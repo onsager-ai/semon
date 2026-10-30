@@ -11,49 +11,16 @@ fn unavailable<T>() -> io::Result<T> {
     Err(failed(StorageError::NamespaceUpgradePending))
 }
 
-impl CatalogSnapshot for Snapshot<'_, '_> {
-    fn runtime_observation(
-        &self,
-        options: &crate::Options,
-        row: &CatalogRow,
-        runtime: &str,
-    ) -> io::Result<Option<String>> {
-        let binding = self.row_runtime_binding(row)?;
-        let mut tx = self
-            .tx
-            .lock()
-            .map_err(|_| failed(StorageError::Unavailable))?;
-        let cwds = super::super::super::native_reader::runtime_source_cwds(&mut tx, &row.sources)
-            .map_err(failed)?;
-        let scoped = if options.facts.is_some() {
-            super::super::super::current_sources::runtime_scope(
-                &mut tx, options, row, runtime, &cwds,
-            )
-            .map_err(failed)?
-        } else {
-            self.runtime_local
-                .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
-                .scope(row, &cwds)?
-        };
-        binding.map(|binding| binding.witness(&scoped)).transpose()
-    }
-    fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
-        super::super::super::current_sources::runtime_in_snapshot(self, options).map_err(failed)
-    }
-    fn facts_authority<'a>(
-        &'a self,
-        path: &std::path::Path,
-    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
-        super::super::super::current_sources::in_snapshot(self, path).map_err(failed)
-    }
-    fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
-        let mut tx = self.tx.lock().ok()?;
-        super::super::super::model_cache::binding(&mut tx).ok()
-    }
-    fn row_runtime_binding(
+impl Snapshot<'_, '_> {
+    fn row_runtime_binding_with_observations(
         &self,
         row: &CatalogRow,
-    ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
+    ) -> io::Result<
+        Option<(
+            crate::storage::QueryRuntimeBinding,
+            Option<crate::storage::selected::PresentationObservations>,
+        )>,
+    > {
         self.require_current()?;
         let mut tx = self
             .tx
@@ -67,6 +34,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let current_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
         metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained_metadata = serde_json::to_vec(&metadata).map_err(io::Error::other)?;
+        let mut operation_binding = None;
         for original in [&current_metadata, &retained_metadata] {
             if row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                 && original == &retained_metadata
@@ -85,13 +53,21 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             if admission != current.admission || stream != current.stream_epoch {
                 return Err(failed(StorageError::ScopeChanged));
             }
-            let operations = tx.driver.query("SELECT CASE WHEN octet_length(payload)<=1048576 THEN payload END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
+            let operations = tx.driver.query("SELECT operation_id,CASE WHEN octet_length(payload)<=1048576 THEN payload END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
             if operations.len() != 1 {
                 return Err(failed(StorageError::ScopeChanged));
             }
+            let operation_id: Vec<u8> = operations[0].get(0);
             let payload = operations[0]
-                .get::<_, Option<Vec<u8>>>(0)
+                .get::<_, Option<Vec<u8>>>(1)
                 .ok_or_else(|| failed(StorageError::Busy))?;
+            let expected_operation = Sha256::digest(&payload);
+            let expected_generation = format!("{:x}", Sha256::digest(&operation_id));
+            if expected_operation.as_slice() != operation_id.as_slice()
+                || expected_generation != generation
+            {
+                return Err(failed(StorageError::ScopeChanged));
+            }
             crate::selected_read::charge(64, payload.len())?;
             let payload: serde_json::Value =
                 serde_json::from_slice(&payload).map_err(io::Error::other)?;
@@ -104,13 +80,34 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             {
                 return Err(failed(StorageError::ScopeChanged));
             }
-            return Ok(Some(current));
+            let values = payload
+                .as_array()
+                .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+            match values.len() {
+                9 => {
+                    let observations =
+                        serde_json::from_value(values[4].clone()).map_err(io::Error::other)?;
+                    return Ok(Some((current, observations)));
+                }
+                8 if values[7].is_object() => {
+                    // Semantic publications authenticate observations in the
+                    // selected-root manifest, not the generic request tuple.
+                    operation_binding = Some(current.clone());
+                }
+                8 if values[7].is_null() => {
+                    // This current generic request has no captured runtime
+                    // observations; do not substitute a semantic manifest.
+                    return Ok(Some((current, None)));
+                }
+                _ => return Err(failed(StorageError::ScopeChanged)),
+            }
         }
         let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),&current_metadata,&retained_metadata]).map_err(sqlstate::error).map_err(failed)?;
-        let value = rows
-            .into_iter()
-            .next()
-            .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+        let Some(value) = rows.into_iter().next() else {
+            return operation_binding
+                .map(|binding| Some((binding, None)))
+                .ok_or_else(|| failed(StorageError::ScopeChanged));
+        };
         let decode = |at: usize| -> io::Result<String> {
             text(
                 value
@@ -139,27 +136,97 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         }
         let manifest = decode(9)?;
         let presentation = decode(10)?;
+        let base = text(value.get(8)).map_err(failed)?;
         crate::selected_read::charge(
             64,
             record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
         )?;
-        crate::storage::proof_codec::verify_presentation_digest(
-            &text(value.get(8)).map_err(failed)?,
-            &manifest,
-            &record.proof,
-        )
-        .map_err(failed)?;
-        crate::storage::proof_codec::verify_presentation_entry(
+        let observations = crate::storage::proof_codec::verify_presentation_observations(
             &row.key,
             &record.metadata,
             &record.slots,
             &presentation,
+            &base,
             &manifest,
+            &record.proof,
         )
         .map_err(failed)?;
-        crate::storage::proof_codec::observation_binding(record, &current, row)
-            .map(Some)
-            .map_err(failed)
+        let binding = crate::storage::proof_codec::observation_binding(record, &current, row)
+            .map_err(failed)?;
+        Ok(Some((binding, observations)))
+    }
+}
+
+impl CatalogSnapshot for Snapshot<'_, '_> {
+    fn runtime_observation(
+        &self,
+        options: &crate::Options,
+        row: &CatalogRow,
+        runtime: &str,
+    ) -> io::Result<Option<String>> {
+        let Some((binding, Some(observations))) =
+            self.row_runtime_binding_with_observations(row)?
+        else {
+            return Err(failed(StorageError::ScopeChanged));
+        };
+        let captured = observations
+            .runtime_for(row)
+            .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+        let mut tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        match super::super::super::native_reader::runtime_source_cwds_if_current(
+            &mut tx,
+            &row.sources,
+        )
+        .map_err(failed)?
+        {
+            Some(cwds) => {
+                let scoped = if options.facts.is_some() {
+                    super::super::super::current_sources::runtime_scope(
+                        &mut tx, options, row, runtime, &cwds,
+                    )
+                    .map_err(failed)?
+                } else {
+                    self.runtime_local
+                        .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                        .scope(row, &cwds)?
+                };
+                let fresh = binding.witness(&scoped)?;
+                if fresh != captured {
+                    return Err(failed(StorageError::ScopeChanged));
+                }
+                Ok(Some(fresh))
+            }
+            None => {
+                let current_global = binding.witness(runtime)?;
+                if observations.runtime.as_deref() != Some(current_global.as_str()) {
+                    return Err(failed(StorageError::ScopeChanged));
+                }
+                Ok(Some(captured))
+            }
+        }
+    }
+    fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
+        super::super::super::current_sources::runtime_in_snapshot(self, options).map_err(failed)
+    }
+    fn facts_authority<'a>(
+        &'a self,
+        path: &std::path::Path,
+    ) -> io::Result<Box<dyn crate::facts::source_authority::SourceAuthority + 'a>> {
+        super::super::super::current_sources::in_snapshot(self, path).map_err(failed)
+    }
+    fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
+        let mut tx = self.tx.lock().ok()?;
+        super::super::super::model_cache::binding(&mut tx).ok()
+    }
+    fn row_runtime_binding(
+        &self,
+        row: &CatalogRow,
+    ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
+        self.row_runtime_binding_with_observations(row)
+            .map(|result| result.map(|(binding, _)| binding))
     }
 
     fn require_current(&self) -> io::Result<()> {

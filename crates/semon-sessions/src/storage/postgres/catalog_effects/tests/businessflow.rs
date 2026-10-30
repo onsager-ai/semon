@@ -2269,6 +2269,29 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         read_bodies(&mut query, &query_store, &retained_host),
         expected_bodies
     );
+    let exact_key = prepared.rows[0].key.clone();
+    let unrelated_runtime = options
+        .claude_home
+        .join("sessions/unrelated-runtime-observation.json");
+    assert!(!unrelated_runtime.exists());
+    let global_before = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    fs::write(&unrelated_runtime, "{}\n").unwrap();
+    let global_after = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let exact_ledger_read = query.call_bound_selected_at(
+        "read_transcript",
+        &serde_json::json!({"id":exact_key.as_str(),"limit":100}),
+        1790812802000,
+        &query_store,
+        &retained_host,
+        None,
+    );
+    fs::remove_file(&unrelated_runtime).unwrap();
+    assert_ne!(global_before, global_after);
+    assert_eq!(
+        exact_ledger_read.unwrap(),
+        expected_bodies[&exact_key]["body"],
+        "fresh row scope survives unrelated global runtime drift"
+    );
     // Captured content uses its admitted immutable generation and independent
     // host/proof authority. It is not an old live Query runtime context.
     let captured_bodies = |pool: &crate::storage::postgres::PgPool| {
@@ -2814,6 +2837,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap()
             .offset,
         receipt.consumed_bytes
+    );
+    let index_ahead_key = selected.key.clone();
+    let original_hostname = fs::read(&hostname).unwrap();
+    let global_before = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    fs::write(&hostname, "synthetic-advanced-index-runtime-drift\n").unwrap();
+    let global_after = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let advanced_with_drift = query.call_bound_selected_at(
+        "read_transcript",
+        &serde_json::json!({"id":index_ahead_key.as_str(),"limit":100}),
+        1790812802000,
+        &query_store,
+        &retained_host,
+        None,
+    );
+    fs::write(&hostname, &original_hostname).unwrap();
+    assert_ne!(global_before, global_after);
+    assert!(
+        advanced_with_drift.is_err(),
+        "an advanced Index cohort needs its captured global witness"
+    );
+    let index_ahead_read = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":index_ahead_key.as_str(),"limit":100}),
+            1790812802000,
+            &query_store,
+            &retained_host,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        index_ahead_read,
+        expected_bodies[&index_ahead_key]["body"],
+        "authenticated old Catalog row stays readable while Index is ahead"
     );
     let append_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     resumed
