@@ -224,6 +224,9 @@ jobs:
           cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
           cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
+      - name: Selected recovery range refusal stage diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
       - name: Reported facts persistence after typed error propagation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
