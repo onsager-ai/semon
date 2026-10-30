@@ -24,7 +24,6 @@ const PAGE_SOURCE_REQUESTS: usize = 256;
 const RECORD_BYTES: usize = 128 * 1024;
 const READ_CHUNK: usize = 4096;
 
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SelectedReadStage {
     InputValidation,
@@ -39,6 +38,7 @@ pub(crate) enum SelectedReadStage {
     RangeContext,
     ProofSnapshot,
     Presentation,
+    PresentationToolTextField,
 }
 
 #[cfg(test)]
@@ -46,12 +46,16 @@ thread_local! {
     pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
+}
+
+thread_local! {
     pub(crate) static LAST_SELECTED_READ_STAGE: std::cell::Cell<Option<SelectedReadStage>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(test)]
 fn selected_read_stage(stage: SelectedReadStage) {
-    LAST_SELECTED_READ_STAGE.with(|last| last.set(Some(stage)));
+    if cfg!(test) || crate::native_timing::enabled() {
+        LAST_SELECTED_READ_STAGE.with(|last| last.set(Some(stage)));
+    }
 }
 
 #[cfg(test)]
@@ -133,10 +137,15 @@ pub(crate) fn session_transcript_range_with_gate(
     mode: SessionSourceReadMode,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> ViewerReply {
-    match read(options, source_key, query, reader, mode, before_read) {
+    let reply = match read(options, source_key, query, reader, mode, before_read) {
         Ok(reply) => reply,
         Err(_) => unavailable(),
+    };
+    if reply.status == 503 && crate::native_timing::enabled() {
+        let stage = LAST_SELECTED_READ_STAGE.with(|last| last.get());
+        eprintln!("semon sessions native: selected_transcript_refused stage={stage:?}");
     }
+    reply
 }
 
 /// Locate a recorded turn using only its source-qualified slot projection.
@@ -649,8 +658,7 @@ fn read_inner(
     )>,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    #[cfg(test)]
-    LAST_SELECTED_READ_STAGE.with(|stage| stage.set(Some(SelectedReadStage::InputValidation)));
+    selected_read_stage(SelectedReadStage::InputValidation);
     for name in [
         "sid",
         "limit",
@@ -727,13 +735,11 @@ fn read_inner(
         Ok(requested) => requested,
         Err(reply) => return Ok(reply),
     };
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::BeforeRead);
     if let Err(reply) = before_read() {
         return Ok(reply);
     }
     if let Some((lease, host, control)) = bound {
-        #[cfg(test)]
         selected_read_stage(SelectedReadStage::Snapshot);
         let selected = lease.open_selected(options, host, control)?;
         if selected.row.key != key {
@@ -808,7 +814,6 @@ fn read_inner(
             history_incomplete: false,
             context,
         };
-        #[cfg(test)]
         selected_read_stage(SelectedReadStage::Presentation);
         let records = selected.sources.reader_with_mode(provider, mode);
         let controlled = crate::storage::selected::Controlled {
@@ -830,19 +835,16 @@ fn read_inner(
         lease.finish_selected(control)?;
         return result;
     }
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::Binding);
     let binding = crate::storage::local_navigation_binding(options, source_key)?;
     let mut connection = binding.connection()?;
     connection.busy_timeout(Duration::from_millis(100))?;
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::Snapshot);
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;
     let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &transaction)?;
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "transcript_before_snapshot");
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::CatalogSelection);
     let selected = catalog::catalog_selection_in_snapshot(
         options,
@@ -888,7 +890,6 @@ fn read_inner(
         hook();
     }
     // Every projection read below stays inside the admitted namespace.
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::CatalogMarker);
     let catalog_generation: Option<String> = transaction
         .query_row(
@@ -925,7 +926,6 @@ fn read_inner(
     } else {
         "session_slots"
     };
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::ProjectionHeader);
     let projection: Option<(String, u32, i64)> = transaction
         .query_row(
@@ -963,7 +963,6 @@ fn read_inner(
     }
     let end = first.saturating_add(limit).min(total);
     let start = first.saturating_sub(1);
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::SlotRows);
     let mut statement = transaction.prepare(
         &format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.{slot_table} WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot"))?;
@@ -993,14 +992,12 @@ fn read_inner(
             |row| row.get(0),
         )?,
     };
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::CatalogRowAuthorization);
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
     // Query observations are optional metadata. Authenticate the selected row
     // even without one before its recipes can admit any native/provider bytes.
     let current = binding.runtime_binding_at(&transaction)?;
     crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)?;
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::RangeContext);
     let context = crate::storage::selected::range_context(
         &crate::storage::sqlite::selected::Context::owned(&transaction),
@@ -1015,7 +1012,6 @@ fn read_inner(
         .collect();
     // The selected recipes and their byte proofs share one WAL snapshot until
     // rendering finishes, including lazy field/attachment proof reads.
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::ProofSnapshot);
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
@@ -1036,7 +1032,6 @@ fn read_inner(
         history_incomplete,
         context,
     };
-    #[cfg(test)]
     selected_read_stage(SelectedReadStage::Presentation);
     present(
         options,
@@ -1852,7 +1847,10 @@ fn render_with_reader(
                 NativeFieldKind::CodexResultObject => {
                     json!({"payload":{"type":"function_call_output","output":{"output":preview["out"]}}})
                 }
-                NativeFieldKind::Text => return unavailable(),
+                NativeFieldKind::Text => {
+                    selected_read_stage(SelectedReadStage::PresentationToolTextField);
+                    return unavailable();
+                }
             };
             let known = field_records
                 .entry((file.path.clone(), field.record_offset))

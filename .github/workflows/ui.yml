@@ -256,6 +256,8 @@ jobs:
           node tests/ui/fixture.mjs "$RUNNER_TEMP/sample-extras" --extras > /dev/null
 
       - name: Serve the fixtures
+        env:
+          SEMON_BUILD_TIMING: '1'
         run: |
           serve() { # name port dir
             SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen "127.0.0.1:$2" \

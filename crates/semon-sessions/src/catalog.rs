@@ -782,7 +782,20 @@ pub(crate) fn page_with_gate(
         Err(cause) => {
             #[cfg(test)]
             eprintln!("catalog_page_read_failed: {cause}");
-            let _ = cause;
+            if crate::native_timing::enabled() {
+                let io_error = cause.downcast_ref::<io::Error>();
+                let storage = cause
+                    .downcast_ref::<crate::storage::StorageError>()
+                    .or_else(|| {
+                        io_error?
+                            .get_ref()?
+                            .downcast_ref::<crate::storage::StorageError>()
+                    });
+                let io_kind = io_error.map(io::Error::kind);
+                eprintln!(
+                    "semon sessions native: catalog_page_refused stage=page_read storage={storage:?} io_kind={io_kind:?}"
+                );
+            }
             error(
                 503,
                 "catalog_unavailable",
