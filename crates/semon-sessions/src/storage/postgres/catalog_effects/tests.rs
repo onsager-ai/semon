@@ -372,13 +372,13 @@ fn oracle() -> Input {
 }
 
 fn build_oracle(keep_raw: bool, history: bool) -> Input {
-    build_oracle_with_binding(keep_raw, history, |_, _| {})
+    build_oracle_with_binding(keep_raw, history, |_, _, _| {})
 }
 
 fn build_oracle_with_binding(
     keep_raw: bool,
     history: bool,
-    bind: impl FnOnce(&[CatalogRow], &[crate::slot_projection::Projection]),
+    bind: impl FnOnce(&Options, &[CatalogRow], &[crate::slot_projection::Projection]),
 ) -> Input {
     let root = std::env::temp_dir().join(format!(
         "pg124-{}-{}",
@@ -513,7 +513,7 @@ fn build_oracle_with_binding(
     let (_, original_generation) = original_cache
         .publish_partial_catalog_fenced(&original_prepared)
         .unwrap();
-    bind(&prepared.rows, &prepared.transcripts);
+    bind(&options, &prepared.rows, &prepared.transcripts);
     // Retain actual Raw custody while the ordinary removal writer records
     // withdrawal. A row with cleared sources alone cannot authorize removing
     // the still-live ledger from a complete publication.
@@ -646,40 +646,82 @@ fn build_oracle_with_binding(
     }
 }
 
+fn custody_row_content(rows: &[CatalogRow]) -> serde_json::Value {
+    let mut value = serde_json::to_value(rows).unwrap();
+    for row in value.as_array_mut().unwrap() {
+        if let Some(query) = row["query"].as_object_mut() {
+            query.remove("runtime");
+        }
+    }
+    value
+}
+
+fn custody_metadata_content(rows: &[Vec<u8>]) -> serde_json::Value {
+    custody_row_content(
+        &rows
+            .iter()
+            .map(|row| serde_json::from_slice::<CatalogRow>(row).unwrap())
+            .collect::<Vec<_>>(),
+    )
+}
+
 fn bind_custody_fixture(
     pool: &crate::storage::postgres::PgPool,
     namespace: &crate::storage::LogicalSourceNamespace,
+    options: &Options,
     rows: &[CatalogRow],
     projections: &[crate::slot_projection::Projection],
 ) -> String {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
-    let mut cache =
-        crate::events::EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
-            .unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = options.clone();
+    options.source = source.with_store(config).unwrap();
+    let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
     for (at, source) in rows.iter().flat_map(|row| &row.sources).enumerate() {
         let receipt = cache
             .ingest(&format!("{:064x}", at + 1), &source.path, "claude")
             .unwrap();
         assert_eq!(receipt.consumed_bytes, source.offset);
     }
-    drop(cache);
-    let (outcome, generation) = pool
-        .transaction(namespace, TxnKind::Write, &control, |tx| {
-            super::publication::publish(
-                tx,
-                &crate::slot_projection::Publication {
-                    rows,
-                    transcripts: Some(projections),
-                    observations: None,
-                },
-                None,
-                &[],
-                false,
-                None,
-            )
-        })
-        .unwrap();
+    let inputs = rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .map(|source| crate::native_evidence::catalog_input(&source.path, &options).unwrap())
+        .collect::<Vec<_>>();
+    let prepared =
+        crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
+    assert_eq!(custody_row_content(&prepared.rows), custody_row_content(rows));
+    let recipes = |projections: &[crate::slot_projection::Projection]| {
+        projections
+            .iter()
+            .map(|projection| {
+                serde_json::to_value((&projection.key, &projection.slots, projection.repair))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(recipes(&prepared.transcripts), recipes(projections));
+    let capture = prepared.presentation_observations().unwrap();
+    let binding = cache.query_runtime_binding().unwrap().unwrap();
+    let runtime = crate::native_evidence::RuntimeObservations::new(&options);
+    for row in &prepared.rows {
+        let cwds = cache.runtime_source_cwds(&row.sources).unwrap();
+        let fresh = binding.witness(&runtime.scope(row, &cwds).unwrap()).unwrap();
+        assert_eq!(capture.runtime_for(row).as_deref(), Some(fresh.as_str()));
+        assert_eq!(
+            row.query.as_ref().unwrap()["runtime"].as_str(),
+            Some(fresh.as_str())
+        );
+    }
+    let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
     generation.expect("ordinary custody fixture publication")
 }
@@ -694,9 +736,9 @@ fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
 fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let (pool, _) = fixture(|_| {});
     let mut generations = Vec::new();
-    let data = build_oracle_with_binding(false, true, |rows, projections| {
+    let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            generations.push(bind_custody_fixture(&pool, &ns(name), rows, projections));
+            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections));
         }
     });
     let mut missing = data.rows.clone();
@@ -738,7 +780,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
         .unwrap();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
-            assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.composite.as_ref().expect("custody oracle"));
+            assert_eq!(custody_metadata_content(&rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>()), custody_metadata_content(data.composite.as_ref().expect("custody oracle")));
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
             assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.composite_slots.as_ref().expect("custody oracle"));
             Ok(())
@@ -754,8 +796,10 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                         .catalog(&current.key, true)?
                         .ok_or(StorageError::ScopeChanged)?;
                     assert_eq!(
-                        serde_json::to_vec(&retained).unwrap(),
-                        data.composite.as_ref().expect("custody oracle")[index]
+                        custody_row_content(std::slice::from_ref(&retained)),
+                        custody_metadata_content(std::slice::from_ref(
+                            &data.composite.as_ref().expect("custody oracle")[index]
+                        ))
                     );
                     let (_, slots) = view
                         .recipe(&current.key, true, 0, 64)?
@@ -780,8 +824,8 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
     let (pool, factory) = fixture(|_| {});
     let namespace = ns("catalog127-original");
     let mut generation = None;
-    let data = build_oracle_with_binding(false, true, |rows, projections| {
-        generation = Some(bind_custody_fixture(&pool, &namespace, rows, projections));
+    let data = build_oracle_with_binding(false, true, |options, rows, projections| {
+        generation = Some(bind_custody_fixture(&pool, &namespace, options, rows, projections));
     });
     let generation = generation.expect("ordinary custody fixture publication");
     let preserve = |tx: &mut PgTxn<'_>| {
@@ -853,7 +897,7 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
             .unwrap();
     reopened.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
-        assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.original.as_ref().expect("custody oracle"));
+        assert_eq!(custody_metadata_content(&rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>()), custody_metadata_content(data.original.as_ref().expect("custody oracle")));
         let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
         assert_eq!(rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>(), *data.original_slots.as_ref().expect("custody oracle"));
         Ok(())

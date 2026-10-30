@@ -355,6 +355,7 @@ pub(crate) struct PresentationWitness {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
+    /// Raw global input, kept distinct from its storage-qualified witness.
     pub(crate) source_runtime: Option<String>,
     pub(crate) runtime: Option<String>,
     runtime_rows: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
@@ -412,6 +413,44 @@ impl PresentationObservations {
     ) -> Self {
         let runtime = crate::native_evidence::query_runtime_generation(options).ok();
         let scoped = crate::native_evidence::RuntimeObservations::new(options);
+        let mut observations = Self::capture_inputs(options, binding, rows, recorded, runtime, scoped);
+        if observations.source_runtime.as_ref().is_some_and(|initial| {
+            crate::native_evidence::query_runtime_generation(options).ok().as_ref() != Some(initial)
+        }) {
+            observations.source_runtime = None;
+            observations.runtime = None;
+        }
+        observations
+    }
+    pub(crate) fn with_publication_authority<'a>(
+        self,
+        options: &crate::Options,
+        binding: Option<&crate::storage::QueryRuntimeBinding>,
+        rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
+        recorded: Option<crate::facts::source_authority::Sources>,
+        source_runtime: String,
+        scoped: crate::native_evidence::runtime::ScopedRuntimeObservations,
+    ) -> Self {
+        let mut observations = Self::capture_inputs(
+            options,
+            binding,
+            rows,
+            recorded,
+            Some(source_runtime),
+            scoped.into_observations(),
+        );
+        observations.runtime_rows = self.runtime_rows;
+        observations.runtime_cwd_fingerprints = self.runtime_cwd_fingerprints;
+        observations
+    }
+    fn capture_inputs<'a>(
+        options: &crate::Options,
+        binding: Option<&crate::storage::QueryRuntimeBinding>,
+        rows: impl Iterator<Item = &'a crate::model::summary::CatalogRow>,
+        recorded: Option<crate::facts::source_authority::Sources>,
+        source_runtime: Option<String>,
+        scoped: crate::native_evidence::RuntimeObservations,
+    ) -> Self {
         let mut facts_known =
             options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
         let mut selection_known = options.facts.is_none()
@@ -458,21 +497,12 @@ impl PresentationObservations {
                 }
             }
         }
-        if recorded
-            .as_ref()
-            .is_some_and(|head| head.validate().is_err())
-        {
+        if recorded.as_ref().is_some_and(|head| head.validate().is_err()) {
             facts_known = false;
             selection_known = false;
             machine_label = None;
             sources.clear();
         }
-        let source_runtime = runtime.filter(|initial| {
-                crate::native_evidence::query_runtime_generation(options)
-                    .ok()
-                    .as_ref()
-                    == Some(initial)
-            });
         let runtime = source_runtime
             .as_ref()
             .and_then(|runtime| binding.and_then(|binding| binding.witness(runtime).ok()));
