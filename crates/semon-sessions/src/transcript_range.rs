@@ -518,9 +518,7 @@ enum SelectedPart {
     Attachment(usize),
 }
 
-fn parse_requested_part(
-    query: &str,
-) -> Result<(SelectedPart, Option<usize>), ViewerReply> {
+fn parse_requested_part(query: &str) -> Result<(SelectedPart, Option<usize>), ViewerReply> {
     let argument = |name| query_value(query, name).and_then(decoded);
     let part = argument("part");
     let attachment = if part.as_deref() == Some("attachment") {
@@ -1028,9 +1026,7 @@ fn present(
     mode: SessionSourceReadMode,
     reader: Option<&dyn SessionSourceReader>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    if !matches!(requested_part, SelectedPart::Transcript)
-        && selection.end != selection.first + 1
-    {
+    if !matches!(requested_part, SelectedPart::Transcript) && selection.end != selection.first + 1 {
         return Ok(catalog::error(
             400,
             "invalid_arguments",

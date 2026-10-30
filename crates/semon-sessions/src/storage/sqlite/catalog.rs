@@ -176,9 +176,7 @@ pub(crate) fn read_page(
     Ok(reply)
 }
 
-pub(crate) fn page_ready(
-    binding: &crate::storage::NativeReaderBinding,
-) -> io::Result<bool> {
+pub(crate) fn page_ready(binding: &crate::storage::NativeReaderBinding) -> io::Result<bool> {
     let mut connection = binding.connection().map_err(io::Error::other)?;
     connection
         .busy_timeout(std::time::Duration::from_millis(100))
@@ -186,10 +184,7 @@ pub(crate) fn page_ready(
     let transaction = connection.transaction().map_err(io::Error::other)?;
     let snapshot = admitted_snapshot(binding, &transaction).map_err(io::Error::other)?;
     snapshot.require_current()?;
-    if snapshot
-        .publication_value("catalog_generation")?
-        .is_none()
-    {
+    if snapshot.publication_value("catalog_generation")?.is_none() {
         return Ok(false);
     }
     let version = snapshot.publication_value("catalog_version")?;

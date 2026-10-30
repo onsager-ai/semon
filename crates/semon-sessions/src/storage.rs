@@ -84,7 +84,10 @@ pub(crate) fn is_postgres_selected(options: &crate::Options) -> bool {
     #[cfg(feature = "postgres")]
     {
         matches!(
-            options.source.selected_store().map(|config| &config.backend),
+            options
+                .source
+                .selected_store()
+                .map(|config| &config.backend),
             Some(StoreBackend::Postgres { .. })
         )
     }

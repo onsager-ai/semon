@@ -7378,8 +7378,7 @@ fn cold_catalog_refresh_waits_for_facts_and_raw_writers() {
             .write(true)
             .open(lock_path)
             .unwrap();
-        let probe_result =
-            unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+        let probe_result = unsafe { libc::flock(probe.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
         assert_eq!(probe_result, -1);
         let contention = std::io::Error::last_os_error();
         assert_eq!(contention.raw_os_error(), Some(libc::EAGAIN));
@@ -7450,8 +7449,8 @@ fn initial_catalog_wait_publishes_a_cold_page() {
         fixture.options.clone(),
         crate::RefreshPool::new(1),
     );
-    let result = observer
-        .wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
+    let result =
+        observer.wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
     observer.close();
     result.unwrap();
     assert_eq!(fixture.body("").0, 200);
@@ -7479,8 +7478,8 @@ fn initial_catalog_wait_does_not_demand_when_publication_predates_wait() {
         crate::RefreshPool::new(1),
     );
     let view = observer.shared_view();
-    let result = observer
-        .wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
+    let result =
+        observer.wait_until_initial_catalog(std::time::Instant::now() + Duration::from_secs(10));
     let demanded = view
         .evidence
         .catalog_demand
@@ -7503,8 +7502,7 @@ fn session_sources_wait_reuses_a_warm_owner_while_its_work_lock_is_held() {
     fixture.publish_existing();
 
     let pool = crate::RefreshPool::new(1);
-    let observer =
-        crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
+    let observer = crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
     let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![(
         "source".into(),
         &observer,
