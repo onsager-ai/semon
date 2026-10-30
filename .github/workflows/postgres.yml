@@ -112,6 +112,21 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Typed Catalog scheduling and JSON claim ordering
+        id: catalog_selector
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres::source_journal::tests::pg_catalog_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/catalog-selector.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_codex_header_search_projection_tracks_metadata_commit_and_delete -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/catalog-selector.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/catalog-selector.log"
+      - name: Retain typed Catalog scheduling diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.catalog_selector.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: catalog-selector-${{ github.sha }}
+          path: ${{ runner.temp }}/catalog-selector.log
+          if-no-files-found: error
       - name: Current transfer inbox durable page and exact OpID qualification
         id: current_transfer
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
