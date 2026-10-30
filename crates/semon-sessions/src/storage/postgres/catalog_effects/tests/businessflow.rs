@@ -1113,9 +1113,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     }) {
                         let endpoint_runtime = pg
                             .runtime_source_cwds(&endpoint.row.sources)
-                            .and_then(|cwds| captured.runtime_observation(&endpoint.row, &cwds));
+                            .and_then(|endpoint_cwds| {
+                                let dependencies_differ =
+                                    crate::native_evidence::runtime::dependencies(row, &cwds)
+                                        != crate::native_evidence::runtime::dependencies(
+                                            &endpoint.row,
+                                            &endpoint_cwds,
+                                        );
+                                let runtime = captured
+                                    .runtime_observation(&endpoint.row, &endpoint_cwds)?;
+                                Ok((runtime, dependencies_differ))
+                            });
                         eprintln!(
-                            "authentic capture overlap: key={} saved={saved_runtime:?} prepared={observed} endpoint={endpoint_runtime:?}",
+                            "authentic capture overlap: key={} source_generation={source} saved={saved_runtime:?} prepared={observed} endpoint_scope_and_dependencies_differ={endpoint_runtime:?}",
                             row.key
                         );
                     }
