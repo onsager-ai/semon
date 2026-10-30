@@ -66,6 +66,12 @@ jobs:
       - name: Selected recovery range authority reconciliation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
+      - name: Selected recovery owner proof and rollback contracts
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          cargo test --locked -p semon-sessions --lib recovery_history_helper_contract_ -- --nocapture
+          cargo test --locked -p semon-sessions --lib recovery_stage_only_preimage_authenticates_before_inserting_current_grant -- --nocapture
+          cargo test --locked -p semon-sessions --lib recovery_query_row_and_grant_roll_back_when_grant_update_fails -- --nocapture
       - name: Current SQLite transfer inbox restart and atomic checkpoint
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture
