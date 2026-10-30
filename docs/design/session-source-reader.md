@@ -259,11 +259,82 @@ it never becomes an empty source or a complete partial success. Capacity and
 source-unavailable responses remain distinct. The hosted adapter adds bounded
 request admission, a deadline and the existing Catalog publication coordinator.
 
+## Cold Catalog search scheduling
+
+A valid partial Catalog read in the draining phase checks pending identity hints
+inside its existing read transaction, after machine authorization. The shared
+indexed selector uses physical source-root ranges for the requested harness;
+the EventCache facade checks the full native path allowlist. This reads metadata
+only, without acquiring producer Work or opening native bodies. Before the first
+readable generation, ordinary cold discovery owns progress and no search is
+declared fulfilled. Complete Catalog reads perform no hint lookup.
+
+Only qualified pending paths enter the 64-ticket scheduling queue. Healthy
+nonmatching, published-only and rejected-harness searches occupy no ticket, in
+either order relative to another tab's live search. Lookup failures remain
+explicit retry interests. A full queue skips the new advisory scheduling hint;
+the qualified Catalog read retains its successful response and page contents.
+Repeated positive admission refreshes the ticket ID while preserving its waiting
+paths, so an older acknowledgement cannot erase renewed demand for the same path.
+
+Selected projection upgrades precede search tickets; first publication still
+uses the newest discovered cohort. The producer filters one ticket's admitted
+paths against pending claims and fetches its selected/FIFO fallback once in the
+same transaction. Successfully exhausted interests retire; lookup errors and
+selected-priority deferral retain them. Round robin applies to admitted live or
+unknown interests, rather than historical keystrokes. A peer-completed ticket
+retires when its next bounded pending-path probe observes no remaining claims.
+
+Every actual hinted attempt reserves one ordinary FIFO turn, including failed
+qualification, lookup failure, Deferred publication, concurrent-source requeue,
+and completion of the last ticket. Selected projection upgrades retain absolute
+precedence without consuming that reservation. The ordinary query excludes the
+bounded union of admitted waiting paths before its 64-source limit; if no other
+pending source exists, the same transaction falls through to the next hint.
+Bounded related components are remembered before derivation, so an unqualified
+parent and its pending child cannot poison an unrelated ordinary cohort. This
+additive registration follows renewed demand for the same attempted seed while
+old acknowledgements and resolution remain fenced by ticket ID and epoch.
+If renewed advisory waiting paths and the attempted bounded component together
+exceed the ticket's 64-path capacity, the ticket retains the entire attempted
+component under its current ID. Other advisory interests resume through FIFO or
+a later read; their durable claims remain pending. Scheduling capacity never
+starts a semantic epoch.
+Components exceeding 64 sources enter the existing semantic epoch; ordinary
+publication does not interleave into an active epoch, and the reservation
+survives until that pipeline permits ordinary scheduling again.
+
+Before the first readable generation, the newest native cohort still resolves
+actual pending whole JSON inputs first. This replays sidecar and PID dependency
+intents without mapping unrelated pending native paths into that cohort.
+After hint qualification chooses the final tier, whole JSON inputs in a selected
+FIFO fallback likewise resolve before native mapping. A discarded fallback does
+not displace a qualified hint.
+
+After successful publication and concurrent-source requeue, completed source
+claims acknowledge demand even when an empty, invalid, deleted or folded source
+produced no Catalog row. Deferred publication, byte checkpoints that remain
+pending and failed publication fences retain demand. Completion closes admission;
+only actual cold recovery reopens a fresh epoch.
+If the advisory acknowledgement's claim probe fails after publication, demand
+remains for a later pending-path probe and the committed publication retains its
+progress signal. Source requeue and final pending/readiness checks remain fallible.
+
+The scheduling shortcut covers ASCII identity matches. Generic Catalog metadata
+search retains its Unicode lowercase substring semantics; other identities use
+ordinary FIFO. The header hint's NOCASE index is distinct from the semantic
+frontier's BINARY index: native Codex header IDs are preserved verbatim, including
+mixed ASCII case. A full raw candidate cohort containing unqualified in-root
+paths remains unknown at read admission. Producer retry refuses that scheduling
+hint and continues with its ordinary fallback, preserving every durable source
+claim and the native allowlist.
+
 ## Current Semon storage contract
 
-The Event Index initializes schema 33 with parser/cache version 29 in one
+The Event Index initializes schema 34 with parser/cache version 29 in one
 transaction, including pricing fingerprints and native usage readiness default
-0. Schema 33 fences the retired proof/tree/usage representations as one contract.
+0. Schema 34 includes the scheduling indexes and fences the retired proof/tree/usage
+representations as one contract.
 Normal writable producer opens (complete and scoped/background) automatically
 clear a recognized obsolete Semon index and initialize the current empty schema;
 normal native collection then reindexes supported original sources. This is

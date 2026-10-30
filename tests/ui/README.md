@@ -98,6 +98,35 @@ its completion witness is the native-publication success message in the CI log.
   fingerprint updates. The exact adopted patch changes only candidate runtime
   fingerprints; all 36 image/DOM digests and reference pins remain unchanged.
   This is binding maintenance only and creates no new appearance approval.
+- CI run 41008626716 for Source `a9caf26b` (merge preview `628e4cbe`)
+  supplies visual artifact 12956718608 and transport artifact 12955919017.
+  The supported audit and sole proposal generator qualified all 161 existing
+  records as fingerprint-only, with zero refusals. Independent Manager review
+  confirmed all 966 image/evidence digests unchanged before adopting the two
+  generated patches. Only candidate fingerprints change to
+  `b0cb52003b6b1964827d8236e1fbebd11a63255fdf0cac825334f3f54a17a434`;
+  prior decisions, review provenance, rationale and reference pins remain intact.
+- CI run 41031732851 for Source `d3e41dfe` (merge preview `7622417c`)
+  supplies visual artifact 12967225341 and transport artifact 12965608344.
+  The same audit and proposal generator qualified 155 visual and six transport records as
+  fingerprint-only, with no refusals, execution errors or coverage failures.
+  Independent Manager review confirmed all 966 image/evidence digests unchanged and
+  inspected reference/candidate/diff examples for root/drawer, Thinking, expanded
+  tool output, failed child, mobile Atlas, Last-turn menus and two-machine states.
+  The generated patches change only candidate fingerprints to
+  `9610b7c6fb569413b46372251a3f781285dbf43e4f018cc028eaee1d9709d4a5`;
+  existing appearance decisions, review provenance and reference pins are preserved.
+- CI run 41052072231 for Source `628baa41` (merge preview `b4c9428b`)
+  supplies visual artifact 12976320428 and transport artifact 12975257520.
+  The supported audit and proposal generator qualify 155 visual and six transport
+  records as fingerprint-only, with no refusals, execution errors or coverage failures.
+  Manager review verified all 966 image/evidence digests unchanged and inspected
+  reference/candidate/diff examples for root/drawer, Thinking, expanded tool output,
+  failed child, mobile Atlas, Last-turn menus and two-machine states; these are the
+  same accepted image bytes. The two generated patches update only candidate
+  fingerprints to `0cc656540a26a662f4423420537bfd68d9b1a9d49619ab41eb788a7eb0faf5c9`.
+  Existing appearance decisions, review provenance and reference pins remain intact;
+  this maintenance grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
