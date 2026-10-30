@@ -616,7 +616,61 @@ fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows
     let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
     let selected = lease.open_selected(options, &host, &crate::SelectedReadControl::default()).unwrap();
-    assert_eq!(selected.witness.observations.runtime.as_deref(), model.prepared().rows[0].query.as_ref().unwrap()["runtime"].as_str());
+    let runtime_binding = binding.runtime_binding().unwrap().unwrap();
+    assert_eq!(runtime_binding.namespace.as_str(), selected.snapshot.namespace.as_str());
+    assert_eq!(runtime_binding.admission, selected.snapshot.admission);
+    assert_eq!(
+        runtime_binding.stream_epoch.as_str(),
+        selected.snapshot.stream_epoch.as_str()
+    );
+    let global_runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+    let global_witness = runtime_binding.witness(&global_runtime).unwrap();
+    assert_eq!(
+        selected.witness.observations.runtime.as_deref(),
+        Some(global_witness.as_str()),
+        "the private envelope retains the independently bound global runtime"
+    );
+
+    // Compute the row's scope from an independent ordinary producer and its
+    // own exact source CWD evidence. The selected private witness and the
+    // published Query row must both retain this same row-specific value.
+    let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    let mut expected = crate::model::prepare_sources(
+        options,
+        &mut ordinary,
+        std::slice::from_ref(input),
+        1_790_000_000_000,
+    )
+    .unwrap();
+    assert_eq!(expected.rows.len(), 1);
+    let cwds = ordinary
+        .runtime_source_cwds(&expected.rows[0].sources)
+        .unwrap();
+    let scoped = crate::native_evidence::RuntimeObservations::new(options)
+        .scope(&expected.rows[0], &cwds)
+        .unwrap();
+    let row_witness = runtime_binding.witness(&scoped).unwrap();
+    expected.rows[0].query.as_mut().unwrap()["runtime"] = json!(row_witness);
+    let expected_row = &expected.rows[0];
+    assert_eq!(
+        model.prepared().rows[0].query,
+        expected_row.query,
+        "the staged Query row matches independent scoped reference data"
+    );
+    assert_eq!(
+        selected.row.query,
+        expected_row.query,
+        "the leased Query row matches independent scoped reference data"
+    );
+    assert_eq!(
+        selected
+            .witness
+            .observations
+            .runtime_for(expected_row)
+            .as_deref(),
+        Some(row_witness.as_str()),
+        "the private per-row witness binds the independently derived scope"
+    );
     let stored: String = db.query_row("SELECT metadata FROM storage_proof_presentations WHERE namespace='source-a' AND id=?1 AND session_key=?2", params![id.0, key], |row| row.get(0)).unwrap();
     assert!(serde_json::from_str::<Value>(&stored).unwrap().get("observations").is_none(), "shared observations must be stored once per publication");
     for name in ["catalog_generation", "catalog_completeness", "catalog_observed_at"] {
