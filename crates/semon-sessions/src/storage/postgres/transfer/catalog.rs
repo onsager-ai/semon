@@ -1178,10 +1178,12 @@ mod tests {
                     .unwrap()
             };
             let forward = {
+                eprintln!("transfer_query_window direction=pg seconds={seconds}");
                 let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
                 recent(&config)
             };
             assert_eq!(forward["total"], total, "recent window {seconds}s");
+            eprintln!("transfer_query_window direction=sqlite seconds={seconds}");
             assert_eq!(recent(&reverse), forward, "recent window {seconds}s");
         }
         assert_eq!(
