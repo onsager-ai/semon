@@ -394,8 +394,10 @@ fn catalog_selection_read(
         cursor: None,
     };
     let reply = match snapshot {
-        Some(snapshot) => read_page_snapshot(options, source_key, &request, snapshot),
-        None => read_page(options, source_key, &request),
+        Some(snapshot) => {
+            read_page_snapshot(options, source_key, &request, snapshot, false, &mut None)
+        }
+        None => read_page(options, source_key, &request, None),
     }
     .map_err(|_| Unavailable)?;
     let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
@@ -951,7 +953,13 @@ pub(crate) fn relative_status(
 }
 
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
-    page_with_gate(options, machine, request, || Ok(()))
+    page_with_gate(options, machine, request, || Ok(()), None)
+}
+
+pub(crate) struct CatalogSearchAdmission {
+    pub(crate) query: String,
+    pub(crate) harness: Option<String>,
+    pub(crate) paths: Result<Vec<String>, ()>,
 }
 
 pub(crate) fn page_with_gate(
@@ -959,11 +967,12 @@ pub(crate) fn page_with_gate(
     machine: &str,
     request: Request,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
+    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> ViewerReply {
     if let Err(reply) = before_read() {
         return reply;
     }
-    match read_page(options, machine, &request) {
+    match read_page(options, machine, &request, on_search) {
         Ok(reply) => reply,
         Err(_) => error(
             503,
@@ -1027,6 +1036,7 @@ fn read_page(
     options: &Options,
     machine: &str,
     request: &Request,
+    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -1034,8 +1044,27 @@ fn read_page(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let transaction = connection.transaction()?;
-    let reply = read_page_snapshot(options, machine, request, &transaction)?;
+    let mut admission = None;
+    let reply = read_page_snapshot(
+        options,
+        machine,
+        request,
+        &transaction,
+        on_search.is_some(),
+        &mut admission,
+    )?;
     transaction.commit()?;
+    if reply.status == 200
+        && let (Some(on_search), Some(admission)) = (on_search, admission)
+        && !on_search(admission)
+    {
+        return Ok(error(
+            503,
+            "catalog_search_busy",
+            "The pending native search queue is full. Retry this Catalog query.",
+            true,
+        ));
+    }
     Ok(reply)
 }
 
@@ -1044,6 +1073,8 @@ fn read_page_snapshot(
     machine: &str,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
+    admit_search: bool,
+    admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
     if request.cursor.as_ref().is_some_and(|cursor| {
@@ -1223,6 +1254,32 @@ fn read_page_snapshot(
         .unwrap_or_else(|| "complete".into());
     if !matches!(completeness.as_str(), "partial" | "complete") {
         return Err(io::Error::other("catalog completeness is invalid").into());
+    }
+    if admit_search
+        && completeness == "partial"
+        && let Some((query, harness)) = request.search_interest()
+    {
+        let draining: bool = transaction
+            .query_row(
+                "SELECT value='draining' FROM meta WHERE key='catalog_backfill_state'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if draining {
+            *admission = Some(CatalogSearchAdmission {
+                query: query.to_owned(),
+                harness: harness.map(str::to_owned),
+                paths: EventCache::catalog_search_sources(
+                    transaction,
+                    options,
+                    crate::events::CatalogSearchInterest { query, harness },
+                    64,
+                )
+                .map_err(|_| ()),
+            });
+        }
     }
     let more = selected.len() > request.limit;
     if more {

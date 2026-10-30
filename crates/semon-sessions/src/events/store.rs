@@ -498,23 +498,55 @@ CREATE INDEX IF NOT EXISTS catalog_search_header ON meta(json_extract(value,'$.h
 const CATALOG_SEARCH_PATHS: &str = "
 SELECT source_path FROM (
  SELECT source_path FROM (
-  SELECT i.source_path FROM session_catalog_sources s INDEXED BY catalog_search_native
+  SELECT DISTINCT i.source_path FROM session_catalog_sources s INDEXED BY catalog_search_native
   JOIN session_catalog_invalidations i ON i.source_path=s.source_path
-  WHERE s.native_id=?1 COLLATE NOCASE AND s.lifecycle='current' LIMIT ?3
+  WHERE s.native_id=?1 COLLATE NOCASE AND s.lifecycle='current' AND $ROOTS LIMIT ?3
  ) UNION SELECT source_path FROM (
-  SELECT source_path FROM session_catalog_invalidations INDEXED BY catalog_search_pending_filename
-  WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2 COLLATE NOCASE LIMIT ?3
+  SELECT source_path FROM session_catalog_invalidations i INDEXED BY catalog_search_pending_filename
+  WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2 COLLATE NOCASE AND $ROOTS LIMIT ?3
  ) UNION SELECT source_path FROM (
-  SELECT source_path FROM session_catalog_invalidations INDEXED BY catalog_search_pending_copilot
+  SELECT source_path FROM session_catalog_invalidations i INDEXED BY catalog_search_pending_copilot
   WHERE source_path GLOB '*/session-state/*/events.jsonl'
-   AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1 COLLATE NOCASE LIMIT ?3
+   AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1 COLLATE NOCASE AND $ROOTS LIMIT ?3
  ) UNION SELECT source_path FROM (
   SELECT i.source_path FROM meta m INDEXED BY catalog_search_header
   JOIN session_catalog_invalidations i ON i.source_path=substr(m.key,length('native_codex_header:')+1)
   WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value)
-   AND json_extract(m.value,'$.header.id')=?1 COLLATE NOCASE LIMIT ?3
+   AND json_extract(m.value,'$.header.id')=?1 COLLATE NOCASE AND $ROOTS LIMIT ?3
  )
 ) ORDER BY source_path LIMIT ?3";
+
+fn catalog_search_sql() -> String {
+    CATALOG_SEARCH_PATHS.replace("$ROOTS", "((i.source_path>=?4 AND i.source_path<?5) OR (i.source_path>=?6 AND i.source_path<?7) OR (i.source_path>=?8 AND i.source_path<?9))")
+}
+
+pub(super) fn catalog_search_paths(
+    connection: &Connection,
+    search: &super::CatalogSearchLookup<'_>,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    if !search.query.is_ascii() {
+        return Ok(Vec::new());
+    }
+    let ranges = search.ranges;
+    connection
+        .prepare(&catalog_search_sql())?
+        .query_map(
+            params![
+                search.query,
+                format!("{}.jsonl", search.query),
+                limit.min(64) as i64,
+                ranges[0].0,
+                ranges[0].1,
+                ranges[1].0,
+                ranges[1].1,
+                ranges[2].0,
+                ranges[2].1
+            ],
+            |row| row.get(0),
+        )?
+        .collect()
+}
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
@@ -2338,7 +2370,7 @@ impl IndexStore for SqliteStore {
     fn pending_catalog_sources(
         &self,
         limit: usize,
-        search: Option<&str>,
+        search: Option<&super::CatalogPendingSearch<'_>>,
     ) -> Result<super::CatalogPendingBatch, StoreError> {
         use super::{CatalogPendingBatch, CatalogPendingTier};
         let transaction = self.connection.unchecked_transaction().map_err(failure)?;
@@ -2356,28 +2388,11 @@ impl IndexStore for SqliteStore {
             return Ok(CatalogPendingBatch {
                 tier: CatalogPendingTier::SelectedUpgrade,
                 paths,
+                fallback: Vec::new(),
+                search_checked: false,
             });
         }
-        if let Some(query) = search {
-            let paths = transaction
-                .prepare(CATALOG_SEARCH_PATHS)
-                .map_err(failure)?
-                .query_map(
-                    params![query, format!("{query}.jsonl"), limit.min(64) as i64],
-                    |row| row.get(0),
-                )
-                .map_err(failure)?
-                .collect::<Result<Vec<String>, _>>()
-                .map_err(failure)?;
-            if !paths.is_empty() {
-                transaction.commit().map_err(failure)?;
-                return Ok(CatalogPendingBatch {
-                    tier: CatalogPendingTier::SearchHint,
-                    paths,
-                });
-            }
-        }
-        let paths = {
+        let fallback = {
             let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
             statement
                 .query_map([limit as i64], |row| row.get(0))
@@ -2385,11 +2400,35 @@ impl IndexStore for SqliteStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failure)?
         };
+        let paths = if let Some(search) = search {
+            if let Some(retry) = &search.retry {
+                catalog_search_paths(&transaction, retry, limit).map_err(failure)?
+            } else {
+                let encoded = serde_json::to_string(search.paths)
+                    .map_err(|error| StoreError::Failed(error.to_string()))?;
+                transaction.prepare("SELECT i.source_path FROM json_each(?1) p JOIN session_catalog_invalidations i ON i.source_path=p.value ORDER BY i.source_path LIMIT ?2").map_err(failure)?
+                    .query_map(params![encoded, limit.min(64) as i64], |row| row.get(0)).map_err(failure)?
+                    .collect::<Result<Vec<String>, _>>().map_err(failure)?
+            }
+        } else {
+            Vec::new()
+        };
         transaction.commit().map_err(failure)?;
-        Ok(CatalogPendingBatch {
-            tier: CatalogPendingTier::Fifo,
-            paths,
-        })
+        if paths.is_empty() {
+            Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::Fifo,
+                paths: fallback,
+                fallback: Vec::new(),
+                search_checked: search.is_some(),
+            })
+        } else {
+            Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::SearchHint,
+                paths,
+                fallback,
+                search_checked: true,
+            })
+        }
     }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
@@ -6986,23 +7025,23 @@ mod tests {
         let path = root.join("index.sqlite3");
         let (store, _) = opened(&path);
         for index in 0..130 {
-            let source = format!("/native/{index:04}.jsonl");
+            let source = format!("/codex/native/{index:04}.jsonl");
             store.connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?1,'codex','Identity',?2)", params![format!("session-{index}"), source]).unwrap();
             store
                 .connection
                 .execute(
                     "INSERT INTO meta(key,value) VALUES(?1,?2)",
                     params![
-                        format!("native_codex_header:/header/{index:04}.jsonl"),
+                        format!("native_codex_header:/codex/header/{index:04}.jsonl"),
                         r#"{"header":{"id":"Identity"}}"#
                     ],
                 )
                 .unwrap();
         }
         let pending = [
-            "/native/0129.jsonl",
-            "/header/0129.jsonl",
-            "/filename/IDENTITY.jsonl",
+            "/codex/native/0129.jsonl",
+            "/codex/header/0129.jsonl",
+            "/claude/IDENTITY.jsonl",
             "/copilot/session-state/IDENTITY/events.jsonl",
         ];
         let tx = store.connection.unchecked_transaction().unwrap();
@@ -7010,17 +7049,38 @@ mod tests {
             invalidate_catalog_source(&tx, source, "changed").unwrap();
         }
         tx.commit().unwrap();
-        let batch = store.pending_catalog_sources(64, Some("identity")).unwrap();
-        assert_eq!(batch.tier, super::super::CatalogPendingTier::SearchHint);
+        let ranges = [
+            ("/claude/".into(), "/claude0".into()),
+            ("/codex/".into(), "/codex0".into()),
+            ("/copilot/".into(), "/copilot0".into()),
+        ];
+        let lookup = super::super::CatalogSearchLookup {
+            query: "identity",
+            ranges: &ranges,
+        };
+        let paths = catalog_search_paths(&store.connection, &lookup, 64).unwrap();
         assert_eq!(
-            batch.paths.into_iter().collect::<BTreeSet<_>>(),
+            paths.into_iter().collect::<BTreeSet<_>>(),
             pending.into_iter().map(str::to_owned).collect()
         );
         let plan: Vec<String> = store
             .connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {CATALOG_SEARCH_PATHS}"))
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", catalog_search_sql()))
             .unwrap()
-            .query_map(params!["identity", "identity.jsonl", 64], |row| row.get(3))
+            .query_map(
+                params![
+                    "identity",
+                    "identity.jsonl",
+                    64,
+                    ranges[0].0,
+                    ranges[0].1,
+                    ranges[1].0,
+                    ranges[1].1,
+                    ranges[2].0,
+                    ranges[2].1
+                ],
+                |row| row.get(3),
+            )
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
@@ -7080,9 +7140,13 @@ mod tests {
             store.pending_catalog_sources(64, None).unwrap().paths,
             vec![path.clone()]
         );
+        let preferred = super::super::CatalogPendingSearch {
+            paths: std::slice::from_ref(&search_path),
+            retry: None,
+        };
         assert_eq!(
             store
-                .pending_catalog_sources(64, Some(&search_source.native_id))
+                .pending_catalog_sources(64, Some(&preferred))
                 .unwrap()
                 .tier,
             super::super::CatalogPendingTier::SelectedUpgrade,
@@ -10311,16 +10375,16 @@ mod tests {
                     "{change}"
                 );
                 assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
-                let mut indexed = current.connection.prepare(CATALOG_SEARCH_PATHS).unwrap();
+                let ranges = std::array::from_fn(|_| (String::new(), String::new()));
+                let search = super::super::CatalogSearchLookup {
+                    query: "missing",
+                    ranges: &ranges,
+                };
                 assert!(
-                    indexed
-                        .query(params!["missing", "missing.jsonl", 64])
+                    catalog_search_paths(&current.connection, &search, 64)
                         .unwrap()
-                        .next()
-                        .unwrap()
-                        .is_none()
+                        .is_empty()
                 );
-                drop(indexed);
                 current
                     .write_one("fresh", None, None, &ledger(2), &full())
                     .unwrap();
