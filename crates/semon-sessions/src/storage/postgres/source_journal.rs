@@ -141,7 +141,7 @@ fn claims(tx: &mut PgTxn<'_>, paths: &[String]) -> Result<SourceClaims, StorageE
     }).collect()
 }
 
-fn invalidate(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageError> {
+pub(super) fn invalidate(tx: &mut PgTxn<'_>, path: &str) -> Result<(), StorageError> {
     let namespace = tx.namespace.as_str().as_bytes();
     let rows = tx.driver.query("UPDATE semon_pg_source_state SET revision=revision+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND revision<9223372036854775807 RETURNING revision", &[&namespace]).map_err(sqlstate::error)?;
     let revision: i64 = rows

@@ -27,9 +27,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
+pub(crate) mod file_rows;
+pub(crate) mod native_aux;
+pub(crate) mod native_commit;
+pub(crate) mod native_decode;
+pub(crate) mod native_pages;
 pub(crate) mod native_rows;
+pub(crate) mod reported_rows;
 pub(crate) mod store;
 pub(crate) mod tree_rows;
+pub(crate) mod tree_proof;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 
@@ -1409,6 +1416,7 @@ pub(crate) struct EventCache {
     /// Cold ingestion advances complete records by a bounded byte slice.
     pub(crate) scan_byte_budget: Option<u64>,
     cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
+    atomic_cold: bool,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -1440,6 +1448,7 @@ pub(crate) struct EventCache {
 const REOPEN_EVERY: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReportedFileStamp {
     dev: u64,
     ino: u64,
@@ -1730,9 +1739,11 @@ impl EventCache {
         let source_journal = capability.journal();
         let observation_namespace = source_journal.namespace().to_owned();
         let observation_path = Some(source_journal.database_path().clone());
-        let store = crate::storage::sqlite::configured_index::open_semantic(capability)?;
+        let (store, claude_json_stamp) =
+            crate::storage::sqlite::configured_index::open_semantic_with_stamp(capability)?;
         let mut cache = Self {
             store: Some(store),
+            claude_json_stamp,
             source_observations: Some(Box::new(source_journal)),
             observation_namespace,
             observation_path,
@@ -1755,6 +1766,31 @@ impl EventCache {
             source_observations: Some(crate::storage::sqlite::source_journal::configured(config)),
             observation_namespace: config.namespace.as_str().to_owned(),
             observation_path: Some(database.clone()),
+            scoped: true,
+            explicit_store: true,
+            ..Self::default()
+        };
+        cache
+            .reconcile_pending_source_operation()
+            .map_err(|_| crate::storage::StorageError::Unavailable)?;
+        Ok(cache)
+    }
+    /// Explicit authorized PG native capability. No public backend readiness,
+    /// SQLite coordinates, Options-derived path or alternate-engine fallback.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)] // Private integration until complete backend qualification.
+    pub(crate) fn open_pg_native(
+        pool: crate::storage::postgres::PgPool,
+        namespace: crate::storage::LogicalSourceNamespace,
+        control: crate::storage::postgres::PgCancellation,
+    ) -> Result<Self, crate::storage::StorageError> {
+        let observation_namespace = namespace.as_str().to_owned();
+        let (store, claude_json_stamp) =
+            crate::storage::postgres::index_store::open(pool, namespace, control)?;
+        let mut cache = Self {
+            store: Some(store),
+            claude_json_stamp,
+            observation_namespace,
             scoped: true,
             explicit_store: true,
             ..Self::default()
@@ -1945,12 +1981,12 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
     pub(crate) fn discover_recovery_sources(&mut self) -> io::Result<bool> {
-        let path = self
+        // A database path is an optional SQLite timing coordinate, never the
+        // identity or admission requirement of a logical Source journal.
+        let _probe = self
             .observation_path
             .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&path, "recovery");
+            .map(|path| crate::native_timing::DiscoveryProbe::new(path, "recovery"));
         // A failed/unknown ACK retains the exact identity before any new capture.
         if self.reconciled_recovery.is_none()
             && (self.pending_source_operation.is_some() || self.deferred_source_operations)
@@ -1996,12 +2032,10 @@ impl EventCache {
         inputs: &[crate::Input],
         complete: bool,
     ) -> io::Result<()> {
-        let observation_path = self
-            .observation_path
+        let observation_path = self.observation_path.clone();
+        let _probe = observation_path
             .as_deref()
-            .ok_or_else(|| io::Error::other("source observation path unavailable"))?
-            .to_owned();
-        let _probe = crate::native_timing::DiscoveryProbe::new(&observation_path, "publication");
+            .map(|path| crate::native_timing::DiscoveryProbe::new(path, "publication"));
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let paths = inputs
@@ -2033,9 +2067,9 @@ impl EventCache {
             }
         };
         measurements.record("source_journal_inclusive", started, paths.len());
-        if timing {
+        if timing && let Some(observation_path) = observation_path.as_deref() {
             measurements.emit(
-                &crate::native_timing::id(&observation_path),
+                &crate::native_timing::id(observation_path),
                 "discovery_publication_work",
             );
         }
@@ -3205,6 +3239,80 @@ impl EventCache {
         Ok(())
     }
 
+    /// Request-owned cold Source batch. Parsing still uses scan_file, while
+    /// every durable family effect waits for the single final store commit.
+    /// Reconcile all identities before Raw, including after a lost batch ACK.
+    #[cfg(feature = "postgres")]
+    #[allow(dead_code)] // Private native integration, not a public backend.
+    pub(crate) fn ingest_initial_batch(
+        &mut self,
+        requests: &[(&str, &Path, &str)],
+    ) -> Result<Vec<crate::storage::native_events::EventReceipt>, crate::storage::StorageError>
+    {
+        use crate::storage::StorageError;
+        if !self.explicit_store
+            || requests.is_empty()
+            || requests.len() > 64
+            || !self.cold_writes.is_empty()
+            || self.event_operation.is_some()
+        {
+            return Err(StorageError::InvalidArguments);
+        }
+        let mut paths = BTreeSet::new();
+        let mut ids = BTreeSet::new();
+        let store = self.store.as_ref().ok_or(StorageError::Unavailable)?;
+        let mut replay = Vec::new();
+        for (id, path, harness) in requests {
+            let path = path.to_str().ok_or(StorageError::InvalidArguments)?;
+            if !paths.insert(path) || !ids.insert(id) {
+                return Err(StorageError::InvalidArguments);
+            }
+            if let Some(receipt) = store
+                .reconcile_event(id, path, harness)
+                .map_err(configured_error)?
+            {
+                replay.push(receipt);
+            }
+        }
+        if replay.len() == requests.len() {
+            return Ok(replay);
+        }
+        if !replay.is_empty() {
+            return Err(StorageError::Conflict);
+        }
+        let prior_budget = self.scan_byte_budget;
+        self.scan_byte_budget = Some(prior_budget.unwrap_or(1024 * 1024).min(1024 * 1024));
+        self.atomic_cold = true;
+        let scanned = (|| {
+            for (id, path, harness) in requests {
+                self.event_operation = Some((*id).to_owned());
+                scan_file(path, harness, self, &mut false)?;
+            }
+            self.flush_cold_writes()
+        })();
+        self.atomic_cold = false;
+        self.event_operation = None;
+        self.scan_byte_budget = prior_budget;
+        if let Err(error) = scanned {
+            self.cold_writes.clear();
+            return Err(error
+                .get_ref()
+                .and_then(|e| e.downcast_ref::<StorageError>())
+                .copied()
+                .unwrap_or(StorageError::Unavailable));
+        }
+        requests
+            .iter()
+            .map(|(_, path, _)| {
+                self.store
+                    .as_ref()
+                    .ok_or(StorageError::Unavailable)?
+                    .event_receipt(path.to_str().ok_or(StorageError::InvalidArguments)?)
+                    .map_err(configured_error)
+            })
+            .collect()
+    }
+
     /// Writes a file's change through to the store. `true` when another
     /// process moved the file on first, so the change must be redone. A
     /// change that isn't written is noted, and read again next scan.
@@ -3818,6 +3926,10 @@ pub(crate) fn scan_file(
             if let Some(hook) = BEFORE_COMMIT.with(|hook| hook.borrow_mut().take()) {
                 hook();
             }
+        }
+        if cache.atomic_cold && (recorded.is_some() || bounded || ledger.offset != ledger.stat.size)
+        {
+            return Err(io::Error::other(crate::storage::StorageError::Conflict));
         }
         if cache.scan_byte_budget.is_some()
             && recorded.is_none()

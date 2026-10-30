@@ -58,6 +58,7 @@ pub(crate) trait CurrentPublicationStore {
 pub(crate) trait SearchPublicationStore {
     fn begin(&self, rows: &[&CatalogRow]) -> Result<(), Self::Error>;
     type Error;
+    fn data(error: serde_json::Error) -> Self::Error;
     fn validate(&self, key: &str) -> Result<(), Self::Error>;
     fn remove(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
     fn document(
@@ -402,6 +403,66 @@ pub(crate) struct SourceProofObservation {
     pub(crate) key: String,
     pub(crate) source: CatalogSource,
     pub(crate) generation: String,
+}
+
+/// The publisher's consumed-prefix identity test, shared by both adapters.
+/// A Catalog source intentionally omits unconsumed size/mtime. Those fields
+/// remain bound by the native proof's full Ledger rather than invented here.
+pub(crate) fn source_matches_ledger(
+    source: &CatalogSource,
+    ledger: &crate::events::Ledger,
+) -> bool {
+    (
+        ledger.stat.dev,
+        ledger.stat.ino,
+        ledger.offset,
+        ledger.prefix,
+        ledger.tail,
+        ledger.stat.changed_ns,
+    ) == (
+        source.dev,
+        source.ino,
+        source.offset,
+        source.prefix_sha256,
+        source.tail_sha256,
+        source.changed_ns,
+    )
+}
+
+#[cfg(test)]
+#[test]
+fn catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics() {
+    let ledger = crate::events::Ledger {
+        stat: crate::events::Stat {
+            dev: u64::MAX,
+            ino: u64::MAX - 1,
+            size: u64::MAX,
+            modified_ns: u128::MAX,
+            changed_ns: None,
+        },
+        offset: u64::MAX - 2,
+        prefix: [7; 32],
+        tail: [9; 32],
+    };
+    let source = ledger.source(std::path::Path::new("logical\0🦀"), "native\0🦀");
+    assert!(source_matches_ledger(&source, &ledger));
+    let mut changed = ledger.clone();
+    changed.stat.size -= 1;
+    changed.stat.modified_ns -= 1;
+    // These are unconsumed observations, not consumed-prefix identity fields.
+    assert!(source_matches_ledger(&source, &changed));
+    for field in 0..6 {
+        let mut changed = ledger.clone();
+        match field {
+            0 => changed.stat.dev -= 1,
+            1 => changed.stat.ino -= 1,
+            2 => changed.offset -= 1,
+            3 => changed.prefix[0] ^= 1,
+            4 => changed.tail[0] ^= 1,
+            _ => changed.stat.changed_ns = Some(i128::MIN),
+        }
+        assert!(!source_matches_ledger(&source, &changed));
+    }
 }
 
 /// Publication head operations share the native publisher's surrounding write

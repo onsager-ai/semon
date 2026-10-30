@@ -4,6 +4,12 @@ use super::*;
 use crate::native_tree::Summary;
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_tree_capture_nodes (
+ digest BLOB PRIMARY KEY CHECK(length(digest)=32),encoded BLOB NOT NULL CHECK(length(encoded)<=67)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_tree_capture_roots (
+ projection_id INTEGER PRIMARY KEY,root BLOB NOT NULL CHECK(length(root)=32)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_generations (
  projection_id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL,
  version INTEGER NOT NULL,receipt TEXT NOT NULL,complete INTEGER NOT NULL,work_pending INTEGER NOT NULL DEFAULT 0
@@ -21,17 +27,22 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
  source_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL, projection_id INTEGER NOT NULL, ledger TEXT NOT NULL
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
- projection_id INTEGER NOT NULL,model TEXT NOT NULL,PRIMARY KEY(projection_id,model)
+ projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
+ PRIMARY KEY(projection_id,model)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(projection_id,label)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(projection_id,tool_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(projection_id,message_id)
@@ -58,6 +69,14 @@ END;
 // Composite Tree and copied-usage families share physical namespace ownership.
 // Public creation still selects the singleton family until full qualification.
 const COMPOSITE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS native_tree_capture_nodes (
+ namespace TEXT NOT NULL,digest BLOB NOT NULL CHECK(length(digest)=32),encoded BLOB NOT NULL CHECK(length(encoded)<=67),
+ PRIMARY KEY(namespace,digest)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS native_tree_capture_roots (
+ namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,root BLOB NOT NULL CHECK(length(root)=32),
+ PRIMARY KEY(namespace,projection_id)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_generations (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,source_id INTEGER NOT NULL,
  version INTEGER NOT NULL,receipt TEXT NOT NULL,complete INTEGER NOT NULL,work_pending INTEGER NOT NULL DEFAULT 0,
@@ -83,9 +102,11 @@ CREATE TABLE IF NOT EXISTS native_tree_headers (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,model TEXT NOT NULL,
+ model_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.model',model)) STORED,
  PRIMARY KEY(namespace,projection_id,model),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_model_addresses ON native_tree_models(namespace,projection_id,model_digest);
 CREATE TABLE IF NOT EXISTS native_tree_labels (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,label TEXT NOT NULL,value TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,label),
@@ -93,10 +114,12 @@ CREATE TABLE IF NOT EXISTS native_tree_labels (
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS native_tree_tools (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,tool_id TEXT NOT NULL,name TEXT,closed INTEGER NOT NULL,
+ tool_id_digest BLOB GENERATED ALWAYS AS (semon_tree_digest('tree.tool',tool_id)) STORED,
  PRIMARY KEY(namespace,projection_id,tool_id),
  FOREIGN KEY(namespace,projection_id) REFERENCES native_tree_generations(namespace,projection_id)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id,name) WHERE closed=0 AND name IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS native_tree_tool_addresses ON native_tree_tools(namespace,projection_id,tool_id_digest);
+CREATE INDEX IF NOT EXISTS native_tree_open_tools ON native_tree_tools(namespace,projection_id,tool_id_digest) WHERE closed=0 AND name IS NOT NULL;
 CREATE TABLE IF NOT EXISTS native_tree_usage_models (
  namespace TEXT NOT NULL,projection_id INTEGER NOT NULL,message_id TEXT NOT NULL,model TEXT NOT NULL,
  PRIMARY KEY(namespace,projection_id,message_id),
@@ -124,6 +147,22 @@ END;
 
 pub(super) fn schema(composite: bool) -> &'static str {
     if composite { COMPOSITE_SCHEMA } else { SCHEMA }
+}
+
+pub(crate) fn register(c: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    c.create_scalar_function(
+        "semon_tree_digest",
+        2,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let domain: String = context.get(0)?;
+            let key: String = context.get(1)?;
+            Ok(crate::events::tree_rows::witness::address(&domain, key.as_bytes()).to_vec())
+        },
+    )
 }
 
 pub(super) fn sql<'a>(
@@ -155,24 +194,32 @@ pub(crate) struct Snapshot {
 #[derive(Clone, Debug)]
 pub(crate) enum TreeCheckpoint {
     Sqlite(Snapshot),
+    #[cfg(feature = "postgres")]
+    Pg(crate::storage::postgres::tree_checkpoint::Snapshot),
 }
 
 impl TreeCheckpoint {
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
         match self {
             Self::Sqlite(snapshot) => snapshot.tool_name(id),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.tool_name(id),
         }
     }
 
     pub(crate) fn shared_usage(&self) -> io::Result<SharedUsage> {
         match self {
             Self::Sqlite(snapshot) => snapshot.shared_usage(),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.shared_usage(),
         }
     }
 
     pub(crate) fn bind_configured(&mut self, config: crate::storage::StoreConfig) {
         match self {
             Self::Sqlite(snapshot) => snapshot.bind_configured(config),
+            #[cfg(feature = "postgres")]
+            Self::Pg(snapshot) => snapshot.bind_configured(config),
         }
     }
 }
@@ -181,7 +228,7 @@ impl fmt::Debug for Snapshot {
         f.write_str("TreeSnapshot")
     }
 }
-type SharedUsage = (
+pub(crate) type SharedUsage = (
     crate::claude_usage::Records,
     BTreeMap<String, Tokens>,
     BTreeMap<String, String>,
@@ -354,6 +401,7 @@ pub(super) fn write_values(
 ) -> rusqlite::Result<()> {
     let rows = crate::events::tree_rows::TreeRows::new(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    super::tree_capture::begin(tx, id)?;
     let turn = &rows.codex_turn;
     tx.prepare_cached(sql(tx, "INSERT INTO native_tree_labels VALUES(?1,'codex_turn',?2) ON CONFLICT(projection_id,label) DO UPDATE SET value=excluded.value", "INSERT INTO native_tree_labels VALUES(semon_namespace(),?1,'codex_turn',?2) ON CONFLICT(namespace,projection_id,label) DO UPDATE SET value=excluded.value")?)?.execute(params![id,turn])?;
     for (label, value) in rows.labels() {
@@ -376,6 +424,7 @@ pub(super) fn write_values(
     for (message, model) in rows.usage_models {
         tx.prepare_cached(sql(tx, "INSERT INTO native_tree_usage_models VALUES(?1,?2,?3) ON CONFLICT(projection_id,message_id) DO UPDATE SET model=excluded.model", "INSERT INTO native_tree_usage_models VALUES(semon_namespace(),?1,?2,?3) ON CONFLICT(namespace,projection_id,message_id) DO UPDATE SET model=excluded.model")?)?.execute(params![id,message,model])?;
     }
+    super::tree_capture::capture(tx, id, &rows)?;
     Ok(())
 }
 
@@ -490,36 +539,42 @@ pub(super) fn witness(
     let Some(projection) = projection else {
         return Ok(None);
     };
-    let mut digest = Sha256::new();
-    for sql in [
-        "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
-        "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model",
-        "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id",
-    ] {
-        digest.update(sql.as_bytes());
-        let scoped = match sql {
-            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label" => {
-                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label"
-            }
-            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model" => {
-                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model"
-            }
-            _ => {
-                "SELECT json_array(tool_id,name) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 AND closed=0 AND name IS NOT NULL ORDER BY tool_id"
-            }
-        };
-        let mut statement = c.prepare(self::sql(c, sql, scoped)?)?;
+    // The stored digest indexes stream the current authenticated order. `row`
+    // admits each encoded cell before allocation; no dimension is collected.
+    let mut writer = crate::events::tree_rows::witness::Writer::new();
+    for (family, (plain, scoped)) in [
+        (
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label",
+            "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+        ),
+        (
+            "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY model_digest",
+            "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
+        ),
+        (
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY tool_id_digest",
+            "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        match family {
+            0 => writer.labels(),
+            1 => writer.models(),
+            _ => writer.tools(),
+        }
+        let mut statement = c.prepare(sql(c, plain, scoped)?)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
             crate::selected_read::checkpoint("tree_witness")
                 .map_err(crate::selected_read::sql_error)?;
             let value: String = row.get(0)?;
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
+            writer.encoded(&value);
         }
     }
-    Ok(Some(format!("{:x}", digest.finalize())))
+    Ok(Some(writer.finish()))
 }
 
 pub(super) fn work_pending(c: &Connection) -> rusqlite::Result<bool> {
@@ -559,7 +614,7 @@ pub(super) fn cleanup_work(c: &mut Connection) -> rusqlite::Result<bool> {
 mod namespace_tests {
     use super::*;
     use rusqlite::functions::FunctionFlags;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn bind(db: &Connection, namespace: &str) {
         configured::bind_metadata_scope(db, namespace).unwrap();
@@ -576,6 +631,7 @@ mod namespace_tests {
     #[test]
     fn native_usage_tree_colliding_generations_restore_witness_and_rollback() {
         let mut db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE files (
             namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
@@ -666,5 +722,247 @@ mod namespace_tests {
         tx.rollback().unwrap();
         bind(&db, "a");
         assert!(ready(&db, path, &ledger).unwrap());
+    }
+
+    // The recipe must reproduce the SQLite json_array witness bytes exactly,
+    // including control, NUL, escape and non-BMP content.
+    #[test]
+    fn tree_witness_recipe_matches_sqlite_json_array_bytes() {
+        use crate::events::tree_rows::witness::digest;
+        use sha2::{Digest, Sha256};
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        register(&c).unwrap();
+        c.execute_batch("CREATE TABLE native_tree_labels(projection_id,label,value);CREATE TABLE native_tree_models(projection_id,model);CREATE TABLE native_tree_tools(projection_id,tool_id,name,closed);").unwrap();
+        let odd = "a\0b\u{1}\u{1f}\t\n\r\u{8}\u{c}\"\\/\u{7f}\u{2028}é🦀";
+        let labels = [
+            ("branch", odd),
+            ("cwd", "/w"),
+            ("first", "🦀"),
+            ("last", ""),
+        ];
+        for (label, value) in labels {
+            c.execute(
+                "INSERT INTO native_tree_labels VALUES(7,?1,?2)",
+                [label, value],
+            )
+            .unwrap();
+        }
+        for model in ["m\0", "m🦀", "Z"] {
+            c.execute("INSERT INTO native_tree_models VALUES(7,?1)", [model])
+                .unwrap();
+        }
+        for (id, name, closed) in [
+            ("t\0", Some(odd), 0),
+            ("t🦀", Some("n"), 0),
+            ("u", Some("closed"), 1),
+            ("v", None, 0),
+        ] {
+            c.execute(
+                "INSERT INTO native_tree_tools VALUES(7,?1,?2,?3)",
+                rusqlite::params![id, name, closed],
+            )
+            .unwrap();
+        }
+        let mut oracle = Sha256::new();
+        for (domain, sql) in [
+            ("semon.tree.witness.4.labels", "SELECT json_array(label,value) FROM native_tree_labels WHERE projection_id=?1 ORDER BY label"),
+            ("semon.tree.witness.4.models", "SELECT json_array(model) FROM native_tree_models WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.model',model)"),
+            ("semon.tree.witness.4.tools", "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE projection_id=?1 ORDER BY semon_tree_digest('tree.tool',tool_id)"),
+        ] {
+            oracle.update(domain.as_bytes());
+            let mut statement = c.prepare(sql).unwrap();
+            let mut rows = statement.query([7]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                let value: String = row.get(0).unwrap();
+                oracle.update((value.len() as u64).to_be_bytes());
+                oracle.update(value.as_bytes());
+            }
+        }
+        let mut models = ["m\0", "m🦀", "Z"];
+        models.sort_unstable();
+        let actual = digest(labels, models, [("t\0", Some(odd), false), ("t🦀", Some("n"), false), ("u", Some("closed"), true), ("v", None, false)]);
+        assert_eq!(actual, format!("tree4:{:x}", oracle.finalize()));
+    }
+
+    fn qualified_tree(summary: Summary) -> (Connection, Ledger, &'static str) {
+        let mut db = Connection::open_in_memory().unwrap();
+        register(&db).unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON; CREATE TABLE files (
+            namespace TEXT NOT NULL,file_id INTEGER NOT NULL,path TEXT NOT NULL,
+            dev INTEGER NOT NULL,ino INTEGER NOT NULL,size INTEGER NOT NULL,
+            mtime_ns BLOB NOT NULL,resume_at INTEGER NOT NULL,head_sha256 BLOB NOT NULL,
+            tail_sha256 BLOB NOT NULL,ctime_ns BLOB,codex_pricing_fingerprint TEXT,
+            PRIMARY KEY(namespace,file_id),UNIQUE(namespace,path));",
+        )
+        .unwrap();
+        db.execute_batch(metadata_schema(true)).unwrap();
+        for ddl in native_usage::schema(true) {
+            db.execute_batch(ddl).unwrap();
+        }
+        db.execute_batch(copied_usage_schema(true)).unwrap();
+        db.execute_batch(schema(true)).unwrap();
+        bind(&db, "witness");
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 64,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset: 64,
+            prefix: [5; 32],
+            tail: [6; 32],
+        };
+        let path = "qualified/witness.jsonl";
+        let tx = db.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO files VALUES(semon_namespace(),1,?1,1,2,64,?2,64,?3,?4,?5,NULL)",
+            params![
+                path,
+                3_u128.to_be_bytes(),
+                ledger.prefix,
+                ledger.tail,
+                4_i128.to_be_bytes()
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            native_usage::begin_source(&tx, path, None, &ledger, false).unwrap(),
+            1
+        );
+        write_tree_summary(&tx, path, &ledger, Some(&summary), true).unwrap();
+        tx.commit().unwrap();
+        (db, ledger, path)
+    }
+
+    fn sqlite_witness_oracle(db: &Connection, path: &str) -> (String, usize, usize) {
+        use sha2::{Digest, Sha256};
+        let projection: i64 = db
+            .query_row(
+                "SELECT projection_id FROM native_tree_headers WHERE namespace=semon_namespace() AND source_path=?1",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut hash = Sha256::new();
+        let mut rows = 0;
+        let mut bytes = 0;
+        for (domain, query) in [
+            (
+                "semon.tree.witness.4.labels",
+                "SELECT json_array(label,value) FROM native_tree_labels WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY label",
+            ),
+            (
+                "semon.tree.witness.4.models",
+                "SELECT json_array(model) FROM native_tree_models WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY model_digest",
+            ),
+            (
+                "semon.tree.witness.4.tools",
+                "SELECT json_array(tool_id,name,closed) FROM native_tree_tools WHERE namespace=semon_namespace() AND projection_id=?1 ORDER BY tool_id_digest",
+            ),
+        ] {
+            hash.update(domain.as_bytes());
+            let mut statement = db.prepare(query).unwrap();
+            let mut result = statement.query([projection]).unwrap();
+            while let Some(row) = result.next().unwrap() {
+                let encoded: String = row.get(0).unwrap();
+                hash.update((encoded.len() as u64).to_be_bytes());
+                hash.update(encoded.as_bytes());
+                rows += 1;
+                bytes += 64 + encoded.len() * 8;
+            }
+        }
+        (format!("tree4:{:x}", hash.finalize()), rows, bytes)
+    }
+
+    #[test]
+    fn tree_witness_current_addresses_authenticate_closed_null_and_missing_rows() {
+        let summary = Summary {
+            models: BTreeSet::from(["m\0🦀".into(), "second".into()]),
+            tools: BTreeMap::from([("closed\0🦀".into(), "retained-name".into())]),
+            closed_tools: BTreeSet::from(["closed\0🦀".into(), "null-name".into()]),
+            ..Summary::default()
+        };
+        let (mut db, ledger, path) = qualified_tree(summary);
+        let expected = witness(&db, path, &ledger).unwrap().unwrap();
+        assert!(expected.starts_with("tree4:"));
+        for mutation in [
+            "UPDATE native_tree_tools SET name='tampered' WHERE tool_id='null-name'",
+            "UPDATE native_tree_tools SET closed=0 WHERE tool_id='null-name'",
+            "DELETE FROM native_tree_models WHERE model='second'",
+        ] {
+            let tx = db.transaction().unwrap();
+            assert!(tx.execute(mutation, []).unwrap() > 0);
+            assert_ne!(witness(&tx, path, &ledger).unwrap().unwrap(), expected);
+            tx.rollback().unwrap();
+            assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
+        }
+        let encoded: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        let mut old: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        old["projection_witness"] = "unversioned-old-witness".into();
+        let old = serde_json::to_string(&old).unwrap();
+        db.execute("UPDATE meta SET value=?1 WHERE namespace=semon_namespace() AND key=?2", params![old, tree_summary_key(path)]).unwrap();
+        let mut statement = db.prepare(native_metadata_value(&db).unwrap()).unwrap();
+        assert!(read_tree_summary(&db, &mut statement, path, &ledger).unwrap().is_none());
+        let retained: String = db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key=?1", [tree_summary_key(path)], |row| row.get(0)).unwrap();
+        assert_eq!(retained, old, "unsupported witness remains untouched");
+        assert_eq!(witness(&db, path, &ledger).unwrap().unwrap(), expected);
+    }
+
+    #[test]
+    fn tree_witness_budgets_actual_qualified_json_before_decode() {
+        let escaped = "a\0b\u{1}\u{1f}\"\\\u{2028}🦀";
+        let summary = Summary {
+            cwd: Some(escaped.into()),
+            branch: Some("branch\0\\\"🦀".into()),
+            models: BTreeSet::from(["model\0\u{1}\"\\🦀".into()]),
+            tools: BTreeMap::from([("tool\0🦀".into(), escaped.into())]),
+            closed_tools: BTreeSet::from(["closed".into()]),
+            ..Summary::default()
+        };
+        let (db, ledger, path) = qualified_tree(summary);
+        let (expected, rows, bytes) = sqlite_witness_oracle(&db, path);
+
+        let too_small = crate::SelectedReadControl::default().with_limits(rows, bytes - 1);
+        {
+            let _scope = crate::selected_read::Scope::enter(&too_small);
+            assert!(witness(&db, path, &ledger).is_err());
+        }
+
+        let exact = crate::SelectedReadControl::default().with_limits(rows, bytes);
+        let actual = {
+            let _scope = crate::selected_read::Scope::enter(&exact);
+            witness(&db, path, &ledger).unwrap().unwrap()
+        };
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn tree_witness_actual_projection_cancels_while_streaming_and_recovers() {
+        let summary = Summary {
+            tools: (0..2048)
+                .map(|index| (format!("tool-{index:04}"), format!("name-{index}")))
+                .collect(),
+            ..Summary::default()
+        };
+        let (db, ledger, path) = qualified_tree(summary);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = cancelled.clone();
+        let control = crate::SelectedReadControl::new(
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+            cancelled.clone(),
+        )
+        .with_limits(4096, 64 * 1024 * 1024);
+        crate::selected_read::set_hook("tree_witness", 3, move || {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        });
+        {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            assert!(witness(&db, path, &ledger).is_err());
+        }
+        assert!(observed.load(std::sync::atomic::Ordering::Acquire));
+        assert!(witness(&db, path, &ledger).unwrap().is_some());
     }
 }

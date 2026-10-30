@@ -349,9 +349,9 @@ independent refusal and publication fences.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 34 with parser/cache version 29 in one
+The Event Index initializes schema 35 with parser/cache version 29 in one
 transaction, including pricing fingerprints and native usage readiness default
-0. Schema 34 includes the scheduling indexes and fences the retired proof/tree/usage
+0. Schema 35 includes the scheduling indexes and fences the retired proof/tree/usage
 representations as one contract.
 Normal writable producer opens (complete and scoped/background) automatically
 clear a recognized obsolete Semon index and initialize the current empty schema;
@@ -373,15 +373,12 @@ Reset and empty initialization share one SQLite immediate writer transaction,
 with reclassification under the lock. Concurrent producers cannot reset a newly
 rebuilt store again; existing WAL readers keep their prior snapshots. No index,
 WAL or SHM file is unlinked, and existing private-file handling remains in place.
-Only the exact configured SQLite derived index is cleared. Native logs, archive
+Only the exact standalone SQLite derived index is cleared. Native logs, archive
 objects, credentials, unrelated files and retired JSON caches remain untouched.
-Physical corruption retains its existing set-aside/recovery behavior.
 
-Reindexing cannot recover history, retained recipes or reported facts whose
-original supported native source bytes are gone or inaccessible. Archive bytes
-are preserved but old derived archive markers are not converted into new read
-authority; an authorized source/provider must supply supported original bytes.
-Unsupported stores still propagate errors rather than empty in-memory history.
+Enrolled configured namespaces refuse old schema, parser and archive contracts before schema or recovery writes. Refusal preserves native bytes, retained history, reported facts and archive custody; the standalone rebuild path cannot bypass namespace custody. Current-format transfer and cutover remain separately qualified.
+
+Physical corruption retains its existing set-aside/recovery behavior.
 
 Current native usage writes persist the normalized source facts and dimensions
 with the ledger. Tree writes maintain copied-usage identities through the current
