@@ -3912,7 +3912,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Ok(())
     }).unwrap();
     assert!(crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
-    assert_eq!(journal.pending(64).unwrap(), vec![selected_path.clone()]);
+    assert_eq!(
+        journal.pending_catalog_sources(64, None).unwrap().paths,
+        vec![selected_path.clone()]
+    );
     assert_eq!(
         journal.claims(&paths).unwrap(),
         revisions,
@@ -3922,7 +3925,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (upgraded, _, _, _) = stage_publish(&mut reopened, &bulk[..1], 1790812811000);
     assert_ne!(upgraded, retired);
     assert!(!crate::request_session_projection_upgrade(&facts_options, selected_key).unwrap());
-    assert_eq!(journal.pending(64).unwrap(), vec![unrelated_path]);
+    assert_eq!(
+        journal.pending_catalog_sources(64, None).unwrap().paths,
+        vec![unrelated_path]
+    );
     assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
     assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
     assert!(

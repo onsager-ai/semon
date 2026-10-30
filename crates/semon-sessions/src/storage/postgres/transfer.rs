@@ -589,7 +589,10 @@ mod tests {
         drop(db);
         let expected = observations(&source).claims(&paths).unwrap();
         assert_eq!(
-            observations(&source).pending(3).unwrap(),
+            observations(&source)
+                .pending_catalog_sources(3, None)
+                .unwrap()
+                .paths,
             vec![paths[69].clone()]
         );
         let (pool, _) = super::super::tests::fixture(|limits| {
@@ -612,7 +615,10 @@ mod tests {
             Some("draining")
         );
         assert_eq!(
-            observations(&config).pending(3).unwrap(),
+            observations(&config)
+                .pending_catalog_sources(3, None)
+                .unwrap()
+                .paths,
             vec![paths[69].clone()]
         );
         let selected = vec![expected[69].clone()];
@@ -630,7 +636,10 @@ mod tests {
         apply(&reverse, &backwards);
         assert_eq!(observations(&reverse).claims(&paths).unwrap(), resumed);
         assert_eq!(
-            observations(&reverse).pending(3).unwrap(),
+            observations(&reverse)
+                .pending_catalog_sources(3, None)
+                .unwrap()
+                .paths,
             vec![paths[69].clone()]
         );
         assert_eq!(
