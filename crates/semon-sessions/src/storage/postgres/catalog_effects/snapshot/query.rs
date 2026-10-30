@@ -169,10 +169,21 @@ impl QueryCatalogStore for QueryCatalog {
                         eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
-                let expected = runtime.as_deref().map(|runtime| {
-                    snapshot.runtime_observation(&self.options, &row, runtime)
-                        .map_err(|_| StorageError::ScopeChanged)
-                }).transpose()?.flatten();
+                let expected = if !self.captured && current {
+                    runtime.as_deref().map(|runtime| {
+                        snapshot.runtime_observation(&self.options, &row, runtime)
+                            .map_err(|_| StorageError::ScopeChanged)
+                    }).transpose()?.flatten()
+                } else {
+                    // Historical summaries retain observation provenance;
+                    // their stored byte custody does not require live CWDs.
+                    if runtime.is_some() {
+                        snapshot.row_runtime_binding(&row)
+                            .map_err(|_| StorageError::ScopeChanged)?
+                            .ok_or(StorageError::ScopeChanged)?;
+                    }
+                    None
+                };
                 if !crate::model::summary::query_observation_matches(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
                     &row.sources,
@@ -387,8 +398,15 @@ impl QueryCatalogStore for QueryCatalog {
             let mut content = BTreeMap::new();
             let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
-                let expected = snapshot.runtime_observation(&self.options, &row, &runtime)
-                    .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?;
+                let expected = if current {
+                    snapshot.runtime_observation(&self.options, &row, &runtime)
+                        .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?
+                } else {
+                    snapshot.row_runtime_binding(&row)
+                        .map_err(|_| cohort_scope_changed("query_runtime_binding_refused"))?
+                        .ok_or_else(|| cohort_scope_changed("query_runtime_binding_missing"))?;
+                    None
+                };
                 let saved = row.query.as_ref().ok_or_else(|| cohort_scope_changed("query_observation_missing"))?;
                 let matches = crate::model::summary::query_observation_matches(saved, &row.sources, current, expected.as_deref()).map_err(|_| cohort_scope_changed("query_observation_invalid"))?;
                 if !matches { return Err(cohort_scope_changed("query_observation_mismatch")); }
