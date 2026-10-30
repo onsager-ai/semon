@@ -1,5 +1,5 @@
-//! Explicit metadata storage boundary. This first increment covers change
-//! delivery only; Index, Catalog, Query and byte-proof ports remain in #478.
+//! Explicit native storage boundary for Index, Catalog, Query, byte proofs
+//! and change delivery. Adapter qualification is tracked by #478 and #479.
 //! A namespace is an authorized logical binding, never a path or a credential.
 pub(crate) mod catalog;
 #[cfg(test)]
