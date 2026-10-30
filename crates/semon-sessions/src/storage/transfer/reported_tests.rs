@@ -570,10 +570,14 @@ pub(crate) fn finish_catalog(
                 );
                 cache.publish_session_descriptions();
                 assert_eq!(
-                    cache
-                        .session_description(&row.key, 1, "transfer-inputs")
-                        .as_deref(),
-                    Some("sanitized transfer description")
+                    cache.session_descriptions(&[
+                        crate::events::SessionDescriptionRequest {
+                            key: row.key.clone(),
+                            version: 1,
+                            inputs: "transfer-inputs".into(),
+                        },
+                    ]),
+                    vec![Some("sanitized transfer description".into())]
                 );
             }
             cache.finish_semantic_stage(batch.epoch).unwrap();
@@ -603,10 +607,14 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     std::fs::remove_dir_all(&options.claude_home).unwrap();
     apply(&target, &manifest);
     assert_eq!(
-        cache(&target)
-            .session_description(&expected[0].key, 1, "transfer-inputs")
-            .as_deref(),
-        Some("sanitized transfer description")
+        cache(&target).session_descriptions(&[
+            crate::events::SessionDescriptionRequest {
+                key: expected[0].key.clone(),
+                version: 1,
+                inputs: "transfer-inputs".into(),
+            },
+        ]),
+        vec![Some("sanitized transfer description".into())]
     );
     let owner =
         crate::events::store::configured::NativeOwnership::restore_transfer(&target).unwrap();
@@ -653,10 +661,14 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     }
     apply(&reverse, &backwards);
     assert_eq!(
-        cache(&reverse)
-            .session_description(&expected[0].key, 1, "transfer-inputs")
-            .as_deref(),
-        Some("sanitized transfer description")
+        cache(&reverse).session_descriptions(&[
+            crate::events::SessionDescriptionRequest {
+                key: expected[0].key.clone(),
+                version: 1,
+                inputs: "transfer-inputs".into(),
+            },
+        ]),
+        vec![Some("sanitized transfer description".into())]
     );
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -723,10 +735,12 @@ fn current_transfer225_occupied_description_refused_before_native_pages_commit()
     writer.save_session_description("existing", 1, "inputs", "owned destination");
     writer.publish_session_descriptions();
     assert_eq!(
-        writer
-            .session_description("existing", 1, "inputs")
-            .as_deref(),
-        Some("owned destination")
+        writer.session_descriptions(&[crate::events::SessionDescriptionRequest {
+            key: "existing".into(),
+            version: 1,
+            inputs: "inputs".into(),
+        }]),
+        vec![Some("owned destination".into())]
     );
     drop(writer);
     let manifest = stage(&source, &target, &[122; 32]);
