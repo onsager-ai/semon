@@ -45,3 +45,15 @@ An adjudicator uses `real_adjudicate.py next` / `submit` for causal disputes,
 then `offline-next` / `offline-submit --session-id ID --reviewed`. Every offline
 dispute needs an explicit full label, including deliberate unknown decisions.
 All corpus, annotation, audit, and example files remain local and private.
+
+Read every packet completely before submitting. For tool-driven annotation,
+set both the command output budget and the enclosing orchestration output
+budget to 40,000 tokens and parse the command's output as JSON before showing
+it to the labeller. Truncation or a JSON parse failure means the evidence is
+incomplete: do not submit a label; request the same unsaved target again with
+sufficient output capacity. Do not infer the omitted evidence.
+
+Offline override keys must be the exact outer `packet.events[*].id` values,
+not event-order numbers or native identifiers quoted inside event text. Each
+value is the full five-field label. Submit `{}` only after reviewing the
+complete session and deliberately retaining every causal label.

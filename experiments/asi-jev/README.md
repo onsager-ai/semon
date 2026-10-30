@@ -56,6 +56,10 @@ Labellers must not read rules, predictions, raw sources, future events during
 the causal pass, or each other's labels. A third blind adjudicator resolves
 disagreements before `freeze-reference`. Retain both original annotations;
 user spot-check review remains separate. Freeze files and hashes live locally.
+Follow [LABEL_GUIDE.md](LABEL_GUIDE.md), including its strict packet-completeness
+check: parse the complete CLI JSON, use 40,000-token inner and outer output
+budgets, and never label a clipped packet. Offline overrides use the exact
+outer event IDs returned by the interface.
 `real_adjudicate.py next` / `submit` serves one causal disagreement at a time.
 After that pass freezes, `offline-next` / `offline-submit --session-id ID
 --reviewed` serves complete-session review and requires an explicit full label
@@ -99,6 +103,17 @@ exports pooled request P50/P95 and measured wall-time throughput; repeat
 `--run-dir` for each condition. Both remote model arms use the same gateway.
 The local Magpie ledger cannot establish remote gateway bills, so Haiku billed
 cost remains unknown. Jev list-price estimates are explicitly separate.
+
+For protocol-grade scoring, pass the disclosure-safe output of
+`real_operations.py --run-dir ... --output AGGREGATE_JSON` to
+`real_metrics.py --operations AGGREGATE_JSON` with the private prediction and
+summary inputs. Metrics validates event, prediction-row, and request counts,
+uses pooled HTTP and projected latency P95 values for acceptance, and retains
+maximum session-summary P95s as descriptive values. Missing operations data
+or unknown queue timing leaves latency acceptance unmeasured. Exploratory runs
+may use smaller bootstrap draws or different repetition sets, but cannot pass
+protocol acceptance; the frozen run uses 2,000 draws, seed 20261030, one Rules
+repetition, and three repetitions for each remote condition.
 
 This experiment compares a small deterministic rules baseline with TypeSafe Jev and, optionally, an OpenAI-compatible lightweight LLM. It reads only the reviewed sanitized fixture corpus at `data/events.jsonl`; it is not a reader for private native session files and does not change the production parser.
 

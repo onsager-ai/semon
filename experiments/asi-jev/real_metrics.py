@@ -18,13 +18,18 @@ Prediction JSONL rows use benchmark.py's ``id``, ``repetition``, ``strategy``,
 ``mode``, ``context`` and ``predictions`` fields. Each condition/context must
 have one row per event and repetition. Optional benchmark summary JSON files
 provide per-run request latency percentiles, request-failure counts, and token
-totals. Independent annotation and user-review JSONL rows have ``id`` plus
+totals. The optional disclosure-safe ``--operations`` JSON comes from
+``real_operations.py`` and supplies pooled latency percentiles and counts for
+matching each condition's events, prediction rows, and requests. Independent annotation and user-review JSONL rows have ``id`` plus
 ``gold`` and optional ``causal_gold`` objects with the same taxonomy fields.
 
 Acceptance additionally requires at least 300 unique events, 15 complete
 sessions with at least five from each harness, blind independent annotations
 covering every reference event for both offline and causal labels, and
-``--adjudication-status frozen``. The status enum is
+``--adjudication-status frozen``, exactly 2,000 bootstrap draws with seed
+20261030, and the frozen repetition sets (one Rules run and three remote runs
+for every required context). Protocol acceptance also requires the operations
+aggregate; exploratory scoring remains available without it. The status enum is
 ``pending`` or ``frozen``. User spot-check
 review remains separately marked pending until its local review file is given.
 
@@ -60,6 +65,28 @@ PRIMARY_CONDITIONS = (
     "Jev per-event", "Jev microbatch", "Rules+triggeredJev",
     "Haiku per-event", "Rules+triggeredHaiku",
 )
+OPERATIONS_CONDITIONS = {
+    ("Rules", "prefix"): "rules-prefix",
+    ("Rules", "offline"): "rules-offline",
+    ("Jev per-event", "prefix"): "jev-prefix",
+    ("Jev per-event", "offline"): "jev-offline",
+    ("Jev microbatch", "prefix"): "jev-microbatch-prefix",
+    ("Rules+triggeredJev", "prefix"): "jev-triggered-prefix",
+    ("Haiku per-event", "prefix"): "llm-prefix",
+    ("Haiku per-event", "offline"): "llm-offline",
+    ("Rules+triggeredHaiku", "prefix"): "llm-triggered-prefix",
+}
+EXPECTED_REPETITIONS = {
+    ("Rules", "prefix"): (1,),
+    ("Rules", "offline"): (1,),
+    ("Jev per-event", "prefix"): (1, 2, 3),
+    ("Jev per-event", "offline"): (1, 2, 3),
+    ("Jev microbatch", "prefix"): (1, 2, 3),
+    ("Rules+triggeredJev", "prefix"): (1, 2, 3),
+    ("Haiku per-event", "prefix"): (1, 2, 3),
+    ("Haiku per-event", "offline"): (1, 2, 3),
+    ("Rules+triggeredHaiku", "prefix"): (1, 2, 3),
+}
 DEFAULT_SEED = 20261030
 DEFAULT_DRAWS = 2000
 CONFIDENCE = 0.95
@@ -77,6 +104,8 @@ def condition_name(strategy: Any, mode: Any) -> str:
     if strategy == "llm" and mode == "microbatch":
         raise MetricsError("unsupported condition fields")
     if strategy == "rules":
+        if mode != "per-event":
+            raise MetricsError("unsupported condition fields")
         return "Rules"
     if strategy == "jev":
         return {
@@ -176,7 +205,10 @@ def _prediction_condition(row: dict[str, Any]) -> tuple[str, str]:
     context = row.get("context")
     if not isinstance(context, str) or context not in CONTEXTS:
         raise MetricsError("prediction context is invalid")
-    return condition, context
+    key = (condition, context)
+    if key not in OPERATIONS_CONDITIONS:
+        raise MetricsError("unsupported condition context")
+    return key
 
 
 def _normalise_predictions(rows: Iterable[dict[str, Any]], references: dict[str, dict[str, Any]]) -> tuple[dict[tuple[str, str], dict[str, dict[int, dict[str, Any]]]], dict[tuple[str, str], int]]:
@@ -219,6 +251,63 @@ def _normalise_summaries(rows: Iterable[dict[str, Any]]) -> dict[tuple[str, str]
         key = _prediction_condition(row)
         grouped[key].append(row)
     return grouped
+
+
+def _normalise_operations(value: Any) -> dict[str, dict[str, Any]] | None:
+    if value is None:
+        return None
+    schema = value.get("schema") if isinstance(value, dict) else None
+    if not isinstance(schema, int) or isinstance(schema, bool) or schema != 1:
+        raise MetricsError("operations aggregate schema is invalid")
+    conditions = value.get("conditions")
+    if not isinstance(conditions, dict):
+        raise MetricsError("operations aggregate conditions are invalid")
+    allowed = set(OPERATIONS_CONDITIONS.values())
+    result: dict[str, dict[str, Any]] = {}
+    for condition, row in conditions.items():
+        if condition not in allowed or not isinstance(row, dict):
+            raise MetricsError("operations aggregate condition is invalid")
+        result[condition] = row
+    return result
+
+
+def _protocol_conformance(
+    predictions: dict[tuple[str, str], dict[str, dict[int, dict[str, Any]]]],
+    draws: int,
+    seed: int,
+) -> dict[str, Any]:
+    repetition_checks: dict[str, dict[str, Any]] = {}
+    repetition_ready = True
+    for key, expected in EXPECTED_REPETITIONS.items():
+        condition, context = key
+        by_event = predictions.get(key)
+        observed = sorted(next(iter(by_event.values()))) if by_event else []
+        matches = observed == list(expected)
+        repetition_ready = repetition_ready and matches
+        repetition_checks[f"{condition}|{context}"] = {
+            "expected": list(expected),
+            "observed": observed,
+            "matches": matches,
+        }
+    unexpected_conditions = sorted(
+        f"{condition}|{context}"
+        for condition, context in predictions
+        if (condition, context) not in EXPECTED_REPETITIONS
+    )
+    draws_match = draws == DEFAULT_DRAWS
+    seed_match = seed == DEFAULT_SEED
+    conditions_match = not unexpected_conditions
+    return {
+        "status": "pass" if draws_match and seed_match and repetition_ready and conditions_match else "insufficient_evidence",
+        "expected_bootstrap_draws": DEFAULT_DRAWS,
+        "observed_bootstrap_draws": draws,
+        "bootstrap_draws_match": draws_match,
+        "expected_bootstrap_seed": DEFAULT_SEED,
+        "observed_bootstrap_seed": seed,
+        "bootstrap_seed_match": seed_match,
+        "unexpected_conditions": unexpected_conditions,
+        "repetition_sets": repetition_checks,
+    }
 
 
 def _prediction_label(row: dict[str, Any], dimension: str) -> str:
@@ -642,7 +731,7 @@ def _session_alert_budget(
                 for event_id in event_ids
             ))
         mean_alerts_by_session[session_id] = sum(alert_counts) / len(alert_counts)
-        over_budget_by_session[session_id] = sum(count > 1 for count in alert_counts) / len(alert_counts)
+        over_budget_by_session[session_id] = float(mean_alerts_by_session[session_id] > 1)
 
     sessions = sorted(mean_alerts_by_session)
     estimate_alerts = sum(mean_alerts_by_session[session_id] for session_id in sessions) / len(sessions)
@@ -673,24 +762,13 @@ def _session_alert_budget(
     }
 
 
-def _operation_metrics(summary_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    if not summary_rows:
-        return {
-            "status": "not_provided",
-            "summary_run_count": 0,
-            "request_count": None,
-            "request_failure_count": None,
-            "request_failure_rate": None,
-            "provider_http_p95_ms_worst_run": None,
-            "projected_async_p95_ms_worst_run": None,
-            "queue_wait_unknown_event_rows": None,
-            "input_tokens": None,
-            "output_tokens": None,
-            "billed_cost_usd": None,
-            "haiku_billing_units": None,
-            "billing_status": "unknown",
-            "jev_list_estimate_usd": None,
-        }
+def _operation_metrics(
+    summary_rows: list[dict[str, Any]],
+    operations_row: dict[str, Any] | None,
+    *,
+    expected_event_count: int,
+    expected_prediction_rows: int,
+) -> dict[str, Any]:
     request_totals: list[int | None] = []
     failure_totals: list[int | None] = []
     input_token_totals: list[int | None] = []
@@ -701,7 +779,7 @@ def _operation_metrics(summary_rows: list[dict[str, Any]]) -> dict[str, Any]:
     projected_p95s: list[float] = []
     projected_latency_incomplete = False
     unknown_wait_rows = 0
-    unknown_wait_count_known = True
+    unknown_wait_count_known = bool(summary_rows)
 
     def count_value(value: Any, message: str) -> int | None:
         if value is None:
@@ -792,25 +870,104 @@ def _operation_metrics(summary_rows: list[dict[str, Any]]) -> dict[str, Any]:
             else:
                 unknown_wait_rows += unknown
 
-    requests = sum(value for value in request_totals if value is not None) if all(value is not None for value in request_totals) else None
-    failures = sum(value for value in failure_totals if value is not None) if all(value is not None for value in failure_totals) else None
+    summary_requests = (
+        sum(value for value in request_totals if value is not None)
+        if request_totals and all(value is not None for value in request_totals) else None
+    )
+    summary_failures = (
+        sum(value for value in failure_totals if value is not None)
+        if failure_totals and all(value is not None for value in failure_totals) else None
+    )
+    pooled_http_p95 = None
+    pooled_projected_p95 = None
+    request_unknown_count = None
+    operations_wait_unknown = None
+    if operations_row is not None:
+        if operations_row.get("status") != "measured":
+            raise MetricsError("operations aggregate status is invalid")
+        operation_events = count_value(operations_row.get("event_count"), "operations event count is invalid")
+        operation_rows = count_value(operations_row.get("prediction_rows"), "operations prediction count is invalid")
+        requests = count_value(operations_row.get("request_count"), "operations request count is invalid")
+        failures = count_value(operations_row.get("failed_request_count"), "operations failure count is invalid")
+        if any(value is None for value in (operation_events, operation_rows, requests, failures)):
+            raise MetricsError("operations aggregate counts are incomplete")
+        if operation_events != expected_event_count or operation_rows != expected_prediction_rows:
+            raise MetricsError("operations event coverage does not match predictions")
+        if failures > requests:
+            raise MetricsError("operations request-failure count is invalid")
+        if summary_requests is not None and summary_requests != requests:
+            raise MetricsError("operations request count does not match summaries")
+        if summary_failures is not None and summary_failures != failures:
+            raise MetricsError("operations failure count does not match summaries")
+
+        rtt = operations_row.get("request_rtt_ms")
+        if not isinstance(rtt, dict):
+            raise MetricsError("operations request latency is invalid")
+        rtt_count = count_value(rtt.get("count"), "operations request latency count is invalid")
+        request_unknown_count = count_value(rtt.get("unknown_count"), "operations unknown request latency count is invalid")
+        if rtt_count is None or request_unknown_count is None:
+            raise MetricsError("operations request latency counts are incomplete")
+        if rtt_count + request_unknown_count != requests:
+            raise MetricsError("operations request latency coverage is inconsistent")
+        rtt_p95 = rtt.get("p95_ms")
+        if rtt_p95 is not None and (isinstance(rtt_p95, bool) or not isinstance(rtt_p95, (int, float)) or not math.isfinite(rtt_p95) or rtt_p95 < 0):
+            raise MetricsError("operations request latency percentile is invalid")
+        if (rtt_count == 0) != (rtt_p95 is None):
+            raise MetricsError("operations request latency percentile coverage is inconsistent")
+        if request_unknown_count == 0:
+            pooled_http_p95 = float(rtt_p95) if rtt_p95 is not None else None
+
+        latency = operations_row.get("latency_ms")
+        if not isinstance(latency, dict):
+            raise MetricsError("operations event latency is invalid")
+        projected = latency.get("projected_online_latency_ms")
+        queue_wait = latency.get("logical_queue_wait_ms")
+        if not isinstance(projected, dict) or not isinstance(queue_wait, dict):
+            raise MetricsError("operations event latency is invalid")
+        projected_count = count_value(projected.get("count"), "operations projected latency count is invalid")
+        projected_unknown = count_value(projected.get("unknown_rows"), "operations unknown projected latency count is invalid")
+        wait_count = count_value(queue_wait.get("count"), "operations queue-wait count is invalid")
+        operations_wait_unknown = count_value(queue_wait.get("unknown_rows"), "operations unknown-wait count is invalid")
+        if any(value is None for value in (projected_count, projected_unknown, wait_count, operations_wait_unknown)):
+            raise MetricsError("operations event latency counts are incomplete")
+        if projected_count + projected_unknown != operation_rows or wait_count + operations_wait_unknown != operation_rows:
+            raise MetricsError("operations event latency coverage is inconsistent")
+        projected_p95 = projected.get("p95_ms")
+        if projected_p95 is not None and (isinstance(projected_p95, bool) or not isinstance(projected_p95, (int, float)) or not math.isfinite(projected_p95) or projected_p95 < 0):
+            raise MetricsError("operations projected latency percentile is invalid")
+        if (projected_count == 0) != (projected_p95 is None):
+            raise MetricsError("operations projected latency percentile coverage is inconsistent")
+        if operations_wait_unknown == 0 and projected_unknown == 0:
+            pooled_projected_p95 = float(projected_p95) if projected_p95 is not None else None
+
+        if summary_rows and unknown_wait_count_known and unknown_wait_rows != operations_wait_unknown:
+            raise MetricsError("operations unknown-wait count does not match summaries")
+        unknown_wait_rows = operations_wait_unknown
+        unknown_wait_count_known = True
+    else:
+        requests = summary_requests
+        failures = summary_failures
+
     if requests is not None and failures is not None and failures > requests:
         raise MetricsError("summary request-failure count is invalid")
     return {
-        "status": "measured" if (requests or 0) or http_p95s or projected_p95s else "not_measured",
+        "status": "measured" if operations_row is not None or (requests or 0) or http_p95s or projected_p95s else "not_provided" if not summary_rows else "not_measured",
         "summary_run_count": len(summary_rows),
         "request_count": requests,
         "request_failure_count": failures,
         "request_failure_rate": failures / requests if requests and failures is not None else None,
-        "provider_http_p95_ms_worst_run": max(http_p95s) if http_p95s and not provider_latency_incomplete else None,
-        "projected_async_p95_ms_worst_run": max(projected_p95s) if projected_p95s and not projected_latency_incomplete and unknown_wait_count_known and unknown_wait_rows == 0 else None,
-        "queue_wait_unknown_event_rows": unknown_wait_rows if unknown_wait_count_known else None,
-        "input_tokens": sum(value for value in input_token_totals if value is not None) if all(value is not None for value in input_token_totals) else None,
-        "output_tokens": sum(value for value in output_token_totals if value is not None) if all(value is not None for value in output_token_totals) else None,
+        "provider_http_p95_ms_worst_session": max(http_p95s) if http_p95s and not provider_latency_incomplete else None,
+        "provider_http_p95_ms_pooled": pooled_http_p95,
+        "projected_async_p95_ms_worst_session": max(projected_p95s) if projected_p95s and not projected_latency_incomplete and unknown_wait_count_known and unknown_wait_rows == 0 else None,
+        "projected_async_p95_ms_pooled": pooled_projected_p95,
+        "queue_wait_unknown_event_rows": unknown_wait_rows if unknown_wait_count_known else operations_wait_unknown,
+        "request_latency_unknown_count": request_unknown_count,
+        "input_tokens": sum(value for value in input_token_totals if value is not None) if input_token_totals and all(value is not None for value in input_token_totals) else None,
+        "output_tokens": sum(value for value in output_token_totals if value is not None) if output_token_totals and all(value is not None for value in output_token_totals) else None,
         "billed_cost_usd": None,
         "haiku_billing_units": None,
         "billing_status": "unknown",
-        "jev_list_estimate_usd": sum(value for value in jev_estimates if value is not None) if all(value is not None for value in jev_estimates) else None,
+        "jev_list_estimate_usd": sum(value for value in jev_estimates if value is not None) if jev_estimates and all(value is not None for value in jev_estimates) else None,
     }
 
 
@@ -903,6 +1060,7 @@ def _acceptance_criteria(
     population_ready: bool,
     adjudication_frozen: bool,
     independent_agreement_ready: bool,
+    protocol_conformance_ready: bool,
 ) -> dict[str, Any]:
     if condition == "Rules":
         return {"status": "baseline", "criteria": {}}
@@ -934,16 +1092,17 @@ def _acceptance_criteria(
             activity_lower, 0.0, positive_events_by_class=activity_support,
         ),
         "provider_request_failure_rate": _criterion(operations.get("request_failure_rate"), 0.01, upper=True),
-        "provider_http_p95_ms": _criterion(operations.get("provider_http_p95_ms_worst_run"), http_limit, upper=True),
-        "projected_async_p95_ms": _criterion(operations.get("projected_async_p95_ms_worst_run"), 15000.0, upper=True),
+        "provider_http_p95_ms": _criterion(operations.get("provider_http_p95_ms_pooled"), http_limit, upper=True),
+        "projected_async_p95_ms": _criterion(operations.get("projected_async_p95_ms_pooled"), 15000.0, upper=True),
     }
     statuses = {item["status"] for item in criteria.values()}
     gates = {
         "population_scope": "pass" if population_ready else "insufficient_evidence",
         "adjudication_frozen": "pass" if adjudication_frozen else "pending",
         "independent_annotation_agreement": "pass" if independent_agreement_ready else "insufficient_evidence",
+        "protocol_conformance": "pass" if protocol_conformance_ready else "insufficient_evidence",
     }
-    if not population_ready or not adjudication_frozen or not independent_agreement_ready:
+    if not population_ready or not adjudication_frozen or not independent_agreement_ready or not protocol_conformance_ready:
         status = "insufficient_evidence"
     else:
         status = "pass" if statuses == {"pass"} else "fail" if "fail" in statuses else "insufficient_evidence"
@@ -955,6 +1114,7 @@ def score_records(
     prediction_rows: Iterable[dict[str, Any]],
     *,
     summary_rows: Iterable[dict[str, Any]] = (),
+    operations: dict[str, Any] | None = None,
     annotation_a_rows: Iterable[dict[str, Any]] | None = None,
     annotation_b_rows: Iterable[dict[str, Any]] | None = None,
     user_review_rows: Iterable[dict[str, Any]] | None = None,
@@ -972,6 +1132,14 @@ def score_records(
     references = _normalise_references(reference_rows)
     predictions, row_counts = _normalise_predictions(prediction_rows, references)
     summaries = _normalise_summaries(summary_rows)
+    operation_rows = _normalise_operations(operations)
+    protocol_conformance = _protocol_conformance(predictions, draws, seed)
+    if operation_rows is not None:
+        prediction_operation_conditions = {
+            OPERATIONS_CONDITIONS[key] for key in predictions
+        }
+        if set(operation_rows) - prediction_operation_conditions:
+            raise MetricsError("operations condition is not in predictions")
     annotation_a = _normalise_annotation_rows(annotation_a_rows) if annotation_a_rows is not None else None
     annotation_b = _normalise_annotation_rows(annotation_b_rows) if annotation_b_rows is not None else None
     if (annotation_a is None) != (annotation_b is None):
@@ -1005,7 +1173,12 @@ def score_records(
             references, row_by_event, total_rows, "gold", draws, seed + index * 31, checkpoint,
         )
         alert_budget = _session_alert_budget(references, row_by_event, checkpoint, draws, seed + index * 71)
-        operations = _operation_metrics(summaries.get(key, []))
+        operations = _operation_metrics(
+            summaries.get(key, []),
+            operation_rows.get(OPERATIONS_CONDITIONS[key]) if operation_rows is not None else None,
+            expected_event_count=len(references),
+            expected_prediction_rows=total_rows,
+        )
         score: dict[str, Any] = {
             "scored_event_count": len(scored_ids),
             "prediction_row_count": total_rows,
@@ -1080,8 +1253,16 @@ def score_records(
                 population_ready=population_ready,
                 adjudication_frozen=adjudication_status == "frozen",
                 independent_agreement_ready=independent_agreement_ready,
+                protocol_conformance_ready=protocol_conformance["status"] == "pass",
             )
             acceptance[condition] = criteria
+
+    rules_prefix = predictions.get(("Rules", "prefix"))
+    rules_offline = predictions.get(("Rules", "offline"))
+    if rules_prefix is not None and rules_offline is not None:
+        rules_delta = _paired_delta(references, rules_prefix, rules_offline, draws, seed + 4001, checkpoint)
+        if rules_delta is not None:
+            paired_context["Rules"] = rules_delta
 
     review_result: dict[str, Any]
     if user_review is None:
@@ -1094,6 +1275,7 @@ def score_records(
         "schema_version": 1,
         "protocol_version": "asi-jev-real-v1",
         "bootstrap": {"confidence": CONFIDENCE, "draws": draws, "seed": seed, "event_unit": "unique_event", "repetitions_averaged_within_event": True},
+        "protocol_conformance": protocol_conformance,
         "reference_counts": {
             "unique_events": len(references),
             "sessions": len(sessions),
@@ -1168,6 +1350,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--references", type=Path, required=True, help="Private reference JSONL; keep it local")
     parser.add_argument("--predictions", type=Path, action="append", required=True, help="Private benchmark predictions JSONL; repeat per run")
     parser.add_argument("--summaries", type=Path, action="append", default=[], help="Optional private benchmark summary JSON; repeat per run")
+    parser.add_argument("--operations", type=Path, help="Disclosure-safe numeric aggregate from real_operations.py")
     parser.add_argument("--annotation-a", type=Path, help="Optional first independent annotation JSONL")
     parser.add_argument("--annotation-b", type=Path, help="Optional second independent annotation JSONL")
     parser.add_argument("--user-review", type=Path, help="Optional local spot-check review JSONL")
@@ -1182,6 +1365,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     inputs = [args.references, *args.predictions, *args.summaries]
+    if args.operations is not None:
+        inputs.append(args.operations)
     inputs.extend(path for path in (args.annotation_a, args.annotation_b, args.user_review) if path is not None)
     output_path = args.output.resolve(strict=False)
     if any(path.resolve(strict=False) == output_path for path in inputs):
@@ -1203,6 +1388,9 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint()
             summaries.append(_read_json(path))
             checkpoint()
+        operations = _read_json(args.operations) if args.operations else None
+        if args.operations:
+            checkpoint()
         checkpoint()
         annotation_a = _read_jsonl(args.annotation_a) if args.annotation_a else None
         if args.annotation_a:
@@ -1220,6 +1408,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint()
         result = score_records(
             references, predictions, summary_rows=summaries,
+            operations=operations,
             annotation_a_rows=annotation_a, annotation_b_rows=annotation_b,
             user_review_rows=user_review, adjudication_status=args.adjudication_status,
             draws=args.draws, seed=args.seed, checkpoint=checkpoint,
