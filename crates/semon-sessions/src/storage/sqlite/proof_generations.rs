@@ -772,11 +772,14 @@ pub(crate) fn publish_repaired_query_observation(
         )
         .optional()
         .map_err(failed)?;
-    if owner_slot.as_ref().is_some_and(|(digest, slot_admission, stream)| {
-        digest != &before_digest
-            || *slot_admission != admission
-            || stream != &current.stream_epoch
-    }) {
+    if owner_slot
+        .as_ref()
+        .is_some_and(|(digest, slot_admission, stream)| {
+            digest != &before_digest
+                || *slot_admission != admission
+                || stream != &current.stream_epoch
+        })
+    {
         return Err(StorageError::ScopeChanged);
     }
 
@@ -785,7 +788,8 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = before;
     repaired.query = Some(query.clone());
-    let repaired_metadata = serde_json::to_string(&repaired).map_err(|_| StorageError::Unavailable)?;
+    let repaired_metadata =
+        serde_json::to_string(&repaired).map_err(|_| StorageError::Unavailable)?;
     if repaired_metadata.len() > 1_048_576 {
         return Err(StorageError::HistoryRetentionBounds);
     }
