@@ -1873,16 +1873,30 @@ impl Writer {
             }
         }
         NativeOwnership::validate_physical(&self.connection)?;
+        let timing = crate::native_timing::enabled();
+        let mut measurements = crate::native_timing::Measurements::new(timing);
+        let mut row_measurements = crate::native_timing::Measurements::new(timing);
+        let producer = if timing {
+            Some(crate::native_timing::id(
+                self.config.backend.sqlite_database()?,
+            ))
+        } else {
+            None
+        };
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
         #[cfg(test)]
         let _sql_lock = crate::source_change::SqlLockScope::enter();
         #[cfg(test)]
         let reserved = std::time::Instant::now();
+        let transaction_started = measurements.start();
+        let validation_started = measurements.start();
         self.validate(&tx)?;
+        measurements.record("validate", validation_started, 1);
         #[cfg(test)]
         let validated = reserved.elapsed();
         let mut work = Vec::new();
+        let admission_started = measurements.start();
         for (path, expected, _, ledger, _, _) in files {
             let intent = self
                 .intents
@@ -1960,6 +1974,8 @@ impl Writer {
             }
             work.push(true);
         }
+        measurements.record("admission", admission_started, files.len());
+        let apply_started = measurements.start();
         for ((path, expected, changes, ledger, _, index), write) in files.iter().zip(work) {
             if !write {
                 continue;
@@ -1983,7 +1999,7 @@ impl Writer {
                 index,
                 *changes,
                 *expected,
-                &mut crate::native_timing::Measurements::default(),
+                &mut row_measurements,
                 self.config.namespace.as_str(),
             )
             .map_err(|error| failed(error))?;
@@ -1992,9 +2008,18 @@ impl Writer {
         }
         #[cfg(test)]
         effect("completion").map_err(failed)?;
+        // Inclusive of index leaf timings collected separately below.
+        measurements.record("apply", apply_started, files.len());
         #[cfg(test)]
         let applied = reserved.elapsed();
+        let commit_started = measurements.start();
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        measurements.record("commit", commit_started, 1);
+        measurements.record("transaction", transaction_started, 1);
+        if let Some(producer) = producer.as_deref() {
+            measurements.emit(producer, "ledger_commit");
+            row_measurements.emit(producer, "index_rows");
+        }
         #[cfg(test)]
         if reserved.elapsed() >= Duration::from_millis(50) {
             eprintln!(
