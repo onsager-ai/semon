@@ -83,6 +83,8 @@ struct WriterShapeMeasurements {
 
 thread_local! {
     static WRITER_SHAPE_MEASUREMENTS: std::cell::RefCell<Option<WriterShapeMeasurements>> = const { std::cell::RefCell::new(None) };
+    #[cfg(test)]
+    static NATIVE_READY_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 // Observation only. In particular, this guard caches no shape result: every
@@ -668,6 +670,8 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
+        #[cfg(test)]
+        NATIVE_READY_VALIDATIONS.with(|count| count.set(count.get() + 1));
         self.validate(db)?;
         validate_read_profile(db, &self.config.namespace, self.admission)?;
         let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
@@ -1553,6 +1557,24 @@ impl Writer {
         ledger_row(&db, path)
             .map(|row| row.map(|(_, ledger)| ledger))
             .map_err(failed)
+    }
+
+    pub(crate) fn ledger_batch(
+        &self,
+        paths: &[String],
+    ) -> Result<Vec<Option<Ledger>>, StorageError> {
+        if paths.len() > 64 {
+            return Err(StorageError::InvalidArguments);
+        }
+        let db = self.snapshot()?;
+        paths
+            .iter()
+            .map(|path| {
+                ledger_row(&db, path)
+                    .map(|row| row.map(|(_, ledger)| ledger))
+                    .map_err(failed)
+            })
+            .collect()
     }
 
     pub(crate) fn reported_stamp(&self) -> Result<Option<ReportedFileStamp>, StorageError> {
@@ -6390,6 +6412,72 @@ mod tests {
             writer.begin(&path, Some(&stale), &"c".repeat(64), "codex"),
             Err(StorageError::Conflict)
         );
+    }
+
+    #[test]
+    fn configured_ledger_batch_validates_once_and_begin_rechecks_stale_hints() {
+        let f = Fixture::new();
+        let owner = NativeOwnership::restore(&f.config).unwrap();
+        let mut writer = Writer::owned(owner).unwrap();
+        let path = f.raw.to_string_lossy().into_owned();
+        let mut paths = vec![path.clone()];
+        paths.extend((0..63).map(|index| format!("missing-{index}")));
+
+        NATIVE_READY_VALIDATIONS.with(|count| count.set(0));
+        let hints = writer.ledger_batch(&paths).unwrap();
+        NATIVE_READY_VALIDATIONS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(hints, vec![None; 64]);
+        assert!(writer.connection.is_autocommit());
+        let too_many_paths = (0..65).map(|_| path.clone()).collect::<Vec<_>>();
+        assert_eq!(
+            writer.ledger_batch(&too_many_paths),
+            Err(StorageError::InvalidArguments)
+        );
+        NATIVE_READY_VALIDATIONS.with(|count| assert_eq!(count.get(), 1));
+
+        let mut concurrent = f.native_cache();
+        concurrent.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        assert_eq!(
+            writer.begin(&path, hints[0].as_ref(), &"b".repeat(64), "codex"),
+            Err(StorageError::Conflict)
+        );
+        let inserted: i64 = writer
+            .connection
+            .query_row(
+                "SELECT count(*) FROM storage_event_operations WHERE operation_id=?1",
+                [&"b".repeat(64)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inserted, 0);
+
+        writer
+            .connection
+            .execute(
+                "UPDATE storage_event_tables SET qualification=1 WHERE namespace=semon_namespace() AND table_name='files'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            writer.begin(&path, hints[0].as_ref(), &"c".repeat(64), "codex"),
+            Err(StorageError::NamespaceUpgradePending)
+        );
+        let inserted: i64 = writer
+            .connection
+            .query_row(
+                "SELECT count(*) FROM storage_event_operations WHERE operation_id=?1",
+                [&"c".repeat(64)],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(inserted, 0);
+        writer
+            .connection
+            .execute(
+                "UPDATE storage_event_tables SET qualification=0 WHERE namespace=semon_namespace() AND table_name='files'",
+                [],
+            )
+            .unwrap();
     }
 
     #[test]

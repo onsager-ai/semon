@@ -2370,6 +2370,26 @@ impl IndexStore for SqliteStore {
             .map_err(failure)
     }
 
+    fn ledger_batch(&self, paths: &[String]) -> Result<Vec<Option<Ledger>>, StoreError> {
+        if paths.len() > 64 {
+            return Err(StoreError::Configured(StorageError::InvalidArguments));
+        }
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        self.owner
+            .validate_ready(&transaction)
+            .map_err(StoreError::Configured)?;
+        let ledgers = paths
+            .iter()
+            .map(|path| {
+                ledger_row(&transaction, path)
+                    .map(|found| found.map(|(_, ledger)| ledger))
+                    .map_err(failure)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        transaction.commit().map_err(failure)?;
+        Ok(ledgers)
+    }
+
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         self.read_one(path).map_err(failure)
     }

@@ -399,6 +399,11 @@ impl IndexStore for ConfiguredIndex {
     fn ledger(&self, path: &str) -> Result<Option<Ledger>, StoreError> {
         self.native.ledger(path).map_err(StoreError::Configured)
     }
+    fn ledger_batch(&self, paths: &[String]) -> Result<Vec<Option<Ledger>>, StoreError> {
+        self.native
+            .ledger_batch(paths)
+            .map_err(StoreError::Configured)
+    }
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         self.native.load(path).map_err(StoreError::Configured)
     }

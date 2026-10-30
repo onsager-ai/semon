@@ -339,6 +339,24 @@ impl IndexStore for NativeIndex {
             )
             .map_err(err)
     }
+    fn ledger_batch(&self, paths: &[String]) -> Result<Vec<Option<Ledger>>, StoreError> {
+        if paths.len() > 64 {
+            return Err(err(StorageError::InvalidArguments));
+        }
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| {
+                    paths
+                        .iter()
+                        .map(|path| native_reader::ledger(tx, path).map(|v| v.map(|(_, l)| l)))
+                        .collect()
+                },
+            )
+            .map_err(err)
+    }
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         let loaded = self
             .pool
