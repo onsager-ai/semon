@@ -6063,7 +6063,7 @@ mod tests {
         assert_eq!(
             writer
                 .connection
-                .pragma_query_value(None, "schema_version", |row| row.get(0))
+                .pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
             committed_cookie
         );
@@ -6082,7 +6082,7 @@ mod tests {
         tx.execute_batch("DROP TRIGGER storage_owned_guard_files_DELETE")
             .unwrap();
         assert_eq!(
-            tx.pragma_query_value(None, "schema_version", |row| row.get(0))
+            tx.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
             dropped_cookie
         );
