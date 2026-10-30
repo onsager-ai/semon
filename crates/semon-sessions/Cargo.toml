@@ -10,14 +10,20 @@ description = "Read-only local Claude Code and Codex session tree."
 semon-control = { path = "../semon-control" }
 libc.workspace = true
 reqwest.workspace = true
-rusqlite = { workspace = true, features = ["cache", "hooks", "limits"] }
+rusqlite = { workspace = true, features = ["cache", "functions", "hooks", "limits"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
 tiny_http.workspace = true
 zstd.workspace = true
+tokio-postgres = { version = "0.7.18", optional = true, features = ["with-serde_json-1"] }
+tokio = { version = "1", optional = true, features = ["rt-multi-thread", "time", "net", "io-util", "macros", "sync"] }
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
 
 [features]
+postgres = ["dep:tokio-postgres", "dep:tokio"]
+postgres-test-tls = ["postgres", "dep:native-tls", "dep:postgres-native-tls"]
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
 # suite builds with it, to serve a fixture whose times must stand still.
 test-clock = []
@@ -29,3 +35,7 @@ test-hooks = []
 [[example]]
 name = "ui-account-server"
 required-features = ["test-ui-account-server"]
+
+[dev-dependencies]
+# Only test administration uses the synchronous client, never adapter code.
+postgres = { version = "0.19.14", features = ["with-serde_json-1"] }

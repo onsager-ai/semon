@@ -1,5 +1,8 @@
 # Retained native projections
 
+See the [native storage contract and partial port inventory](session-storage-contract.md)
+for the #478 backend boundary and explicit remaining work.
+
 A missing local source is an observation failure, rather than proof that a
 session never existed. Catalog format 3 records `current` or `retained`
 lifecycle. Full native publication still checks the captured collection

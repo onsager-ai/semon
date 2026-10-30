@@ -73,7 +73,7 @@ fn membership(scope: &str) -> rusqlite::Result<(&'static str, &'static str)> {
 
 /// Qualify the selected current representation before changing either scope.
 /// Bound the union first so an absent scope cannot hide excess other-scope rows.
-fn validate_key(connection: &Connection, key: &str) -> rusqlite::Result<()> {
+pub(crate) fn validate_key(connection: &Connection, key: &str) -> rusqlite::Result<()> {
     let (physical, valid): (i64, i64) = connection.prepare_cached("SELECT COUNT(*),COUNT(valid) FROM (SELECT CASE WHEN octet_length(gram)<=12 THEN 1 ELSE NULL END AS valid FROM session_search_memberships WHERE session_key=?1 LIMIT ?2)")?.query_row(params![key,(MAX_GRAMS*2+1) as i64], |row|Ok((row.get(0)?,row.get(1)?)))?;
     if physical > (MAX_GRAMS * 2) as i64 || physical != valid {
         return Err(rusqlite::Error::InvalidQuery);
@@ -261,6 +261,162 @@ fn publish_current_rows_order(
     transaction: &Transaction<'_>,
     rows: &[&CatalogRow],
     owners: usize,
+    #[cfg(test)] probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+) -> rusqlite::Result<()> {
+    publish_current_rows_effects(
+        transaction,
+        &crate::storage::sqlite::search::SearchWriter::unbound(transaction),
+        rows,
+        owners,
+        #[cfg(test)]
+        probe,
+    )
+}
+
+pub(crate) fn publish_current_rows_with_store<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+    store: &P,
+) -> rusqlite::Result<()> {
+    publish_current_rows_effects(
+        transaction,
+        store,
+        rows,
+        64,
+        #[cfg(test)]
+        None,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn publish_current_rows_original(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+) -> rusqlite::Result<()> {
+    publish_current_rows_original_order(transaction, rows, 64, None)
+}
+
+fn publish_current_rows_effects<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
+    transaction: &Transaction<'_>,
+    store: &P,
+    rows: &[&CatalogRow],
+    owners: usize,
+    #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+) -> rusqlite::Result<()> {
+    let producer = crate::native_timing::enabled()
+        .then(|| {
+            transaction
+                .path()
+                .map(std::path::Path::new)
+                .map(crate::native_timing::id)
+        })
+        .flatten();
+    let mut measurements = crate::native_timing::Measurements::new(producer.is_some());
+    for rows in rows.chunks(64) {
+        #[cfg(test)]
+        let search_before = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
+        let started = measurements.start();
+        store.begin(rows)?;
+        measurements.record("members", started, rows.len());
+        let started = measurements.start();
+        for row in rows {
+            store.validate(&row.key)?;
+        }
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            store.remove(scope)?;
+        }
+        measurements.record("removal", started, 2);
+        let started = measurements.start();
+        let prepared = rows
+            .iter()
+            .map(|row| prepared_fields(row))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        measurements.record("normalization", started, rows.len());
+        let started = measurements.start();
+        for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
+            for scope in [
+                crate::CatalogReadScope::Current,
+                crate::CatalogReadScope::RetainedHistory,
+            ] {
+                store.document(scope, row, encoded, *complete)?;
+            }
+        }
+        measurements.record("documents", started, rows.len() * 2);
+        // The ordering index groups grams, while its primary key groups source
+        // keys. At most 64 source ranges are resident here. Gram-major writes
+        // revisit their bounded primary-key pages while keeping the ordering
+        // index's current leaf hot, instead of cycling through all gram leaves
+        // for each source and repeatedly spilling dirty pages into the WAL.
+        let started = measurements.start();
+        #[cfg(test)]
+        let preparation_started = probe.as_ref().map(|_| std::time::Instant::now());
+        let postings = posting_order(rows, &prepared, owners);
+        #[cfg(test)]
+        let preparation_us = preparation_started
+            .map(|started| started.elapsed().as_micros())
+            .unwrap_or(0);
+        measurements.record("posting_preparation", started, postings.len());
+        #[cfg(test)]
+        let postings_before = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
+        let started = measurements.start();
+        store.postings(&postings)?;
+        #[cfg(test)]
+        let postings_after = probe
+            .as_ref()
+            .map(|_| crate::native_timing::ProbeSample::read(transaction));
+        measurements.record("postings", started, postings.len() * 2);
+        measurements.count("posting_rows", postings.len());
+        let started = measurements.start();
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            store.counts(scope)?;
+        }
+        measurements.record("counts", started, 2);
+        #[cfg(test)]
+        if let Some(probe) = probe.as_deref_mut() {
+            let counts_after = crate::native_timing::ProbeSample::read(transaction);
+            *probe = Some(crate::native_timing::SearchTraversalProbe {
+                search: search_before.as_ref().unwrap().interval(&counts_after),
+                postings: postings_before
+                    .as_ref()
+                    .unwrap()
+                    .interval(postings_after.as_ref().unwrap()),
+                counts: postings_after.as_ref().unwrap().interval(&counts_after),
+                preparation_us,
+                sampling_us: search_before.as_ref().unwrap().sampling_us()
+                    + postings_before.as_ref().unwrap().sampling_us()
+                    + postings_after.as_ref().unwrap().sampling_us()
+                    + counts_after.sampling_us(),
+                owners: rows.len(),
+                physical_rows: postings.len(),
+                logical_positions: postings.len() * 2,
+            });
+        }
+    }
+    if let Some(producer) = producer {
+        measurements.emit(&producer, "search_rows");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn publish_current_rows_original_order(
+    transaction: &Transaction<'_>,
+    rows: &[&CatalogRow],
+    owners: usize,
     #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
 ) -> rusqlite::Result<()> {
     let producer = crate::native_timing::enabled()
@@ -379,7 +535,7 @@ fn publish_current_rows_order(
 /// Remove only this cohort's old documents and postings. Aggregate shared gram
 /// decrements once, using source-key lookups rather than scanning all members of
 /// each gram. The temporary tables and count changes roll back with publication.
-fn remove_members(transaction: &Transaction<'_>, scope: &str) -> rusqlite::Result<()> {
+pub(crate) fn remove_members(transaction: &Connection, scope: &str) -> rusqlite::Result<()> {
     transaction.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_removals(gram TEXT PRIMARY KEY,members INTEGER NOT NULL) WITHOUT ROWID; DELETE FROM catalog_search_removals;")?;
     let (column, other) = membership(scope)?;
     transaction.prepare_cached(&format!("INSERT INTO catalog_search_removals SELECT p.gram,COUNT(*) FROM catalog_search_members m CROSS JOIN session_search_memberships p WHERE p.session_key=m.session_key AND p.{column} IS NOT NULL GROUP BY p.gram ON CONFLICT(gram) DO UPDATE SET members=members+excluded.members"))?.execute([])?;
@@ -511,8 +667,8 @@ fn insert_fields(
     Ok(())
 }
 
-fn insert_document(
-    transaction: &Transaction<'_>,
+pub(crate) fn insert_document(
+    transaction: &Connection,
     scope: &str,
     row: &CatalogRow,
     encoded: &str,
