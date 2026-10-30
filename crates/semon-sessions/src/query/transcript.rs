@@ -1197,7 +1197,8 @@ fn read_inner(
     )?;
     snapshot.commit().map_err(unavailable)?;
     if let Some(runtime) = &runtime
-        && crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != *runtime
+        && crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
+            != *runtime
     {
         return Err(unavailable(
             "Native transcript observation changed during this read",
