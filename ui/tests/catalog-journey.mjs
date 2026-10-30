@@ -256,11 +256,11 @@ try {
   Object.assign(measurements, { searchMs, selectedRowId: rowId });
   started = performance.now();
   await selectedRow.click();
-  await page.locator('[data-entry-key]').first().waitFor({ timeout: 60000 });
+  await page.locator('#page [data-entry-key]:visible').first().waitFor({ timeout: 60000 });
   const selectedMs = performance.now() - started,
     selected = await sample();
   Object.assign(measurements, { selectedMs });
-  const entry = await page.locator('[data-entry-key]').first().elementHandle();
+  const entry = await page.locator('#page [data-entry-key]:visible').first().elementHandle();
   const earlierButton = page.getByRole('button', { name: 'Load earlier records', exact: true });
   await earlierButton.first().waitFor();
   started = performance.now();
@@ -299,7 +299,7 @@ try {
   await selectedRow.waitFor();
   started = performance.now();
   await selectedRow.click();
-  await page.locator('[data-entry-key]').first().waitFor();
+  await page.locator('#page [data-entry-key]:visible').first().waitFor();
   const warmMs = performance.now() - started;
   Object.assign(measurements, { warmMs });
   assert.equal(await entry.evaluate((node) => node.isConnected), true);
