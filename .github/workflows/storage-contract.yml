@@ -95,18 +95,23 @@ jobs:
         run: |
           cargo test --locked -p semon-sessions --lib configured_semantic_domain94_receipt_order_ties_append_and_restart_oracle -- --nocapture > "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
           cargo test --locked -p semon-sessions --lib default_local_viewer_advertises_a_nonempty_stable_catalog_source -- --nocapture >> "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
+          cargo test --locked -p semon-sessions --lib catalog::tests::native_codex_archive_unarchive_reuses_the_indexed_generation -- --exact --nocapture >> "$RUNNER_TEMP/native-tree-test.log" 2>&1 || true
           python3 - <<'PYSAFE'
           import os, re
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           lines = []
+          native_sqlite_read_errors = []
           for line in (root / 'native-tree-test.log').open():
               line = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', line)[:490].rstrip()
-              if line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source-journal phase=', 'native diagnostic route=', 'storage_sqlite_failure ', 'test result:')):
+              if line.startswith('native_sqlite_read_error '):
+                  native_sqlite_read_errors.append(line)
+              elif line.startswith(('native tree statement=', 'native tree metadata_scope=', 'native tree digest_argument=', 'native SQL stage=', 'native catalog phase=', 'configured SQL value=', 'source recovery step=', 'source recovery refusal=', 'source-journal phase=', 'native diagnostic route=', 'storage_sqlite_failure ', 'test result:')):
                   lines.append(line)
               elif match := re.search(r'panicked at (crates/[A-Za-z0-9_./-]+:\d+:\d+):', line):
                   lines.append('native diagnostic panic=' + match.group(1))
-          (root / 'native-tree-diagnostic.txt').write_text('\n'.join(lines[:30]))
+          retained = (native_sqlite_read_errors + lines)[:30]
+          (root / 'native-tree-diagnostic.txt').write_text('\n'.join(retained))
           PYSAFE
       - name: Retain bounded native-tree diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
