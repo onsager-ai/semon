@@ -314,8 +314,67 @@ mod tests {
         let f = Fixture::new();
         f.config.admit_namespace().unwrap();
         let db = f.db();
-        let missing: i64 = db.query_row("SELECT count(*) FROM sqlite_schema s WHERE s.type='table' AND s.name NOT LIKE 'sqlite_%' AND s.name NOT LIKE 'storage_%' AND NOT EXISTS(SELECT 1 FROM storage_writer_inventory i WHERE i.table_name=s.name AND i.qualified_version=0)", [], |r| r.get(0)).unwrap();
-        assert_eq!(missing, 0);
+        let tables: Vec<String> = db
+            .prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'storage_%' ORDER BY name")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let triggers: Vec<(String, String, String)> = db
+            .prepare("SELECT tbl_name,name,sql FROM main.sqlite_schema WHERE type='trigger' ORDER BY tbl_name,name")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for table in tables {
+            let table_triggers: Vec<_> = triggers
+                .iter()
+                .filter(|(target, _, _)| target == &table)
+                .collect();
+            for operation in ["INSERT", "UPDATE", "DELETE"] {
+                let owner_guard = [
+                    ("storage_owned_guard_", "private native ownership refused"),
+                    ("storage_semantic_guard_", "semantic Source refused"),
+                    ("storage_source_guard_", "source operation namespace refused"),
+                    ("storage_event_guard_", "configured event writer refused"),
+                    ("storage_event_scope_", "event operation namespace refused"),
+                    ("storage_catalog_guard_", "namespace writer refused"),
+                ]
+                .iter()
+                .any(|(family, refusal)| {
+                    let expected = format!("{family}{table}_{operation}");
+                    let body = format!("RAISE(ABORT,'{refusal}')");
+                    table_triggers.iter().any(|(_, name, sql)| {
+                        name == &expected
+                            && sql.contains(&format!(" BEFORE {operation} ON "))
+                            && sql.contains(&body)
+                    })
+                });
+                let unported_fence = {
+                    let suffix = format!("_{operation}");
+                    table_triggers.iter().any(|(_, name, sql)| {
+                        name.starts_with("storage_private_unported_")
+                            && name.ends_with(&suffix)
+                            && sql.contains(&format!(" BEFORE {operation} ON "))
+                            && sql.contains("RAISE(ABORT,'private native family unported')")
+                    })
+                };
+                assert!(
+                    owner_guard || unported_fence,
+                    "current table {table} has no {operation} owning guard or private-unported fence"
+                );
+            }
+        }
+        let qualification: u32 = db
+            .query_row(
+                "SELECT writer_qualification FROM storage_namespaces WHERE namespace=?1",
+                [f.config.namespace.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(qualification, WRITER_QUALIFICATION_VERSION);
         let inventory: serde_json::Value =
             serde_json::from_str(include_str!("writer-inventory.json")).unwrap();
         assert_eq!(

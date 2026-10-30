@@ -298,6 +298,9 @@ mod tests {
         }
     }
     fn database() -> Database {
+        database_with_epoch(&"a".repeat(64))
+    }
+    fn database_with_epoch(stream_epoch: &str) -> Database {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
             "semon-changes-{}-{}",
@@ -306,10 +309,13 @@ mod tests {
         ));
         std::fs::create_dir(&root).unwrap();
         let path = root.join("index.sqlite3");
-        drop(crate::events::store::current_search_test_connection(
-            &path,
-            &LogicalSourceNamespace::new("machine").unwrap(),
-        ));
+        drop(
+            crate::events::store::current_search_test_connection_with_epoch(
+                &path,
+                &LogicalSourceNamespace::new("machine").unwrap(),
+                stream_epoch,
+            ),
+        );
         Database {
             db: Some(reopen(&path)),
             root,
@@ -410,7 +416,16 @@ mod tests {
             CatalogReadScope::RetainedHistory
         );
         assert!(!history.caught_up);
-        let mut replaced = database();
+        let mut replaced = database_with_epoch(&"b".repeat(64));
+        let replaced_epoch: String = replaced
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(replaced_epoch, "b".repeat(64));
+        assert_ne!(page.stream_epoch, replaced_epoch);
         assert_eq!(
             read(
                 &mut replaced,

@@ -11457,7 +11457,16 @@ pub(crate) fn current_search_test_connection(
     path: &Path,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> Connection {
-    let mut store = current_test_store(path, namespace);
+    current_search_test_connection_with_epoch(path, namespace, &"a".repeat(64))
+}
+
+#[cfg(test)]
+pub(crate) fn current_search_test_connection_with_epoch(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    stream_epoch: &str,
+) -> Connection {
+    let mut store = current_test_store_with_epoch(path, namespace, stream_epoch);
     store
         .publish_catalog_with_generation(
             &crate::slot_projection::Publication {
@@ -11478,14 +11487,24 @@ fn current_test_store(
     path: &Path,
     namespace: &crate::storage::LogicalSourceNamespace,
 ) -> SqliteStore {
+    current_test_store_with_epoch(path, namespace, &"a".repeat(64))
+}
+
+#[cfg(test)]
+fn current_test_store_with_epoch(
+    path: &Path,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    stream_epoch: &str,
+) -> SqliteStore {
     let config = crate::storage::StoreConfig {
         backend: crate::storage::StoreBackend::Sqlite {
             database: path.to_owned(),
         },
         namespace: namespace.clone(),
-        expected_stream_epoch: Some("a".repeat(64)),
+        expected_stream_epoch: Some(stream_epoch.to_owned()),
     };
-    let source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
+    let source =
+        crate::storage::HostSource::new(namespace.clone(), stream_epoch.to_owned()).unwrap();
     drop(super::EventCache::open_scoped(&path.with_extension("json"), &source).unwrap());
     let owner = configured::NativeOwnership::restore(&config).unwrap();
     let connection = configured::connection(&config).unwrap();
