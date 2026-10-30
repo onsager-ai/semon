@@ -698,6 +698,143 @@ pub(crate) fn native_catalog_observation_grant(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum CatalogObservationOwner {
+    Catalog,
+    History,
+}
+
+/// Publish one producer-repaired Query observation without changing its
+/// source admission or rewriting any immutable Stage proof. The old row must
+/// still be authorized by its exact current owner grant or retained proof.
+pub(crate) fn publish_repaired_query_observation(
+    db: &Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    owner: CatalogObservationOwner,
+    selected: &CatalogRow,
+    query: &serde_json::Value,
+) -> Result<(), StorageError> {
+    let source_generation = crate::retention::source_generation(&selected.sources)
+        .map_err(|_| StorageError::Unavailable)?;
+    if selected.key.is_empty()
+        || !query.is_object()
+        || query["version"] != 1
+        || query["source_generation"].as_str() != Some(source_generation.as_str())
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let (table, owner_kind) = match owner {
+        CatalogObservationOwner::Catalog => ("session_catalog", "catalog"),
+        CatalogObservationOwner::History => ("session_history_catalog", "history"),
+    };
+    let namespace = current.namespace.as_str();
+    let stored: Option<Option<String>> = db
+        .query_row(
+            &format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE namespace=?1 AND session_key=?2"),
+            params![namespace, selected.key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
+    let stored = match stored {
+        Some(Some(stored)) => stored,
+        Some(None) => return Err(StorageError::HistoryRetentionBounds),
+        None => return Err(StorageError::ScopeChanged),
+    };
+    let stored_row: CatalogRow =
+        serde_json::from_str(&stored).map_err(|_| StorageError::Unavailable)?;
+    if serde_json::to_value(&stored_row).map_err(|_| StorageError::Unavailable)?
+        != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+
+    // Validate the exact preimage through the ordinary reader authority path.
+    // This also permits immutable Stage-only rows without trusting saved Query
+    // runtime data as authority.
+    let proven = observation_binding(db, current, selected)?;
+    if proven.namespace.as_str() != current.namespace.as_str()
+        || proven.stream_epoch != current.stream_epoch
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+
+    let mut before = selected.clone();
+    before.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let before_metadata = serde_json::to_string(&before).map_err(|_| StorageError::Unavailable)?;
+    let before_digest = proof_codec::digest(before_metadata.as_bytes());
+    let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
+    let owner_slot: Option<(String, i64, String)> = db
+        .query_row(
+            "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
+            params![namespace, selected.key, owner_kind],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(failed)?;
+    if owner_slot.as_ref().is_some_and(|(digest, slot_admission, stream)| {
+        digest != &before_digest
+            || *slot_admission != admission
+            || stream != &current.stream_epoch
+    }) {
+        return Err(StorageError::ScopeChanged);
+    }
+
+    if selected.query.as_ref() == Some(query) {
+        return Ok(());
+    }
+    let mut repaired = before;
+    repaired.query = Some(query.clone());
+    let repaired_metadata = serde_json::to_string(&repaired).map_err(|_| StorageError::Unavailable)?;
+    if repaired_metadata.len() > 1_048_576 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    let repaired_digest = proof_codec::digest(repaired_metadata.as_bytes());
+
+    let changed = db
+        .execute(
+            &format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?3)) WHERE namespace=?1 AND session_key=?2 AND metadata=?4"),
+            params![namespace, selected.key, query.to_string(), stored],
+        )
+        .map_err(failed)?;
+    if changed != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
+    if owner_slot.is_some() {
+        let changed = db
+            .execute(
+                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
+                params![
+                    namespace,
+                    selected.key,
+                    owner_kind,
+                    before_digest,
+                    admission,
+                    repaired_digest,
+                    current.stream_epoch
+                ],
+            )
+            .map_err(failed)?;
+        if changed != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+    } else {
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                namespace,
+                selected.key,
+                owner_kind,
+                repaired_digest,
+                admission,
+                current.stream_epoch
+            ],
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
+}
+
 /// Reconcile both owner slots from the post-publication Catalog rows, keeping
 /// only exact producer evidence already attached to those rows. A changed or
 /// copied row cannot create local authority.

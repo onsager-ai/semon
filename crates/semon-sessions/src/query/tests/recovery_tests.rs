@@ -410,6 +410,31 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         let before = generations();
         assert_eq!(before.0, before.1);
         assert_eq!(before.0, before.2);
+        let observation_grant = || {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='long'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut row: crate::model::summary::CatalogRow =
+                serde_json::from_str(&metadata).unwrap();
+            row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            let expected = crate::storage::proof_codec::digest(
+                serde_json::to_string(&row).unwrap().as_bytes(),
+            );
+            let grant: (String, i64, String) = db
+                .query_row(
+                    "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='long' AND owner_kind='catalog'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(grant.0, expected, "exact Catalog metadata grant");
+            grant
+        };
+        let grant_before = observation_grant();
         let mut journal = config.source_observations().unwrap();
         let paths: Vec<String> = Vec::new();
         let operation = crate::storage::source_observations::SourceOperation::capture(
@@ -488,6 +513,10 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             crate::slot_projection::VERSION
         );
         assert_eq!(generations(), before);
+        let grant_after = observation_grant();
+        assert_ne!(grant_after.0, grant_before.0, "repaired Query row digest");
+        assert_eq!(grant_after.1, grant_before.1, "repair preserves admission");
+        assert_eq!(grant_after.2, grant_before.2, "repair preserves stream");
         assert_eq!(std::fs::read(&source_path).unwrap(), raw);
         eprintln!("slot_upgrade stage=selected_publication version=6 raw=unchanged");
         let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
