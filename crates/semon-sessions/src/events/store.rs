@@ -6750,7 +6750,9 @@ mod tests {
         let config = options.source.config(&options.cache).unwrap();
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap().into_test_connection();
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute_batch("UPDATE meta SET value='partial' WHERE namespace=semon_namespace() AND key='catalog_completeness'; UPDATE storage_source_journal SET backfill_state='draining' WHERE namespace=semon_namespace();").unwrap();
         let tx = db.unchecked_transaction().unwrap();
         let ordinary = options
@@ -6821,7 +6823,9 @@ mod tests {
         let (mut store, _) = opened(&path);
         store.connection = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
-        ).unwrap().into_test_connection();
+        )
+        .unwrap()
+        .into_test_connection();
         for index in 0..130 {
             let source = format!("/codex/native/{index:04}.jsonl");
             store.connection.execute("INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,0,'codex','{}')", [format!("session-{index}")]).unwrap();
@@ -6857,14 +6861,23 @@ mod tests {
             query: "identity",
             ranges: &ranges,
         };
-        let paths = source_journal::catalog_search_paths(&store.connection, store.owner.config().namespace.as_str(), &lookup, 64).unwrap();
+        let paths = source_journal::catalog_search_paths(
+            &store.connection,
+            store.owner.config().namespace.as_str(),
+            &lookup,
+            64,
+        )
+        .unwrap();
         assert_eq!(
             paths.into_iter().collect::<BTreeSet<_>>(),
             pending.into_iter().map(str::to_owned).collect()
         );
         let plan: Vec<String> = store
             .connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", source_journal::catalog_search_sql()))
+            .prepare(&format!(
+                "EXPLAIN QUERY PLAN {}",
+                source_journal::catalog_search_sql()
+            ))
             .unwrap()
             .query_map(
                 params![

@@ -370,8 +370,13 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         lookup: &crate::events::CatalogSearchLookup<'_>,
         limit: usize,
     ) -> io::Result<Vec<String>> {
-        super::source_journal::catalog_search_paths(self.0, self.2.namespace.as_str(), lookup, limit)
-            .map_err(io::Error::other)
+        super::source_journal::catalog_search_paths(
+            self.0,
+            self.2.namespace.as_str(),
+            lookup,
+            limit,
+        )
+        .map_err(io::Error::other)
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
         rows(self.0, request).map_err(io::Error::other)

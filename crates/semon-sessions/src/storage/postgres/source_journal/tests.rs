@@ -365,11 +365,16 @@ fn catalog_search(
     limit: usize,
 ) -> Vec<String> {
     let lookup = CatalogSearchLookup { query, ranges };
-    pool.transaction(&ns(namespace), TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
-        crate::storage::postgres::catalog_effects::snapshot::catalog_search_paths(
-            tx, &lookup, limit,
-        )
-    })
+    pool.transaction(
+        &ns(namespace),
+        TxnKind::ReadSnapshot,
+        &PgCancellation::default(),
+        |tx| {
+            crate::storage::postgres::catalog_effects::snapshot::catalog_search_paths(
+                tx, &lookup, limit,
+            )
+        },
+    )
     .unwrap()
 }
 
@@ -568,7 +573,10 @@ fn pg_catalog_search_filters_roots_before_capping_each_branch() {
     let found = catalog_search(&pool, namespace, "identity", &roots, usize::MAX);
     assert_eq!(found.len(), CATALOG_SEARCH_LIMIT);
     assert!(found.iter().all(|path| path.starts_with("/claude/")));
-    assert_eq!(found.first().map(String::as_str), Some("/claude/000/IDENTITY.JSONL"));
+    assert_eq!(
+        found.first().map(String::as_str),
+        Some("/claude/000/IDENTITY.JSONL")
+    );
 }
 
 #[test]
@@ -608,15 +616,17 @@ fn pg_codex_header_search_projection_tracks_metadata_commit_and_delete() {
         &PgCancellation::default(),
         |tx| {
             assert!(super::super::native_keys::read_meta(tx, key.as_bytes(), 4096)?.is_none());
-            assert!(super::super::catalog_effects::snapshot::catalog_search_paths(
-                tx,
-                &CatalogSearchLookup {
-                    query: "mixed",
-                    ranges: &roots,
-                },
-                64,
-            )?
-            .is_empty());
+            assert!(
+                super::super::catalog_effects::snapshot::catalog_search_paths(
+                    tx,
+                    &CatalogSearchLookup {
+                        query: "mixed",
+                        ranges: &roots,
+                    },
+                    64,
+                )?
+                .is_empty()
+            );
             Ok(())
         },
     )
@@ -629,7 +639,10 @@ fn pg_codex_header_search_projection_tracks_metadata_commit_and_delete() {
         |tx| super::super::native_keys::put_meta(tx, key.as_bytes(), value),
     )
     .unwrap();
-    assert_eq!(catalog_search(&pool, namespace, "MIXED", &roots, 64), vec![path]);
+    assert_eq!(
+        catalog_search(&pool, namespace, "MIXED", &roots, 64),
+        vec![path]
+    );
     pool.transaction(
         &ns(namespace),
         TxnKind::Write,
@@ -663,9 +676,7 @@ fn pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete() {
         },
     )
     .unwrap();
-    let json_revision = store.claims(&[json_path.into()]).unwrap()[0]
-        .1
-        .unwrap();
+    let json_revision = store.claims(&[json_path.into()]).unwrap()[0].1.unwrap();
 
     let rolled_back: Result<(), StorageError> = pool.transaction(
         &ns(namespace),
@@ -688,7 +699,10 @@ fn pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete() {
     assert_eq!(rolled_back, Err(StorageError::Conflict));
     assert_eq!(
         store.claims(&[json_path.into(), log_path.into()]).unwrap(),
-        vec![(json_path.into(), Some(json_revision)), (log_path.into(), None)]
+        vec![
+            (json_path.into(), Some(json_revision)),
+            (log_path.into(), None)
+        ]
     );
 
     pool.transaction(

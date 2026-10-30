@@ -43,11 +43,23 @@ pub(crate) fn read_local_catalog_page_with_search(
     let reply = match &binding.config().backend {
         #[cfg(feature = "postgres")]
         StoreBackend::Postgres { pool, control } => postgres::catalog_page(
-            binding.config(), pool, control, options, source_key, request,
-            admit_search, &mut admission,
-        ).map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?,
+            binding.config(),
+            pool,
+            control,
+            options,
+            source_key,
+            request,
+            admit_search,
+            &mut admission,
+        )
+        .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?,
         StoreBackend::Sqlite { .. } => sqlite::catalog::read_page(
-            &binding, options, source_key, request, admit_search, &mut admission,
+            &binding,
+            options,
+            source_key,
+            request,
+            admit_search,
+            &mut admission,
         )?,
     };
     if reply.status == 200

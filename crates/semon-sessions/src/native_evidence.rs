@@ -570,12 +570,18 @@ impl NativeEvidence {
             accepted
         };
         let reply = crate::storage::read_local_catalog_page_with_search(
-            &self.options, "test", &request, Some(&mut on_search),
+            &self.options,
+            "test",
+            &request,
+            Some(&mut on_search),
         );
         if !observed && !matches!(reply, Ok(ref reply) if reply.status == 200) {
             accepted = self.note_catalog_search_result(epoch, interest, Err(()));
         }
-        assert!(accepted, "test search admission exceeds the pending-path capacity");
+        assert!(
+            accepted,
+            "test search admission exceeds the pending-path capacity"
+        );
     }
 
     fn acknowledge_catalog_search(&self, cache: &EventCache, prepared: &model::PreparedSources) {
@@ -2663,7 +2669,9 @@ mod catalog_owner_tests {
         let config = options.source.config(&options.cache).unwrap();
         crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap().into_test_connection()
+        )
+        .unwrap()
+        .into_test_connection()
     }
 
     fn cold_search_reader() -> (

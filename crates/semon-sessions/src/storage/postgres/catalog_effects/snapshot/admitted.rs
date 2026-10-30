@@ -1,7 +1,7 @@
 //! Ordinary Catalog renderer adapter over one acknowledged immutable generation.
 use super::*;
-use crate::{catalog::Request, storage::catalog::CatalogSnapshot};
 use crate::storage::source_observations::CatalogSearchLookup;
+use crate::{catalog::Request, storage::catalog::CatalogSnapshot};
 use std::io;
 
 fn failed(error: StorageError) -> io::Error {
@@ -163,7 +163,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 .map_err(sqlstate::error)
                 .map_err(failed)?;
             rows.first()
-                .map(|row| row.try_get::<_, Option<String>>(0).map_err(|_| failed(StorageError::ScopeChanged)))
+                .map(|row| {
+                    row.try_get::<_, Option<String>>(0)
+                        .map_err(|_| failed(StorageError::ScopeChanged))
+                })
                 .transpose()?
                 .flatten()
         } else {

@@ -7783,10 +7783,16 @@ fn cold_catalog_search_keeps_two_tabs_and_drains_rejected_harness_hints() {
     // A hint whose only remaining physical match has the wrong harness
     // still permits a full ordinary cohort, then finite FIFO completion.
     let rejected = fixture.source("wrong-harness");
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-    ).unwrap().into_test_connection();
+    )
+    .unwrap()
+    .into_test_connection();
     db.execute("INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(semon_namespace(),?1,999999,'changed',0)", [rejected.to_string_lossy().as_ref()]).unwrap();
     evidence.note_catalog_search(
         Request::parse("q=wrong-harness&harness=codex")
@@ -7874,10 +7880,16 @@ fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification(
             .unwrap()
             .is_empty()
     );
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-    ).unwrap().into_test_connection();
+    )
+    .unwrap()
+    .into_test_connection();
     assert_eq!(
         db.execute(
             "UPDATE session_catalog_invalidations SET revision=999999 WHERE source_path=?1",
