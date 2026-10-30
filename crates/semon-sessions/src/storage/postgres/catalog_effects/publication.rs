@@ -9,6 +9,114 @@ use crate::{events::Outcome, storage::semantic_owner};
 pub(in crate::storage::postgres) struct Semantic<'a> {
     pub(in crate::storage::postgres) runtime: &'a str,
     pub(in crate::storage::postgres) withdrawals: &'a [crate::model::relation_stage::Withdrawal],
+    pub(in crate::storage::postgres) prior_owners: &'a std::collections::BTreeMap<String, CatalogRow>,
+    pub(in crate::storage::postgres) retired_owners: &'a [CatalogRow],
+    pub(in crate::storage::postgres) lifecycle_authority:
+        Option<ValidatedLifecycle<'a>>,
+}
+
+/// Physical qualification is performed before opening the publication writer.
+/// The private constructor prevents a SQL-only caller from manufacturing it.
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+pub(in crate::storage::postgres) struct ValidatedLifecycle<'a>(
+    &'a crate::model::relation_stage::LifecycleAuthority,
+);
+
+pub(in crate::storage::postgres) fn preflight(
+    authority: Option<&crate::model::relation_stage::LifecycleAuthority>,
+) -> Result<Option<ValidatedLifecycle<'_>>, StorageError> {
+    authority
+        .map(|authority| {
+            if !authority.current().unwrap_or(false) {
+                return Err(StorageError::Conflict);
+            }
+            Ok(ValidatedLifecycle(authority))
+        })
+        .transpose()
+}
+
+fn retirement_plan(
+    tx: &mut PgTxn<'_>,
+    expected: Option<&str>,
+    claims: &[(String, Option<i64>)],
+    rows: &[CatalogRow],
+    semantic: &Semantic<'_>,
+) -> Result<Vec<Vec<u8>>, StorageError> {
+    let paths = claims
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let prior = super::super::semantic_owners::affected(tx, expected, &paths)?;
+    if encoded(&prior)? != encoded(semantic.prior_owners)? {
+        return Err(StorageError::Conflict);
+    }
+    if let Some(authority) = &semantic.lifecycle_authority {
+        if authority.0.runtime != semantic.runtime
+            || (authority.0.facts.is_none() && !semantic.retired_owners.is_empty())
+            || !super::super::current_sources::lifecycle_recorded(tx, authority.0)?
+        {
+            return Err(StorageError::Conflict);
+        }
+    } else if !semantic.retired_owners.is_empty()
+        || (!prior.is_empty()
+            && rows
+                .iter()
+                .any(|row| row.query.is_some() || row.trace.is_some()))
+    {
+        return Err(StorageError::Conflict);
+    }
+    let mut outgoing = Vec::new();
+    for old in prior.values() {
+        if old.sources.iter().any(|source| {
+            !paths
+                .iter()
+                .any(|path| source.path == std::path::Path::new(path))
+        }) {
+            return Err(StorageError::Conflict);
+        }
+        if rows.iter().any(|row| row.key == old.key) {
+            continue;
+        }
+        let withdrawn = old.sources.iter().all(|source| {
+            semantic
+                .withdrawals
+                .iter()
+                .any(|withdrawal| source.path == std::path::Path::new(&withdrawal.path))
+        });
+        if !withdrawn {
+            for source in &old.sources {
+                if rows
+                    .iter()
+                    .flat_map(|row| &row.sources)
+                    .any(|new| new.path == source.path)
+                {
+                    continue;
+                }
+                let path = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
+                let removed: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed')", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+                if !removed
+                    || (super::super::native_keys::read_meta(
+                        tx,
+                        format!("source-retired:{path}").as_bytes(),
+                        16384,
+                    )?
+                    .is_none()
+                        && super::super::native_reader::ledger(tx, path)?.is_some())
+                {
+                    return Err(StorageError::Conflict);
+                }
+            }
+        }
+        outgoing.push(old.clone());
+    }
+    if encoded(&outgoing)? != encoded(&semantic.retired_owners)? {
+        return Err(StorageError::Conflict);
+    }
+    Ok(outgoing
+        .iter()
+        .map(|row| digest(row.key.as_bytes()))
+        .collect())
 }
 
 /// A new destination operation over an already applied, source-authorized
@@ -248,7 +356,11 @@ pub(in crate::storage::postgres) fn publish(
     let generation = format!("{:x}", Sha256::digest(&operation));
     // A partial request keeps every unmentioned Current owner. Owners connected
     // to a republished or claimed Source must be republished by the producer.
-    let mut leaving = Vec::new();
+    let mut leaving = if let Some(semantic) = &semantic {
+        retirement_plan(tx, expected, claims, publication.rows, semantic)?
+    } else {
+        Vec::new()
+    };
     let mut carried = None;
     if let Some(previous) = expected {
         let mut mentioned = publication
@@ -256,6 +368,7 @@ pub(in crate::storage::postgres) fn publish(
             .iter()
             .map(|row| digest(row.key.as_bytes()))
             .collect::<Vec<_>>();
+        mentioned.extend(leaving.iter().cloned());
         // A claimed Source that no row reads and has durable removal or exact
         // semantic Facts withdrawal authority is withdrawn:
         // owners reading only withdrawn Sources leave Current, exactly as the
@@ -279,7 +392,9 @@ pub(in crate::storage::postgres) fn publish(
             if withdrawn.len() > 64 {
                 return Err(StorageError::Busy);
             }
-            leaving.clone_from(&withdrawn);
+            leaving.extend(withdrawn.iter().cloned());
+            leaving.sort();
+            leaving.dedup();
             mentioned.extend(withdrawn);
         }
         let claimed = paths

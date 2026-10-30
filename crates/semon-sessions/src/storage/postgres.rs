@@ -26,6 +26,7 @@ mod pool;
 mod reported_facts;
 mod schema;
 mod semantic_events;
+mod semantic_owners;
 mod semantic_stage;
 mod source_journal;
 mod source_lifecycle;

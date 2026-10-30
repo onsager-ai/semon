@@ -4,6 +4,20 @@ use super::*;
 use crate::events::EventCache;
 use crate::storage::native_events::NativeEventStore;
 
+fn stage_inputs(
+    options: &Options,
+    batch: &crate::model::relation_stage::Batch,
+) -> Vec<crate::Input> {
+    batch
+        .paths
+        .iter()
+        .map(|path| {
+            crate::native_evidence::catalog_input(std::path::Path::new(path), options)
+                .expect("every enrolled source belongs to the configured native roots")
+        })
+        .collect()
+}
+
 fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
     let mut value = serde_json::to_value(rows).unwrap();
     for row in value.as_array_mut().unwrap() {
@@ -833,7 +847,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             assert_eq!(resumed.phase, batch.phase);
         }
         let model = pg
-            .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812802000)
+            .prepare_semantic_model_batch(
+                &options,
+                &stage_inputs(&options, &batch),
+                &batch,
+                1790812802000,
+            )
             .unwrap();
         let current_binding = pg.query_runtime_binding().unwrap().unwrap();
         assert_eq!(current_binding.namespace, binding.namespace);
@@ -1941,7 +1960,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let continued_generation = loop {
         let batch = resumed.semantic_batch(64).unwrap().unwrap();
         let model = resumed
-            .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812803000)
+            .prepare_semantic_model_batch(
+                &options,
+                &stage_inputs(&options, &batch),
+                &batch,
+                1790812803000,
+            )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let ack = resumed
@@ -2328,7 +2352,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (moved_generation, moved_rows) = loop {
         let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
         let model = moved_cache
-            .prepare_semantic_model_batch(&options, &moved_inputs, &batch, 1790812803000)
+            .prepare_semantic_model_batch(
+                &options,
+                &stage_inputs(&options, &batch),
+                &batch,
+                1790812803000,
+            )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let rows = model.prepared().rows.clone();
@@ -2629,7 +2658,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (facts_generation, facts_rows) = loop {
         let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
         let model = moved_cache
-            .prepare_semantic_model_batch(&facts_options, &moved_inputs, &batch, 1790812805000)
+            .prepare_semantic_model_batch(
+                &facts_options,
+                &stage_inputs(&facts_options, &batch),
+                &batch,
+                1790812805000,
+            )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(
@@ -2859,7 +2893,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         loop {
             let batch = cache.semantic_batch(64).unwrap().unwrap();
             let model = cache
-                .prepare_semantic_model_batch(&facts_options, inputs, &batch, at)
+                .prepare_semantic_model_batch(
+                    &facts_options,
+                    &stage_inputs(&facts_options, &batch),
+                    &batch,
+                    at,
+                )
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 // Each bounded custody advance commits as a Deferred checkpoint;
@@ -2871,6 +2910,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     for withdrawal in &mut stale_withdrawals {
                         withdrawal.runtime.clone_from(&stale_runtime);
                     }
+                    let lifecycle = super::super::publication::preflight(
+                        model.prepared().relationships.lifecycle_authority.as_ref(),
+                    )
+                    .unwrap();
                     assert_eq!(
                         pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                             super::super::publication::publish(
@@ -2885,6 +2928,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                                 Some(super::super::publication::Semantic {
                                     runtime: &stale_runtime,
                                     withdrawals: &stale_withdrawals,
+                                    prior_owners: &batch.context.prior_owners,
+                                    retired_owners: &model.prepared().relationships.retired_owners,
+                                    lifecycle_authority: lifecycle,
                                 }),
                             )
                         }),
@@ -3308,7 +3354,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let (batch, model) = loop {
         let batch = catchup.semantic_batch(64).unwrap().unwrap();
         let model = catchup
-            .prepare_semantic_model_batch(&facts_options, &connected, &batch, 1790812809000)
+            .prepare_semantic_model_batch(
+                &facts_options,
+                &stage_inputs(&facts_options, &batch),
+                &batch,
+                1790812809000,
+            )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             break (batch, model);

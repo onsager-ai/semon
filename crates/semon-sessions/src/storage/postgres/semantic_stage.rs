@@ -18,7 +18,9 @@ const MAX: usize = 1024 * 1024;
 #[serde(deny_unknown_fields)]
 pub(super) struct Stage {
     epoch: i64,
+    seeds: Vec<String>,
     paths: Vec<String>,
+    claims: Vec<(String, Option<i64>)>,
     runtime: String,
     binding: String,
     generation: Option<String>,
@@ -119,7 +121,7 @@ pub(super) fn begin(
     if let Some(stage) = load(tx, true)? {
         if held.is_some_and(|epoch| epoch != stage.epoch)
             || stage.runtime != runtime
-            || stage.paths != paths
+            || stage.seeds != paths
             || stage.generation != generation
         {
             return Err(StorageError::Conflict);
@@ -139,7 +141,9 @@ pub(super) fn begin(
         tx,
         &Stage {
             epoch,
+            seeds: paths.to_vec(),
             paths: paths.to_vec(),
+            claims: Vec::new(),
             runtime: runtime.into(),
             binding,
             generation,
@@ -157,19 +161,72 @@ pub(super) fn begin(
 }
 
 pub(super) fn next(tx: &mut PgTxn<'_>, limit: usize) -> Result<Option<Batch>, StorageError> {
-    tx.check()?;
-    let Some(stage) = load(tx, true)? else {
+    let revision = lock(tx)?;
+    let Some(mut stage) = load(tx, true)? else {
         return Ok(None);
     };
+    if model_cache::generation(tx)? != stage.generation {
+        return Err(StorageError::Conflict);
+    }
+    // Revisit the physical incident indexes after native indexing, too: a new
+    // dependency can enlarge the old-owner closure without moving the head.
+    let prior = super::semantic_owners::affected(tx, stage.generation.as_deref(), &stage.paths)?;
+    let mut paths = stage
+        .paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    paths.extend(prior.values().flat_map(|row| {
+        row.sources
+            .iter()
+            .map(|source| source.path.to_string_lossy().into_owned())
+    }));
+    if paths.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let paths = paths.into_iter().collect::<Vec<_>>();
+    let added = paths.iter().any(|path| !stage.paths.contains(path));
+    let mut claims = Vec::new();
+    for path in &paths {
+        let rows = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
+        claims.push((path.clone(), rows.first().map(|row| row.get(0))));
+    }
+    if stage.phase != Phase::Indexing && (added || revision != stage.revision) {
+        // Invalidate every in-memory batch and reduction witness atomically;
+        // published rows, source claims and native custody remain untouched.
+        stage.active = false;
+        stage.model = None;
+        stage.acknowledgement = None;
+        save(tx, &stage, false)?;
+        stage.epoch = stage
+            .epoch
+            .checked_add(1)
+            .ok_or(StorageError::ScopeChanged)?;
+        stage.active = true;
+        stage.phase = Phase::Indexing;
+        stage.context = Context::default();
+        stage.identities.clear();
+        stage.paths = paths;
+        stage.claims = claims;
+        stage.context.prior_owners = prior;
+        stage.revision = revision;
+        save(tx, &stage, true)?;
+    } else {
+        stage.paths = paths;
+        stage.claims = claims;
+        stage.context.prior_owners = prior;
+        stage.revision = revision;
+        save(tx, &stage, false)?;
+    }
+    #[cfg(test)]
+    crate::events::store::configured::effect("semantic_lifecycle_enroll")
+        .map_err(|_| StorageError::Unavailable)?;
     if limit == 0
         || limit > 64
         || stage.paths.len() > limit
         || (stage.phase == Phase::Relations && stage.paths.len() > 32)
     {
         return Err(StorageError::Busy);
-    }
-    if model_cache::generation(tx)? != stage.generation {
-        return Err(StorageError::Conflict);
     }
     Ok(Some(Batch {
         epoch: stage.epoch,
@@ -300,6 +357,10 @@ pub(super) fn record(
     let revision = lock(tx)?;
     let mut stage = checked(tx, batch)?;
     claims(tx, batch, prepared)?;
+    if batch.phase != Phase::Indexing && prepared.claims != stage.claims {
+        return Err(StorageError::Conflict);
+    }
+    stage.claims.clone_from(&prepared.claims);
     if batch.phase != Phase::Indexing && revision != stage.revision {
         return Err(StorageError::Conflict);
     }
@@ -361,7 +422,9 @@ pub(super) fn record(
                 .push((harness.clone(), native.clone(), key));
         }
     }
+    let prior = std::mem::take(&mut stage.context.prior_owners);
     stage.context = prepared.relationships.clone();
+    stage.context.prior_owners = prior;
     stage.context.epoch = Some(stage.epoch);
     stage.phase = match stage.phase {
         Phase::Indexing => Phase::Identity,
@@ -378,6 +441,7 @@ pub(super) fn publish(
     tx: &mut PgTxn<'_>,
     batch: &Batch,
     prepared: &PreparedSources,
+    lifecycle: Result<Option<publication::ValidatedLifecycle<'_>>, StorageError>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let revision = lock(tx)?;
     let witness = prepared
@@ -393,6 +457,14 @@ pub(super) fn publish(
         return Ok((Outcome::Written, stage.acknowledgement));
     }
     let mut stage = checked(tx, batch)?;
+    let lifecycle = lifecycle?;
+    if serde_json::to_vec(&lifecycle).map_err(|_| StorageError::ScopeChanged)?
+        != serde_json::to_vec(&prepared.relationships.lifecycle_authority)
+            .map_err(|_| StorageError::ScopeChanged)?
+        || stage.claims != prepared.claims
+    {
+        return Err(StorageError::Conflict);
+    }
     if stage.model.as_deref() != Some(&witness) {
         return Err(StorageError::Conflict);
     }
@@ -416,6 +488,9 @@ pub(super) fn publish(
         Some(publication::Semantic {
             runtime: &batch.runtime,
             withdrawals: &prepared.withdrawals,
+            prior_owners: &batch.context.prior_owners,
+            retired_owners: &prepared.relationships.retired_owners,
+            lifecycle_authority: lifecycle,
         }),
     )?;
     if result.0 == Outcome::Written {

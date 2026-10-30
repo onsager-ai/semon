@@ -1320,7 +1320,10 @@ impl Writer {
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
-        if !self.tree_repair_pending().map_err(crate::events::store_io_error)? {
+        if !self
+            .tree_repair_pending()
+            .map_err(crate::events::store_io_error)?
+        {
             return Ok((false, None));
         }
         #[cfg(test)]

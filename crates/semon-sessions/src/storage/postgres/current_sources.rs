@@ -345,6 +345,34 @@ impl CurrentSources {
 
 /// SQL-only persisted Facts authority check. Physical Source qualification
 /// remains separate; this predicate alone is not a publication grant.
+pub(super) fn lifecycle_recorded(
+    tx: &mut PgTxn<'_>,
+    authority: &crate::model::relation_stage::LifecycleAuthority,
+) -> Result<bool, StorageError> {
+    // Facts begin reserves this namespace before allowing the host write;
+    // completion replaces the head and clears the marker under the same lock.
+    if native_keys::read_meta(tx, b"facts-write-inflight", 1048576)?.is_some() {
+        return Ok(false);
+    }
+    let binding = model_cache::binding(tx)?;
+    let source = crate::storage::HostSource::new(tx.namespace.clone(), binding.stream_epoch)?;
+    if serde_json::to_vec(&source).map_err(|_| StorageError::ScopeChanged)?
+        != serde_json::to_vec(&authority.source).map_err(|_| StorageError::ScopeChanged)?
+    {
+        return Ok(false);
+    }
+    let Some((path, identity)) = &authority.facts else {
+        return Ok(true);
+    };
+    let Some(head) = load(tx)? else {
+        return Ok(false);
+    };
+    Ok(head.path == *path
+        && head.source == *identity
+        && head.runtime == authority.runtime
+        && Some(&head.activity) == authority.facts_activity.as_ref())
+}
+
 pub(super) fn withdrawal_recorded(
     tx: &mut PgTxn<'_>,
     withdrawal: &crate::model::relation_stage::Withdrawal,

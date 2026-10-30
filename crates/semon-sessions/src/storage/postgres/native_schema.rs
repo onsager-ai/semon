@@ -447,6 +447,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     (
+        "catalog_dependency_native",
+        "catalog_dependencies",
+        "generation,harness_digest,native_digest,path_digest",
+        false,
+    ),
+    (
         "relocation_new",
         "relocation_candidates",
         "new_path,old_path",

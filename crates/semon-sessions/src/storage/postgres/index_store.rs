@@ -138,14 +138,19 @@ impl IndexStore for NativeIndex {
         &mut self,
         limit: usize,
     ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
-        self.pool
+        let batch = self
+            .pool
             .transaction(
                 &self.namespace,
-                TxnKind::ReadSnapshot,
+                TxnKind::Write,
                 &self.control,
                 |tx| super::semantic_stage::next(tx, limit),
             )
-            .map_err(err)
+            .map_err(err)?;
+        if let Some(batch) = &batch {
+            self.semantic_epoch = Some(batch.epoch);
+        }
+        Ok(batch)
     }
     fn record_semantic_batch(
         &mut self,
@@ -165,9 +170,30 @@ impl IndexStore for NativeIndex {
         batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        let lifecycle = (|| {
+            if let Some(authority) = &prepared.relationships.lifecycle_authority {
+                self.pool.transaction(
+                    &self.namespace,
+                    TxnKind::ReadSnapshot,
+                    &self.control,
+                    |tx| {
+                        let revision: i64 = tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&tx.namespace.as_str().as_bytes()]).map_err(super::sqlstate::error)?.get(0);
+                        if revision != batch.source_revision
+                            || !super::current_sources::lifecycle_recorded(tx, authority)?
+                        {
+                            return Err(StorageError::Conflict);
+                        }
+                        Ok(())
+                    },
+                )?;
+            }
+            super::catalog_effects::publication::preflight(
+                prepared.relationships.lifecycle_authority.as_ref(),
+            )
+        })();
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                super::semantic_stage::publish(tx, batch, prepared)
+                super::semantic_stage::publish(tx, batch, prepared, lifecycle)
             })
             .map_err(err)
     }
