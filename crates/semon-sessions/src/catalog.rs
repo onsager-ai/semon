@@ -1710,6 +1710,75 @@ mod tests {
     }
 
     #[test]
+    fn cold_catalog_search_keeps_two_tabs_and_drains_rejected_harness_hints() {
+        let fixture = Fixture::new();
+        for id in ["first-tab", "second-tab"] {
+            let path = fixture.source(id);
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+                .unwrap();
+        }
+        for index in 0..256 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        for query in [
+            "q=first-tab&harness=claude",
+            "q=second-tab&harness=claude",
+            "",
+        ] {
+            evidence.note_catalog_search(Request::parse(query).unwrap().search_interest());
+        }
+        for id in ["first-tab", "second-tab"] {
+            let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+            assert_eq!(
+                crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+                1
+            );
+            assert_eq!(
+                fixture.body(&format!("q={id}&harness=claude")).1["items"][0]["key"],
+                id
+            );
+        }
+        // A hint whose only remaining physical match has the wrong harness
+        // still permits a full ordinary cohort, then finite FIFO completion.
+        let rejected = fixture.source("wrong-harness");
+        let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,999999,'changed',0)", [rejected.to_string_lossy().as_ref()]).unwrap();
+        evidence.note_catalog_search(
+            Request::parse("q=wrong-harness&harness=codex")
+                .unwrap()
+                .search_interest(),
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64
+        );
+        let complete = (0..32).any(|_| {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        });
+        assert!(complete);
+        evidence.note_catalog_search(Request::parse("q=first-tab").unwrap().search_interest());
+        evidence.retire();
+    }
+
+    #[test]
     fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification() {
         let fixture = Fixture::new();
         let claude = fixture.source("Identity-Hint");

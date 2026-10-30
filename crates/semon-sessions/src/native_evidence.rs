@@ -7,7 +7,7 @@ use crate::{
     proc_start,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
     path::{Path, PathBuf},
     sync::{
@@ -24,11 +24,122 @@ pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
-    catalog_search: Mutex<Option<(String, Option<String>)>>,
+    catalog_search: Mutex<CatalogSearchQueue>,
     query: RwLock<Option<Arc<QueryCache>>>,
     closed: AtomicBool,
     audit_request: AtomicU64,
     audit_completed: AtomicU64,
+}
+
+// Reuse the existing bounded cohort size as scheduling capacity, not a
+// performance budget. Full queues refuse new keys; admitted tickets are never
+// evicted by another tab or by ordinary reads.
+const CATALOG_SEARCH_CAPACITY: usize = 64;
+
+#[derive(Clone)]
+struct CatalogSearchTicket {
+    id: u64,
+    epoch: u64,
+    query: String,
+    harness: Option<String>,
+    waiting: BTreeSet<String>,
+}
+
+struct CatalogSearchQueue {
+    active: bool,
+    epoch: u64,
+    next_id: u64,
+    tickets: VecDeque<CatalogSearchTicket>,
+}
+
+impl Default for CatalogSearchQueue {
+    fn default() -> Self {
+        Self {
+            active: true,
+            epoch: 0,
+            next_id: 0,
+            tickets: VecDeque::new(),
+        }
+    }
+}
+
+impl CatalogSearchQueue {
+    fn note(&mut self, interest: Option<(&str, Option<&str>)>) -> bool {
+        let Some((query, harness)) = interest else {
+            return false;
+        };
+        if !self.active {
+            return false;
+        }
+        if self
+            .tickets
+            .iter()
+            .any(|ticket| ticket.query == query && ticket.harness.as_deref() == harness)
+        {
+            return true;
+        }
+        if self.tickets.len() == CATALOG_SEARCH_CAPACITY {
+            return false;
+        }
+        self.next_id += 1;
+        self.tickets.push_back(CatalogSearchTicket {
+            id: self.next_id,
+            epoch: self.epoch,
+            query: query.to_owned(),
+            harness: harness.map(str::to_owned),
+            waiting: BTreeSet::new(),
+        });
+        true
+    }
+
+    fn next(&mut self) -> Option<CatalogSearchTicket> {
+        let ticket = self.tickets.pop_front()?;
+        self.tickets.push_back(ticket.clone());
+        Some(ticket)
+    }
+
+    fn remember(&mut self, ticket: &CatalogSearchTicket, paths: impl Iterator<Item = String>) {
+        if let Some(current) = self
+            .tickets
+            .iter_mut()
+            .find(|current| current.id == ticket.id && current.epoch == ticket.epoch)
+        {
+            for path in paths {
+                if current.waiting.len() == CATALOG_SEARCH_CAPACITY {
+                    break;
+                }
+                current.waiting.insert(path);
+            }
+        }
+    }
+
+    fn acknowledge(&mut self, epoch: u64, tickets: &BTreeSet<u64>, published: &[String]) {
+        self.tickets.retain_mut(|ticket| {
+            if ticket.epoch != epoch || !tickets.contains(&ticket.id) {
+                return true;
+            }
+            if ticket.waiting.is_empty() {
+                return true;
+            }
+            for path in published {
+                ticket.waiting.remove(path);
+            }
+            !ticket.waiting.is_empty()
+        });
+    }
+
+    fn close(&mut self) {
+        self.active = false;
+        self.tickets.clear();
+    }
+
+    fn open(&mut self) {
+        if !self.active {
+            self.epoch += 1;
+            self.tickets.clear();
+            self.active = true;
+        }
+    }
 }
 
 pub(crate) enum CatalogPreparation {
@@ -292,10 +403,45 @@ impl NativeEvidence {
     /// Search interest only changes producer scheduling. HTTP readers neither
     /// open native files nor acquire the producer's Work/publication fence.
     pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
-        if let Some((id, harness)) = interest {
-            // An ordinary read in another tab must not cancel pending demand.
-            *lock(&self.catalog_search) = Some((id.to_owned(), harness.map(str::to_owned)));
+        lock(&self.catalog_search).note(interest);
+    }
+
+    fn acknowledge_catalog_search(
+        &self,
+        cache: &EventCache,
+        prepared: &model::PreparedSources,
+    ) -> io::Result<()> {
+        let (epoch, tickets, waiting) = {
+            let queue = lock(&self.catalog_search);
+            (
+                queue.epoch,
+                queue.tickets.iter().map(|ticket| ticket.id).collect(),
+                queue
+                    .tickets
+                    .iter()
+                    .flat_map(|ticket| ticket.waiting.iter().cloned())
+                    .collect::<BTreeSet<_>>(),
+            )
+        };
+        if waiting.is_empty() {
+            return Ok(());
         }
+        let paths: Vec<_> = prepared
+            .rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .filter(|path| waiting.contains(path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let published: Vec<_> = cache
+            .catalog_claims(&paths)?
+            .into_iter()
+            .filter_map(|(path, pending)| pending.is_none().then_some(path))
+            .collect();
+        lock(&self.catalog_search).acknowledge(epoch, &tickets, &published);
+        Ok(())
     }
 
     fn finish_audit(
@@ -407,6 +553,7 @@ impl NativeEvidence {
             work.cold_catalog = None;
             return Ok(CatalogPreparation::Pending);
         }
+        lock(&self.catalog_search).open();
         let discovery = work.cold_catalog.get_or_insert_with(|| ColdCatalog {
             revision: self.audit_request.load(Ordering::Acquire),
             ..Default::default()
@@ -455,39 +602,44 @@ impl NativeEvidence {
             cache.resolve_catalog_input(&self.options, path)?;
             return Ok(CatalogPreparation::Pending);
         }
-        let preferred = if cache.session_catalog_generation().is_some() {
-            let interest = lock(&self.catalog_search).take();
-            if let Some((id, harness)) = interest {
-                cache.pending_catalog_identity_sources(
-                    &self.options,
-                    crate::events::CatalogSearchInterest {
-                        query: &id,
-                        harness: harness.as_deref(),
-                    },
-                )?
-            } else {
-                Vec::new()
-            }
+        let ticket = if cache.session_catalog_generation().is_some() {
+            lock(&self.catalog_search).next()
         } else {
-            Vec::new()
+            None
         };
-        let inputs = if !preferred.is_empty() {
-            preferred
-        } else if cache.session_catalog_generation().is_none() && !discovery.newest.is_empty() {
+        let (tier, pending) = cache.prioritized_catalog_inputs(
+            &self.options,
+            64,
+            ticket
+                .as_ref()
+                .map(|ticket| crate::events::CatalogSearchInterest {
+                    query: &ticket.query,
+                    harness: ticket.harness.as_deref(),
+                }),
+        )?;
+        let use_newest =
+            cache.session_catalog_generation().is_none() && !discovery.newest.is_empty();
+        let inputs = if use_newest {
             std::mem::take(&mut discovery.newest)
                 .into_iter()
                 .map(|(_, input)| input)
                 .collect::<Vec<_>>()
         } else {
-            cache
-                .pending_catalog_sources(64)?
-                .into_iter()
-                .map(|path| {
-                    catalog_input(Path::new(&path), &self.options)
-                        .ok_or_else(|| io::Error::other("backfill source outside allowlist"))
-                })
-                .collect::<io::Result<Vec<_>>>()?
+            pending
         };
+        if tier == crate::events::CatalogPendingTier::SearchHint && !use_newest {
+            if let Some(ticket) = &ticket {
+                lock(&self.catalog_search).remember(
+                    ticket,
+                    inputs.iter().map(|input| {
+                        input
+                            .full_path(&self.options)
+                            .to_string_lossy()
+                            .into_owned()
+                    }),
+                );
+            }
+        }
         if !inputs.is_empty() || cache.session_catalog_generation().is_none() {
             let snapshot = discovery
                 .snapshot
@@ -545,6 +697,7 @@ impl NativeEvidence {
             }
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_cleanup");
             crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+            self.acknowledge_catalog_search(cache, &prepared)?;
             cache.publish_session_descriptions();
             cache.end_scan();
             cache.release_published_indexes();
@@ -747,6 +900,7 @@ impl NativeEvidence {
         if batch.phase == Phase::Publication {
             work.observed_catalog_generation = generation;
             crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
+            self.acknowledge_catalog_search(cache, &prepared)?;
             cache.publish_session_descriptions();
         }
         cache.end_scan();
@@ -955,6 +1109,9 @@ impl NativeEvidence {
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         let complete = self.refresh_catalog_step(work, now, before_build)?;
+        if complete {
+            lock(&self.catalog_search).close();
+        }
         Ok(complete && !work.tree_repair_pending)
     }
 
@@ -982,6 +1139,14 @@ impl NativeEvidence {
             .as_mut()
             .expect("event cache initialized")
             .advance_tree_repair(&self.options)?;
+        {
+            let cache = work.events.as_ref().expect("event cache initialized");
+            if cache.backfill_state()?.as_deref() == Some("complete")
+                && cache.qualified_catalog()?
+            {
+                lock(&self.catalog_search).close();
+            }
+        }
         if self.advance_semantic_stage(work, now, &mut before_build)? {
             let cache = work.events.as_ref().expect("event cache initialized");
             if cache.qualified_catalog()? && cache.pending_catalog_sources(1)?.is_empty() {
@@ -2076,6 +2241,189 @@ mod catalog_owner_tests {
     use super::*;
 
     #[test]
+    fn cold_catalog_search_queue_is_fair_bounded_and_rejects_stale_acknowledgements() {
+        let mut queue = CatalogSearchQueue::default();
+        assert!(queue.note(Some(("first", Some("codex")))));
+        assert!(queue.note(Some(("second", None))));
+        assert!(!queue.note(None));
+        let first = queue.next().unwrap();
+        assert_eq!(first.query, "first");
+        assert_eq!(queue.next().unwrap().query, "second");
+        queue.remember(&first, ["/first".to_owned()].into_iter());
+        assert!(queue.note(Some(("first", Some("codex")))));
+        for index in 2..CATALOG_SEARCH_CAPACITY {
+            assert!(queue.note(Some((&format!("tab-{index}"), None))));
+        }
+        assert!(!queue.note(Some(("overflow", None))));
+        assert_eq!(queue.tickets.len(), CATALOG_SEARCH_CAPACITY);
+        queue.close();
+        assert!(!queue.note(Some(("warm", None))));
+        queue.open();
+        queue.note(Some(("first", Some("codex"))));
+        let reposted = queue.next().unwrap();
+        queue.remember(&reposted, ["/first".to_owned()].into_iter());
+        queue.acknowledge(first.epoch, &BTreeSet::from([first.id]), &["/first".into()]);
+        assert_eq!(queue.tickets.len(), 1);
+        queue.acknowledge(
+            reposted.epoch,
+            &BTreeSet::from([first.id]),
+            &["/first".into()],
+        );
+        assert_eq!(queue.tickets.len(), 1);
+        queue.acknowledge(
+            reposted.epoch,
+            &BTreeSet::from([reposted.id]),
+            &["/first".into()],
+        );
+        assert!(queue.tickets.is_empty());
+    }
+
+    #[test]
+    fn cold_catalog_search_survives_lookup_error_and_scan_budget_until_qualified_publication() {
+        use std::io::Write;
+        let (root, options, _) = audit_fixture();
+        let initial = NativeEvidence::new(options.clone());
+        drain_catalog(&initial, &std::cell::Cell::new(0));
+        initial.note_catalog_search(Some(("stale-warm", None)));
+        assert!(lock(&initial.catalog_search).tickets.is_empty());
+        drop(initial);
+        let selected = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/selected.jsonl".into(),
+        };
+        let ordinary = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/ordinary.jsonl".into(),
+        };
+        for (input, id) in [(&selected, "selected"), (&ordinary, "ordinary")] {
+            fs::write(input.full_path(&options), format!("{{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{{\"id\":\"{id}\"}}}}\n")).unwrap();
+        }
+        let mut log = fs::OpenOptions::new()
+            .append(true)
+            .open(selected.full_path(&options))
+            .unwrap();
+        let record = format!(
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{}\"}}}}\n",
+            "x".repeat(8192)
+        );
+        for _ in 0..640 {
+            log.write_all(record.as_bytes()).unwrap();
+        }
+        drop(log);
+        let selected_path = selected.full_path(&options).to_string_lossy().into_owned();
+        let ordinary_path = ordinary.full_path(&options).to_string_lossy().into_owned();
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        for (path, revision) in [(&ordinary_path, 100), (&selected_path, 101)] {
+            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,?2,'changed',0)", rusqlite::params![path, revision]).unwrap();
+        }
+        let index: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name='catalog_search_header'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        db.execute_batch("DROP INDEX catalog_search_header")
+            .unwrap();
+        let evidence = NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some(("selected", Some("codex"))));
+        let mut work = lock(&evidence.work);
+        assert!(
+            evidence
+                .prepare_catalog(&mut work, model::now_ms())
+                .is_err()
+        );
+        assert_eq!(lock(&evidence.catalog_search).tickets.len(), 1);
+        db.execute_batch(&index).unwrap();
+        assert!(matches!(
+            evidence
+                .prepare_catalog(&mut work, model::now_ms())
+                .unwrap(),
+            CatalogPreparation::Pending
+        ));
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([selected_path.clone()])
+        );
+        let mut published = false;
+        for _ in 0..128 {
+            evidence
+                .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
+                .unwrap();
+            let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [&selected_path], |row| row.get(0)).unwrap();
+            if !pending {
+                published = true;
+                assert!(lock(&evidence.catalog_search).tickets.is_empty());
+                break;
+            }
+            assert_eq!(
+                lock(&evidence.catalog_search).tickets.len(),
+                1,
+                "indexing and stage-begin do not acknowledge demand"
+            );
+        }
+        assert!(published);
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&ordinary_path],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        drop(work);
+        drop(evidence);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cold_catalog_search_survives_publication_fence_would_block() {
+        let (root, options, input) = audit_fixture();
+        let initial = NativeEvidence::new(options.clone());
+        drain_catalog(&initial, &std::cell::Cell::new(0));
+        drop(initial);
+        append_audit_record(&options, &input);
+        let path = input.full_path(&options).to_string_lossy().into_owned();
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,100,'changed',0)", [&path]).unwrap();
+        let cache_path = EventCache::path(&options.cache);
+        let changed = path.clone();
+        crate::events::BEFORE_CATALOG_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let db = rusqlite::Connection::open(cache_path).unwrap();
+                db.execute(
+                    "UPDATE session_catalog_invalidations SET revision=101 WHERE source_path=?1",
+                    [changed],
+                )
+                .unwrap();
+            }));
+        });
+        let evidence = NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some(("audit", Some("codex"))));
+        let mut work = lock(&evidence.work);
+        let error = match evidence.prepare_catalog(&mut work, model::now_ms()) {
+            Err(error) => error,
+            Ok(_) => panic!("the changed claim must refuse publication"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([path])
+        );
+        evidence
+            .prepare_catalog(&mut work, model::now_ms())
+            .unwrap();
+        assert!(lock(&evidence.catalog_search).tickets.is_empty());
+        drop(work);
+        drop(evidence);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cold_catalog_search_interest_is_scoped_after_machine_authorization() {
         let (first_root, first_options, _) = audit_fixture();
         let (second_root, second_options, _) = audit_fixture();
@@ -2083,6 +2431,10 @@ mod catalog_owner_tests {
         let second = NativeEvidence::new(second_options);
         drain_catalog(&first, &std::cell::Cell::new(0));
         drain_catalog(&second, &std::cell::Cell::new(0));
+        assert!(!lock(&first.catalog_search).active);
+        assert!(!lock(&second.catalog_search).active);
+        lock(&first.catalog_search).open();
+        lock(&second.catalog_search).open();
         let sources = Arc::new(SessionSources::from_evidence(vec![
             ("first".into(), first.clone()),
             ("second".into(), second.clone()),
@@ -2093,8 +2445,8 @@ mod catalog_owner_tests {
                 .status,
             404
         );
-        assert!(lock(&first.catalog_search).is_none());
-        assert!(lock(&second.catalog_search).is_none());
+        assert!(lock(&first.catalog_search).tickets.is_empty());
+        assert!(lock(&second.catalog_search).tickets.is_empty());
         assert_eq!(
             core.respond(
                 "GET",
@@ -2105,10 +2457,14 @@ mod catalog_owner_tests {
             .status,
             200
         );
-        assert!(lock(&first.catalog_search).is_none());
+        assert!(lock(&first.catalog_search).tickets.is_empty());
         assert_eq!(
-            *lock(&second.catalog_search),
-            Some(("audit".into(), Some("codex".into())))
+            lock(&second.catalog_search)
+                .tickets
+                .iter()
+                .map(|ticket| (ticket.query.clone(), ticket.harness.clone()))
+                .collect::<Vec<_>>(),
+            vec![("audit".into(), Some("codex".into()))]
         );
         assert_eq!(
             core.respond("GET", "/api/sessions", "machine=second", None)
@@ -2116,8 +2472,12 @@ mod catalog_owner_tests {
             200
         );
         assert_eq!(
-            *lock(&second.catalog_search),
-            Some(("audit".into(), Some("codex".into())))
+            lock(&second.catalog_search)
+                .tickets
+                .iter()
+                .map(|ticket| (ticket.query.clone(), ticket.harness.clone()))
+                .collect::<Vec<_>>(),
+            vec![("audit".into(), Some("codex".into()))]
         );
         core.close();
         fs::remove_dir_all(first_root).unwrap();
