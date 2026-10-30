@@ -56,13 +56,15 @@ CODEX_ROOT_TYPES = {"session_meta", "response_item", "event_msg"}
 CODEX_CONTROL_TYPES = {
     "turn_context", "token_count", "compaction", "compacted",
     "session_meta", "shutdown_complete", "deprecation_notice",
+    "world_state", "token_usage_record", "turn_context",
 }
 CODEX_PAYLOAD_TYPES = {
     "message", "user_message", "agent_message", "function_call", "tool_call",
     "tool_use", "function_call_output", "tool_result", "error",
     "reasoning", "agent_reasoning", "exec_command_begin", "exec_command_end",
     "command_execution", "task_complete", "turn_complete", "turn_started",
-    "turn_aborted", "mcp_tool_call", "mcp_tool_result",
+    "turn_aborted", "mcp_tool_call", "mcp_tool_result", "task_started",
+    "custom_tool_call", "custom_tool_call_output",
 }
 
 PEM_RE = re.compile(
@@ -546,6 +548,8 @@ def _claude_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, 
 def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, Any]:
     root_type = root.get("type")
     payload = root.get("payload")
+    if root_type in CODEX_CONTROL_TYPES:
+        raise ExcludedRecord("non_event_metadata")
     if not isinstance(root_type, str) or root_type not in CODEX_ROOT_TYPES or not isinstance(payload, dict):
         raise ExcludedRecord("unrecognized_envelope")
     if root_type in CODEX_CONTROL_TYPES:
@@ -553,6 +557,8 @@ def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, A
     if _subagent_or_forked(root):
         raise ExcludedRecord("subagent_record")
     payload_type = payload.get("type")
+    if payload_type in {"token_count", "item_completed"}:
+        raise ExcludedRecord("non_event_metadata")
     if not isinstance(payload_type, str) or payload_type not in CODEX_PAYLOAD_TYPES:
         raise ExcludedRecord("unrecognized_envelope")
     if payload_type in {"reasoning", "agent_reasoning"}:
@@ -567,7 +573,7 @@ def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, A
     elif payload_type == "agent_message":
         role = "assistant"
     result_event = payload_type in {
-        "function_call_output", "tool_result", "mcp_tool_result",
+        "function_call_output", "custom_tool_call_output", "tool_result", "mcp_tool_result",
     }
     if result_event:
         visible: list[str] = []
@@ -599,7 +605,7 @@ def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, A
         visible, safe_blocks, block_kinds, names, block_status, block_exit = _extract_text(content, counts)
 
     tool = None
-    if payload_type in {"function_call", "tool_call", "tool_use", "mcp_tool_call"}:
+    if payload_type in {"function_call", "custom_tool_call", "tool_call", "tool_use", "mcp_tool_call"}:
         tool = _safe_tool_name(payload.get("name") or payload.get("tool_name"))
         block_kinds.add("tool_use")
     elif result_event and (payload.get("name") or payload.get("tool_name")):
@@ -630,7 +636,7 @@ def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, A
 
     if "tool_use" in block_kinds:
         kind = "tool_use"
-    elif payload_type in {"function_call_output", "tool_result", "mcp_tool_result"} or "tool_result" in block_kinds:
+    elif payload_type in {"function_call_output", "custom_tool_call_output", "tool_result", "mcp_tool_result"} or "tool_result" in block_kinds:
         kind = "tool_result"
     elif payload_type == "error" or error_message is not None:
         kind = "error"
@@ -642,7 +648,7 @@ def _codex_projection(root: dict[str, Any], counts: Counter[str]) -> dict[str, A
         kind = "assistant_message"
     elif payload_type in {"exec_command_begin", "exec_command_end", "command_execution"}:
         kind = "tool_status"
-    elif payload_type in {"task_complete", "turn_complete", "turn_started", "turn_aborted"}:
+    elif payload_type in {"task_complete", "task_started", "turn_complete", "turn_started", "turn_aborted"}:
         kind = "turn_status"
     else:
         kind = "status"
@@ -742,7 +748,7 @@ def _locate_native_start(records: list[tuple[Any, bytes]], harness: str) -> tupl
         if _subagent_or_forked(record):
             raise PipelineError("subagent_session")
         if record.get("type") == "user" and _native_session_id(record, harness):
-            if record.get("parentUuid") is not None:
+            if "parentUuid" not in record or record["parentUuid"] is not None:
                 raise PipelineError("forked_or_partial_session")
             if record.get("isSidechain") not in (None, False):
                 raise PipelineError("subagent_session")

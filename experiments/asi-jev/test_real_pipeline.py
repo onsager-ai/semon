@@ -9,6 +9,7 @@ import stat
 import tempfile
 import time
 import unittest
+from collections import Counter
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,6 +48,7 @@ class RealPipelineTests(unittest.TestCase):
                     "type": "user",
                     "sessionId": "synthetic-claude-session",
                     "uuid": "synthetic-user-event",
+                    "parentUuid": None,
                     "timestamp": "2026-10-29T00:00:00.250Z",
                     "cwd": "/home/synthetic/project",
                     "message": {
@@ -182,7 +184,7 @@ class RealPipelineTests(unittest.TestCase):
                     "type": "response_item",
                     "timestamp": "2026-10-29T00:00:05Z",
                     "payload": {
-                        "type": "function_call_output",
+                        "type": "custom_tool_call_output",
                         "call_id": "synthetic-tool-call",
                         "output": "Synthetic tool output at /home/synthetic/result",
                         "exit_code": 7,
@@ -227,6 +229,7 @@ class RealPipelineTests(unittest.TestCase):
                 {
                     "type": "user",
                     "sessionId": "synthetic-unknown-session",
+                    "parentUuid": None,
                     "message": {"role": "user", "content": [{"type": "opaque_blob", "data": "synthetic"}]},
                 },
             ])
@@ -261,6 +264,27 @@ class RealPipelineTests(unittest.TestCase):
                         private_root=base / "private",
                     )
             self.assertEqual(raised.exception.code, "forked_or_partial_session")
+
+    def test_missing_claude_ancestry_and_nested_codex_subagents_are_excluded(self) -> None:
+        for harness, record, expected in (
+            ("claude", {"type": "user", "sessionId": "synthetic"}, "forked_or_partial_session"),
+            ("codex", {"type": "session_meta", "payload": {
+                "id": "synthetic", "source": {"subagent": {"thread_spawn": {}}},
+            }}, "subagent_session"),
+        ):
+            with self.subTest(harness=harness):
+                with self.assertRaises(real_pipeline.PipelineError) as raised:
+                    real_pipeline._locate_native_start([(record, b"synthetic")], harness)
+                self.assertEqual(raised.exception.code, expected)
+
+    def test_codex_custom_tool_invocation_and_task_start_keep_native_kinds(self) -> None:
+        for native_kind, expected in (("custom_tool_call", "tool_use"), ("task_started", "turn_status")):
+            projection = real_pipeline._project_record({
+                "type": "response_item" if native_kind == "custom_tool_call" else "event_msg",
+                "payload": {"type": native_kind, "name": "synthetic_tool"},
+            }, "codex", Counter())
+            self.assertEqual(projection["event_kind"], expected)
+            self.assertTrue(projection["native_record_kind"].endswith("/" + native_kind))
 
     def test_prepare_one_requires_explicit_closed_source_attestation(self) -> None:
         with self.assertRaises(real_pipeline.PipelineError) as raised:
