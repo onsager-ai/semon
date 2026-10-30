@@ -154,7 +154,12 @@ fn publish_semantic_stage(home: &Home, input: &crate::Input) {
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
     )
     .unwrap();
-    let paths = vec![input.full_path(&home.options).to_string_lossy().into_owned()];
+    let paths = vec![
+        input
+            .full_path(&home.options)
+            .to_string_lossy()
+            .into_owned(),
+    ];
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     assert_eq!(
         cache.begin_semantic_stage(&paths, &runtime).unwrap(),
@@ -165,7 +170,10 @@ fn publish_semantic_stage(home: &Home, input: &crate::Input) {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
         if batch.paths.is_empty() {
             if batch.phase == Phase::Publication {
-                assert!(published, "the real model must publish before Stage cleanup");
+                assert!(
+                    published,
+                    "the real model must publish before Stage cleanup"
+                );
                 assert_eq!(
                     cache.finish_semantic_stage(batch.epoch).unwrap(),
                     crate::events::Outcome::Written
