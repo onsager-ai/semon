@@ -6732,8 +6732,13 @@ fn bounded_cold_commit_retries_after_raw_append_and_persists_prefix() {
         }));
     });
 
+    let parsed = crate::events::PARSED.with(std::cell::Cell::get);
     let mut dirty = false;
     let index = crate::events::scan_file(&path, "claude", &mut cache, &mut dirty).unwrap();
+    assert!(
+        crate::events::PARSED.with(std::cell::Cell::get) - parsed > 160,
+        "the changed physical witness must force a second bounded parse"
+    );
     let physical_size = fs::metadata(&path).unwrap().len();
     let ledger = cache.recorded(path.to_str().unwrap()).unwrap().unwrap();
     assert!(physical_size > size_before_commit_hook, "the hook appended Raw bytes");
