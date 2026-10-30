@@ -474,7 +474,7 @@ fn generic_runtime_publication_facades(
                     None,
                 )
                 .expect("generic publication selected transcript through authorized native proofs");
-            let mut fields = query
+            let fields = query
                 .call_bound_selected_at(
                     "get_session",
                     &serde_json::json!({"id":row.key}),
@@ -484,9 +484,6 @@ fn generic_runtime_publication_facades(
                     None,
                 )
                 .expect("generic publication selected fields without semantic manifest");
-            assert_eq!(fields["session"]["machine"], namespace.as_str());
-            fields["session"]["machine"] =
-                expected_bodies[&row.key]["fields"]["session"]["machine"].clone();
             assert_eq!(body, expected_bodies[&row.key]["body"]);
             assert_eq!(fields, expected_bodies[&row.key]["fields"]);
 
