@@ -17,6 +17,10 @@ on:
         description: Compare the pre-foundation reference and selected reader on identical native fixtures
         type: boolean
         default: false
+      selected_readiness_measurement:
+        description: Compare cold selected Catalog readiness against the measured foundation baseline
+        type: boolean
+        default: false
   pull_request:
   push:
     branches: [main]
@@ -35,7 +39,7 @@ concurrency:
 jobs:
   foundation:
     name: UI types and generated assets
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -87,7 +91,7 @@ jobs:
   build:
     name: viewer test binaries
     needs: foundation
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     # Manual diagnostics also build the pinned recovery baseline.
     timeout-minutes: ${{ inputs.refresh_diagnostics && 25 || 15 }}
@@ -166,7 +170,7 @@ jobs:
   checks:
     name: viewer / ${{ matrix.suite }}
     needs: build
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.native_foundation_measurement || inputs.refresh_diagnostics }}
+    if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
@@ -487,7 +491,7 @@ jobs:
 
   native-foundation-measurement:
     name: native foundation same-fixture measurement
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.native_foundation_measurement }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.native_foundation_measurement || inputs.selected_readiness_measurement) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -517,6 +521,7 @@ jobs:
           cp target/debug/semon "$RUNNER_TEMP/semon-candidate"
 
       - name: Build the selected pre-foundation reference
+        if: ${{ !inputs.selected_readiness_measurement }}
         env:
           SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
         run: |
@@ -528,6 +533,7 @@ jobs:
           cp target/debug/semon "$RUNNER_TEMP/semon-reference"
 
       - name: Build the selected Catalog readiness baseline
+        if: ${{ inputs.selected_readiness_measurement }}
         env:
           READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
         run: |
@@ -539,6 +545,7 @@ jobs:
           cp target/debug/semon "$RUNNER_TEMP/semon-readiness-baseline"
 
       - name: Measure focused multi-machine reads and archived tail scope in Source
+        if: ${{ !inputs.selected_readiness_measurement }}
         env:
           MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
         run: |
@@ -565,6 +572,7 @@ jobs:
           npx playwright install --with-deps chromium
 
       - name: Compare selected transcript tail reads on copied native fixtures
+        if: ${{ !inputs.selected_readiness_measurement }}
         env:
           SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
           SOURCE_CANDIDATE: ${{ github.sha }}
@@ -578,7 +586,20 @@ jobs:
             --counts 0,256,2048 \
             --output "$MEASUREMENT_OUT"
 
+      - name: Run the candidate browser journey
+        if: ${{ !inputs.selected_readiness_measurement }}
+        env:
+          SOURCE_CANDIDATE: ${{ github.sha }}
+          BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
+        run: |
+          python3 scripts/catalog-journey.py \
+            --binary "$RUNNER_TEMP/semon-candidate" \
+            --source-revision "$SOURCE_CANDIDATE" \
+            --counts 0,2048 \
+            --output "$BROWSER_MEASUREMENT_OUT"
+
       - name: Compare browser readiness on identical native fixtures
+        if: ${{ inputs.selected_readiness_measurement }}
         env:
           SOURCE_CANDIDATE: ${{ github.sha }}
           READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
@@ -627,7 +648,7 @@ jobs:
     steps:
       - name: Require the selected workflow path to pass
         env:
-          MEASUREMENT_ENABLED: ${{ inputs.native_foundation_measurement && 'true' || 'false' }}
+          MEASUREMENT_ENABLED: ${{ (inputs.native_foundation_measurement || inputs.selected_readiness_measurement) && 'true' || 'false' }}
           REFRESH_DIAGNOSTICS_ENABLED: ${{ inputs.refresh_diagnostics && 'true' || 'false' }}
           FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
