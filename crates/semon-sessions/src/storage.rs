@@ -293,7 +293,7 @@ impl NativeReaderBinding {
             )
             .unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true));
         }
-        sqlite::catalog::read_page(self, options, source, &request).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
+        sqlite::catalog::read_page(self, options, source, &request, false, &mut None).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
     }
     pub(crate) fn bookmark_identity(
         &self,
@@ -563,7 +563,15 @@ impl StoreConfig {
             );
         }
         let binding = NativeReaderBinding::Admitted(self.clone());
-        sqlite::catalog::read_page(&binding, options, self.namespace.as_str(), &request).map_err(
+        sqlite::catalog::read_page(
+            &binding,
+            options,
+            self.namespace.as_str(),
+            &request,
+            false,
+            &mut None,
+        )
+        .map_err(
             |error| {
                 error
                     .downcast::<StorageError>()
