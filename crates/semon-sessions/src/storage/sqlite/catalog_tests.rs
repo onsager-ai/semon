@@ -4273,6 +4273,11 @@ fn local_only_codex_fixture() -> (Fixture, PathBuf) {
 fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
     for reader in ["web", "field", "mcp"] {
         let (fixture, path) = local_only_codex_fixture();
+        if reader == "mcp" {
+            // The MCP focused reader requires the current Query observation;
+            // Web and field keep exercising the provisional publication above.
+            fixture.publish_existing();
+        }
         let first = crate::session_transcript_range_with_mode(
             &fixture.options,
             "source",
@@ -4561,11 +4566,16 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
             _ => unreachable!(),
         }
         let strict = get(query, crate::SessionSourceReadMode::LocalThenProvider);
+        let strict_body: Value = serde_json::from_slice(&strict.body).unwrap();
         assert_eq!(
             strict.status, 409,
-            "regression must reject at deployed strict path: {mutation}"
+            "regression must reject at deployed strict path: {mutation}; code={} fence={} stage={} local_revision={}",
+            strict_body["error"]["code"],
+            strict_body["fence_reason"],
+            strict_body["stage"],
+            strict_body["local_revision_reason"]
         );
-        let strict: Value = serde_json::from_slice(&strict.body).unwrap();
+        let strict = strict_body;
         assert_eq!(strict["fence_reason"], "local_source_revision");
         assert_eq!(
             strict["local_revision_reason"],
@@ -4860,8 +4870,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     fs::write(&path, "{}\n").unwrap();
                 }
                 "legacy" => {
-                    // A supported persisted recipe predating the physical
-                    // change-time witness has no local generation proof.
+                    // Remove the persisted physical change-time witness.
                     let mut db = fixture.db();
                     let text: String = db
                         .query_row(
@@ -4889,8 +4898,17 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                 _ => unreachable!(),
             }
             let stale = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
-            assert_eq!(stale.status, 409, "{scope}/{mutation}");
-            let stale: Value = serde_json::from_slice(&stale.body).unwrap();
+            let stale_body: Value = serde_json::from_slice(&stale.body).unwrap();
+            assert_eq!(
+                stale.status,
+                409,
+                "{scope}/{mutation}: code={} fence={} stage={} local_revision={}",
+                stale_body["error"]["code"],
+                stale_body["fence_reason"],
+                stale_body["stage"],
+                stale_body["local_revision_reason"]
+            );
+            let stale = stale_body;
             assert_eq!(stale["fence_reason"], "local_source_revision");
             assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
             // Metadata-only observation succeeds in the same stale cache;
@@ -6160,7 +6178,7 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
 
     fn assert_retained_chunk_generation(
         db: &Connection,
-        database: &std::path::Path,
+        options: &Options,
         path: &str,
         ledger: &crate::events::Ledger,
         bytes: &[u8],
@@ -6199,10 +6217,20 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             )
             .unwrap();
         }
-        let prefix_len = usize::try_from(ledger.offset.min(crate::source_chunks::SIZE as u64))
-            .unwrap();
+        let prefix_len =
+            usize::try_from(ledger.offset.min(crate::source_chunks::SIZE as u64)).unwrap();
         assert!(prefix_len > 0 && prefix_len <= bytes.len());
-        let read = crate::events::store::chunk_proofs::Focused::open(database, path, ledger)
+        let read = crate::storage::local_navigation_binding(options, "source")
+            .map_err(io::Error::other)
+            .and_then(|binding| {
+                crate::events::store::chunk_proofs::Focused::open_with_raw(
+                    &binding,
+                    &EventCache::path(&options.cache),
+                    path,
+                    ledger,
+                    None,
+                )
+            })
             .and_then(|proof| proof.verify(0, &bytes[..prefix_len]));
         if let Some(live) = live {
             db.execute(
@@ -6232,21 +6260,11 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
         }
         fixture.publish_existing();
         let db = fixture.db();
-        let database: PathBuf = db
-            .query_row(
-                "SELECT file FROM pragma_database_list WHERE name='main'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap()
-            .into();
         let original_bytes = fs::read(&path).unwrap();
-        let (_, original_ledger) = crate::events::store::ledger_row(
-            &db,
-            path.to_string_lossy().as_ref(),
-        )
-        .unwrap()
-        .unwrap();
+        let (_, original_ledger) =
+            crate::events::store::ledger_row(&db, path.to_string_lossy().as_ref())
+                .unwrap()
+                .unwrap();
         let mut archived_ledger = None;
         let original: i64 = db
             .query_row(
@@ -6303,11 +6321,14 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 ))
                 .unwrap();
                 {
-                    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+                    let evidence =
+                        crate::native_evidence::NativeEvidence::new(fixture.options.clone());
                     let mut work = crate::viewer::lock(&evidence.work);
-                    assert!(evidence
-                        .refresh_catalog(&mut work, crate::model::now_ms())
-                        .is_err());
+                    assert!(
+                        evidence
+                            .refresh_catalog(&mut work, crate::model::now_ms())
+                            .is_err()
+                    );
                 }
                 db.execute_batch("DROP TRIGGER reject_native_relocation;")
                     .unwrap();
@@ -6404,16 +6425,14 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             let selected: String=db.query_row("SELECT source_path FROM session_catalog_sources WHERE session_key='native-session' AND lifecycle='current'",[],|row|row.get(0)).unwrap();
             assert_eq!(selected, new.to_string_lossy());
             if !append {
-                let (_, ledger) = crate::events::store::ledger_row(
-                    &db,
-                    new.to_string_lossy().as_ref(),
-                )
-                .unwrap()
-                .unwrap();
+                let (_, ledger) =
+                    crate::events::store::ledger_row(&db, new.to_string_lossy().as_ref())
+                        .unwrap()
+                        .unwrap();
                 archived_ledger = Some(ledger);
                 assert_retained_chunk_generation(
                     &db,
-                    &database,
+                    &fixture.options,
                     path.to_string_lossy().as_ref(),
                     &original_ledger,
                     &original_bytes,
@@ -6422,14 +6441,14 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             if append {
                 assert_retained_chunk_generation(
                     &db,
-                    &database,
+                    &fixture.options,
                     path.to_string_lossy().as_ref(),
                     &original_ledger,
                     &original_bytes,
                 );
                 assert_retained_chunk_generation(
                     &db,
-                    &database,
+                    &fixture.options,
                     fixture
                         .options
                         .codex_home
