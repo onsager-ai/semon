@@ -235,7 +235,14 @@ impl Snapshot {
                 [&self.path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
-            .map_err(io::Error::other)?;
+            .map_err(|error| {
+                #[cfg(test)]
+                eprintln!(
+                    "native_sqlite_read_error stage=tree_checkpoint_header no_rows={}",
+                    matches!(&error, rusqlite::Error::QueryReturnedNoRows)
+                );
+                io::Error::other(error)
+            })?;
         if actual.0 != self.file_id
             || actual.1 != header_ledger(&self.ledger)
             || actual.2 != self.projection_id

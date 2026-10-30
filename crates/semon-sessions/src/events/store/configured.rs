@@ -1885,7 +1885,43 @@ impl Writer {
             if intent.base != expected.map(header_ledger).unwrap_or_default() {
                 return Err(StorageError::Conflict);
             }
-            let (state, target): (String, Option<String>) = tx.query_row("SELECT state,target FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2 AND source_path=?3 AND base=?4 AND observed_revision IS ?5", params![self.config.namespace.as_str(),intent.id,path,intent.base,intent.revision], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
+            let (state, target): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT state,target FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2 AND source_path=?3 AND base=?4 AND observed_revision IS ?5",
+                    params![self.config.namespace.as_str(),intent.id,path,intent.base,intent.revision],
+                    |r| Ok((r.get(0)?,r.get(1)?)),
+                )
+                .map_err(|error| {
+                    #[cfg(test)]
+                    {
+                        let no_rows = matches!(&error, rusqlite::Error::QueryReturnedNoRows);
+                        let diagnostic = tx
+                            .query_row(
+                                "SELECT source_path=?3,base=?4,observed_revision IS ?5 FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2",
+                                params![self.config.namespace.as_str(), intent.id, path, intent.base, intent.revision],
+                                |r| {
+                                    Ok((
+                                        r.get::<_, bool>(0)?,
+                                        r.get::<_, bool>(1)?,
+                                        r.get::<_, bool>(2)?,
+                                    ))
+                                },
+                            )
+                            .optional();
+                        let (lookup_ok, row_exists, path_match, base_match, revision_match) =
+                            match diagnostic {
+                                Ok(Some((path_match, base_match, revision_match))) => {
+                                    (true, true, path_match, base_match, revision_match)
+                                }
+                                Ok(None) => (true, false, false, false, false),
+                                Err(_) => (false, false, false, false, false),
+                            };
+                        eprintln!(
+                            "native_sqlite_read_error stage=event_commit_intent no_rows={no_rows} lookup_ok={lookup_ok} row_exists={row_exists} path_match={path_match} base_match={base_match} revision_match={revision_match}"
+                        );
+                    }
+                    failed(error)
+                })?;
             if state == "complete" {
                 let target_ledger = header_ledger(ledger);
                 if target.as_deref() != Some(target_ledger.as_str()) {
