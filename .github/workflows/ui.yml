@@ -576,6 +576,9 @@ jobs:
           cargo test --locked -p semon-sessions --lib cold_catalog_search_ \
             -- --nocapture --test-threads=1 \
             2>&1 | tee "$MEASUREMENT_OUT/selected-readiness-regressions.log"
+          cargo test --locked -p semon-sessions --lib selected_projection_upgrade_precedes_draining_and_preserves_revision \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee "$MEASUREMENT_OUT/selected-upgrade-priority-regression.log"
 
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -643,6 +646,7 @@ jobs:
             ${{ runner.temp }}/native-foundation-measurement/source-multi-machine.log
             ${{ runner.temp }}/native-foundation-measurement/source-tail-scope.log
             ${{ runner.temp }}/native-foundation-measurement/selected-readiness-regressions.log
+            ${{ runner.temp }}/native-foundation-measurement/selected-upgrade-priority-regression.log
             ${{ runner.temp }}/native-foundation-browser/server-results.json
             ${{ runner.temp }}/native-foundation-browser/*-first-import.json
             ${{ runner.temp }}/native-foundation-browser/*-first-import.json.result

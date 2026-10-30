@@ -1008,6 +1008,12 @@ pub(crate) struct Loaded {
     pub(crate) stamp: Option<ReportedFileStamp>,
 }
 
+/// Validated Catalog search demand changes scheduling, never native identity.
+pub(crate) struct CatalogSearchInterest<'a> {
+    pub(crate) query: &'a str,
+    pub(crate) harness: Option<&'a str>,
+}
+
 /// Where the event index persists between runs: the narrow interface the
 /// cache needs, so the storage behind it (SQLite today) stays in one place.
 ///
@@ -1091,6 +1097,10 @@ pub(crate) trait IndexStore: Send {
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
     fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
+    /// Read at most 64 candidates from each of four identity selectors. Return
+    /// pending, deduplicated paths only; defer to selected projection upgrades.
+    /// This read neither changes invalidation revisions nor qualifies sources.
+    fn pending_catalog_identity_paths(&self, query: &str) -> Result<Vec<String>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
     fn catalog_component_paths(
@@ -1640,6 +1650,29 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
             .pending_catalog_sources(limit)
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn pending_catalog_identity_sources(
+        &self,
+        options: &crate::Options,
+        interest: CatalogSearchInterest<'_>,
+    ) -> io::Result<Vec<crate::Input>> {
+        let paths = self
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("native producer unavailable"))?
+            .pending_catalog_identity_paths(interest.query)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(paths
+            .into_iter()
+            .filter_map(|path| crate::native_evidence::catalog_input(Path::new(&path), options))
+            .filter(|input| {
+                interest
+                    .harness
+                    .is_none_or(|harness| input.root.as_str() == harness)
+            })
+            .take(64)
+            .collect())
     }
     pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
         self.store
