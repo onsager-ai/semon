@@ -2367,10 +2367,10 @@ mod tests {
 
     #[test]
     fn fresh_assembled_core_indexes_are_scoped_before_factory() {
-        let f = Fixture::new();
+        let f = Fixture::unbound("configured-events");
         let db = f.db();
-        // Inspect the complete create_native_store DDL, before native_events
-        // can refuse it. The private core fixture omits semantic-stage DDL.
+        // Inspect complete create_native_store DDL before owner admission.
+        // The unbound fixture has no NativeOwnership capability.
         let objects: Vec<(String, String, String)> = db
             .prepare("SELECT type,name,coalesce(sql,'') FROM sqlite_schema WHERE type IN('index','trigger') AND tbl_name IN('files','events','signals') ORDER BY name")
             .unwrap()
@@ -2489,27 +2489,11 @@ mod tests {
     fn private_composite_core_collisions_reads_deletes_and_rollback() {
         // Deliberately bypass public enrollment in this private family fixture.
         // The rest of the native writer is still unqualified for two sources.
-        let mut db = Connection::open_in_memory().unwrap();
-        db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
-        db.execute_batch(metadata_schema()).unwrap();
-        db.execute_batch(CORE_SCHEMA).unwrap();
-        db.execute_batch(copied_usage_schema()).unwrap();
-        tree_state::register(&db).unwrap();
-        db.execute_batch(tree_state::schema()).unwrap();
-        db.execute_batch(
-            "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
-        )
-        .unwrap();
-        let bind = |db: &Connection, namespace: &str| {
-            let namespace = namespace.to_owned();
-            db.create_scalar_function(
-                "semon_namespace",
-                0,
-                FunctionFlags::SQLITE_UTF8,
-                move |_| Ok(namespace.clone()),
-            )
-            .unwrap();
-        };
+        let f = Fixture::unbound("a");
+        let mut b_config = f.config.clone();
+        b_config.namespace = LogicalSourceNamespace::new("b").unwrap();
+        let mut a_db = connection(&f.config).unwrap();
+        let b_db = connection(&b_config).unwrap();
         let put = |db: &Connection, path: &str, size: i64| -> i64 {
             db.query_row(
                 PUT_FILE,
@@ -2565,10 +2549,9 @@ mod tests {
             }
             all
         };
-        for (namespace, size) in [("a", 10), ("b", 20)] {
-            bind(&db, namespace);
+        for (namespace, size, db) in [("a", 10, &a_db), ("b", 20, &b_db)] {
             assert_eq!(
-                put(&db, "same/relative.jsonl", size),
+                put(db, "same/relative.jsonl", size),
                 1,
                 "IDs must collide across namespaces"
             );
@@ -2592,7 +2575,7 @@ mod tests {
                 ],
             )
             .unwrap();
-            let mut readers = Readers::new(&db).unwrap();
+            let mut readers = Readers::new(db).unwrap();
             assert_eq!(
                 readers
                     .events
@@ -2608,7 +2591,7 @@ mod tests {
                 namespace
             );
             assert_eq!(
-                ledger_row(&db, "same/relative.jsonl")
+                ledger_row(db, "same/relative.jsonl")
                     .unwrap()
                     .unwrap()
                     .1
@@ -2616,12 +2599,11 @@ mod tests {
                 size as u64
             );
         }
-        assert_eq!(put(&db, "only-b.jsonl", 21), 2);
-        let b = state(&db, "b");
-        bind(&db, "a");
+        assert_eq!(put(&b_db, "only-b.jsonl", 21), 2);
+        let b = state(&a_db, "b");
         assert!(
             put_event(
-                &mut db.prepare(PUT_EVENT).unwrap(),
+                &mut a_db.prepare(PUT_EVENT).unwrap(),
                 2,
                 false,
                 0,
@@ -2630,9 +2612,9 @@ mod tests {
             .is_err(),
             "a child cannot use b's parent"
         );
-        assert_eq!(put(&db, "same/relative.jsonl", 30), 1);
+        assert_eq!(put(&a_db, "same/relative.jsonl", 30), 1);
         put_event(
-            &mut db.prepare(PUT_EVENT).unwrap(),
+            &mut a_db.prepare(PUT_EVENT).unwrap(),
             1,
             false,
             1,
@@ -2640,16 +2622,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            ledger_row(&db, "same/relative.jsonl")
+            ledger_row(&a_db, "same/relative.jsonl")
                 .unwrap()
                 .unwrap()
                 .1
                 .offset,
             30
         );
-        assert_eq!(state(&db, "b"), b);
+        assert_eq!(state(&a_db, "b"), b);
         {
-            let tx = db.transaction().unwrap();
+            let tx = a_db.transaction().unwrap();
             clear(&tx, 1).unwrap();
             tx.execute(
                 "DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",
@@ -2660,8 +2642,8 @@ mod tests {
             assert_eq!(state(&tx, "b"), b);
             // Dropping the transaction restores all three families.
         }
-        assert!(ledger_row(&db, "same/relative.jsonl").unwrap().is_some());
-        let tx = db.transaction().unwrap();
+        assert!(ledger_row(&a_db, "same/relative.jsonl").unwrap().is_some());
+        let tx = a_db.transaction().unwrap();
         clear(&tx, 1).unwrap();
         tx.execute(
             "DELETE FROM files WHERE namespace=semon_namespace() AND file_id=?1",
@@ -2669,10 +2651,9 @@ mod tests {
         )
         .unwrap();
         tx.commit().unwrap();
-        assert_eq!(state(&db, "b"), b);
-        bind(&db, "b");
+        assert_eq!(state(&a_db, "b"), b);
         assert_eq!(
-            ledger_row(&db, "same/relative.jsonl")
+            ledger_row(&b_db, "same/relative.jsonl")
                 .unwrap()
                 .unwrap()
                 .1
@@ -4478,9 +4459,11 @@ mod tests {
             inputs[1].full_path(&options[1]),
         )
         .unwrap();
-        fs::copy(
-            options[0].facts.as_ref().unwrap(),
+        let facts = crate::facts::read_facts(options[0].facts.as_ref().unwrap()).unwrap();
+        crate::facts::write_facts(
             options[1].facts.as_ref().unwrap(),
+            &facts,
+            &options[1].source,
         )
         .unwrap();
         let runtime = crate::native_evidence::query_runtime_generation(&options[0]).unwrap();
