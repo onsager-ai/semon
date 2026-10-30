@@ -85,6 +85,9 @@ no automatic retry. Individual outputs stay in `private/runs/`. Aggregate with
 and summary files, both independent annotations, `--adjudication-status frozen`,
 2,000 draws and seed 20261030. Its public output schema permits numeric metrics
 and fixed taxonomy labels only. Inspect that export before committing it.
+Use `--checkpoint-pause-ms 50` to pace CPU work on the thermally constrained
+local host. This sleeps between bounded draw groups without changing draws,
+seeds, samples, or statistics; the 85°C stop remains active.
 Private examples and the 50-event user review packet must remain local.
 After both freezes, `ASI_API_BASE=https://magpie.onsager.ai python3
 experiments/asi-jev/real_matrix.py --all` runs the nine conditions sequentially,
