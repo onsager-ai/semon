@@ -302,7 +302,35 @@ pub(crate) struct AdmittedSnapshot<'a, 'b>(
     &'a Transaction<'b>,
     Option<crate::storage::QueryRuntimeBinding>,
     crate::storage::QueryRuntimeBinding,
+    std::cell::OnceCell<crate::native_evidence::RuntimeObservations>,
 );
+
+/// Metadata from the caller's validated snapshot, never an Options-derived
+/// connection. Each CWD belongs to the exact published native prefix.
+pub(crate) fn runtime_source_cwds(
+    db: &Connection,
+    sources: &[CatalogSource],
+) -> io::Result<std::collections::BTreeSet<String>> {
+    if sources.is_empty() || sources.len() > 64 {
+        return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+    }
+    let mut cwds = std::collections::BTreeSet::new();
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        let ledger = crate::events::store::ledger_row(db, &path).map_err(io::Error::other)?;
+        if ledger.as_ref().map(|(_, ledger)| ledger) != Some(&crate::source_carrier::ledger(source)) {
+            return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+        }
+        let cwd: Option<String> = db.query_row(
+            "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
+            [path.as_ref()], |row| row.get(0),
+        ).map_err(io::Error::other)?;
+        if let Some(cwd) = cwd {
+            cwds.insert(cwd);
+        }
+    }
+    Ok(cwds)
+}
 
 /// Bound Home/Query readers select through the same admitted snapshot as
 /// Catalog pages. Only the current namespace schema is readable.
@@ -317,10 +345,23 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
         transaction,
         binding.runtime_binding()?,
         binding.runtime_binding_at(transaction)?,
+        std::cell::OnceCell::new(),
     ))
 }
 
 impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
+    fn runtime_observation(
+        &self,
+        options: &Options,
+        row: &CatalogRow,
+        _runtime: &str,
+    ) -> io::Result<Option<String>> {
+        let binding = self.row_runtime_binding(row)?;
+        let cwds = runtime_source_cwds(self.0, &row.sources)?;
+        let scoped = self.3.get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+            .scope(row, &cwds)?;
+        binding.map(|binding| binding.witness(&scoped)).transpose()
+    }
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         self.1.clone()
     }

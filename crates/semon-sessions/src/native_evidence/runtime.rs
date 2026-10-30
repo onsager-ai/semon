@@ -1,7 +1,6 @@
 //! Query observation fences for a row's runtime dependencies. This is a
 //! fingerprint, never runtime or control authority, and reads no transcripts.
 use super::*;
-use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 const PREFIX: &str = "scoped-v1:";
@@ -11,33 +10,19 @@ pub(crate) struct RuntimeObservations {
     pids: BTreeMap<String, Vec<crate::model::PidFile>>,
     names: BTreeMap<(String, String), usize>,
     runs: BTreeMap<String, Vec<usize>>,
-    connection: Option<Connection>,
-    fallback: Option<String>,
 }
 /// Runtime dependencies captured for native publication.
 pub(crate) struct ScopedRuntimeObservations(RuntimeObservations);
 impl ScopedRuntimeObservations {
-    pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
-        self.0.scope(row)
+    pub(crate) fn scope(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        cwds: &BTreeSet<String>,
+    ) -> io::Result<String> {
+        self.0.scope(row, cwds)
     }
 }
 impl RuntimeObservations {
-    /// Configured producers/readers use the captured aggregate runtime under a
-    /// validated logical fence. They never reopen an Options-derived database.
-    pub(crate) fn bound(
-        binding: &crate::storage::QueryRuntimeBinding,
-        runtime: &str,
-    ) -> io::Result<Self> {
-        Ok(Self {
-            facts: None,
-            local: false,
-            pids: BTreeMap::new(),
-            names: BTreeMap::new(),
-            runs: BTreeMap::new(),
-            connection: None,
-            fallback: Some(binding.witness(runtime)?),
-        })
-    }
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }
@@ -45,22 +30,16 @@ impl RuntimeObservations {
         options: &Options,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Self {
-        let mut observations = Self::fresh_measured(options, measurements);
-        let started = measurements.start();
-        observations.fallback = query_runtime_generation(options).ok();
-        measurements.record("runtime_ctor_fallback", started, 1);
-        observations
+        Self::fresh_measured(options, measurements)
     }
     /// Only for a publication that captured this initial runtime successfully
     /// and independently rechecks it after deriving all scoped Query rows.
     pub(crate) fn for_publication_measured(
         options: &Options,
-        initial_runtime: &str,
+        _initial_runtime: &str,
         measurements: &mut crate::native_timing::Measurements,
     ) -> ScopedRuntimeObservations {
-        let mut observations = Self::fresh_measured(options, measurements);
-        observations.fallback = Some(initial_runtime.to_owned());
-        observations.into_scoped()
+        Self::fresh_measured(options, measurements).into_scoped()
     }
     pub(crate) fn into_scoped(self) -> ScopedRuntimeObservations {
         ScopedRuntimeObservations(self)
@@ -92,6 +71,25 @@ impl RuntimeObservations {
                 Some(facts)
             });
         measurements.record("runtime_ctor_facts", started, 1);
+        Self::from_facts_measured(options, facts, local, measurements)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn recorded(options: &Options, facts: crate::Facts) -> Self {
+        Self::from_facts_measured(
+            options,
+            Some(facts),
+            false,
+            &mut crate::native_timing::Measurements::default(),
+        )
+    }
+
+    fn from_facts_measured(
+        options: &Options,
+        facts: Option<crate::Facts>,
+        local: bool,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
         let started = measurements.start();
         let mut pids = BTreeMap::<String, Vec<_>>::new();
         let mut names = BTreeMap::new();
@@ -113,150 +111,119 @@ impl RuntimeObservations {
             }
         }
         measurements.record("runtime_ctor_indices", started, 1);
-        let started = measurements.start();
-        let connection = crate::events::store::local_reader(options).ok();
-        measurements.record("runtime_ctor_connection", started, 1);
         Self {
             facts,
             local,
             pids,
             names,
             runs,
-            connection,
-            fallback: None,
         }
     }
-    pub(crate) fn expected(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
-        let saved = row
-            .query
-            .as_ref()
-            .and_then(|query| query["runtime"].as_str());
-        if saved.is_some_and(|runtime| runtime.starts_with(PREFIX)) {
-            return self.scope(row).ok();
-        }
-        if saved == self.fallback.as_deref() {
-            return self.fallback.clone();
-        }
-        self.fallback.clone()
+    pub(crate) fn scope(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        cwds: &BTreeSet<String>,
+    ) -> io::Result<String> {
+        let parts = dependencies(row, cwds)
+            .into_iter()
+            .map(|key| {
+                let value = self.dependency(&key)?;
+                Ok((key, value))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        scope_parts(&parts)
     }
-    pub(crate) fn scope(&self, row: &crate::model::summary::CatalogRow) -> io::Result<String> {
-        let Some(facts) = &self.facts else {
-            return self
-                .fallback
-                .clone()
-                .ok_or_else(|| io::Error::other("runtime observation unavailable"));
-        };
-        let mut ids = row
-            .native_ids
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if let Some(rows) = row
-            .query
-            .as_ref()
-            .and_then(|query| query["rows"].as_object())
-        {
-            ids.extend(rows.keys().map(String::as_str));
-        }
-        let mut cwds = BTreeSet::new();
-        let Some(connection) = self.connection.as_ref() else {
-            // Without durable source metadata, publication can only bind the
-            // aggregate observation captured and rechecked by its producer.
-            return self
-                .fallback
-                .clone()
-                .ok_or_else(|| io::Error::other("runtime observation unavailable"));
-        };
-        let mut cwd = connection
-            .prepare("SELECT cwd FROM files WHERE path=?1")
-            .map_err(io::Error::other)?;
-        for source in &row.sources {
-            let value = cwd
-                .query_row([source.path.to_string_lossy()], |row| {
-                    row.get::<_, Option<String>>(0)
-                })
-                .optional()
-                .map_err(io::Error::other)?
-                .flatten();
-            if let Some(value) = value {
-                cwds.insert(value);
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn projections(&self) -> io::Result<Vec<(RuntimeDependency, String)>> {
+        let facts = self.facts.as_ref().ok_or_else(unavailable)?;
+        let mut keys = BTreeSet::from([RuntimeDependency::Common]);
+        keys.extend(facts.codex_locks.keys().chain(self.pids.keys()).chain(self.runs.keys())
+            .cloned().map(RuntimeDependency::Native));
+        keys.extend(self.names.keys().cloned().map(|(harness, id)| RuntimeDependency::Name(harness, id)));
+        keys.extend(facts.repos.keys().cloned().map(RuntimeDependency::Repo));
+        keys.into_iter().map(|key| {
+            let value = self.dependency(&key)?.ok_or_else(unavailable)?;
+            Ok((key, value))
+        }).collect()
+    }
+
+    fn dependency(&self, key: &RuntimeDependency) -> io::Result<Option<String>> {
+        let facts = self.facts.as_ref().ok_or_else(unavailable)?;
+        let value = match key {
+            RuntimeDependency::Common => serde_json::to_vec(&(
+                facts.version, &facts.hostname, &facts.home, &facts.offline_since,
+            )),
+            RuntimeDependency::Native(id) => {
+                let lock = facts.codex_locks.get(id);
+                let pids = self.pids.get(id).map(Vec::as_slice).unwrap_or_default();
+                let runs = self.runs.get(id).map(Vec::as_slice).unwrap_or_default();
+                if lock.is_none() && pids.is_empty() && runs.is_empty() {
+                    return Ok(None);
+                }
+                let process = |pid: &u32| (
+                    *pid, facts.proc_starts.get(pid), facts.runs.get(pid), facts.process_ancestors.get(pid),
+                );
+                let processes = pids.iter().map(|pid| (pid, process(&pid.pid))).collect::<Vec<_>>();
+                let runs = runs.iter().map(|index| &facts.reported_runs[*index]).collect::<Vec<_>>();
+                serde_json::to_vec(&(lock.map(process), processes, runs))
             }
-        }
-        let repos = cwds
-            .iter()
-            .map(|cwd| {
+            RuntimeDependency::Name(harness, id) => {
+                let Some(index) = self.names.get(&(harness.clone(), id.clone())) else {
+                    return Ok(None);
+                };
+                let name = &facts.native_names[*index];
+                serde_json::to_vec(&(&name.name, &name.source, &name.updated_at, &name.freshness))
+            }
+            RuntimeDependency::Repo(cwd) => {
                 let repo = if self.local {
                     Some(model::repo_of(cwd, facts.home.as_deref().map(Path::new)))
                 } else {
                     facts.repos.get(cwd).cloned()
                 };
-                (cwd, repo)
-            })
-            .collect::<Vec<_>>();
-        let locks = ids
-            .iter()
-            .filter_map(|id| facts.codex_locks.get(*id).map(|value| (*id, value)))
-            .collect::<Vec<_>>();
-        let codex_processes = locks
-            .iter()
-            .map(|(_, pid)| {
-                (
-                    *pid,
-                    facts.proc_starts.get(pid),
-                    facts.runs.get(pid),
-                    facts.process_ancestors.get(pid),
-                )
-            })
-            .collect::<Vec<_>>();
-        let names = ids
-            .iter()
-            .filter_map(|id| self.names.get(&(row.harness.clone(), (*id).to_owned())))
-            .map(|index| {
-                let name = &facts.native_names[*index];
-                (
-                    &name.native_id,
-                    &name.name,
-                    &name.source,
-                    &name.updated_at,
-                    &name.freshness,
-                )
-            })
-            .collect::<Vec<_>>();
-        let pids = ids
-            .iter()
-            .filter_map(|id| self.pids.get(*id))
-            .flatten()
-            .collect::<Vec<_>>();
-        let processes = pids
-            .iter()
-            .map(|pid| {
-                (
-                    pid,
-                    facts.proc_starts.get(&pid.pid),
-                    facts.runs.get(&pid.pid),
-                    facts.process_ancestors.get(&pid.pid),
-                )
-            })
-            .collect::<Vec<_>>();
-        let runs = ids
-            .iter()
-            .filter_map(|id| self.runs.get(*id))
-            .flatten()
-            .map(|index| &facts.reported_runs[*index])
-            .collect::<Vec<_>>();
-        let bytes = serde_json::to_vec(&(
-            facts.version,
-            &facts.hostname,
-            &facts.home,
-            &facts.offline_since,
-            repos,
-            locks,
-            codex_processes,
-            names,
-            processes,
-            runs,
-        ))
-        .map_err(io::Error::other)?;
-        Ok(format!("{PREFIX}{:x}", Sha256::digest(bytes)))
+                let Some(repo) = repo else { return Ok(None) };
+                serde_json::to_vec(&repo)
+            }
+        }.map_err(io::Error::other)?;
+        Ok(Some(format!("{:x}", Sha256::digest(value))))
     }
+}
+
+fn unavailable() -> io::Error {
+    io::Error::other("runtime dependency observation unavailable")
+}
+
+/// Point-key inputs for the shared per-session runtime recipe. Adapters own
+/// their physical reads; these values grant no Raw or runtime authority.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RuntimeDependency {
+    Common,
+    Native(String),
+    Name(String, String),
+    Repo(String),
+}
+
+pub(crate) fn dependencies(
+    row: &crate::model::summary::CatalogRow,
+    cwds: &BTreeSet<String>,
+) -> BTreeSet<RuntimeDependency> {
+    let mut ids = row.native_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if let Some(rows) = row.query.as_ref().and_then(|query| query["rows"].as_object()) {
+        ids.extend(rows.keys().map(String::as_str));
+    }
+    let mut keys = BTreeSet::from([RuntimeDependency::Common]);
+    for id in ids {
+        keys.insert(RuntimeDependency::Native(id.to_owned()));
+        keys.insert(RuntimeDependency::Name(row.harness.clone(), id.to_owned()));
+    }
+    keys.extend(cwds.iter().cloned().map(RuntimeDependency::Repo));
+    keys
+}
+
+pub(crate) fn scope_parts(parts: &[(RuntimeDependency, Option<String>)]) -> io::Result<String> {
+    if !parts.iter().any(|(key, value)| *key == RuntimeDependency::Common && value.is_some()) {
+        return Err(unavailable());
+    }
+    let bytes = serde_json::to_vec(parts).map_err(io::Error::other)?;
+    Ok(format!("{PREFIX}{:x}", Sha256::digest(bytes)))
 }

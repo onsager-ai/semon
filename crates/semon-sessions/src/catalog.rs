@@ -715,7 +715,7 @@ pub(crate) fn recorded_status(
 /// Only the row's published sources are checked; no bodies load.
 pub(crate) fn relative_status(
     options: &Options,
-    runtime: &crate::native_evidence::RuntimeObservations,
+    runtime: Option<&str>,
     recorded: Option<&dyn crate::facts::source_authority::SourceAuthority>,
     row: &CatalogRow,
 ) -> Value {
@@ -754,7 +754,7 @@ pub(crate) fn relative_status(
     }
     recorded_status(
         row,
-        runtime.expected(row).as_deref(),
+        runtime,
         true,
         facts_known,
         retired_native,
@@ -844,17 +844,6 @@ pub(crate) fn read_page_snapshot_with_search(
         None
     } else {
         transaction.runtime_generation(options).ok()
-    };
-    let runtime_binding = transaction.runtime_binding();
-    let runtime_observations = match (pinned, runtime_binding.as_ref()) {
-        (Some(_), _) => None,
-        (None, Some(binding)) => Some(crate::native_evidence::RuntimeObservations::bound(
-            binding,
-            runtime
-                .as_deref()
-                .ok_or_else(|| io::Error::other("runtime observation unavailable"))?,
-        )?),
-        (None, None) => Some(crate::native_evidence::RuntimeObservations::new(options)),
     };
     // Share the same custody capture with selected family status qualification.
     // Its existing final validation still fences the whole response.
@@ -1076,39 +1065,18 @@ pub(crate) fn read_page_snapshot_with_search(
             .first()
             .map(|row| {
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
-                    // ImmutableCatalog supplies its pinned relative inputs.
-                    if relative.query.is_some()
-                        && let Some(runtime) = runtime.as_deref()
-                    {
-                        match transaction
-                            .row_runtime_binding(relative)
-                            .and_then(|binding| {
-                                binding
-                                    .map(|binding| {
-                                        crate::native_evidence::RuntimeObservations::bound(
-                                            &binding, runtime,
-                                        )
-                                    })
-                                    .transpose()
-                            }) {
-                            Ok(Some(runtime)) => {
-                                return relative_status(
-                                    options,
-                                    &runtime,
-                                    recorded.as_deref(),
-                                    relative,
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(_) => return json!({"state":null,"observation":"unavailable"}),
-                        }
+                    let expected = runtime.as_deref().map(|runtime| {
+                        transaction.runtime_observation(options, relative, runtime)
+                    }).transpose();
+                    match expected {
+                        Ok(expected) => relative_status(
+                            options,
+                            expected.flatten().as_deref(),
+                            recorded.as_deref(),
+                            relative,
+                        ),
+                        Err(_) => json!({"state":null,"observation":"unavailable"}),
                     }
-                    runtime_observations
-                        .as_ref()
-                        .map(|runtime| {
-                            relative_status(options, runtime, recorded.as_deref(), relative)
-                        })
-                        .unwrap_or(Value::Null)
                 })
             })
             .transpose()?
@@ -1240,38 +1208,11 @@ pub(crate) fn read_page_snapshot_with_search(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
-        let row_runtime = if row.query.is_some() {
-            runtime
-                .as_deref()
-                .map(
-                    |runtime| -> io::Result<Option<crate::native_evidence::RuntimeObservations>> {
-                        transaction
-                            .row_runtime_binding(&row)?
-                            .map(|binding| {
-                                crate::native_evidence::RuntimeObservations::bound(
-                                    &binding, runtime,
-                                )
-                            })
-                            .transpose()
-                    },
-                )
-                .transpose()?
-                .flatten()
-        } else {
-            None
-        };
         let runtime = pinned
-            .and_then(|saved| saved.runtime.clone())
-            .or_else(|| {
-                row_runtime
-                    .as_ref()
-                    .and_then(|runtime| runtime.expected(&row))
-            })
-            .or_else(|| {
-                runtime_observations
-                    .as_ref()
-                    .and_then(|runtime| runtime.expected(&row))
-            });
+            .and_then(|saved| saved.runtime_for(&row))
+            .or_else(|| runtime.as_deref().and_then(|runtime| {
+                transaction.runtime_observation(options, &row, runtime).ok().flatten()
+            }));
         let runtime_pending = current
             && facts_known
             && !retired_native

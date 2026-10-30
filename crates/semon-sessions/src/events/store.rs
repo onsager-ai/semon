@@ -710,7 +710,7 @@ pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    runtime: &str,
+    _runtime: &str,
 ) -> io::Result<Option<String>> {
     let config = options
         .source
@@ -721,8 +721,7 @@ pub(crate) fn audit_catalog_sources(
         .runtime_binding()
         .map_err(io::Error::other)?
         .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
-    let observations =
-        crate::native_evidence::RuntimeObservations::bound(&runtime_binding, runtime)?;
+    let observations = crate::native_evidence::RuntimeObservations::new(options);
     let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
     let db = journal.connection().map_err(io::Error::other)?;
     let machine = crate::facts::MachineFacts::of(options);
@@ -815,7 +814,10 @@ pub(crate) fn audit_catalog_sources(
         for (path, metadata) in paths {
             let row: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(io::Error::other)?;
-            let expected = observations.expected(&row);
+            let expected = crate::storage::sqlite::catalog::runtime_source_cwds(&tx, &row.sources)
+                .and_then(|cwds| observations.scope(&row, &cwds))
+                .and_then(|scoped| runtime_binding.witness(&scoped))
+                .ok();
             let saved_runtime = row
                 .query
                 .as_ref()

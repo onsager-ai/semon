@@ -58,6 +58,10 @@ fn key(stamp: &[u8], relative: &str) -> Vec<u8> {
     ]
     .concat()
 }
+fn runtime_key(stamp: &[u8], dependency: &crate::native_evidence::runtime::RuntimeDependency) -> Result<Vec<u8>, StorageError> {
+    let key = serde_json::to_vec(dependency).map_err(|_| StorageError::Unavailable)?;
+    Ok([b"facts-current-runtime:".as_slice(), stamp, b"\0", &key].concat())
+}
 fn selected(tx: &mut PgTxn<'_>, head: &Head, relative: &str) -> Result<Option<bool>, StorageError> {
     if head.facts_version != FACTS_VERSION || !head.selection_known {
         return Ok(None);
@@ -101,6 +105,8 @@ pub(super) fn prepare(
     let stamp = serde_json::to_vec(&source).map_err(|_| StorageError::Unavailable)?;
     let runtime = crate::native_evidence::recorded_runtime_fingerprint(options, &facts)
         .map_err(|_| StorageError::Unavailable)?;
+    let runtime_parts = crate::native_evidence::RuntimeObservations::recorded(options, facts.clone())
+        .projections().map_err(|_| StorageError::Unavailable)?;
     if crate::native_evidence::recorded_activity_generation(options)
         .map_err(|_| StorageError::Unavailable)?
         != activity
@@ -159,6 +165,27 @@ pub(super) fn prepare(
             Ok(())
         })?;
     }
+    // Runtime dependencies share this Facts head and its independent PID-file
+    // activity stamp. Readers fetch only the requested native/name/repo keys.
+    let runtime_stamp = serde_json::to_vec(&(&source, &activity)).map_err(|_| StorageError::Unavailable)?;
+    let runtime_parts = runtime_parts.into_iter().map(|(dependency, value)| {
+        Ok((runtime_key(&runtime_stamp, &dependency)?, value))
+    }).collect::<Result<Vec<_>, StorageError>>()?;
+    for page in runtime_parts.chunks(64) {
+        let encoded = serde_json::to_vec(page).map_err(|_| StorageError::Unavailable)?;
+        if encoded.len() > 1024 * 1024 { return Err(StorageError::Busy); }
+        let completed = [b"facts-current-runtime-page:".as_slice(), &Sha256::digest(&encoded)].concat();
+        pool.transaction(namespace, TxnKind::Write, control, |tx| {
+            let current = model_cache::binding(tx)?;
+            if current.admission != binding.admission || current.stream_epoch != binding.stream_epoch
+                || identity(path)? != source { return Err(StorageError::Conflict); }
+            if native_keys::read_meta(tx, &completed, MAX)?.as_ref() == Some(&runtime_stamp) { return Ok(()); }
+            for (key, value) in page {
+                native_keys::put_meta(tx, key, value.as_bytes())?;
+            }
+            native_keys::put_meta(tx, &completed, &runtime_stamp)
+        })?;
+    }
     pool.transaction(namespace, TxnKind::Write, control, |tx| {
         tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&namespace.as_str().as_bytes()]).map_err(super::sqlstate::error)?;
         if load(tx)? != prior || identity(path)? != source { return Err(StorageError::Conflict); }
@@ -207,6 +234,33 @@ pub(in crate::storage::postgres) fn runtime_in_snapshot(
         return Err(StorageError::ScopeChanged);
     }
     Ok(head.runtime)
+}
+
+pub(super) fn runtime_scope(
+    tx: &mut PgTxn<'_>,
+    options: &crate::Options,
+    row: &crate::model::summary::CatalogRow,
+    runtime: &str,
+    cwds: &std::collections::BTreeSet<String>,
+) -> Result<String, StorageError> {
+    let head = load(tx)?.ok_or(StorageError::ScopeChanged)?;
+    if options.facts.as_ref() != Some(&head.path) || head.runtime != runtime {
+        return Err(StorageError::ScopeChanged);
+    }
+    let stamp = serde_json::to_vec(&(&head.source, &head.activity)).map_err(|_| StorageError::Unavailable)?;
+    let mut parts = Vec::new();
+    for dependency in crate::native_evidence::runtime::dependencies(row, cwds) {
+        let value = native_keys::read_meta(tx, &runtime_key(&stamp, &dependency)?, 64)?
+            .map(|bytes| {
+                let value = String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged)?;
+                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                Ok(value)
+            }).transpose()?;
+        parts.push((dependency, value));
+    }
+    crate::native_evidence::runtime::scope_parts(&parts).map_err(|_| StorageError::ScopeChanged)
 }
 pub(in crate::storage::postgres) fn in_snapshot<'a, 'b, 'tx>(
     snapshot: &'a super::catalog_effects::snapshot::Snapshot<'b, 'tx>,

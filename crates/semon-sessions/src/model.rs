@@ -7733,7 +7733,7 @@ pub(crate) fn prepare_semantic_batch(
     }
     if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
         let binding = cache.query_runtime_binding()?;
-        prepared.relationships.presentation = Some(
+        let mut presentation =
             crate::storage::selected::PresentationObservations::capture_with_authority(
                 options,
                 binding.as_ref(),
@@ -7749,8 +7749,20 @@ pub(crate) fn prepare_semantic_batch(
                     .as_ref()
                     .map(|path| cache.facts_authority(path))
                     .transpose()?,
-            ),
-        );
+            );
+        let observations = crate::native_evidence::RuntimeObservations::new(options);
+        for row in prepared.rows.iter().chain(batch.context.endpoints.values().map(|endpoint| &endpoint.row)).take(128) {
+            let observed = cache.runtime_source_cwds(&row.sources)
+                .and_then(|cwds| observations.scope(row, &cwds))
+                .and_then(|scoped| match &binding {
+                    Some(binding) => binding.witness(&scoped),
+                    None => Ok(scoped),
+                });
+            if let Ok(runtime) = observed {
+                presentation.capture_runtime(row, runtime)?;
+            }
+        }
+        prepared.relationships.presentation = Some(presentation);
     }
     #[cfg(feature = "postgres")]
     prepared.retain_withdrawal_fence(options)?;
@@ -8374,24 +8386,16 @@ fn build_sources_inner(
         1,
         crate::native_evidence::query_runtime_generation(options)?
     );
+    let runtime_binding =
+        archive_read_diagnostic!("query_runtime_binding", cache.query_runtime_binding())?;
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if let Some(binding) =
-            archive_read_diagnostic!("query_runtime_binding", cache.query_runtime_binding())?
-        {
-            crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
-                .into_scoped()
-        } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
-            crate::native_evidence::RuntimeObservations::for_publication_measured(
-                options,
-                &query_runtime,
-                &mut measurements,
-            )
-        } else {
-            crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
-                .into_scoped()
-        }
+        crate::native_evidence::RuntimeObservations::for_publication_measured(
+            options,
+            &query_runtime,
+            &mut measurements,
+        )
     );
     let catalog_base = measured!("catalog_base", 1, cache.session_catalog_generation());
     #[cfg(feature = "test-hooks")]
@@ -8816,6 +8820,8 @@ fn build_sources_inner(
             (h.out.id.clone(),serde_json::json!({"brief_session":owner("brief"),"result_session":owner("result")}))
         }).collect();
         measurements.record("projection_context", started, rows.len());
+        let runtime_cwds = builder.files.iter().map(|file| (&file.path, &file.summary.cwd))
+            .collect::<BTreeMap<_, _>>();
         for row in rows.iter_mut() {
             let selected_turns = turns_by_session
                 .get(row.key.as_str())
@@ -8897,7 +8903,16 @@ fn build_sources_inner(
                 let runtime = measured!(
                     "projection_runtime_scope",
                     1,
-                    runtime_observations.scope(row)?
+                    {
+                        let cwds = row.sources.iter().filter_map(|source| {
+                            runtime_cwds.get(&source.path).and_then(|cwd| cwd.as_ref().cloned())
+                        }).collect::<BTreeSet<_>>();
+                        let scoped = runtime_observations.scope(row, &cwds)?;
+                        match &runtime_binding {
+                            Some(binding) => binding.witness(&scoped)?,
+                            None => scoped,
+                        }
+                    }
                 );
                 row.query.as_mut().expect("query captured")["runtime"] =
                     serde_json::Value::String(runtime);
