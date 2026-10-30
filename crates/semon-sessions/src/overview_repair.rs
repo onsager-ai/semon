@@ -1057,9 +1057,7 @@ pub fn repair_session_overview_with_control(
     let trace_store = if repaired.iter().any(|row| row.trace.is_some()) {
         Some(
             crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner)
-                .map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                })
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
                 .map_err(failure)?,
         )
     } else {

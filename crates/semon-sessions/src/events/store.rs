@@ -3230,14 +3230,12 @@ impl SqliteStore {
                         ));
                     }
                     let trace_store = if rows.iter().any(|row| row.trace.is_some()) {
-                        let store = crate::storage::sqlite::trace::TraceWriter::owned(
-                            &transaction,
-                            owner,
-                        )
-                        .map_err(|error| {
-                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                        })
-                        .map_err(failure)?;
+                        let store =
+                            crate::storage::sqlite::trace::TraceWriter::owned(&transaction, owner)
+                                .map_err(|error| {
+                                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                                })
+                                .map_err(failure)?;
                         Some(store)
                     } else {
                         None
