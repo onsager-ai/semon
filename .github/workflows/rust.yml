@@ -60,6 +60,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
+      - name: Cold Catalog demand and selected-upgrade priority
+        run: |
+          cargo test -p semon-sessions --locked cold_catalog_search_ -- --nocapture
+          cargo test -p semon-sessions --locked selected_projection_upgrade_precedes_draining_and_preserves_revision -- --nocapture
+
       # Diagnostic only: leave both normal isolated and full-parallel gates
       # below unchanged, and retain counters even if this diagnostic fails.
       - name: Cold Index writer diagnostic (not qualification)
