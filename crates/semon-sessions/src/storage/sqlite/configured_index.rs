@@ -167,6 +167,13 @@ impl IndexStore for ConfiguredIndex {
             .runtime_binding()
             .map(Some)
     }
+    fn runtime_source_cwds(
+        &self,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        self.semantic.as_ref().ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?
+            .runtime_source_cwds(sources)
+    }
     fn prepare_file(
         &mut self,
         path: &str,

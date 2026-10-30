@@ -12,6 +12,23 @@ fn unavailable<T>() -> io::Result<T> {
 }
 
 impl CatalogSnapshot for Snapshot<'_, '_> {
+    fn runtime_observation(
+        &self,
+        options: &crate::Options,
+        row: &CatalogRow,
+        runtime: &str,
+    ) -> io::Result<Option<String>> {
+        let binding = self.row_runtime_binding(row)?;
+        let mut tx = self.tx.lock().map_err(|_| failed(StorageError::Unavailable))?;
+        let cwds = super::super::super::native_reader::runtime_source_cwds(&mut tx, &row.sources).map_err(failed)?;
+        let scoped = if options.facts.is_some() {
+            super::super::super::current_sources::runtime_scope(&mut tx, options, row, runtime, &cwds).map_err(failed)?
+        } else {
+            self.runtime_local.get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                .scope(row, &cwds)?
+        };
+        binding.map(|binding| binding.witness(&scoped)).transpose()
+    }
     fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
         super::super::super::current_sources::runtime_in_snapshot(self, options).map_err(failed)
     }

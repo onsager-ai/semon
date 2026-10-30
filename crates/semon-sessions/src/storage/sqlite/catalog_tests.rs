@@ -6931,6 +6931,25 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
 }
 
 #[test]
+fn scoped_runtime_metadata_refuses_an_uncommitted_source_ledger() {
+    let fixture = Fixture::new();
+    fixture.source("scoped-runtime-ledger");
+    fixture.publish_existing();
+    let db = fixture.db();
+    let metadata: String = db.query_row(
+        "SELECT metadata FROM session_catalog WHERE session_key='scoped-runtime-ledger'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let mut row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(
+        crate::storage::sqlite::catalog::runtime_source_cwds(&db, &row.sources).unwrap(),
+        std::collections::BTreeSet::from(["/synthetic/project".to_owned()]),
+    );
+    row.sources[0].prefix_sha256[0] ^= 1;
+    assert!(crate::storage::sqlite::catalog::runtime_source_cwds(&db, &row.sources).is_err());
+}
+
+#[test]
 fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalog() {
     let id = "12345678-1234-1234-1234-123456789012";
     for unrelated in [0, 256, 2048] {
@@ -6978,7 +6997,7 @@ fn runtime_changes_publish_only_indexed_dependencies_and_heartbeat_reuses_catalo
             let row: Value = serde_json::from_str(text).unwrap();
             row["query"]["runtime"]
                 .as_str()
-                .is_some_and(|runtime| runtime.starts_with("scoped-v1:"))
+                .is_some_and(|runtime| runtime.starts_with("source-runtime-v1:"))
         }));
         for phase in 0..3 {
             match phase {

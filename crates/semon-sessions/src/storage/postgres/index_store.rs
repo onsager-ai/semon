@@ -980,6 +980,13 @@ impl IndexStore for NativeIndex {
             )
             .map_err(err)
     }
+    fn runtime_source_cwds(
+        &self,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control,
+            |tx| super::native_reader::runtime_source_cwds(tx, sources)).map_err(err)
+    }
     fn query_runtime_binding(
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {

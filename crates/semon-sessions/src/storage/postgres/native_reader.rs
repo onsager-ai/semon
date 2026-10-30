@@ -247,6 +247,32 @@ pub(super) fn ledger(
     found.first().map(decode::ledger).transpose().map_err(bad)
 }
 
+pub(super) fn runtime_source_cwds(
+    tx: &mut PgTxn<'_>,
+    sources: &[crate::model::summary::CatalogSource],
+) -> Result<std::collections::BTreeSet<String>, StorageError> {
+    if sources.is_empty() || sources.len() > 64 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut cwds = std::collections::BTreeSet::new();
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        if ledger(tx, &path)?.as_ref().map(|(_, ledger)| ledger)
+            != Some(&crate::source_carrier::ledger(source))
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let values = rows(tx, "files", "cwd",
+            "namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)",
+            &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()])?;
+        let value = values.first().ok_or(StorageError::ScopeChanged)?;
+        if let Some(cwd) = value.get::<Option<String>>(0).map_err(bad)? {
+            cwds.insert(cwd);
+        }
+    }
+    Ok(cwds)
+}
+
 pub(super) fn file(
     tx: &mut PgTxn<'_>,
     path: &str,
