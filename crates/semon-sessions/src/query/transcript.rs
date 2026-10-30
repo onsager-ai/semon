@@ -742,6 +742,13 @@ fn read_inner(
     if projection_generation.as_deref() != Some(&catalog_generation) {
         return Ok(None);
     }
+    let current: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current')",
+            [key],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
     let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
     let text = match history.as_ref() {
         Some(text) => Some(text.clone()),
@@ -791,18 +798,23 @@ fn read_inner(
     let (runtime, row_runtime) = {
         let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)
             .map_err(unavailable)?;
-        let runtime = snapshot.runtime_generation(options).map_err(unavailable)?;
-        let observed = snapshot
-            .runtime_observation(options, &row, &runtime)
-            .map_err(unavailable)?;
-        (runtime, observed)
+        if current {
+            let runtime = snapshot.runtime_generation(options).map_err(unavailable)?;
+            let observed = snapshot
+                .runtime_observation(options, &row, &runtime)
+                .map_err(unavailable)?;
+            (Some(runtime), observed)
+        } else {
+            // Retained custody still requires the original publication binding,
+            // even when its consumed file ledger has been retired.
+            snapshot.row_runtime_binding(&row).map_err(unavailable)?;
+            (None, None)
+        }
     };
-    // Retention preserves byte custody, not a live process observation. Its
-    // pending tools and backgrounds need the same runtime qualification.
     if !crate::model::summary::query_observation_matches(
         saved,
         &row.sources,
-        true,
+        current,
         row_runtime.as_deref(),
     )
     .map_err(unavailable)?
@@ -1008,8 +1020,9 @@ fn read_inner(
             headers,
             &slot_generation,
         )?;
-        if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
-            != runtime
+        if let Some(runtime) = &runtime
+            && crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
+                != *runtime
         {
             return Err(unavailable(
                 "Native session observation changed during this read",
@@ -1139,8 +1152,9 @@ fn read_inner(
             return Err(unavailable("Native query relationship publication changed"));
         }
         snapshot.commit().map_err(unavailable)?;
-        if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
-            != runtime
+        if let Some(runtime) = &runtime
+            && crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
+                != *runtime
         {
             return Err(unavailable(
                 "Native search observation changed during this read",
@@ -1182,7 +1196,9 @@ fn read_inner(
         &slot_generation,
     )?;
     snapshot.commit().map_err(unavailable)?;
-    if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != runtime {
+    if let Some(runtime) = &runtime
+        && crate::native_evidence::query_runtime_generation(options).map_err(unavailable)? != *runtime
+    {
         return Err(unavailable(
             "Native transcript observation changed during this read",
         ));

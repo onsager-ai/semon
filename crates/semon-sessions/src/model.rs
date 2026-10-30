@@ -7750,7 +7750,6 @@ pub(crate) fn prepare_semantic_batch(
                     .map(|path| cache.facts_authority(path))
                     .transpose()?,
             );
-        let observations = crate::native_evidence::RuntimeObservations::new(options);
         for row in prepared
             .rows
             .iter()
@@ -7765,11 +7764,7 @@ pub(crate) fn prepare_semantic_batch(
         {
             let observed = cache
                 .runtime_source_cwds(&row.sources)
-                .and_then(|cwds| observations.scope(row, &cwds))
-                .and_then(|scoped| match &binding {
-                    Some(binding) => binding.witness(&scoped),
-                    None => Ok(scoped),
-                });
+                .and_then(|cwds| presentation.runtime_observation(row, &cwds));
             if let Ok(runtime) = observed {
                 presentation.capture_runtime(row, runtime)?;
             }

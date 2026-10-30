@@ -1077,7 +1077,9 @@ pub(super) fn capture_presentations(
                 .ok_or(StorageError::Unavailable)?;
             let context =
                 CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative| {
-                    observations.capture_relative_status(relative)
+                    observations.capture_relative_status(relative, || {
+                        super::catalog::runtime_source_cwds(tx, &relative.sources)
+                    })
                 })
                 .map_err(|_| StorageError::Unavailable)?;
             Some(PresentationWitness {
