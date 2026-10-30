@@ -356,7 +356,8 @@ pub(crate) struct PresentationWitness {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
     pub(crate) runtime: Option<String>,
-    runtime_rows: BTreeMap<String, BTreeMap<String, String>>,
+    runtime_rows: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
+    runtime_cwds: BTreeMap<String, BTreeSet<String>>,
     pub(crate) facts_known: bool,
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
@@ -476,6 +477,7 @@ impl PresentationObservations {
         Self {
             runtime,
             runtime_rows: BTreeMap::new(),
+            runtime_cwds: BTreeMap::new(),
             facts_known,
             selection_known,
             machine_label,
@@ -497,24 +499,48 @@ impl PresentationObservations {
     pub(crate) fn capture_runtime(
         &mut self,
         row: &crate::model::summary::CatalogRow,
+        cwds: &BTreeSet<String>,
         runtime: String,
     ) -> io::Result<()> {
         let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
-        // Initial capture has at most 128 cohorts; one selected family adds
-        // at most its owner, 32 ancestors and 99 descendants.
-        let count: usize = self.runtime_rows.values().map(BTreeMap::len).sum();
-        if count >= 260
-            && !self
-                .runtime_rows
-                .get(&row.key)
-                .is_some_and(|rows| rows.contains_key(&source))
+        let dependency = crate::native_evidence::runtime::dependency_identity(row, cwds)?;
+        if self
+            .runtime_cwds
+            .get(&source)
+            .is_some_and(|saved| saved != cwds)
         {
+            return Err(io::Error::other("presentation runtime source CWDs changed"));
+        }
+        if let Some(saved) = self
+            .runtime_rows
+            .get(&row.key)
+            .and_then(|rows| rows.get(&source))
+            .and_then(|rows| rows.get(&dependency))
+        {
+            return if saved == &runtime {
+                Ok(())
+            } else {
+                Err(io::Error::other("presentation runtime observation conflicts"))
+            };
+        }
+        // Bound exact dependency observations, including distinct final rows
+        // and family endpoints sharing the same owner and source cohort.
+        let count: usize = self
+            .runtime_rows
+            .values()
+            .flat_map(BTreeMap::values)
+            .map(BTreeMap::len)
+            .sum();
+        if count >= 260 {
             return Err(io::Error::other("presentation runtime budget exceeded"));
         }
+        self.runtime_cwds.insert(source.clone(), cwds.clone());
         self.runtime_rows
             .entry(row.key.clone())
             .or_default()
-            .insert(source, runtime);
+            .entry(source)
+            .or_default()
+            .insert(dependency, runtime);
         Ok(())
     }
     pub(crate) fn runtime_observation(
@@ -539,7 +565,13 @@ impl PresentationObservations {
     pub(crate) fn runtime_for(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
         self.runtime.as_ref()?;
         let source = crate::retention::source_generation(&row.sources).ok()?;
-        self.runtime_rows.get(&row.key)?.get(&source).cloned()
+        let cwds = self.runtime_cwds.get(&source)?;
+        let dependency = crate::native_evidence::runtime::dependency_identity(row, cwds).ok()?;
+        self.runtime_rows
+            .get(&row.key)?
+            .get(&source)?
+            .get(&dependency)
+            .cloned()
     }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
         Self::source_key(source)
@@ -587,7 +619,11 @@ impl PresentationObservations {
                 recorded.validate()?;
             }
             let runtime = needs_runtime
-                .then(|| self.runtime_observation(row, &cwds()?))
+                .then(|| {
+                    let cwds = cwds()?;
+                    self.runtime_observation(row, &cwds)
+                        .map(|runtime| (runtime, cwds))
+                })
                 .transpose()?;
             let mut sources = Vec::new();
             for source in row.sources.iter().take(64) {
@@ -622,8 +658,8 @@ impl PresentationObservations {
             if let Some(recorded) = &recorded {
                 recorded.validate()?;
             }
-            if let Some(runtime) = runtime {
-                self.capture_runtime(row, runtime)?;
+            if let Some((runtime, cwds)) = runtime {
+                self.capture_runtime(row, &cwds, runtime)?;
             }
             self.sources.extend(sources);
             Ok(())
