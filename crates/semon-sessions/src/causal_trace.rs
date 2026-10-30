@@ -543,8 +543,8 @@ pub(crate) fn session_causal_trace_with_gate(
         return reply;
     }
     let read = || -> Result<Value, u16> {
-        let binding = crate::storage::local_navigation_binding(options, source_key)
-            .map_err(|_| 503u16)?;
+        let binding =
+            crate::storage::local_navigation_binding(options, source_key).map_err(|_| 503u16)?;
         let mut db = binding.connection().map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
@@ -838,13 +838,10 @@ pub(crate) fn session_causal_trace_with_gate(
         }
         // A changed runtime cannot advertise a current observation from the
         // earlier capture. Custody drift rejects the response, as in Catalog.
-        if runtime_generation.as_ref().is_none_or(|before| {
-            snapshot
-                .runtime_generation(options)
-                .ok()
-                .as_ref()
-                != Some(before)
-        }) {
+        if runtime_generation
+            .as_ref()
+            .is_none_or(|before| snapshot.runtime_generation(options).ok().as_ref() != Some(before))
+        {
             for summary in participant_summaries.values_mut() {
                 if summary.observed_extent.status["observation"] == "current" {
                     summary.observed_extent.status =
