@@ -5770,6 +5770,55 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_record_refuses_inexact_claims_without_effects() {
+        let f = semantic_fixture("claim-cas-a");
+        let mut store = owned_semantic(&f.config);
+        let paths = vec![f.raw.to_string_lossy().into_owned()];
+        assert_eq!(
+            store.begin_semantic_stage(&paths, "runtime-a", true).unwrap(),
+            Outcome::Written
+        );
+        let batch = store.semantic_batch(64).unwrap().unwrap();
+        let mut prepared = semantic_prepared(&mut *store, &f, &batch);
+        let expected = prepared.claims.clone();
+        let revision = expected[0].1.expect("fixture source has a claim");
+        let before = f.state();
+
+        prepared.claims[0].1 = Some(revision + 1);
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Conflict,
+            "a changed revision is not the staged claim"
+        );
+        assert_eq!(f.state(), before, "changed claim has no stage effects");
+
+        prepared.claims.clone_from(&expected);
+        prepared.claims.clear();
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Conflict,
+            "a missing path claim is not complete coverage"
+        );
+        assert_eq!(f.state(), before, "missing claim has no stage effects");
+
+        prepared.claims.clone_from(&expected);
+        prepared.claims.push(expected[0].clone());
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Conflict,
+            "duplicate claims do not replace exact path coverage"
+        );
+        assert_eq!(f.state(), before, "duplicate claim has no stage effects");
+
+        prepared.claims = expected;
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written,
+            "the unchanged exact claim still records"
+        );
+    }
+
+    #[test]
     fn configured_semantic_namespace_factories_keep_rollback_and_restart_isolated() {
         let a = semantic_fixture("source-a");
         let b = semantic_fixture("source-b");
@@ -9509,7 +9558,7 @@ mod tests {
                 let (batch, model) = claude_ready(&mut cache, options, &inputs);
                 let mut ordinary =
                     EventCache::open_scoped(&options.cache, &options.source).unwrap();
-                let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+                let (reference, _) = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let before = shared_state(&f);
                 for (name, count) in [("worker", copies), ("absent", 0)] {
                     let selector = Selector::ClaudeName { name: name.into() };
@@ -9995,7 +10044,7 @@ mod tests {
             let (fresh, fresh_model) = claude_ready(&mut cache, options, &inputs);
             assert_ne!(fresh.epoch, old.epoch);
             let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let (reference, _) = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 1);
             assert_eq!(
@@ -10164,7 +10213,7 @@ mod tests {
             );
             assert_ne!(fresh.epoch, old.epoch);
             let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let (reference, _) = ordinary_claude_ready(&mut ordinary, options, &inputs);
             let actual = cache.semantic_select(fresh.epoch, &selector).unwrap();
             assert_eq!(actual.count, 2, "ambiguity is bounded to two candidates");
             assert_eq!(
@@ -10366,7 +10415,8 @@ mod tests {
             cache: &mut EventCache,
             options: &crate::Options,
             inputs: &[crate::Input],
-        ) -> Batch {
+        ) -> (Batch, bool) {
+            let mut saw_order_mismatch = false;
             assert_eq!(
                 cache.observation_namespace,
                 options.source.namespace().unwrap().as_str()
@@ -10409,43 +10459,41 @@ mod tests {
                 selected.sort_by_key(|input| input.full_path(options));
                 assert!(selected.len() <= 64);
                 assert_eq!(selected.len(), batch.paths.len());
+                let selected_paths = selected
+                    .iter()
+                    .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
                 assert_eq!(
-                    selected
-                        .iter()
-                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
-                        .collect::<std::collections::BTreeSet<_>>(),
-                    batch.paths.iter().cloned().collect(),
+                    selected_paths.iter().cloned().collect::<BTreeSet<_>>(),
+                    batch.paths.iter().cloned().collect::<BTreeSet<_>>(),
                     "ordinary semantic preparation uses exactly the staged batch paths"
                 );
-                let prepared = match batch.phase {
-                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
-                        options,
-                        cache,
-                        &selected,
-                        1_790_000_000_000,
-                    ),
-                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
-                        options,
-                        cache,
-                        &selected,
-                        &batch.context,
-                        1_790_000_000_000,
-                    ),
-                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
-                        options,
-                        cache,
-                        &selected,
-                        &batch.context,
-                        batch.phase == Phase::Relations,
-                        1_790_000_000_000,
-                    ),
-                }
-                .unwrap();
+                saw_order_mismatch |= selected_paths != batch.paths;
                 if batch.phase == Phase::Publication {
-                    return batch;
+                    return (batch, saw_order_mismatch);
                 }
+                let prepared = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
                 assert_eq!(
-                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                    prepared
+                        .prepared()
+                        .claims
+                        .iter()
+                        .map(|(path, _)| path.clone())
+                        .collect::<Vec<_>>(),
+                    batch.paths,
+                    "the typed producer keeps exact claims in staged path order"
+                );
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, prepared.prepared())
+                        .unwrap(),
                     Outcome::Written
                 );
             }
@@ -10566,7 +10614,14 @@ mod tests {
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
                 let mut ordinary =
                     EventCache::open_scoped(&options.cache, &options.source).unwrap();
-                let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+                let (reference, saw_order_mismatch) =
+                    ordinary_claude_ready(&mut ordinary, options, &inputs);
+                if copies > 1 {
+                    assert!(
+                        saw_order_mismatch,
+                        "two copied source paths must exercise input order differing from batch order"
+                    );
+                }
                 let ordinary_db =
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 let actual = projection_rows(&f.db(), Some("source-a"));
@@ -10777,7 +10832,12 @@ mod tests {
             let mut admitted = open(&f.config);
             let (batch, model) = claude_ready(&mut admitted, options, &inputs);
             let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+            let (reference, saw_order_mismatch) =
+                ordinary_claude_ready(&mut ordinary, options, &inputs);
+            assert!(
+                saw_order_mismatch,
+                "the copied-event fixture must exercise input order differing from batch order"
+            );
             let db = f.db();
             let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
             assert_eq!(
@@ -10849,7 +10909,7 @@ mod tests {
                 }
                 let mut ordinary =
                     EventCache::open_scoped(&options.cache, &options.source).unwrap();
-                ordinary_claude_ready(&mut ordinary, options, &inputs);
+                let _ = ordinary_claude_ready(&mut ordinary, options, &inputs);
                 let reference = Connection::open(options.cache.with_extension("sqlite3")).unwrap();
                 assert_eq!(
                     projection_rows(&db, Some("source-a")),
