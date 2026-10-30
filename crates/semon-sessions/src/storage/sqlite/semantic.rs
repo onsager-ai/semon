@@ -2842,7 +2842,24 @@ impl Stage {
         let claims = super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)?;
         if claims != prepared.claims {
             #[cfg(test)]
-            eprintln!("semantic_record_conflict: source_claims");
+            {
+                use sha2::{Digest, Sha256};
+
+                let describe = |claims: &[(String, Option<i64>)]| {
+                    claims
+                        .iter()
+                        .map(|(path, revision)| {
+                            (format!("{:x}", Sha256::digest(path.as_bytes())), *revision)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                eprintln!(
+                    "semantic_record_conflict: source_claims phase={:?} live={:?} prepared={:?}",
+                    batch.phase,
+                    describe(&claims),
+                    describe(&prepared.claims)
+                );
+            }
             return Ok(Outcome::Conflict);
         }
         if batch.phase == Phase::Publication {
