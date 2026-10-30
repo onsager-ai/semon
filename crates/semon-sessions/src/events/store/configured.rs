@@ -653,6 +653,30 @@ impl NativeOwnership {
         crate::storage::sqlite::semantic::validate_owners(db)?;
         validate_copied_usage(db).map_err(failed)?;
         semantic_stage::validate_support(db).map_err(failed)?;
+        // These guards are added with the admitted writer profile rather than
+        // the authored base DDL. Qualify their static presence on schema-cookie
+        // misses, after prepare_owned has created the operation table.
+        let owner_ready: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='storage_event_operations')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        if owner_ready {
+            for table in TABLES.iter().copied().chain([
+                "storage_event_tables",
+                "storage_event_operations",
+                "session_catalog_invalidations",
+                "catalog_backfill_sources",
+                "pricing_recompute_pending",
+            ]) {
+                let guards: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN('storage_owned_guard_'||?1||'_INSERT','storage_owned_guard_'||?1||'_UPDATE','storage_owned_guard_'||?1||'_DELETE')", [table], |row| row.get(0)).map_err(failed)?;
+                if guards != 3 {
+                    return Err(StorageError::NamespaceUpgradePending);
+                }
+            }
+        }
         // Match the existing copied-usage/support layout caches: never retain
         // an uncommitted cookie, which rollback could reuse for different DDL.
         if db.is_autocommit() {
@@ -679,33 +703,22 @@ impl NativeOwnership {
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let count: i64 = db
+        let (count_matches, all_owned): (bool, bool) = db
             .query_row(
-                "SELECT count(*) FROM storage_event_tables WHERE namespace=?1 AND qualification=0",
-                [self.config.namespace.as_str()],
-                |r| r.get(0),
+                "WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))",
+                rusqlite::params_from_iter(
+                    std::iter::once(self.config.namespace.as_str())
+                        .chain(TABLES.iter().copied())
+                        .chain(["pricing_recompute_pending"]),
+                ),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(failed)?;
-        if count != (TABLES.len() + 1) as i64 {
+        if !count_matches {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        for table in TABLES.iter().copied().chain(["pricing_recompute_pending"]) {
-            let owned: bool=db.query_row("SELECT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=?1 AND table_name=?2 AND qualification=0)",params![self.config.namespace.as_str(),table],|r|r.get(0)).map_err(failed)?;
-            if !owned {
-                return Err(StorageError::ScopeChanged);
-            }
-        }
-        for table in TABLES.iter().copied().chain([
-            "storage_event_tables",
-            "storage_event_operations",
-            "session_catalog_invalidations",
-            "catalog_backfill_sources",
-            "pricing_recompute_pending",
-        ]) {
-            let guards: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN('storage_owned_guard_'||?1||'_INSERT','storage_owned_guard_'||?1||'_UPDATE','storage_owned_guard_'||?1||'_DELETE')", [table], |r| r.get(0)).map_err(failed)?;
-            if guards != 3 {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
+        if !all_owned {
+            return Err(StorageError::ScopeChanged);
         }
         Ok(())
     }
@@ -732,21 +745,9 @@ impl NativeOwnership {
         if !current_contract(db).map_err(failed)? {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        for table in TABLES
-            .iter()
-            .copied()
-            .chain(semantic_stage::STAGE_TABLES.iter().copied())
-            .chain([
-                "session_catalog_invalidations",
-                "catalog_backfill_sources",
-                "pricing_recompute_pending",
-            ])
-        {
-            let scoped: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1,'main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [table], |r| r.get(0)).map_err(failed)?;
-            if !scoped {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-        }
+        // validate_physical checks the complete authored table DDL on a
+        // committed schema-cookie miss. Mutable admission, epoch, contract and
+        // profile rows remain transaction-local in validate_ready.
         Ok(())
     }
 
@@ -5980,15 +5981,83 @@ mod tests {
         // physical validator: releasing one snapshot must permit the next,
         // and a cached layout must never cache mutable writer qualification.
         let f = Fixture::current("writer-cache");
-        let writer = Writer::owned(NativeOwnership::admit(&f.config).unwrap()).unwrap();
+        let mut writer = Writer::owned(NativeOwnership::admit(&f.config).unwrap()).unwrap();
         let path = f.raw.to_string_lossy();
         assert!(writer.ledger(&path).unwrap().is_none());
         assert!(writer.ledger(&path).unwrap().is_none());
         assert!(writer.connection.is_autocommit());
         writer.connection.execute("UPDATE storage_event_tables SET qualification=1 WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
-        assert!(writer.ledger(&path).is_err());
+        assert!(matches!(
+            writer.ledger(&path),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
         writer.connection.execute("UPDATE storage_event_tables SET qualification=0 WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
         assert!(writer.ledger(&path).unwrap().is_none());
+        writer.connection.execute("UPDATE storage_event_tables SET table_name='unowned' WHERE namespace=semon_namespace() AND table_name='files'", []).unwrap();
+        assert!(matches!(
+            writer.ledger(&path),
+            Err(StorageError::ScopeChanged)
+        ));
+        writer.connection.execute("UPDATE storage_event_tables SET table_name='files' WHERE namespace=semon_namespace() AND table_name='unowned'", []).unwrap();
+        assert!(writer.ledger(&path).unwrap().is_none());
+
+        let guards = connection(&f.config).unwrap();
+        let update_guard: String = guards
+            .query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name='storage_owned_guard_files_UPDATE'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        guards
+            .execute_batch("DROP TRIGGER storage_owned_guard_files_UPDATE")
+            .unwrap();
+        assert!(writer.ledger(&path).is_err());
+        guards.execute_batch(&update_guard).unwrap();
+        assert!(writer.ledger(&path).unwrap().is_none());
+
+        let committed_cookie: i64 = writer
+            .connection
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .unwrap();
+        let tx = writer.connection.transaction().unwrap();
+        tx.execute_batch("DROP TRIGGER storage_owned_guard_files_INSERT")
+            .unwrap();
+        let dropped_cookie: i64 = tx
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .unwrap();
+        assert!(NativeOwnership::validate_physical(&tx).is_err());
+        tx.rollback().unwrap();
+        assert_eq!(
+            writer
+                .connection
+                .pragma_query_value(None, "schema_version", |row| row.get(0))
+                .unwrap(),
+            committed_cookie
+        );
+
+        let tx = writer.connection.transaction().unwrap();
+        tx.execute_batch("CREATE TABLE transient_owner_layout_probe(value INTEGER)")
+            .unwrap();
+        let reused_cookie: i64 = tx
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(reused_cookie, dropped_cookie);
+        NativeOwnership::validate_physical(&tx).unwrap();
+        tx.rollback().unwrap();
+
+        let tx = writer.connection.transaction().unwrap();
+        tx.execute_batch("DROP TRIGGER storage_owned_guard_files_DELETE")
+            .unwrap();
+        assert_eq!(
+            tx.pragma_query_value(None, "schema_version", |row| row.get(0))
+                .unwrap(),
+            dropped_cookie
+        );
+        assert!(NativeOwnership::validate_physical(&tx).is_err());
+        tx.rollback().unwrap();
+        assert!(writer.ledger(&path).unwrap().is_none());
+
         f.db()
             .execute_batch("DROP INDEX session_trace_starts")
             .unwrap();
