@@ -8709,7 +8709,7 @@ mod tests {
         }
 
         #[test]
-        fn configured_semantic_domain61_affected_owner_source_capacity_is_not_conflict() {
+        fn configured_semantic_domain61_component_source_capacity_is_not_conflict() {
             let (_home, _, options, _) = model_sources();
             let options = &options[0];
             let f = semantic_fixture("source-a");
@@ -8721,9 +8721,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
             for (i, input) in inputs.iter().enumerate() {
-                // Real duplicate rollouts of one native identity exercise the
-                // header-id discovery index without a fabricated
-                // dependency/endpoint row.
+                // Real duplicate rollouts exercise header-id discovery and
+                // enroll all 65 indexed sources into one staged component.
+                // This reaches the reducer's component source bound without
+                // fabricated dependency or endpoint rows.
                 write(options, input, "overflow", None);
                 cache
                     .ingest(
@@ -8754,7 +8755,7 @@ mod tests {
                 let before = shared_state(&f);
                 match cache.semantic_batch(64) {
                     Err(error) => {
-                        assert_eq!(error.to_string(), "semantic_affected_owner_source_budget");
+                        assert_eq!(error.to_string(), "semantic_component_source_budget");
                         assert_eq!(
                             shared_state(&f),
                             before,
@@ -8769,18 +8770,16 @@ mod tests {
                                 )
                                 .unwrap(),
                             65,
-                            "all 65 real sources are enrolled before capacity refusal"
+                            "all 65 real sources are enrolled before component refusal"
                         );
-                        assert!(
-                            f.db()
-                                .query_row(
-                                    "SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",
-                                    [],
-                                    |r| r.get::<_, i64>(0),
-                                )
-                                .unwrap()
-                                < 65,
-                            "owner source capacity precedes the component index guard"
+                        assert_eq!(
+                            f.db().query_row(
+                                "SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND index_done=1",
+                                [],
+                                |r| r.get::<_, i64>(0),
+                            ).unwrap(),
+                            65,
+                            "the component source bound counts indexed sources"
                         );
                         reached = true;
                         break;
@@ -8814,7 +8813,7 @@ mod tests {
             }
             assert!(
                 reached,
-                "65 real sources must reach the affected-owner capacity guard"
+                "65 real sources must reach the component source capacity guard"
             );
             let after = namespace_state(&f, "source-a")
                 .into_iter()
