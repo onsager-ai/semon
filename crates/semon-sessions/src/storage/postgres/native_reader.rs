@@ -265,12 +265,12 @@ pub(super) fn runtime_source_cwds(
         let values = rows(
             tx,
             "files",
-            "cwd",
+            "file_id,cwd",
             "namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(path,path_digest,$2)",
             &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()],
         )?;
         let value = values.first().ok_or(StorageError::ScopeChanged)?;
-        if let Some(cwd) = value.get::<Option<String>>(0).map_err(bad)? {
+        if let Some(cwd) = value.get::<Option<String>>(1).map_err(bad)? {
             cwds.insert(cwd);
         }
     }
