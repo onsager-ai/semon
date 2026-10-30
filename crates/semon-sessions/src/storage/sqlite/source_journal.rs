@@ -2166,6 +2166,7 @@ mod tests {
                 None,
                 None,
                 &ledger,
+                &ledger.stat,
                 &FileIndex::default()
             ),
             Err(StoreError::Configured(

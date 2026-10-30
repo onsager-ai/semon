@@ -398,6 +398,7 @@ type CommitFile<'a> = (
     Option<&'a Ledger>,
     Option<&'a super::super::DirtyRows>,
     &'a Ledger,
+    &'a Stat,
     &'a FileIndex,
 );
 
@@ -1830,13 +1831,13 @@ impl Writer {
         drop(self.snapshot()?);
         // Raw checks precede the DB reservation. The parser qualifies complete
         // records and proofs on its open handle; no Raw I/O runs in the DB tx.
-        for (path, _, _, ledger, index) in files {
+        for (path, _, _, _, physical_stat, index) in files {
             let physical = index
                 .native_path
                 .as_deref()
                 .unwrap_or_else(|| Path::new(path));
             if physical.to_string_lossy() != *path
-                || Stat::of(physical).ok().as_ref() != Some(&ledger.stat)
+                || Stat::of(physical).ok().as_ref() != Some(physical_stat)
             {
                 #[cfg(test)]
                 eprintln!("commit_raw_conflict");
@@ -1854,7 +1855,7 @@ impl Writer {
         #[cfg(test)]
         let validated = reserved.elapsed();
         let mut work = Vec::new();
-        for (path, expected, _, ledger, _) in files {
+        for (path, expected, _, ledger, _, _) in files {
             let intent = self
                 .intents
                 .get(*path)
@@ -1895,7 +1896,7 @@ impl Writer {
             }
             work.push(true);
         }
-        for ((path, expected, changes, ledger, index), write) in files.iter().zip(work) {
+        for ((path, expected, changes, ledger, _, index), write) in files.iter().zip(work) {
             if !write {
                 continue;
             }

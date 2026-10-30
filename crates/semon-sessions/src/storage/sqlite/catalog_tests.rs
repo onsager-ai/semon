@@ -6696,6 +6696,72 @@ fn local_runtime_changes_rebuild_only_the_indexed_session() {
 }
 
 #[test]
+fn bounded_cold_commit_retries_after_raw_append_and_persists_prefix() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let path = fixture.source("bounded-commit");
+    let line = format!(
+        "{}\n",
+        json!({"type":"system","subtype":"turn_duration","sessionId":"bounded-commit","padding":"x".repeat(32*1024)})
+    );
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    for _ in 0..160 {
+        file.write_all(line.as_bytes()).unwrap();
+    }
+    file.sync_all().unwrap();
+    drop(file);
+    let size_before_commit_hook = fs::metadata(&path).unwrap().len();
+    assert!(size_before_commit_hook > 4 * 1024 * 1024);
+
+    let changed_path = path.clone();
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    cache.scan_byte_budget = Some(4 * 1024 * 1024);
+    crate::events::BEFORE_COMMIT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(&changed_path)
+                .unwrap();
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"system","subtype":"turn_duration","sessionId":"bounded-commit","marker":"append-during-commit"})
+            )
+            .unwrap();
+            file.sync_all().unwrap();
+        }));
+    });
+
+    let mut dirty = false;
+    let index = crate::events::scan_file(&path, "claude", &mut cache, &mut dirty).unwrap();
+    let physical_size = fs::metadata(&path).unwrap().len();
+    let ledger = cache.recorded(path.to_str().unwrap()).unwrap().unwrap();
+    assert!(physical_size > size_before_commit_hook, "the hook appended Raw bytes");
+    assert!(ledger.offset > 4 * 1024 * 1024);
+    assert!(ledger.offset < physical_size, "the committed ledger is a prefix");
+    assert_eq!(ledger.stat.size, ledger.offset);
+    assert!(
+        index
+            .source_chunks
+            .as_ref()
+            .is_some_and(|chunks| chunks.valid(ledger.offset)),
+        "the committed proof covers the exact prefix"
+    );
+    drop(cache);
+
+    let db = fixture.db();
+    let (stored_offset, stored_size): (i64, i64) = db
+        .query_row(
+            "SELECT resume_at,size FROM files WHERE path=?1",
+            [path.to_string_lossy()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stored_offset as u64, ledger.offset);
+    assert_eq!(stored_size as u64, ledger.offset);
+}
+
+#[test]
 fn large_cold_source_checkpoints_complete_records_and_restarts_without_reparsing_prefixes() {
     let fixture = Fixture::new();
     let path = fixture.source("large");

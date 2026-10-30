@@ -412,6 +412,7 @@ impl IndexStore for NativeIndex {
         expected: Option<&Ledger>,
         changes: Option<&DirtyRows>,
         ledger: &Ledger,
+        physical_stat: &Stat,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError> {
         let intent = self
@@ -427,6 +428,7 @@ impl IndexStore for NativeIndex {
             expected,
             changes,
             ledger,
+            physical_stat,
             index,
         )
         .inspect_err(|_error| {

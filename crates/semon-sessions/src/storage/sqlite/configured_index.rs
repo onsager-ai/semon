@@ -444,7 +444,9 @@ impl IndexStore for ConfiguredIndex {
         }
         let files = files
             .iter()
-            .map(|(path, ledger, index)| (path.as_str(), None, None, ledger, index.as_ref()))
+            .map(|(path, ledger, index)| {
+                (path.as_str(), None, None, ledger, &ledger.stat, index.as_ref())
+            })
             .collect::<Vec<_>>();
         self.native.commit(&files).map_err(StoreError::Configured)
     }
@@ -454,10 +456,11 @@ impl IndexStore for ConfiguredIndex {
         expected: Option<&Ledger>,
         changes: Option<&DirtyRows>,
         ledger: &Ledger,
+        physical_stat: &Stat,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError> {
         self.native
-            .commit(&[(path, expected, changes, ledger, index)])
+            .commit(&[(path, expected, changes, ledger, physical_stat, index)])
             .map_err(StoreError::Configured)
     }
     fn select_reported_runs(
