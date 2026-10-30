@@ -1320,7 +1320,7 @@ impl Writer {
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
-        if !self.tree_repair_pending().map_err(std::io::Error::other)? {
+        if !self.tree_repair_pending().map_err(crate::events::store_io_error)? {
             return Ok((false, None));
         }
         #[cfg(test)]
@@ -3057,7 +3057,7 @@ mod tests {
     fn configured_semantic_runtime_capability_is_crate_private_and_public_factory_stays_closed() {
         let f = semantic_fixture("runtime-a");
         let capability =
-            crate::storage::sqlite::semantic::SemanticStaging::validate(&f.config).unwrap();
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap();
         let mut runtime =
             crate::storage::sqlite::configured_index::open_semantic(capability).unwrap();
         let paths = [f.raw.to_string_lossy().into_owned()];
@@ -3227,8 +3227,9 @@ mod tests {
     }
 
     fn runtime_semantic(config: &StoreConfig) -> Box<dyn IndexStore> {
-        let capability =
-            crate::storage::sqlite::semantic::SemanticStaging::validate(config).unwrap();
+        // Current fixtures restore their private native owner; ownerless
+        // validation deliberately cannot grant this producer capability.
+        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap();
         crate::storage::sqlite::configured_index::open_semantic(capability).unwrap()
     }
 
@@ -5580,7 +5581,7 @@ mod tests {
     #[test]
     fn configured_semantic_ingest_begin_batch_record_uses_real_claim_and_generation() {
         let f = semantic_fixture("source-a");
-        let mut store = crate::storage::sqlite::open_private_semantic(&f.config).unwrap();
+        let mut store = owned_semantic(&f.config);
         let paths = vec![f.raw.to_string_lossy().into_owned()];
         let claims = source_claims(&*store, &paths);
         assert!(claims[0].1.is_some());
@@ -5627,18 +5628,18 @@ mod tests {
             .unwrap()
                 > 0
         );
-        assert!(
-            store.semantic_batch(64).is_err(),
-            "unported frontier reduction must not certify identity"
-        );
+        let next = store.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(next.epoch, batch.epoch);
+        assert_eq!(source_claims(&*store, &paths), claims);
+        assert_eq!(store.session_catalog_generation().unwrap(), base);
     }
 
     #[test]
     fn configured_semantic_namespace_factories_keep_rollback_and_restart_isolated() {
         let a = semantic_fixture("source-a");
         let b = semantic_fixture("source-b");
-        let mut a_store = crate::storage::sqlite::open_private_semantic(&a.config).unwrap();
-        let mut b_store = crate::storage::sqlite::open_private_semantic(&b.config).unwrap();
+        let mut a_store = owned_semantic(&a.config);
+        let mut b_store = owned_semantic(&b.config);
         for (store, f) in [(&mut a_store, &a), (&mut b_store, &b)] {
             assert_eq!(
                 store
@@ -5656,7 +5657,7 @@ mod tests {
         assert_eq!(a.state(), before_a);
         assert_eq!(b.state(), before_b);
         drop(a_store);
-        let mut reopened = crate::storage::sqlite::open_private_semantic(&a.config).unwrap();
+        let mut reopened = owned_semantic(&a.config);
         assert_eq!(
             reopened.semantic_batch(64).unwrap().unwrap().epoch,
             batch.epoch
@@ -5669,6 +5670,8 @@ mod tests {
         let mut wrong = a.config.clone();
         wrong.namespace = b.config.namespace.clone();
         let before = a.state();
+        assert!(NativeOwnership::restore(&wrong).is_err());
+        assert_eq!(a.state(), before);
         assert!(crate::storage::sqlite::open_private_semantic(&wrong).is_err());
         assert_eq!(a.state(), before);
     }
@@ -5676,7 +5679,7 @@ mod tests {
     #[test]
     fn configured_semantic_stale_record_and_admission_refuse_without_writes() {
         let f = semantic_fixture("source-a");
-        let mut store = crate::storage::sqlite::open_private_semantic(&f.config).unwrap();
+        let mut store = owned_semantic(&f.config);
         let paths = [f.raw.to_string_lossy().into_owned()];
         store.begin_semantic_stage(&paths, "runtime", true).unwrap();
         let batch = store.semantic_batch(64).unwrap().unwrap();

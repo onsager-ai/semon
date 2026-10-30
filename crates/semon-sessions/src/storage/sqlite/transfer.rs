@@ -104,9 +104,8 @@ pub(crate) fn frozen_catalog_generation(
         if admission.generation != manifest.binding_epoch {
             return Err(StorageError::ScopeChanged);
         }
-        let revision: i64 = tx
-            .0
-            .query_row(
+        let revision: i64 =
+            tx.0.query_row(
                 "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
                 [tx.1],
                 |row| row.get(0),
