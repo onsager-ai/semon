@@ -2085,7 +2085,11 @@ pub(crate) fn read_session_descriptions(
         .map(|request| {
             statement
                 .query_row(
-                    params![request.key.as_str(), request.version, request.inputs.as_str()],
+                    params![
+                        request.key.as_str(),
+                        request.version,
+                        request.inputs.as_str()
+                    ],
                     |row| row.get(0),
                 )
                 .optional()

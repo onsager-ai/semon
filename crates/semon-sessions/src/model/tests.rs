@@ -9781,13 +9781,7 @@ fn prepublication_persisted_description_reuses_exact_current_summary() {
 
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
     let mut dirty = false;
-    let actual = build_with_cache(
-        &options,
-        &mut cache,
-        &mut dirty,
-        &mut Texts::default(),
-        NOW,
-    );
+    let actual = build_with_cache(&options, &mut cache, &mut dirty, &mut Texts::default(), NOW);
     assert_equivalent(&expected, &actual, NOW);
     SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
 }
