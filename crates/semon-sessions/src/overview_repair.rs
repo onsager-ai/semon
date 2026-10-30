@@ -377,6 +377,10 @@ fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     })
     .transpose()
 }
+fn same_catalog_metadata(left: &CatalogRow, right: &CatalogRow) -> io::Result<bool> {
+    Ok(serde_json::to_value(left).map_err(failure)?
+        == serde_json::to_value(right).map_err(failure)?)
+}
 fn ready(db: &Connection, row: &CatalogRow) -> io::Result<bool> {
     let source = crate::retention::source_generation(&row.sources).map_err(failure)?;
     if !projection_ready(db, row)? {
@@ -958,6 +962,20 @@ pub fn repair_session_overview_with_control(
         tx.commit().map_err(failure)?;
         return Ok(false);
     }
+    let selected_preimage = rows
+        .iter()
+        .find(|row| row.key == key)
+        .cloned()
+        .ok_or_else(|| failure("Selected native migration owner unavailable"))?;
+    let reader_binding =
+        crate::storage::local_navigation_binding(options, source_key).map_err(failure)?;
+    let preimage_binding = reader_binding.runtime_binding_at(&tx).map_err(failure)?;
+    crate::storage::sqlite::proof_generations::observation_binding(
+        &tx,
+        &preimage_binding,
+        &selected_preimage,
+    )
+    .map_err(failure)?;
     let upgrade = !projection_ready(&tx, &rows[0])?;
     let generation: String = tx
         .query_row(
@@ -1036,6 +1054,22 @@ pub fn repair_session_overview_with_control(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(failure)?;
     validate_writer(&tx, &owner)?;
+    let stream = owner
+        .config()
+        .expected_stream_epoch
+        .as_deref()
+        .ok_or_else(|| failure(crate::storage::StorageError::ScopeChanged))?;
+    let writer_binding = crate::storage::QueryRuntimeBinding {
+        namespace: owner.config().namespace.clone(),
+        admission: owner.admission(),
+        stream_epoch: stream.to_owned(),
+    };
+    if writer_binding.namespace != preimage_binding.namespace
+        || writer_binding.admission != preimage_binding.admission
+        || writer_binding.stream_epoch != preimage_binding.stream_epoch
+    {
+        return Err(publication_changed());
+    }
     let current: String = tx
         .query_row(
             "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
@@ -1050,7 +1084,7 @@ pub fn repair_session_overview_with_control(
         let Some(current) = catalog(&tx, &row.key)? else {
             return Err(publication_changed());
         };
-        if current.sources != row.sources {
+        if current.sources != row.sources || !same_catalog_metadata(&current, &selected_preimage)? {
             return Err(publication_changed());
         }
     }
@@ -1077,15 +1111,22 @@ pub fn repair_session_overview_with_control(
             crate::causal_trace::publish_owned(&tx, trace_store, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
-            let table = if crate::history_projection::catalog(&tx, &row.key)
+            let owner = if crate::history_projection::catalog(&tx, &row.key)
                 .map_err(failure)?
                 .is_some()
             {
-                "session_history_catalog"
+                crate::storage::sqlite::proof_generations::CatalogObservationOwner::History
             } else {
-                "session_catalog"
+                crate::storage::sqlite::proof_generations::CatalogObservationOwner::Catalog
             };
-            tx.execute(&format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?2)) WHERE namespace=semon_namespace() AND session_key=?1"),rusqlite::params![row.key,query.to_string()]).map_err(failure)?;
+            crate::storage::sqlite::proof_generations::publish_repaired_query_observation(
+                &tx,
+                &writer_binding,
+                owner,
+                &selected_preimage,
+                query,
+            )
+            .map_err(failure)?;
         }
         if upgrade {
             let projection = transcripts

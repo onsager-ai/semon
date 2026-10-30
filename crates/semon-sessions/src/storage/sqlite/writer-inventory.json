@@ -31,7 +31,7 @@
     "launch pages and bounded measured cleanup",
     "relocation evidence and Tree metadata readiness join",
     "source-owned semantic recipe, generation, journal revision, header frontiers and progress metadata",
-    "storage_catalog_native_observation_grants uses namespace/session/owner-kind primary key for latest Catalog and History digests, admission and stream; semon_semantic_publisher guards all DML; semantic Stage retains receipt-bound meta grants",
+    "storage_catalog_native_observation_grants uses namespace/session/owner-kind primary key for latest Catalog and History digests, admission and stream; semon_semantic_publisher guards all DML; qualified Overview repair updates only an exact preimage owner digest under the same live admission/stream; semantic Stage retains receipt-bound meta grants",
     "store pricing target versus source pricing work/completion metadata; repair clock",
     "SourceJournal seed reads, physical reader epoch and source change-stream floors",
     "store.rs observation/recovery/backfill/generation/slot/search/publication metadata, schema qualification/init and reported-file stamp; archive GLOB/current file count selects core and meta layouts independently"
