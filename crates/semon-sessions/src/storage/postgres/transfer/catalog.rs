@@ -1031,7 +1031,6 @@ mod tests {
                 Ok(())
             }).unwrap();
             let facts_path = options.facts.as_ref().unwrap();
-            let facts_bytes = std::fs::read(facts_path).unwrap();
             let mut changed = original_facts.clone();
             changed.hostname = "changed-transfer-runtime".into();
             std::fs::write(facts_path, serde_json::to_vec(&changed).unwrap()).unwrap();
@@ -1046,7 +1045,7 @@ mod tests {
                 ordinary(&config).is_err(),
                 "new authoritative runtime must not rebind old Query observations"
             );
-            std::fs::write(facts_path, facts_bytes).unwrap();
+            crate::write_facts(facts_path, &original_facts, &options.source).unwrap();
             super::super::super::current_sources::prepare(
                 &pool,
                 &config.namespace,
