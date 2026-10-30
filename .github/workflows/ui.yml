@@ -474,6 +474,7 @@ jobs:
         if: ${{ !cancelled() && startsWith(matrix.suite, 'order-') }}
         working-directory: tests/ui
         env:
+          SEMON_BUILD_TIMING: '1'
           SEMON_ORDER_SCHEMES: ${{ matrix.suite == 'order-phone' && 'phone-light,phone-dark' || matrix.suite == 'order-desktop-light' && 'desktop-light' || 'desktop-dark' }}
         run: node checks/order.mjs
       - name: Retain bounded per-case visual binding provenance
