@@ -106,6 +106,16 @@ its completion witness is the native-publication success message in the CI log.
   generated patches. Only candidate fingerprints change to
   `b0cb52003b6b1964827d8236e1fbebd11a63255fdf0cac825334f3f54a17a434`;
   prior decisions, review provenance, rationale and reference pins remain intact.
+- CI run 41031732851 for Source `d3e41dfe` (merge preview `7622417c`)
+  supplies visual artifact 12967225341 and transport artifact 12965608344.
+  The same audit and proposal generator qualified 155 visual and six transport records as
+  fingerprint-only, with no refusals, execution errors or coverage failures.
+  Independent Manager review confirmed all 966 image/evidence digests unchanged and
+  inspected reference/candidate/diff examples for root/drawer, Thinking, expanded
+  tool output, failed child, mobile Atlas, Last-turn menus and two-machine states.
+  The generated patches change only candidate fingerprints to
+  `9610b7c6fb569413b46372251a3f781285dbf43e4f018cc028eaee1d9709d4a5`;
+  existing appearance decisions, review provenance and reference pins are preserved.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
