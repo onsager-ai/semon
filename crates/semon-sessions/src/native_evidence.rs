@@ -627,18 +627,19 @@ impl NativeEvidence {
         } else {
             pending
         };
-        if tier == crate::events::CatalogPendingTier::SearchHint && !use_newest {
-            if let Some(ticket) = &ticket {
-                lock(&self.catalog_search).remember(
-                    ticket,
-                    inputs.iter().map(|input| {
-                        input
-                            .full_path(&self.options)
-                            .to_string_lossy()
-                            .into_owned()
-                    }),
-                );
-            }
+        if tier == crate::events::CatalogPendingTier::SearchHint
+            && !use_newest
+            && let Some(ticket) = &ticket
+        {
+            lock(&self.catalog_search).remember(
+                ticket,
+                inputs.iter().map(|input| {
+                    input
+                        .full_path(&self.options)
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+            );
         }
         if !inputs.is_empty() || cache.session_catalog_generation().is_none() {
             let snapshot = discovery
@@ -2340,16 +2341,36 @@ mod catalog_owner_tests {
             evidence
                 .prepare_catalog(&mut work, model::now_ms())
                 .unwrap(),
-            CatalogPreparation::Pending
+            CatalogPreparation::PublishedPending
         ));
+        let indexed = work
+            .events
+            .as_ref()
+            .unwrap()
+            .indexed_stat(&selected.full_path(&options))
+            .unwrap();
+        assert!(indexed.size >= 4 * 1024 * 1024);
+        assert!(
+            indexed.size < fs::metadata(selected.full_path(&options)).unwrap().len(),
+            "the first publication must contain a real bounded prefix"
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "a byte checkpoint alone uses ordinary publication and requeue"
+        );
         assert_eq!(
             lock(&evidence.catalog_search).tickets[0].waiting,
             BTreeSet::from([selected_path.clone()])
         );
         let mut published = false;
-        for _ in 0..128 {
+        for _ in 0..4 {
             evidence
-                .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
+                .prepare_catalog(&mut work, model::now_ms())
                 .unwrap();
             let pending: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [&selected_path], |row| row.get(0)).unwrap();
             if !pending {
@@ -2360,7 +2381,7 @@ mod catalog_owner_tests {
             assert_eq!(
                 lock(&evidence.catalog_search).tickets.len(),
                 1,
-                "indexing and stage-begin do not acknowledge demand"
+                "a requeued byte checkpoint does not acknowledge demand"
             );
         }
         assert!(published);
@@ -2372,6 +2393,76 @@ mod catalog_owner_tests {
             )
             .unwrap()
         );
+        drop(work);
+        drop(evidence);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cold_catalog_search_survives_component_budget_stage_begin_until_publication() {
+        use std::io::Write;
+        let (root, options, _) = audit_fixture();
+        let initial = NativeEvidence::new(options.clone());
+        drain_catalog(&initial, &std::cell::Cell::new(0));
+        drop(initial);
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/selected.jsonl".into(),
+        };
+        let path = input.full_path(&options);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut log = fs::File::create(&path).unwrap();
+        for index in 0..65 {
+            writeln!(log, "{}", serde_json::json!({"type":"user","sessionId":"selected","uuid":format!("peer-{index}"),"timestamp":"2026-10-01T00:00:00Z","origin":{"kind":"peer","from":"uds:/synthetic/peer.sock","name":"peer","msg_id":format!("message-{index}")},"message":{"role":"user","content":"peer message"}})).unwrap();
+        }
+        drop(log);
+        let path = path.to_string_lossy().into_owned();
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        for (pending, revision) in [("/unrelated/first.jsonl", 100), (path.as_str(), 101)] {
+            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,?2,'changed',0)", rusqlite::params![pending, revision]).unwrap();
+        }
+        let evidence = NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some(("selected", Some("claude"))));
+        let mut work = lock(&evidence.work);
+        assert!(matches!(
+            evidence
+                .prepare_catalog(&mut work, model::now_ms())
+                .unwrap(),
+            CatalogPreparation::Pending
+        ));
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "65 distinct peer-message dependencies must start a genuine semantic stage"
+        );
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([path.clone()])
+        );
+        let mut published = false;
+        for _ in 0..128 {
+            evidence
+                .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
+                .unwrap();
+            if !db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [&path], |row| row.get::<_, bool>(0)).unwrap() {
+                published = true;
+                assert!(lock(&evidence.catalog_search).tickets.is_empty());
+                break;
+            }
+            assert_eq!(
+                lock(&evidence.catalog_search).tickets.len(),
+                1,
+                "stage begin and indexing retain the original demand"
+            );
+        }
+        assert!(published);
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap());
         drop(work);
         drop(evidence);
         drop(db);
