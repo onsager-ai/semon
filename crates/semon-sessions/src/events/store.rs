@@ -2393,13 +2393,24 @@ impl IndexStore for SqliteStore {
             });
         }
         let fallback = {
-            let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
+            let excluded = serde_json::to_string(search.map_or(&[][..], |search| search.excluded))
+                .map_err(|error| StoreError::Failed(error.to_string()))?;
+            let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations WHERE source_path NOT IN (SELECT value FROM json_each(?2)) ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
             statement
-                .query_map([limit as i64], |row| row.get(0))
+                .query_map(params![limit as i64, excluded], |row| row.get(0))
                 .map_err(failure)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failure)?
         };
+        if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+            transaction.commit().map_err(failure)?;
+            return Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::Fifo,
+                paths: fallback,
+                fallback: Vec::new(),
+                search_checked: false,
+            });
+        }
         let paths = if let Some(search) = search {
             if let Some(retry) = &search.retry {
                 catalog_search_paths(&transaction, retry, limit).map_err(failure)?
@@ -6980,7 +6991,10 @@ mod tests {
         let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
         let tx = db.unchecked_transaction().unwrap();
-        invalidate_catalog_source(&tx, "/unrelated/first.jsonl", "changed").unwrap();
+        let ordinary = options
+            .claude_home
+            .join("projects/-work-proj/native-cl-00.jsonl");
+        invalidate_catalog_source(&tx, ordinary.to_str().unwrap(), "changed").unwrap();
         invalidate_catalog_source(&tx, replacement.to_str().unwrap(), "changed").unwrap();
         tx.commit().unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
@@ -6997,6 +7011,26 @@ mod tests {
             64,
             "the first qualified replacement defers after the custody page"
         );
+        evidence
+            .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
+            .unwrap();
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [ordinary.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "ordinary publication progresses between Deferred hinted attempts"
+        );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [replacement.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
         let published = (0..16).any(|_| {
             evidence
                 .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
@@ -7012,7 +7046,6 @@ mod tests {
             published,
             "the original search survives each Deferred without reposting"
         );
-        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap());
         drop(work);
         drop(evidence);
         drop(db);
@@ -7143,6 +7176,8 @@ mod tests {
         let preferred = super::super::CatalogPendingSearch {
             paths: std::slice::from_ref(&search_path),
             retry: None,
+            yield_to_fifo: true,
+            excluded: std::slice::from_ref(&search_path),
         };
         assert_eq!(
             store

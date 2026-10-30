@@ -1024,6 +1024,8 @@ pub(crate) struct CatalogSearchLookup<'a> {
 pub(crate) struct CatalogPendingSearch<'a> {
     pub(crate) paths: &'a [String],
     pub(crate) retry: Option<CatalogSearchLookup<'a>>,
+    pub(crate) yield_to_fifo: bool,
+    pub(crate) excluded: &'a [String],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

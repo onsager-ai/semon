@@ -1794,6 +1794,17 @@ mod tests {
             evidence.note_catalog_search(Request::parse(query).unwrap().search_interest());
         }
         for id in ["first-tab", "second-tab"] {
+            if id == "second-tab" {
+                let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+                evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap();
+                assert_eq!(
+                    crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+                    64,
+                    "a completed hint still reserves an ordinary cohort before the next tab"
+                );
+            }
             let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
