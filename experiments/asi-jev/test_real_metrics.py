@@ -3,7 +3,13 @@
 import json
 import unittest
 
-from real_metrics import MetricsError, condition_name, score_records
+from real_metrics import (
+    EXPECTED_REPETITIONS,
+    MetricsError,
+    _protocol_conformance,
+    condition_name,
+    score_records,
+)
 
 
 def _gold(activity, *, failure="none", retry="none", anomaly=False, phase="active"):
@@ -39,6 +45,36 @@ def _prediction(event_id, repetition, values, *, strategy="rules", mode="per-eve
     }
 
 
+def _operations_row(*, event_count, prediction_rows, request_count, failed_request_count,
+                    http_count=None, http_unknown=0, http_p95=None,
+                    projected_count=None, projected_unknown=0, projected_p95=None,
+                    wait_count=None, wait_unknown=0):
+    http_count = request_count - http_unknown if http_count is None else http_count
+    projected_count = prediction_rows - projected_unknown if projected_count is None else projected_count
+    wait_count = prediction_rows - wait_unknown if wait_count is None else wait_count
+    return {
+        "status": "measured",
+        "event_count": event_count,
+        "prediction_rows": prediction_rows,
+        "request_count": request_count,
+        "failed_request_count": failed_request_count,
+        "request_rtt_ms": {
+            "count": http_count, "p50_ms": http_p95, "p95_ms": http_p95,
+            "unknown_count": http_unknown,
+        },
+        "latency_ms": {
+            "projected_online_latency_ms": {
+                "count": projected_count, "p50_ms": projected_p95,
+                "p95_ms": projected_p95, "unknown_rows": projected_unknown,
+            },
+            "logical_queue_wait_ms": {
+                "count": wait_count, "p50_ms": 5.0, "p95_ms": 10.0,
+                "unknown_rows": wait_unknown,
+            },
+        },
+    }
+
+
 class RealMetricsTests(unittest.TestCase):
     def test_condition_names_cover_all_protocol_modes(self):
         self.assertEqual(condition_name("rules", "per-event"), "Rules")
@@ -69,6 +105,23 @@ class RealMetricsTests(unittest.TestCase):
         self.assertEqual(score["prediction_rows"], 6)
         self.assertAlmostEqual(score["dimensions"]["activity"]["accuracy"]["estimate"], 5 / 6)
         self.assertEqual(score["dimensions"]["activity"]["per_class"]["task_request"]["positive_events"], 1)
+        self.assertEqual(result["protocol_conformance"]["status"], "insufficient_evidence")
+
+    def test_protocol_conformance_requires_frozen_draws_seed_and_repeat_sets(self):
+        predictions = {
+            key: {"event": {repetition: {} for repetition in repetitions}}
+            for key, repetitions in EXPECTED_REPETITIONS.items()
+        }
+        conforming = _protocol_conformance(predictions, 2000, 20261030)
+        self.assertEqual(conforming["status"], "pass")
+        self.assertTrue(conforming["bootstrap_draws_match"])
+        self.assertTrue(conforming["bootstrap_seed_match"])
+
+        predictions[("Jev per-event", "prefix")] = {"event": {1: {}, 2: {}}}
+        nonconforming = _protocol_conformance(predictions, 2000, 20261030)
+        self.assertEqual(nonconforming["status"], "insufficient_evidence")
+        self.assertFalse(nonconforming["repetition_sets"]["Jev per-event|prefix"]["matches"])
+        self.assertEqual(_protocol_conformance(predictions, 20, 123)["status"], "insufficient_evidence")
 
     def test_harness_points_are_descriptive_and_average_repetitions_per_event(self):
         refs = [
@@ -133,6 +186,23 @@ class RealMetricsTests(unittest.TestCase):
         self.assertEqual(budget["mean_false_positive_alerts_per_session"]["estimate"], 1.0)
         self.assertEqual(budget["fraction_sessions_over_one_false_positive_alert"]["estimate"], 0.5)
 
+    def test_sessions_over_one_uses_repetition_averaged_session_count(self):
+        refs = [
+            _reference("a1", "s1", 1, _gold("progress", anomaly=False)),
+            _reference("a2", "s1", 2, _gold("progress", anomaly=False)),
+        ]
+        predictions = []
+        for repetition in (1, 2, 3):
+            for event_id in ("a1", "a2"):
+                predictions.append(_prediction(event_id, repetition, {
+                    "activity": "progress", "failure_category": "none", "retry_loop": "none",
+                    "anomaly": repetition == 1, "phase": "active",
+                }))
+        result = score_records(refs, predictions, draws=20)
+        budget = result["conditions"]["Rules"]["prefix"]["false_alert_budget"]
+        self.assertEqual(budget["mean_false_positive_alerts_per_session"]["estimate"], 2 / 3)
+        self.assertEqual(budget["fraction_sessions_over_one_false_positive_alert"]["estimate"], 0.0)
+
     def test_binary_failure_counts_every_non_none_category_as_failure(self):
         refs = [
             _reference("e1", "s1", 1, _gold("failure", failure="unknown")),
@@ -146,6 +216,22 @@ class RealMetricsTests(unittest.TestCase):
         binary = result["conditions"]["Rules"]["prefix"]["metrics"]["dimensions"]["failure_detection"]
         self.assertEqual(binary["per_class"]["failure"]["positive_events"], 1)
         self.assertEqual(binary["per_class"]["failure"]["recall"]["estimate"], 1.0)
+
+    def test_rules_prefix_offline_comparison_is_reported(self):
+        refs = [
+            _reference("e1", "s1", 1, _gold("task_request")),
+            _reference("e2", "s1", 2, _gold("progress")),
+        ]
+        predictions = [
+            _prediction("e1", 1, _gold("task_request"), context="prefix"),
+            _prediction("e2", 1, _gold("progress"), context="prefix"),
+            _prediction("e1", 1, _gold("progress"), context="offline"),
+            _prediction("e2", 1, _gold("progress"), context="offline"),
+        ]
+        result = score_records(refs, predictions, draws=20)
+        comparison = result["paired_prefix_vs_offline_activity_macro_f1"]["Rules"]
+        self.assertEqual(comparison["event_count"], 2)
+        self.assertIn("estimate", comparison)
 
     def test_independent_annotations_report_raw_agreement_and_kappa(self):
         refs = [
@@ -244,21 +330,103 @@ class RealMetricsTests(unittest.TestCase):
         self.assertEqual(operations["input_tokens"], 24)
         self.assertEqual(operations["output_tokens"], 13)
         self.assertAlmostEqual(operations["jev_list_estimate_usd"], 0.3)
-        self.assertEqual(operations["provider_http_p95_ms_worst_run"], 40.0)
-        self.assertEqual(operations["projected_async_p95_ms_worst_run"], 200.0)
+        self.assertEqual(operations["provider_http_p95_ms_worst_session"], 40.0)
+        self.assertEqual(operations["projected_async_p95_ms_worst_session"], 200.0)
+        self.assertIsNone(operations["provider_http_p95_ms_pooled"])
+        self.assertIsNone(operations["projected_async_p95_ms_pooled"])
         self.assertEqual(operations["queue_wait_unknown_event_rows"], 0)
 
         second_summary["latency"]["queue_wait_unknown_event_rows"] = 1
         result = score_records(refs, predictions, summary_rows=[summary], draws=20)
         operations = result["conditions"]["Jev per-event"]["prefix"]["operations"]
-        self.assertIsNone(operations["projected_async_p95_ms_worst_run"])
+        self.assertIsNone(operations["projected_async_p95_ms_worst_session"])
         self.assertEqual(operations["queue_wait_unknown_event_rows"], 1)
 
         second_summary["latency"].pop("queue_wait_unknown_event_rows")
         result = score_records(refs, predictions, summary_rows=[summary], draws=20)
         operations = result["conditions"]["Jev per-event"]["prefix"]["operations"]
-        self.assertIsNone(operations["projected_async_p95_ms_worst_run"])
+        self.assertIsNone(operations["projected_async_p95_ms_worst_session"])
         self.assertIsNone(operations["queue_wait_unknown_event_rows"])
+
+    def test_pooled_operations_drive_acceptance_and_match_run_counts(self):
+        refs = [
+            _reference("e1", "s1", 1, _gold("progress"), eligible_count=1),
+            _reference("e2", "s2", 1, _gold("progress"), eligible_count=1),
+        ]
+        predictions = [
+            _prediction(event_id, repetition, _gold("progress"), strategy="jev")
+            for event_id in ("e1", "e2")
+            for repetition in (1, 2, 3)
+        ]
+        summary = {
+            "strategy": "jev", "mode": "per-event", "context": "prefix",
+            "sessions": [
+                {"summary": {"request_count": 2, "request_failure_count": 0, "latency": {
+                    "provider_http_rtt": {"p95_ms": 1200.0},
+                    "projected_online_event_latency": {"p95_ms": 3000.0},
+                    "queue_wait_unknown_event_rows": 0,
+                }}},
+                {"summary": {"request_count": 1, "request_failure_count": 0, "latency": {
+                    "provider_http_rtt": {"p95_ms": 1400.0},
+                    "projected_online_event_latency": {"p95_ms": 2500.0},
+                    "queue_wait_unknown_event_rows": 0,
+                }}},
+            ],
+        }
+        operations_row = _operations_row(
+            event_count=2, prediction_rows=6, request_count=3,
+            failed_request_count=0, http_p95=900.0, projected_p95=2000.0,
+        )
+        operations_file = {"schema": 1, "conditions": {"jev-prefix": operations_row}}
+        result = score_records(
+            refs, predictions, summary_rows=[summary], operations=operations_file, draws=20,
+        )
+        measured = result["conditions"]["Jev per-event"]["prefix"]["operations"]
+        self.assertEqual(measured["provider_http_p95_ms_worst_session"], 1400.0)
+        self.assertEqual(measured["provider_http_p95_ms_pooled"], 900.0)
+        self.assertEqual(measured["projected_async_p95_ms_worst_session"], 3000.0)
+        self.assertEqual(measured["projected_async_p95_ms_pooled"], 2000.0)
+        criteria = result["acceptance"]["Jev per-event"]["criteria"]
+        self.assertEqual(criteria["provider_http_p95_ms"]["bound"], 900.0)
+
+        without_operations = score_records(refs, predictions, summary_rows=[summary], draws=20)
+        operations = without_operations["conditions"]["Jev per-event"]["prefix"]["operations"]
+        self.assertIsNone(operations["provider_http_p95_ms_pooled"])
+        self.assertEqual(
+            without_operations["acceptance"]["Jev per-event"]["criteria"]["provider_http_p95_ms"]["status"],
+            "not_measured",
+        )
+
+        mismatched = {"schema": 1, "conditions": {"jev-prefix": _operations_row(
+            event_count=2, prediction_rows=6, request_count=4,
+            failed_request_count=0, http_p95=900.0, projected_p95=2000.0,
+        )}}
+        with self.assertRaises(MetricsError):
+            score_records(refs, predictions, summary_rows=[summary], operations=mismatched, draws=20)
+
+    def test_unknown_queue_timing_blocks_pooled_projected_latency(self):
+        refs = [
+            _reference("e1", "s1", 1, _gold("progress"), eligible_count=1),
+            _reference("e2", "s2", 1, _gold("progress"), eligible_count=1),
+        ]
+        predictions = [
+            _prediction(event_id, repetition, _gold("progress"), strategy="jev")
+            for event_id in ("e1", "e2")
+            for repetition in (1, 2, 3)
+        ]
+        operations = {"schema": 1, "conditions": {"jev-prefix": _operations_row(
+            event_count=2, prediction_rows=6, request_count=3,
+            failed_request_count=0, http_p95=900.0,
+            projected_count=5, projected_unknown=1, projected_p95=2000.0,
+            wait_count=5, wait_unknown=1,
+        )}}
+        result = score_records(refs, predictions, operations=operations, draws=20)
+        measured = result["conditions"]["Jev per-event"]["prefix"]["operations"]
+        self.assertEqual(measured["provider_http_p95_ms_pooled"], 900.0)
+        self.assertEqual(measured["queue_wait_unknown_event_rows"], 1)
+        self.assertIsNone(measured["projected_async_p95_ms_pooled"])
+        self.assertIsNone(measured["input_tokens"])
+        self.assertIsNone(measured["jev_list_estimate_usd"])
 
     def test_aggregate_output_contains_no_private_event_or_session_keys(self):
         refs = [_reference("private-event-key", "private-session-key", 1, _gold("progress"), eligible_count=1)]
