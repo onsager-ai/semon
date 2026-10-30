@@ -56,6 +56,10 @@ Labellers must not read rules, predictions, raw sources, future events during
 the causal pass, or each other's labels. A third blind adjudicator resolves
 disagreements before `freeze-reference`. Retain both original annotations;
 user spot-check review remains separate. Freeze files and hashes live locally.
+`real_adjudicate.py next` / `submit` serves one causal disagreement at a time.
+After that pass freezes, `offline-next` / `offline-submit --session-id ID
+--reviewed` serves complete-session review and requires an explicit full label
+for every offline dispute. It writes `private/adjudicated-reference.jsonl`.
 The reference input has `id` and `gold` containing `streaming` and `offline`
 five-dimension objects. Then run each named condition with the same freeze:
 
