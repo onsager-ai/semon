@@ -1110,9 +1110,10 @@ mod tests {
                 crate::SessionSources::with_machines(vec![(String::new(), recent_options)]),
             ));
             let originals = host.clone();
-            let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
-                Ok(Box::new(originals.clone()))
-            };
+            let readers =
+                move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+                    Ok(Box::new(originals.clone()))
+                };
             query
                 .call_catalog_at(
                     "list_sessions",
@@ -1187,7 +1188,11 @@ mod tests {
         assert_eq!(ordinary(&reverse).unwrap(), forward_ordinary);
         for (seconds, forward) in forward_recent {
             eprintln!("transfer_query_window direction=sqlite seconds={seconds}");
-            assert_eq!(recent(&reverse, seconds), forward, "recent window {seconds}s");
+            assert_eq!(
+                recent(&reverse, seconds),
+                forward,
+                "recent window {seconds}s"
+            );
         }
         assert_eq!(
             crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),

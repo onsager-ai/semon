@@ -3047,11 +3047,8 @@ mod tests {
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        tx.execute(
-            "DELETE FROM catalog_semantic_stage WHERE namespace='a'",
-            [],
-        )
-        .unwrap();
+        tx.execute("DELETE FROM catalog_semantic_stage WHERE namespace='a'", [])
+            .unwrap();
         assert!(!semantic_stage::active(&tx).unwrap());
         assert_eq!(
             tx.query_row(

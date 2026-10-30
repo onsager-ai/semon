@@ -1336,10 +1336,7 @@ fn scan_selected(
     } else {
         None
     };
-    let scan_file = |path: &Path,
-                     harness: &str,
-                     cache: &mut EventCache,
-                     dirty: &mut bool| {
+    let scan_file = |path: &Path, harness: &str, cache: &mut EventCache, dirty: &mut bool| {
         if committed_only {
             events::scan_committed_file(path, harness, cache, dirty)
         } else if let Some(hint) = ledger_hints
