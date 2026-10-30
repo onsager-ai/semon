@@ -482,8 +482,122 @@ pub(super) fn relocate(
         format!("source-retired:{old}").as_bytes(),
         &serde_json::to_vec(&Some(prior)).map_err(|_| StorageError::Unavailable)?,
     )?;
-    tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
+    // Semantic staging still visits the outgoing Current path. Keep its exact
+    // removal claim until successor publication acknowledges that revision.
+    // The original physical Stat cannot be recovered from the mutable append
+    // witness, so retain the verbatim request alongside its durable ACK.
+    super::native_keys::put_meta(
+        tx,
+        format!("native-relocation-receipt:{old}").as_bytes(),
+        &request,
+    )?;
     super::native_keys::put_meta(tx, key.as_bytes(), &request)?;
+    tx.check()?;
+    Ok(true)
+}
+
+/// A completed relocation has already retained both native generations. Replay
+/// only that exact removal observation, including during semantic staging; this
+/// performs no withdrawal, claim mutation or native body/filesystem I/O.
+pub(super) fn relocation_removed(
+    tx: &mut PgTxn<'_>,
+    old: &str,
+    expected: &crate::events::Ledger,
+) -> Result<bool, StorageError> {
+    use crate::events::native_commit::{CatalogRelocation, relocation_namespace};
+    use sha2::{Digest, Sha256};
+    let Some(bytes) = super::native_keys::read_meta(
+        tx,
+        format!("native_catalog_relocation:{old}").as_bytes(),
+        16384,
+    )? else {
+        return Ok(false);
+    };
+    let proof: CatalogRelocation =
+        serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if proof.version != 1
+        || &proof.prior != expected
+        || old == proof.new_path
+        || !relocation_namespace(old).is_some_and(|(root, archived)| {
+            relocation_namespace(&proof.new_path)
+                .is_some_and(|(new_root, new_archived)| root == new_root && archived != new_archived)
+        })
+        || super::native_reader::ledger(tx, old)?
+            .map(|(_, ledger)| ledger)
+            .as_ref()
+            != Some(expected)
+        || super::native_reader::ledger(tx, &proof.new_path)?.map(|(_, ledger)| ledger)
+            != Some(proof.after.clone())
+    {
+        return Ok(false);
+    }
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let paths = vec![old.as_bytes().to_vec(), proof.new_path.as_bytes().to_vec()];
+    let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=ANY($2::bytea[]))", &[&ns, &paths]).map_err(sqlstate::error)?.get(0);
+    if pending {
+        return Ok(false);
+    }
+    let candidate: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_relocation_candidates WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND old_path=$2 AND new_path=$3)", &[&ns, &old.as_bytes(), &proof.new_path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    if !candidate
+        || super::native_keys::read_meta(tx, format!("source-retired:{old}").as_bytes(), 16384)?
+            != Some(serde_json::to_vec(&Some(expected)).map_err(|_| StorageError::Unavailable)?)
+    {
+        return Ok(false);
+    }
+    let Some(request) = super::native_keys::read_meta(
+        tx,
+        format!("native-relocation-receipt:{old}").as_bytes(),
+        16384,
+    )? else {
+        return Ok(false);
+    };
+    let (kind, from, to, id, stat, prior): (
+        String,
+        String,
+        String,
+        String,
+        crate::events::Stat,
+        crate::events::Ledger,
+    ) = serde_json::from_slice(&request).map_err(|_| StorageError::ScopeChanged)?;
+    let ack = format!("native-relocation-ack:{:x}", Sha256::digest(&request));
+    if kind != "native-relocation-v1"
+        || from != old
+        || to != proof.new_path
+        || id != proof.native_id
+        || prior != proof.prior
+        || stat.size < prior.offset
+        || super::native_keys::read_meta(tx, ack.as_bytes(), 16384)?.as_ref() != Some(&request)
+    {
+        return Ok(false);
+    }
+    for (path, ledger) in [(old, expected), (proof.new_path.as_str(), &proof.after)] {
+        if super::native_keys::read_meta(
+            tx,
+            format!("raw-write-inflight:{path}").as_bytes(),
+            16384,
+        )?
+        .is_some()
+        {
+            return Ok(false);
+        }
+        let Some(header) = super::native_keys::read_meta(
+            tx,
+            format!("native_codex_header:{path}").as_bytes(),
+            1048576,
+        )? else {
+            return Ok(false);
+        };
+        let header: crate::events::native_aux::CodexHeaderRecord =
+            serde_json::from_slice(&header).map_err(|_| StorageError::ScopeChanged)?;
+        if header.version != 1
+            || header.parser_version != crate::events::CACHE_VERSION
+            || header.ledger != crate::events::store::header_ledger(ledger)
+            || header.header.id.as_deref() != Some(proof.native_id.as_str())
+        {
+            return Ok(false);
+        }
+        super::native_pages::current(tx, path, ledger)?;
+    }
     tx.check()?;
     Ok(true)
 }
