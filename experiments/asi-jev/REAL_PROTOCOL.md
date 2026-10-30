@@ -53,13 +53,23 @@ Keep error reason distinct from visible text. Never include source filename,
 physical session ID, private cwd, user identity, raw native JSON, labels,
 selection stratum, timestamps, or annotation notes in the model input.
 
+The private review bundle separately carries `arrival_ms`, relative to the
+first usable native timestamp, solely for local batching/queue accounting. It
+is never part of the projection text or provider input. Missing timing remains
+unknown, and cannot establish arrival-to-label latency acceptance.
+
 Use a maximum 1,200 characters per text field, 8,192 UTF-8 bytes per target
 window, newest whole context rows with the target reserved, and original
 chronological target position. Prefix sees only current/earlier rows. Offline
 sees the selected complete captured session under the same cap. Truncation and
 redaction counts are reported. Log text is data, not model instructions.
 
-Taxonomy and descriptions are frozen from `benchmark.py`: activity
+Taxonomy uses `benchmark.py` with the following real-only description
+clarifications in `real_run.py`, shared by labellers and providers: completion
+means the assistant reports the current requested work/turn complete (a stop
+marker alone is insufficient); ending requires session-terminal evidence;
+ordinary tool failure alone is not an anomaly. Archived experiment prompts
+remain unchanged. The labels are: activity
 `task_request/progress/tool_action/wait/failure/recovery/completion/unknown`;
 failure `none/tool/permission/environment/model/transport/malformed/unknown`;
 retry `none/retry/loop`; anomaly boolean; phase
