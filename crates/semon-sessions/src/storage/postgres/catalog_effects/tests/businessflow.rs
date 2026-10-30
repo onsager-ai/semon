@@ -137,7 +137,10 @@ fn generic_runtime_publication_preflight(
         .iter()
         .map(|row| row.query.as_ref().unwrap()["runtime"].as_str().unwrap())
         .collect::<std::collections::BTreeSet<_>>();
-    assert!(scopes.len() > 1, "ordinary rows have distinct runtime scopes");
+    assert!(
+        scopes.len() > 1,
+        "ordinary rows have distinct runtime scopes"
+    );
     for fault in [
         "missing",
         "raw_global",
@@ -167,7 +170,9 @@ fn generic_runtime_publication_preflight(
                 rows[0].query.as_mut().unwrap()["runtime"] = other;
             }
             "source_generation" => rows[0].sources[0].offset += 1,
-            "dependency" => rows[0].native_ids.push("unobserved native dependency".into()),
+            "dependency" => rows[0]
+                .native_ids
+                .push("unobserved native dependency".into()),
             _ => unreachable!(),
         }
         let publication = crate::slot_projection::Publication {
@@ -1437,12 +1442,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "authentic publication capture must bind the stage's global runtime"
             );
             for row in &saved.rows {
-                let cwds = pg.runtime_source_cwds(&row.sources).unwrap_or_else(|error| {
-                    panic!(
-                        "authentic capture CWD lookup failed: key={} error={error}",
-                        row.key
-                    )
-                });
+                let cwds = pg
+                    .runtime_source_cwds(&row.sources)
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "authentic capture CWD lookup failed: key={} error={error}",
+                            row.key
+                        )
+                    });
                 let observed = captured
                     .runtime_observation(row, &cwds)
                     .unwrap_or_else(|error| {
@@ -1478,8 +1485,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                                             &endpoint.row,
                                             &endpoint_cwds,
                                         );
-                                let runtime = captured
-                                    .runtime_observation(&endpoint.row, &endpoint_cwds)?;
+                                let runtime =
+                                    captured.runtime_observation(&endpoint.row, &endpoint_cwds)?;
                                 Ok((runtime, dependencies_differ))
                             });
                         eprintln!(
@@ -1505,15 +1512,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             && endpoint.row.query.is_none()
                             && crate::retention::source_generation(&endpoint.row.sources).unwrap()
                                 == crate::retention::source_generation(&row.sources).unwrap()
-                            && crate::native_evidence::runtime::dependencies(row, &Default::default())
-                                != crate::native_evidence::runtime::dependencies(
-                                    &endpoint.row,
-                                    &Default::default(),
-                                ))
+                            && crate::native_evidence::runtime::dependencies(
+                                row,
+                                &Default::default(),
+                            ) != crate::native_evidence::runtime::dependencies(
+                                &endpoint.row,
+                                &Default::default(),
+                            ))
                         .then_some((row, &endpoint.row))
                     })
                 })
-                .expect("native fixture must contain a queryless endpoint with different dependencies");
+                .expect(
+                    "native fixture must contain a queryless endpoint with different dependencies",
+                );
             let cwds = pg.runtime_source_cwds(&row.sources).unwrap();
             let row_runtime = captured.runtime_observation(row, &cwds).unwrap();
             let endpoint_runtime = captured.runtime_observation(endpoint, &cwds).unwrap();

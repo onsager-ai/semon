@@ -684,7 +684,8 @@ fn bind_custody_fixture(
     config.create_native_store().unwrap();
     let mut options = options.clone();
     options.source = source.with_store(config).unwrap();
-    let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    let mut cache =
+        crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
     for (at, source) in rows.iter().flat_map(|row| &row.sources).enumerate() {
         let receipt = cache
             .ingest(&format!("{:064x}", at + 1), &source.path, "claude")
@@ -698,7 +699,10 @@ fn bind_custody_fixture(
         .collect::<Vec<_>>();
     let prepared =
         crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
-    assert_eq!(custody_row_content(&prepared.rows), custody_row_content(rows));
+    assert_eq!(
+        custody_row_content(&prepared.rows),
+        custody_row_content(rows)
+    );
     let recipes = |projections: &[crate::slot_projection::Projection]| {
         projections
             .iter()
@@ -714,7 +718,9 @@ fn bind_custody_fixture(
     let runtime = crate::native_evidence::RuntimeObservations::new(&options);
     for row in &prepared.rows {
         let cwds = cache.runtime_source_cwds(&row.sources).unwrap();
-        let fresh = binding.witness(&runtime.scope(row, &cwds).unwrap()).unwrap();
+        let fresh = binding
+            .witness(&runtime.scope(row, &cwds).unwrap())
+            .unwrap();
         assert_eq!(capture.runtime_for(row).as_deref(), Some(fresh.as_str()));
         assert_eq!(
             row.query.as_ref().unwrap()["runtime"].as_str(),
@@ -741,9 +747,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let mut generations = Vec::new();
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            generations.push(
-                bind_custody_fixture(&pool, &ns(name), options, rows, projections).0,
-            );
+            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections).0);
         }
     });
     let mut missing = data.rows.clone();
@@ -830,7 +834,13 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
     let namespace = ns("catalog127-original");
     let mut generation = None;
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
-        generation = Some(bind_custody_fixture(&pool, &namespace, options, rows, projections));
+        generation = Some(bind_custody_fixture(
+            &pool,
+            &namespace,
+            options,
+            rows,
+            projections,
+        ));
     });
     let (generation, native_rows) = generation.expect("ordinary custody fixture publication");
     let preserve = |tx: &mut PgTxn<'_>| {
