@@ -234,7 +234,10 @@ pub(crate) fn catalog_page(
     request: &crate::catalog::Request,
     admit_search: bool,
 ) -> Result<
-    (crate::ViewerReply, Option<crate::catalog::CatalogSearchAdmission>),
+    (
+        crate::ViewerReply,
+        Option<crate::catalog::CatalogSearchAdmission>,
+    ),
     super::StorageError,
 > {
     let control = &control.for_selected_read();

@@ -26,14 +26,18 @@ fn cohort_page(
     snapshot: &Snapshot<'_, '_>,
     after: Option<&(i64, Vec<u8>)>,
 ) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, StorageError> {
-    snapshot.require_current().map_err(|_| StorageError::ScopeChanged)?;
+    snapshot
+        .require_current()
+        .map_err(|_| StorageError::ScopeChanged)?;
     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
     tx.check()?;
     let namespace = tx.namespace.as_str().as_bytes();
     let after_last = after.map(|cursor| cursor.0);
     let after_key = after.map(|cursor| cursor.1.as_slice());
-    let page = tx.driver.query(
-        "WITH visible AS (
+    let page = tx
+        .driver
+        .query(
+            "WITH visible AS (
             SELECT session_key,metadata,last_ms,true AS is_current
             FROM semon_pg_native_catalog_rows r
             WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
@@ -57,13 +61,20 @@ fn cohort_page(
         ) SELECT session_key,
             CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
             last_ms,is_current FROM page ORDER BY last_ms DESC,session_key",
-        &[&namespace,&snapshot.generation.as_bytes(),&after_last,&after_key],
-    ).map_err(sqlstate::error)?;
+            &[
+                &namespace,
+                &snapshot.generation.as_bytes(),
+                &after_last,
+                &after_key,
+            ],
+        )
+        .map_err(sqlstate::error)?;
     let mut output = Vec::new();
     for row in page {
         let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
         crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
-        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        let metadata: crate::model::summary::CatalogRow =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         if metadata.key.as_bytes() != row.get::<_, Vec<u8>>(0)
             || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)
             || metadata.sources.len() > 64
@@ -72,7 +83,7 @@ fn cohort_page(
         }
         let current = row.get::<_, bool>(3)
             && metadata.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-        output.push((metadata,current));
+        output.push((metadata, current));
     }
     tx.check()?;
     Ok(output)
