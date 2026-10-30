@@ -2639,6 +2639,7 @@ impl EventCache {
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
                 },
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
@@ -2677,6 +2678,7 @@ impl EventCache {
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
                 },
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
@@ -2831,6 +2833,7 @@ impl EventCache {
             &crate::slot_projection::Publication {
                 rows,
                 transcripts: None,
+                observations: None,
             },
             expected_generation,
         );

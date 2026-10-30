@@ -376,6 +376,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &crate::slot_projection::Publication {
                 rows: &expected.rows,
                 transcripts: Some(&expected.transcripts),
+                observations: None,
             },
             expected.base_generation.as_deref(),
         )
@@ -1463,7 +1464,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         pg.publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
                 rows: &competing,
-                transcripts: Some(&prepared.transcripts)
+                transcripts: Some(&prepared.transcripts),
+                observations: None,
             },
             prepared.base_generation.as_deref()
         )
@@ -3548,6 +3550,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                                 &crate::slot_projection::Publication {
                                     rows: &model.prepared().rows,
                                     transcripts: Some(&model.prepared().transcripts),
+                                    observations: None,
                                 },
                                 batch.base_generation.as_deref(),
                                 &model.prepared().claims,

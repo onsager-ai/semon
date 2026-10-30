@@ -7731,51 +7731,41 @@ pub(crate) fn prepare_semantic_batch(
             .cloned()
             .collect();
     }
-    if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
-        let binding = cache.query_runtime_binding()?;
-        let mut presentation =
-            crate::storage::selected::PresentationObservations::capture_with_authority(
-                options,
-                binding.as_ref(),
-                prepared.rows.iter().chain(
-                    batch
-                        .context
-                        .endpoints
-                        .values()
-                        .map(|endpoint| &endpoint.row),
-                ),
-                options
-                    .facts
-                    .as_ref()
-                    .map(|path| cache.facts_authority(path))
-                    .transpose()?,
-            );
-        for row in prepared
-            .rows
-            .iter()
-            .chain(
-                batch
-                    .context
-                    .endpoints
-                    .values()
-                    .map(|endpoint| &endpoint.row),
-            )
-            .take(128)
-        {
-            let observed = cache.runtime_source_cwds(&row.sources).and_then(|cwds| {
-                presentation
-                    .runtime_observation(row, &cwds)
-                    .map(|runtime| (runtime, cwds))
-            });
-            if let Ok((runtime, cwds)) = observed {
-                presentation.capture_runtime(row, &cwds, runtime)?;
-            }
-        }
-        prepared.relationships.presentation = Some(presentation);
-    }
     #[cfg(feature = "postgres")]
     prepared.retain_withdrawal_fence(options)?;
     Ok(SemanticModelBatch { prepared })
+}
+
+
+fn capture_publication_observations(
+    options: &Options,
+    cache: &EventCache,
+    rows: &[summary::CatalogRow],
+    relationships: Option<&relation_stage::Context>,
+    source_runtime: &str,
+) -> io::Result<crate::storage::selected::PresentationObservations> {
+    let binding = cache.query_runtime_binding()?;
+    let cohort = || rows.iter().chain(
+        relationships.into_iter().flat_map(|context| context.endpoints.values().map(|endpoint| &endpoint.row)),
+    );
+    let mut observations = crate::storage::selected::PresentationObservations::capture_with_authority(
+        options,
+        binding.as_ref(),
+        cohort(),
+        options.facts.as_ref().map(|path| cache.facts_authority(path)).transpose()?,
+    );
+    if observations.source_runtime.as_deref() != Some(source_runtime) {
+        return Err(io::Error::other("publication runtime changed during capture"));
+    }
+    for row in cohort().take(128) {
+        let observed = cache.runtime_source_cwds(&row.sources).and_then(|cwds| {
+            observations.runtime_observation(row, &cwds).map(|runtime| (runtime, cwds))
+        });
+        if let Ok((runtime, cwds)) = observed {
+            observations.capture_runtime(row, &cwds, runtime)?;
+        }
+    }
+    Ok(observations)
 }
 
 fn semantic_withdrawals(
@@ -9004,14 +8994,26 @@ fn build_sources_inner(
         builder.cache.emit_scan_measurements(&id);
         measurements.emit(&id, "model_preparation");
     }
+    // PG publication is bounded to 64 rows. Larger complete SQLite catalogs
+    // retain their existing writer path without a truncated runtime capture.
+    let presentation = if history_records.is_none()
+        && !matches!(&selection, BuildSelection::Identity { .. } | BuildSelection::Matching { .. })
+        && let Some(rows) = &catalog
+        && rows.len() <= 64
+    {
+        Some(capture_publication_observations(options, builder.cache, rows, staged_relationships, &query_runtime)?)
+    } else {
+        None
+    };
     match target {
         BuildTarget::Sources => {
             let sender_turns = builder.complete_sender_turns()?;
-            let relationships = relation_stage::Context::capture(
+            let mut relationships = relation_stage::Context::capture(
                 &builder,
                 published_facts.as_ref(),
                 sender_turns.as_deref().unwrap_or(&turns),
             );
+            relationships.presentation = presentation;
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
             let mut message_dependencies = Some(Vec::new());
@@ -9093,6 +9095,7 @@ fn build_sources_inner(
                 &crate::slot_projection::Publication {
                     rows: catalog.as_deref().unwrap_or_default(),
                     transcripts: slot_projections.as_deref(),
+                    observations: presentation.as_ref(),
                 },
                 catalog_base.as_deref(),
             )?;
@@ -9273,6 +9276,7 @@ fn build_sources_inner(
             &crate::slot_projection::Publication {
                 rows: &catalog,
                 transcripts: slot_projections.as_deref(),
+                observations: presentation.as_ref(),
             },
             catalog_base.as_deref(),
         );

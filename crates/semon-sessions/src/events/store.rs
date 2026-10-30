@@ -2276,6 +2276,7 @@ impl IndexStore for SqliteStore {
             &crate::slot_projection::Publication {
                 rows: &prepared.rows,
                 transcripts: Some(&prepared.transcripts),
+                observations: prepared.presentation_observations(),
             },
             batch.base_generation.as_deref(),
             Some(&prepared.claims),
@@ -7418,6 +7419,7 @@ mod tests {
             &crate::slot_projection::Publication {
                 rows,
                 transcripts: Some(projections),
+                observations: None,
             },
             generation.as_deref(),
             scoped.then_some(claims.as_slice()),
@@ -8573,6 +8575,7 @@ mod tests {
             let publication = crate::slot_projection::Publication {
                 rows: &rows,
                 transcripts: Some(&projections),
+                observations: None,
             };
             assert_eq!(
                 store
@@ -8694,6 +8697,7 @@ mod tests {
             let publication = crate::slot_projection::Publication {
                 rows: &rows,
                 transcripts: Some(&projections),
+                observations: None,
             };
             let claims = rows
                 .iter()
@@ -8988,6 +8992,7 @@ mod tests {
                         &crate::slot_projection::Publication {
                             rows: &rows,
                             transcripts: Some(&projections),
+                            observations: None,
                         },
                         Some("stale-publication"),
                         None,
@@ -12242,6 +12247,7 @@ pub(crate) fn current_search_test_connection_with_epoch(
             &crate::slot_projection::Publication {
                 rows: &[],
                 transcripts: None,
+                observations: None,
             },
             None,
             None,
