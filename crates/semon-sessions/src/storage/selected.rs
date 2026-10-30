@@ -355,6 +355,7 @@ pub(crate) struct PresentationWitness {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
+    pub(crate) source_runtime: Option<String>,
     pub(crate) runtime: Option<String>,
     runtime_rows: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
     runtime_cwd_fingerprints: BTreeMap<String, String>,
@@ -466,15 +467,17 @@ impl PresentationObservations {
             machine_label = None;
             sources.clear();
         }
-        let runtime = runtime
-            .filter(|initial| {
+        let source_runtime = runtime.filter(|initial| {
                 crate::native_evidence::query_runtime_generation(options)
                     .ok()
                     .as_ref()
                     == Some(initial)
-            })
-            .and_then(|runtime| binding.and_then(|binding| binding.witness(&runtime).ok()));
+            });
+        let runtime = source_runtime
+            .as_ref()
+            .and_then(|runtime| binding.and_then(|binding| binding.witness(runtime).ok()));
         Self {
+            source_runtime,
             runtime,
             runtime_rows: BTreeMap::new(),
             runtime_cwd_fingerprints: BTreeMap::new(),

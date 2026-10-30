@@ -3900,6 +3900,7 @@ mod tests {
         let publication = crate::slot_projection::Publication {
             rows: &prepared.rows,
             transcripts: Some(&prepared.transcripts),
+            observations: None,
         };
         let (outcome, partial) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
         assert_eq!(outcome, Outcome::Written);
