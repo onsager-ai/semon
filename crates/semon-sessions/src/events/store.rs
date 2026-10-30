@@ -244,8 +244,9 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: pre-cleanup proof/tree/usage representations are rebuilt together.
-pub(crate) const SCHEMA_VERSION: i64 = 33;
+// Contract fence: older owned indexes rebuild together. Version 34 adds the
+// matching NOCASE scheduling indexes; current stores do not run storage DDL.
+pub(crate) const SCHEMA_VERSION: i64 = 34;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -485,7 +486,67 @@ CREATE TABLE IF NOT EXISTS reported_runs (
     capture_at INTEGER NOT NULL,
     PRIMARY KEY (session_id, start)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS catalog_search_native ON session_catalog_sources(native_id COLLATE NOCASE,source_path) WHERE lifecycle='current';
+CREATE INDEX IF NOT EXISTS catalog_search_pending_filename ON session_catalog_invalidations(substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1) COLLATE NOCASE,source_path);
+CREATE INDEX IF NOT EXISTS catalog_search_pending_copilot ON session_catalog_invalidations(substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1) COLLATE NOCASE,source_path) WHERE source_path GLOB '*/session-state/*/events.jsonl';
+CREATE INDEX IF NOT EXISTS catalog_search_header ON meta(json_extract(value,'$.header.id') COLLATE NOCASE,key) WHERE key GLOB 'native_codex_header:*' AND json_valid(value);
+
 ";
+
+// Each branch admits pending matches before its limit. Matching expression
+// indexes bound lookup to the requested identity, not the full cold inventory.
+const CATALOG_SEARCH_PATHS: &str = "
+SELECT source_path FROM (
+ SELECT source_path FROM (
+  SELECT DISTINCT i.source_path FROM session_catalog_sources s INDEXED BY catalog_search_native
+  JOIN session_catalog_invalidations i ON i.source_path=s.source_path
+  WHERE s.native_id=?1 COLLATE NOCASE AND s.lifecycle='current' AND $ROOTS LIMIT ?3
+ ) UNION SELECT source_path FROM (
+  SELECT source_path FROM session_catalog_invalidations i INDEXED BY catalog_search_pending_filename
+  WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?2 COLLATE NOCASE AND $ROOTS LIMIT ?3
+ ) UNION SELECT source_path FROM (
+  SELECT source_path FROM session_catalog_invalidations i INDEXED BY catalog_search_pending_copilot
+  WHERE source_path GLOB '*/session-state/*/events.jsonl'
+   AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1 COLLATE NOCASE AND $ROOTS LIMIT ?3
+ ) UNION SELECT source_path FROM (
+  SELECT i.source_path FROM meta m INDEXED BY catalog_search_header
+  JOIN session_catalog_invalidations i ON i.source_path=substr(m.key,length('native_codex_header:')+1)
+  WHERE m.key GLOB 'native_codex_header:*' AND json_valid(m.value)
+   AND json_extract(m.value,'$.header.id')=?1 COLLATE NOCASE AND $ROOTS LIMIT ?3
+ )
+) ORDER BY source_path LIMIT ?3";
+
+fn catalog_search_sql() -> String {
+    CATALOG_SEARCH_PATHS.replace("$ROOTS", "((i.source_path>=?4 AND i.source_path<?5) OR (i.source_path>=?6 AND i.source_path<?7) OR (i.source_path>=?8 AND i.source_path<?9))")
+}
+
+pub(super) fn catalog_search_paths(
+    connection: &Connection,
+    search: &super::CatalogSearchLookup<'_>,
+    limit: usize,
+) -> rusqlite::Result<Vec<String>> {
+    if !search.query.is_ascii() {
+        return Ok(Vec::new());
+    }
+    let ranges = search.ranges;
+    connection
+        .prepare(&catalog_search_sql())?
+        .query_map(
+            params![
+                search.query,
+                format!("{}.jsonl", search.query),
+                limit.min(super::CATALOG_SEARCH_LIMIT) as i64,
+                ranges[0].0,
+                ranges[0].1,
+                ranges[1].0,
+                ranges[1].1,
+                ranges[2].0,
+                ranges[2].1
+            ],
+            |row| row.get(0),
+        )?
+        .collect()
+}
 
 const FILE_COLUMNS: &str = "file_id, path, dev, ino, size, mtime_ns, resume_at, head_sha256, \
      tail_sha256, entrypoint, title, agent_name, last_model, failed, first_ms, last_ms, cwd, \
@@ -2306,30 +2367,79 @@ impl IndexStore for SqliteStore {
         read_append_evidence(&self.connection, path).map_err(failure)
     }
 
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError> {
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&super::CatalogPendingSearch<'_>>,
+    ) -> Result<super::CatalogPendingBatch, StoreError> {
+        use super::{CatalogPendingBatch, CatalogPendingTier};
         let transaction = self.connection.unchecked_transaction().map_err(failure)?;
         require_current_sql(&transaction).map_err(failure)?;
-        let mut selected = transaction.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
-        let paths = selected
-            .query_map([limit as i64], |row| row.get(0))
-            .map_err(failure)?
-            .collect::<Result<Vec<String>, _>>()
-            .map_err(failure)?;
+        let paths = {
+            let mut selected = transaction.prepare("SELECT i.source_path FROM meta m JOIN session_catalog_invalidations i ON i.source_path=m.value WHERE m.key>='slot_upgrade_selected:' AND m.key<'slot_upgrade_selected;' ORDER BY i.revision,i.source_path LIMIT ?1").map_err(failure)?;
+            selected
+                .query_map([limit as i64], |row| row.get(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<String>, _>>()
+                .map_err(failure)?
+        };
         if !paths.is_empty() {
-            drop(selected);
             transaction.commit().map_err(failure)?;
-            return Ok(paths);
+            return Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::SelectedUpgrade,
+                paths,
+                fallback: Vec::new(),
+                search_checked: false,
+            });
         }
-        drop(selected);
-        let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
-        let paths = statement
-            .query_map([limit as i64], |row| row.get(0))
-            .map_err(failure)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(failure)?;
-        drop(statement);
+        let fallback = {
+            let excluded = serde_json::to_string(search.map_or(&[][..], |search| search.excluded))
+                .map_err(|error| StoreError::Failed(error.to_string()))?;
+            let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_invalidations WHERE source_path NOT IN (SELECT value FROM json_each(?2)) ORDER BY revision,source_path LIMIT ?1").map_err(failure)?;
+            statement
+                .query_map(params![limit as i64, excluded], |row| row.get(0))
+                .map_err(failure)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(failure)?
+        };
+        if search.is_some_and(|search| search.yield_to_fifo) && !fallback.is_empty() {
+            transaction.commit().map_err(failure)?;
+            return Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::Fifo,
+                paths: fallback,
+                fallback: Vec::new(),
+                search_checked: false,
+            });
+        }
+        let paths = if let Some(search) = search {
+            if let Some(retry) = &search.retry {
+                catalog_search_paths(&transaction, retry, limit).map_err(failure)?
+            } else {
+                let encoded = serde_json::to_string(search.paths)
+                    .map_err(|error| StoreError::Failed(error.to_string()))?;
+                transaction.prepare("SELECT i.source_path FROM json_each(?1) p JOIN session_catalog_invalidations i ON i.source_path=p.value ORDER BY i.source_path LIMIT ?2").map_err(failure)?
+                    .query_map(params![encoded, limit.min(super::CATALOG_SEARCH_LIMIT) as i64], |row| row.get(0)).map_err(failure)?
+                    .collect::<Result<Vec<String>, _>>().map_err(failure)?
+            }
+        } else {
+            Vec::new()
+        };
         transaction.commit().map_err(failure)?;
-        Ok(paths)
+        if paths.is_empty() {
+            Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::Fifo,
+                paths: fallback,
+                fallback: Vec::new(),
+                search_checked: search.is_some(),
+            })
+        } else {
+            Ok(CatalogPendingBatch {
+                tier: CatalogPendingTier::SearchHint,
+                paths,
+                fallback,
+                search_checked: true,
+            })
+        }
     }
 
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
@@ -6847,11 +6957,197 @@ mod tests {
     }
 
     #[test]
+    fn cold_catalog_search_survives_deferred_original_custody_publication() {
+        use std::io::Write;
+        let root = scratch("catalog-search-deferred-original");
+        let (options, _, _) = catalog_native_fixture(&root, 2, true);
+        let key = "native-cx-01";
+        let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
+        let original = options.codex_home.join(relative);
+        let mut file = fs::OpenOptions::new().append(true).open(&original).unwrap();
+        for index in 2..130 {
+            writeln!(file, "{}", serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original {index}")}]}})).unwrap();
+        }
+        drop(file);
+        let initial = crate::native_evidence::NativeEvidence::new(options.clone());
+        assert!((0..128).any(|_| {
+            initial
+                .refresh_catalog(&mut crate::viewer::lock(&initial.work), CATALOG_FIXTURE_NOW)
+                .unwrap()
+        }));
+        drop(initial);
+        let proof = crate::session_source_proof(&options, "codex", relative)
+            .unwrap()
+            .unwrap();
+        let ready = crate::source_projection_ready(&options, "codex", relative)
+            .unwrap()
+            .unwrap();
+        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        fs::remove_file(original).unwrap();
+        let replacement = options
+            .claude_home
+            .join(format!("projects/-work-proj/{key}.jsonl"));
+        fs::write(&replacement, serde_json::json!({"type":"user","uuid":"replacement","sessionId":key,"timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Replacement"}}).to_string()+"\n").unwrap();
+        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
+        let tx = db.unchecked_transaction().unwrap();
+        let ordinary = options
+            .claude_home
+            .join("projects/-work-proj/native-cl-00.jsonl");
+        invalidate_catalog_source(&tx, ordinary.to_str().unwrap(), "changed").unwrap();
+        invalidate_catalog_source(&tx, replacement.to_str().unwrap(), "changed").unwrap();
+        tx.commit().unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some((key, Some("claude"))));
+        let mut work = crate::viewer::lock(&evidence.work);
+        assert!(matches!(
+            evidence
+                .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
+                .unwrap(),
+            crate::native_evidence::CatalogPreparation::Pending
+        ));
+        assert_eq!(
+            catalog_recipes(&db, "session_history_slots", key).len(),
+            64,
+            "the first qualified replacement defers after the custody page"
+        );
+        evidence
+            .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
+            .unwrap();
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [ordinary.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "ordinary publication progresses between Deferred hinted attempts"
+        );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [replacement.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        let published = (0..16).any(|_| {
+            evidence
+                .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
+                .unwrap();
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [replacement.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+        });
+        assert!(
+            published,
+            "the original search survives each Deferred without reposting"
+        );
+        drop(work);
+        drop(evidence);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cold_catalog_search_uses_indexed_pending_matches_before_branch_limits() {
+        let root = scratch("catalog-search-pending-indexes");
+        let path = root.join("index.sqlite3");
+        let (store, _) = opened(&path);
+        for index in 0..130 {
+            let source = format!("/codex/native/{index:04}.jsonl");
+            store.connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES(?1,'codex','Identity',?2)", params![format!("session-{index}"), source]).unwrap();
+            store
+                .connection
+                .execute(
+                    "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                    params![
+                        format!("native_codex_header:/codex/header/{index:04}.jsonl"),
+                        r#"{"header":{"id":"Identity"}}"#
+                    ],
+                )
+                .unwrap();
+        }
+        let pending = [
+            "/codex/native/0129.jsonl",
+            "/codex/header/0129.jsonl",
+            "/claude/IDENTITY.jsonl",
+            "/copilot/session-state/IDENTITY/events.jsonl",
+        ];
+        let tx = store.connection.unchecked_transaction().unwrap();
+        for source in pending {
+            invalidate_catalog_source(&tx, source, "changed").unwrap();
+        }
+        tx.commit().unwrap();
+        let ranges = [
+            ("/claude/".into(), "/claude0".into()),
+            ("/codex/".into(), "/codex0".into()),
+            ("/copilot/".into(), "/copilot0".into()),
+        ];
+        let lookup = super::super::CatalogSearchLookup {
+            query: "identity",
+            ranges: &ranges,
+        };
+        let paths = catalog_search_paths(&store.connection, &lookup, 64).unwrap();
+        assert_eq!(
+            paths.into_iter().collect::<BTreeSet<_>>(),
+            pending.into_iter().map(str::to_owned).collect()
+        );
+        let plan: Vec<String> = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", catalog_search_sql()))
+            .unwrap()
+            .query_map(
+                params![
+                    "identity",
+                    "identity.jsonl",
+                    64,
+                    ranges[0].0,
+                    ranges[0].1,
+                    ranges[1].0,
+                    ranges[1].1,
+                    ranges[2].0,
+                    ranges[2].1
+                ],
+                |row| row.get(3),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        for index in [
+            "catalog_search_native",
+            "catalog_search_pending_filename",
+            "catalog_search_pending_copilot",
+            "catalog_search_header",
+        ] {
+            assert!(
+                plan.iter()
+                    .any(|step| step.contains("SEARCH ") && step.contains(index)),
+                "{index}: {plan:?}"
+            );
+        }
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN s ")
+                || step.starts_with("SCAN m ")
+                || step.starts_with("SCAN i ")
+                || step.starts_with("SCAN session_catalog_invalidations")),
+            "{plan:?}"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn selected_projection_upgrade_precedes_draining_and_preserves_revision() {
         let root = scratch("selected-upgrade-priority");
         let (options, rows, _) = catalog_native_fixture(&root, 2, true);
         let selected = &rows[1];
         let path = selected.sources[0].path.to_string_lossy().into_owned();
+        let search_source = &rows[0].sources[0];
+        let search_path = search_source.path.to_string_lossy().into_owned();
         let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial'),('catalog_backfill_state','draining');").unwrap();
         db.execute(
@@ -6861,6 +7157,7 @@ mod tests {
         .unwrap();
         let tx = db.unchecked_transaction().unwrap();
         invalidate_catalog_source(&tx, "/unrelated/first.jsonl", "changed").unwrap();
+        invalidate_catalog_source(&tx, &search_path, "changed").unwrap();
         invalidate_catalog_source(&tx, &path, "changed").unwrap();
         tx.commit().unwrap();
         let revision: i64 = db
@@ -6873,8 +7170,22 @@ mod tests {
         assert!(crate::request_session_projection_upgrade(&options, &selected.key).unwrap());
         let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
         assert_eq!(
-            store.pending_catalog_sources(64).unwrap(),
+            store.pending_catalog_sources(64, None).unwrap().paths,
             vec![path.clone()]
+        );
+        let preferred = super::super::CatalogPendingSearch {
+            paths: std::slice::from_ref(&search_path),
+            retry: None,
+            yield_to_fifo: true,
+            excluded: std::slice::from_ref(&search_path),
+        };
+        assert_eq!(
+            store
+                .pending_catalog_sources(64, Some(&preferred))
+                .unwrap()
+                .tier,
+            super::super::CatalogPendingTier::SelectedUpgrade,
+            "search hints must defer to explicit projection upgrades"
         );
         assert_eq!(
             db.query_row(
@@ -6887,6 +7198,7 @@ mod tests {
         );
         drop(store);
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        evidence.note_catalog_search(Some((&search_source.native_id, None)));
         let upgraded = (0..128).any(|_| {
             evidence
                 .refresh_catalog(
@@ -6902,11 +7214,39 @@ mod tests {
             .unwrap()
                 == crate::slot_projection::VERSION
         });
-        evidence.retire();
         assert!(
             upgraded,
             "ordinary producer must complete the selected upgrade"
         );
+        assert!(
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&search_path],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap(),
+            "competing search publication must not precede the selected upgrade"
+        );
+        let searched = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    CATALOG_FIXTURE_NOW,
+                )
+                .unwrap();
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&search_path],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+        });
+        assert!(
+            searched,
+            "the deferred search must publish without another request"
+        );
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap(), "deferred search must still precede ordinary FIFO");
+        evidence.retire();
         eprintln!("slot_upgrade stage=producer selected_first=true version=6");
         drop(db);
         fs::remove_dir_all(root).unwrap();
@@ -10025,6 +10365,7 @@ mod tests {
     #[test]
     fn obsolete_producer_contracts_rebuild_once_and_keep_focused_reads_read_only() {
         for change in [
+            "DROP INDEX catalog_search_native; DROP INDEX catalog_search_pending_filename; DROP INDEX catalog_search_pending_copilot; DROP INDEX catalog_search_header; PRAGMA user_version=33",
             "PRAGMA user_version=32",
             "PRAGMA user_version=1",
             "UPDATE meta SET value='1' WHERE key='cache_version'",
@@ -10069,6 +10410,16 @@ mod tests {
                     "{change}"
                 );
                 assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
+                let ranges = std::array::from_fn(|_| (String::new(), String::new()));
+                let search = super::super::CatalogSearchLookup {
+                    query: "missing",
+                    ranges: &ranges,
+                };
+                assert!(
+                    catalog_search_paths(&current.connection, &search, 64)
+                        .unwrap()
+                        .is_empty()
+                );
                 current
                     .write_one("fresh", None, None, &ledger(2), &full())
                     .unwrap();

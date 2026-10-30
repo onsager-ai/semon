@@ -394,8 +394,10 @@ fn catalog_selection_read(
         cursor: None,
     };
     let reply = match snapshot {
-        Some(snapshot) => read_page_snapshot(options, source_key, &request, snapshot),
-        None => read_page(options, source_key, &request),
+        Some(snapshot) => {
+            read_page_snapshot(options, source_key, &request, snapshot, false, &mut None)
+        }
+        None => read_page(options, source_key, &request, None),
     }
     .map_err(|_| Unavailable)?;
     let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
@@ -541,6 +543,12 @@ fn reply(status: u16, body: Value) -> ViewerReply {
 }
 
 impl Request {
+    pub(crate) fn search_interest(&self) -> Option<(&str, Option<&str>)> {
+        self.q
+            .as_deref()
+            .map(|query| (query, self.harness.as_deref()))
+    }
+
     pub(crate) fn parse(query: &str) -> Result<Self, ViewerReply> {
         let invalid = || {
             error(
@@ -945,7 +953,13 @@ pub(crate) fn relative_status(
 }
 
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
-    page_with_gate(options, machine, request, || Ok(()))
+    page_with_gate(options, machine, request, || Ok(()), None)
+}
+
+pub(crate) struct CatalogSearchAdmission {
+    pub(crate) query: String,
+    pub(crate) harness: Option<String>,
+    pub(crate) paths: Result<Vec<String>, ()>,
 }
 
 pub(crate) fn page_with_gate(
@@ -953,11 +967,12 @@ pub(crate) fn page_with_gate(
     machine: &str,
     request: Request,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
+    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> ViewerReply {
     if let Err(reply) = before_read() {
         return reply;
     }
-    match read_page(options, machine, &request) {
+    match read_page(options, machine, &request, on_search) {
         Ok(reply) => reply,
         Err(_) => error(
             503,
@@ -1021,6 +1036,7 @@ fn read_page(
     options: &Options,
     machine: &str,
     request: &Request,
+    on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
@@ -1028,8 +1044,23 @@ fn read_page(
     )?;
     connection.busy_timeout(Duration::from_millis(100))?;
     let transaction = connection.transaction()?;
-    let reply = read_page_snapshot(options, machine, request, &transaction)?;
+    let mut admission = None;
+    let reply = read_page_snapshot(
+        options,
+        machine,
+        request,
+        &transaction,
+        on_search.is_some(),
+        &mut admission,
+    )?;
     transaction.commit()?;
+    if reply.status == 200
+        && let (Some(on_search), Some(admission)) = (on_search, admission)
+    {
+        // Producer priority is advisory; a full queue cannot invalidate the
+        // Catalog page already read from a qualified publication.
+        let _ = on_search(admission);
+    }
     Ok(reply)
 }
 
@@ -1038,6 +1069,8 @@ fn read_page_snapshot(
     machine: &str,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
+    admit_search: bool,
+    admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
     if request.cursor.as_ref().is_some_and(|cursor| {
@@ -1217,6 +1250,32 @@ fn read_page_snapshot(
         .unwrap_or_else(|| "complete".into());
     if !matches!(completeness.as_str(), "partial" | "complete") {
         return Err(io::Error::other("catalog completeness is invalid").into());
+    }
+    if admit_search
+        && completeness == "partial"
+        && let Some((query, harness)) = request.search_interest()
+    {
+        let draining: bool = transaction
+            .query_row(
+                "SELECT value='draining' FROM meta WHERE key='catalog_backfill_state'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if draining {
+            *admission = Some(CatalogSearchAdmission {
+                query: query.to_owned(),
+                harness: harness.map(str::to_owned),
+                paths: EventCache::catalog_search_sources(
+                    transaction,
+                    options,
+                    crate::events::CatalogSearchInterest { query, harness },
+                    crate::events::CATALOG_SEARCH_LIMIT,
+                )
+                .map_err(|_| ()),
+            });
+        }
     }
     let more = selected.len() > request.limit;
     if more {
@@ -1629,6 +1688,267 @@ mod tests {
         fn drop(&mut self) {
             fs::remove_dir_all(&self.root).unwrap();
         }
+    }
+
+    #[test]
+    fn cold_catalog_search_interest_prioritizes_exact_identity_and_finishes_fifo() {
+        let fixture = Fixture::new();
+        let selected = fixture.source("selected-interest");
+        fs::File::open(&selected)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+            .unwrap();
+        for index in 0..192 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        assert!(
+            fixture.body("q=selected-interest").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        let request = Request::parse("q=selected-interest&harness=claude").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        evidence.note_catalog_search(Request::parse("").unwrap().search_interest());
+        assert!(
+            !evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        );
+        let after = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        assert_eq!(
+            after - before,
+            1,
+            "selection must prepare its closure before unrelated cohorts"
+        );
+        let (status, selected) = fixture.body("q=selected-interest&harness=claude");
+        assert_eq!(status, 200, "{selected}");
+        assert_eq!(selected["items"][0]["key"], "selected-interest");
+        assert_eq!(selected["completeness"]["state"], "partial");
+
+        // A metadata value that is not a native identity keeps ordinary FIFO
+        // work. Search correctness never depends on an identity hint existing.
+        let request = Request::parse("q=project").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64
+        );
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
+        let (status, found) = fixture.body("q=project&limit=100");
+        assert_eq!(status, 200, "{found}");
+        assert_eq!(found["completeness"]["state"], "complete");
+        assert_eq!(found["search"]["index_complete"], true);
+        assert_eq!(found["items"].as_array().unwrap().len(), 100);
+        assert_eq!(
+            fixture.body("sid=selected-interest").1["items"][0]["key"],
+            "selected-interest"
+        );
+        evidence.retire();
+    }
+
+    #[test]
+    fn cold_catalog_search_keeps_two_tabs_and_drains_rejected_harness_hints() {
+        let fixture = Fixture::new();
+        for id in ["first-tab", "second-tab"] {
+            let path = fixture.source(id);
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+                .unwrap();
+        }
+        for index in 0..256 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        for query in [
+            "q=first-tab&harness=claude",
+            "q=second-tab&harness=claude",
+            "",
+        ] {
+            evidence.note_catalog_search(Request::parse(query).unwrap().search_interest());
+        }
+        for id in ["first-tab", "second-tab"] {
+            if id == "second-tab" {
+                let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+                evidence
+                    .refresh_catalog(&mut work, crate::model::now_ms())
+                    .unwrap();
+                assert_eq!(
+                    crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+                    64,
+                    "a completed hint still reserves an ordinary cohort before the next tab"
+                );
+            }
+            let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+            assert_eq!(
+                crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+                1
+            );
+            assert_eq!(
+                fixture.body(&format!("q={id}&harness=claude")).1["items"][0]["key"],
+                id
+            );
+        }
+        // A hint whose only remaining physical match has the wrong harness
+        // still permits a full ordinary cohort, then finite FIFO completion.
+        let rejected = fixture.source("wrong-harness");
+        let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,999999,'changed',0)", [rejected.to_string_lossy().as_ref()]).unwrap();
+        evidence.note_catalog_search(
+            Request::parse("q=wrong-harness&harness=codex")
+                .unwrap()
+                .search_interest(),
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64
+        );
+        let complete = (0..32).any(|_| {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        });
+        assert!(complete);
+        evidence.note_catalog_search(Request::parse("q=first-tab").unwrap().search_interest());
+        evidence.retire();
+    }
+
+    #[test]
+    fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification() {
+        let fixture = Fixture::new();
+        let claude = fixture.source("Identity-Hint");
+        let codex = fixture
+            .options
+            .codex_home
+            .join("sessions/2026/10/01/Identity-Hint.jsonl");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            format!(
+                "{}\n",
+                json!({
+                    "type":"session_meta", "timestamp":"2026-10-01T00:00:00Z",
+                    "payload":{"id":"actual-codex", "cwd":"/synthetic/project"}
+                })
+            ),
+        )
+        .unwrap();
+        for path in [&claude, &codex] {
+            fs::File::open(path)
+                .unwrap()
+                .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
+                .unwrap();
+        }
+        for index in 0..192 {
+            fixture.source(&format!("unrelated-{index:04}"));
+        }
+        let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+        let mut work = crate::viewer::lock(&evidence.work);
+        while !session_catalog_page_ready(&fixture.options).unwrap() {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap();
+        }
+        let request = Request::parse("q=IDENTITY-HINT&harness=codex").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            1
+        );
+        // A same-basename file is a discovery hint, never the native identity.
+        assert!(
+            fixture.body("q=identity-hint&harness=codex").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            fixture.body("q=actual-codex&harness=codex").1["items"][0]["key"],
+            "actual-codex"
+        );
+        assert!(
+            fixture.body("q=identity-hint&harness=claude").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE session_catalog_invalidations SET revision=999999 WHERE source_path=?1",
+                [claude.to_string_lossy().as_ref()]
+            )
+            .unwrap(),
+            1
+        );
+        let request = Request::parse("q=IDENTITY-HINT&harness=claude").unwrap();
+        evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64,
+            "the completed Codex hint reserves an ordinary cohort"
+        );
+        assert!(
+            fixture.body("q=identity-hint&harness=claude").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            1,
+            "the mixed-case Claude hint precedes the remaining older FIFO cohort"
+        );
+        assert_eq!(
+            fixture.body("q=identity-hint&harness=claude").1["items"][0]["key"],
+            "Identity-Hint"
+        );
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
+        evidence.retire();
     }
 
     #[test]
