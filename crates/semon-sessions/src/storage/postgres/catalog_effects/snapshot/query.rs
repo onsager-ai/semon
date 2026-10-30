@@ -22,6 +22,7 @@ pub(in crate::storage::postgres) struct QueryCatalog {
 /// Query includes retained-only owners without changing the Current Catalog
 /// pager. Preserve each Current header for window/runtime membership before
 /// choosing its proof-owned history, as the SQLite Query reader does.
+/// The boolean records physical Catalog membership separately from lifecycle.
 fn cohort_page(
     snapshot: &Snapshot<'_, '_>,
     after: Option<&(i64, Vec<u8>)>,
@@ -38,7 +39,7 @@ fn cohort_page(
         .driver
         .query(
             "WITH visible AS (
-            SELECT session_key,metadata,last_ms,true AS is_current
+            SELECT session_key,metadata,last_ms,true AS catalog_member
             FROM semon_pg_native_catalog_rows r
             WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
             UNION ALL
@@ -55,12 +56,12 @@ fn cohort_page(
                   AND r.generation=o.generation AND r.key_digest=o.key_digest
                   AND r.session_key=o.session_key)
         ), page AS MATERIALIZED (
-            SELECT session_key,metadata,last_ms,is_current FROM visible
+            SELECT session_key,metadata,last_ms,catalog_member FROM visible
             WHERE $3::bigint IS NULL OR last_ms<$3 OR (last_ms=$3 AND session_key>$4)
             ORDER BY last_ms DESC,session_key LIMIT 65
         ) SELECT session_key,
             CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
-            last_ms,is_current FROM page ORDER BY last_ms DESC,session_key",
+            last_ms,catalog_member FROM page ORDER BY last_ms DESC,session_key",
             &[
                 &namespace,
                 &snapshot.generation.as_bytes(),
@@ -81,9 +82,7 @@ fn cohort_page(
         {
             return Err(StorageError::ScopeChanged);
         }
-        let current = row.get::<_, bool>(3)
-            && metadata.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-        output.push((metadata, current));
+        output.push((metadata, row.get::<_, bool>(3)));
     }
     tx.check()?;
     Ok(output)
@@ -423,18 +422,20 @@ impl QueryCatalogStore for QueryCatalog {
                 let more = catalog.len() > 64;
                 catalog.truncate(64);
                 let next = catalog.last().map(|(row,_)| (row.last.unwrap_or(0),row.key.as_bytes().to_vec()));
-                for (row,current) in catalog {
+                for (row,catalog_member) in catalog {
+                    let current = catalog_member && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
                     let Some(c) = cutoff else {
-                        loaded.insert(row.key.clone(), (chosen(row)?.0,current));
+                        let selected = if catalog_member { chosen(row)?.0 } else { row };
+                        loaded.insert(selected.key.clone(), (selected,current));
                         continue;
                     };
                     // The chosen history may have older timestamps than its
-                    // Current header. Window membership follows that header,
-                    // while retained-only owners cannot become live by an old
-                    // saved work/wait observation.
+                    // Current header. Only physical Catalog members qualify
+                    // by header time or live state; retained-only owners use
+                    // their saved Query time below.
                     let state = current && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
-                    let current_recent = row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state;
-                    let (row, history) = chosen(row)?;
+                    let current_recent = catalog_member && (row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state);
+                    let (row, history) = if catalog_member { chosen(row)? } else { (row,true) };
                     if current_recent || (history && query_last(&row).is_some_and(|last| last >= c)) {
                         loaded.insert(row.key.clone(), (row,current));
                     }
