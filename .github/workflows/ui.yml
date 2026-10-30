@@ -589,7 +589,9 @@ jobs:
             ${{ runner.temp }}/native-foundation-measurement/source-tail-scope.log
             ${{ runner.temp }}/native-foundation-browser/server-results.json
             ${{ runner.temp }}/native-foundation-browser/*-first-import.json
+            ${{ runner.temp }}/native-foundation-browser/*-first-import.json.result
             ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json
+            ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json.result
             ${{ runner.temp }}/native-foundation-browser/*-browser.log
           if-no-files-found: warn
           retention-days: 14

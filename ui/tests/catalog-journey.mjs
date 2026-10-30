@@ -8,6 +8,7 @@ import { chromium } from '../../tests/ui/node_modules/playwright/index.mjs';
 const fixture = JSON.parse(
   await readFile(process.argv[2] ?? process.env.SEMON_CATALOG_SERVED_MANIFEST, 'utf8'),
 );
+const MAX_NETWORK_EVENTS = 200;
 fixture.catalog_key ??= fixture.sid;
 const evidencePath = process.argv[3] ?? fixture.evidence_path;
 await writeFile(
@@ -27,10 +28,15 @@ try {
   const captures = new Set(),
     fieldCaptures = new Set();
   let bundle = null;
-  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('pageerror', (error) => {
+    if (errors.length < MAX_NETWORK_EVENTS) errors.push(error.message);
+  });
   page.on('request', (request) => {
     const url = new URL(request.url());
-    if (url.pathname.startsWith('/api/')) requests.push(url.pathname + url.search);
+    if (url.pathname.startsWith('/api/') && requests.length < MAX_NETWORK_EVENTS) {
+      url.searchParams.delete('t');
+      requests.push(url.pathname + url.search);
+    }
   });
   page.on('response', (response) => {
     const capture = (async () => {
@@ -42,13 +48,14 @@ try {
       if (!url.pathname.startsWith('/api/')) return;
       const started = response.request().timing();
       if ((response.headers()['content-type'] ?? '').includes('text/event-stream')) {
-        responses.push({
-          path: url.pathname,
-          status: response.status(),
-          bytes: null,
-          streamed: true,
-          serverResponseMs: started.responseStart - started.requestStart,
-        });
+        if (responses.length < MAX_NETWORK_EVENTS)
+          responses.push({
+            path: url.pathname,
+            status: response.status(),
+            bytes: null,
+            streamed: true,
+            serverResponseMs: started.responseStart - started.requestStart,
+          });
         return;
       }
       let bytes = null,
@@ -73,14 +80,18 @@ try {
         const field = JSON.parse(body.toString('utf8'));
         fieldTexts[field.field.chunk] = field.text;
       }
-      responses.push({
-        path: url.pathname,
-        status: response.status(),
-        bytes,
-        ...(unavailable ? { body_unavailable: unavailable } : {}),
-        serverResponseMs: started.responseStart - started.requestStart,
-      });
-    })().catch((error) => errors.push('Response capture failed: ' + error.message));
+      if (responses.length < MAX_NETWORK_EVENTS)
+        responses.push({
+          path: url.pathname,
+          status: response.status(),
+          bytes,
+          ...(unavailable ? { body_unavailable: unavailable } : {}),
+          serverResponseMs: started.responseStart - started.requestStart,
+        });
+    })().catch((error) => {
+      if (errors.length < MAX_NETWORK_EVENTS)
+        errors.push('Response capture failed: ' + error.message);
+    });
     captures.add(capture);
     if (new URL(response.url()).pathname === '/api/session-entry' && response.status() === 200)
       fieldCaptures.add(capture);
@@ -131,7 +142,7 @@ try {
         new URL(response.url()).searchParams.get('harness') === fixture.harness,
     );
     await page.getByRole('textbox', { name: 'Harness', exact: true }).fill(fixture.harness);
-    await page.getByRole('textbox', { name: 'Harness', exact: true }).press('Tab');
+    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
     await response;
     await page.locator(`[data-session-row="list"][data-id="${fixture.catalog_key}"]`).waitFor();
   }
@@ -216,7 +227,16 @@ try {
     JSON.stringify({ coldMs, filterMs, selectedMs, earlierMs, fieldMs, warmMs, bundle, errors }),
   );
 } catch (error) {
-  await writeFile(evidencePath + '.result', JSON.stringify({ ok: false, error: error.message }));
+  await writeFile(
+    evidencePath + '.result',
+    JSON.stringify({
+      ok: false,
+      error: error.message,
+      requests,
+      responses,
+      page_errors: errors,
+    }),
+  );
   throw error;
 } finally {
   await browser.close();
