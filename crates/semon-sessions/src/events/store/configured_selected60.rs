@@ -746,7 +746,7 @@ fn configured_semantic_selected65_capture_unavailable_facts_is_per_row_unavailab
     assert!(!observations.selection_known);
     assert!(observations.runtime.is_none());
     assert!(observations.machine_label.is_none());
-    assert_eq!(observations.capture_relative_status(&model.prepared().rows[0]), json!({"state":null,"observation":"unavailable"}));
+    assert_eq!(observations.capture_relative_status(&model.prepared().rows[0], || cache.runtime_source_cwds(&model.prepared().rows[0].sources)), json!({"state":null,"observation":"unavailable"}));
 }
 
 #[test]
@@ -776,12 +776,30 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
         model.prepared().rows.iter(),
     );
     assert_eq!(saved.captured_source_count(), row.sources.len());
-    let saved_a = saved.capture_relative_status(row);
+    let saved_a = saved.capture_relative_status(row, || cache.runtime_source_cwds(&row.sources));
     assert_ne!(saved_a, json!({"state":null,"observation":"unavailable"}));
     let mut facts_b = facts_a.clone();
     facts_b.codex_rollouts = Some(Default::default());
     crate::facts::write_facts(facts_path, &facts_b, &crate::Options::default().source).unwrap();
-    assert_eq!(saved.capture_relative_status(row), saved_a);
+    assert_eq!(saved.capture_relative_status(row, || cache.runtime_source_cwds(&row.sources)), saved_a);
+
+    // A replacement during the exact-ledger lookup must not leave a scoped
+    // runtime or source selection cached after final authority validation fails.
+    crate::facts::write_facts(facts_path, &facts_a, &crate::Options::default().source).unwrap();
+    let mut interrupted = crate::storage::selected::PresentationObservations::capture(
+        options,
+        runtime_binding.as_ref(),
+        model.prepared().rows.iter().skip(1),
+    );
+    assert_eq!(
+        interrupted.capture_relative_status(row, || {
+            crate::facts::write_facts(facts_path, &facts_b, &crate::Options::default().source)?;
+            cache.runtime_source_cwds(&row.sources)
+        }),
+        json!({"state":null,"observation":"unavailable"})
+    );
+    assert!(interrupted.runtime_for(row).is_none());
+    assert_eq!(interrupted.captured_source_count(), 0);
 
     // A row requiring a lazy lookup through A's now-invalid identity fails
     // closed instead of taking B's current_codex answer.
@@ -794,7 +812,7 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
     assert_eq!(lazy.captured_source_count(), 0);
     crate::facts::write_facts(facts_path, &facts_b, &crate::Options::default().source).unwrap();
     assert_eq!(
-        lazy.capture_relative_status(row),
+        lazy.capture_relative_status(row, || cache.runtime_source_cwds(&row.sources)),
         json!({"state":null,"observation":"unavailable"})
     );
     let mut durable: crate::storage::selected::PresentationObservations =
@@ -804,7 +822,7 @@ fn configured_semantic_selected80_facts_replacement_after_capture_never_substitu
     facts_c.hostname = "after-deserialization".into();
     crate::facts::write_facts(facts_path, &facts_c, &crate::Options::default().source).unwrap();
     assert_eq!(
-        durable.capture_relative_status(row),
+        durable.capture_relative_status(row, || cache.runtime_source_cwds(&row.sources)),
         json!({"state":null,"observation":"unavailable"})
     );
 }
@@ -836,7 +854,7 @@ fn configured_semantic_selected80_capture_ignores_unrelated_facts_history() {
     );
     assert_eq!(observations.captured_source_count(), 1);
     assert_ne!(
-        observations.capture_relative_status(&model.prepared().rows[0]),
+        observations.capture_relative_status(&model.prepared().rows[0], || cache.runtime_source_cwds(&model.prepared().rows[0].sources)),
         json!({"state":null,"observation":"unavailable"})
     );
 }

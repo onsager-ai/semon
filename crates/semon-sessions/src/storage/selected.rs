@@ -356,7 +356,7 @@ pub(crate) struct PresentationWitness {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
     pub(crate) runtime: Option<String>,
-    runtime_rows: BTreeMap<String, (String, String)>,
+    runtime_rows: BTreeMap<String, BTreeMap<String, String>>,
     pub(crate) facts_known: bool,
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
@@ -369,6 +369,8 @@ pub(crate) struct PresentationObservations {
 }
 struct PresentationAuthority {
     options: crate::Options,
+    runtime: crate::native_evidence::RuntimeObservations,
+    binding: Option<crate::storage::QueryRuntimeBinding>,
     recorded: Option<std::sync::Mutex<crate::facts::source_authority::Sources>>,
 }
 impl std::fmt::Debug for PresentationAuthority {
@@ -407,6 +409,7 @@ impl PresentationObservations {
         recorded: Option<crate::facts::source_authority::Sources>,
     ) -> Self {
         let runtime = crate::native_evidence::query_runtime_generation(options).ok();
+        let scoped = crate::native_evidence::RuntimeObservations::new(options);
         let mut facts_known =
             options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
         let mut selection_known = options.facts.is_none()
@@ -480,6 +483,8 @@ impl PresentationObservations {
             relative_statuses: BTreeMap::new(),
             authority: Some(std::sync::Arc::new(PresentationAuthority {
                 options: options.clone(),
+                runtime: scoped,
+                binding: binding.cloned(),
                 recorded: recorded.map(std::sync::Mutex::new),
             })),
         }
@@ -494,20 +499,47 @@ impl PresentationObservations {
         row: &crate::model::summary::CatalogRow,
         runtime: String,
     ) -> io::Result<()> {
-        if self.runtime_rows.len() >= 128 && !self.runtime_rows.contains_key(&row.key) {
+        let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
+        // Initial capture has at most 128 cohorts; one selected family adds
+        // at most its owner, 32 ancestors and 99 descendants.
+        let count: usize = self.runtime_rows.values().map(BTreeMap::len).sum();
+        if count >= 260
+            && !self
+                .runtime_rows
+                .get(&row.key)
+                .is_some_and(|rows| rows.contains_key(&source))
+        {
             return Err(io::Error::other("presentation runtime budget exceeded"));
         }
-        let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
         self.runtime_rows
             .entry(row.key.clone())
-            .or_insert((source, runtime));
+            .or_default()
+            .insert(source, runtime);
         Ok(())
+    }
+    pub(crate) fn runtime_observation(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+        cwds: &BTreeSet<String>,
+    ) -> io::Result<String> {
+        self.runtime
+            .as_ref()
+            .ok_or_else(|| io::Error::other("presentation runtime unavailable"))?;
+        let authority = self
+            .authority
+            .as_ref()
+            .ok_or_else(|| io::Error::other("presentation runtime authority unavailable"))?;
+        let scoped = authority.runtime.scope(row, cwds)?;
+        authority
+            .binding
+            .as_ref()
+            .ok_or_else(|| io::Error::other("presentation runtime binding unavailable"))?
+            .witness(&scoped)
     }
     pub(crate) fn runtime_for(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
         self.runtime.as_ref()?;
         let source = crate::retention::source_generation(&row.sources).ok()?;
-        let (saved, runtime) = self.runtime_rows.get(&row.key)?;
-        (saved == &source).then(|| runtime.clone())
+        self.runtime_rows.get(&row.key)?.get(&source).cloned()
     }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
         Self::source_key(source)
@@ -518,6 +550,7 @@ impl PresentationObservations {
     pub(crate) fn capture_relative_status(
         &mut self,
         row: &crate::model::summary::CatalogRow,
+        cwds: impl FnOnce() -> io::Result<BTreeSet<String>>,
     ) -> Value {
         // Publication's indexed family lookup may include a relative outside
         // the model's incident endpoint page. Qualify only those actual paths
@@ -534,10 +567,12 @@ impl PresentationObservations {
             // live Facts file changes. Reopening or validating authority here
             // would turn authenticated A data into an unnecessary unavailable
             // result despite no lazy lookup being requested.
-            if keys.iter().all(|key| self.sources.contains_key(key)) {
+            let needs_runtime = row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                && self.runtime_for(row).is_none();
+            if keys.iter().all(|key| self.sources.contains_key(key)) && !needs_runtime {
                 return Ok(());
             }
-            let Some(authority) = &self.authority else {
+            let Some(authority) = self.authority.clone() else {
                 return Ok(());
             };
             let recorded = authority
@@ -551,12 +586,16 @@ impl PresentationObservations {
             if let Some(recorded) = &recorded {
                 recorded.validate()?;
             }
+            let runtime = needs_runtime
+                .then(|| self.runtime_observation(row, &cwds()?))
+                .transpose()?;
+            let mut sources = Vec::new();
             for source in row.sources.iter().take(64) {
                 let key = Self::source_key(source)?;
                 if self.sources.contains_key(&key) {
                     continue;
                 }
-                if self.sources.len() >= 8192 {
+                if self.sources.len() + sources.len() >= 8192 {
                     return Err(io::Error::other("selected source observation bound"));
                 }
                 let relative =
@@ -571,18 +610,22 @@ impl PresentationObservations {
                 } else {
                     None
                 };
-                self.sources.insert(
+                sources.push((
                     key,
                     SourceObservation {
                         relative,
                         current_codex,
                         cached: crate::catalog::source_state(source) == "cached",
                     },
-                );
+                ));
             }
             if let Some(recorded) = &recorded {
                 recorded.validate()?;
             }
+            if let Some(runtime) = runtime {
+                self.capture_runtime(row, runtime)?;
+            }
+            self.sources.extend(sources);
             Ok(())
         })();
         if captured.is_err() {
