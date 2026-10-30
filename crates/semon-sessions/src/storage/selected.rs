@@ -672,6 +672,15 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
             }
         }
     }
+    fn catalog_search_paths(
+        &self,
+        _: &crate::events::CatalogSearchLookup<'_>,
+        _: usize,
+    ) -> io::Result<Vec<String>> {
+        Err(io::Error::other(
+            "selected snapshot has no search authority",
+        ))
+    }
     fn search(
         &self,
         _: crate::catalog_search::Query<'_>,
