@@ -1106,8 +1106,7 @@ impl NativeEvidence {
                 eprintln!("native catalog phase=tree_repair");
             })?;
         #[cfg(test)]
-        let tree_repair_us =
-            tree_repair_started.map_or(0, |started| started.elapsed().as_micros());
+        let tree_repair_us = tree_repair_started.map_or(0, |started| started.elapsed().as_micros());
         #[cfg(test)]
         let semantic_stage_started = timing.then(std::time::Instant::now);
         let semantic_stage_pending = self
@@ -1121,9 +1120,8 @@ impl NativeEvidence {
             semantic_stage_started.map_or(0, |started| started.elapsed().as_micros());
         #[cfg(test)]
         if timing && cold_diagnostic {
-            let producer = crate::native_timing::id(&crate::events::EventCache::path(
-                &self.options.cache,
-            ));
+            let producer =
+                crate::native_timing::id(&crate::events::EventCache::path(&self.options.cache));
             eprintln!(
                 "semon sessions native: producer={producer} phase=cold_refresh_wrapper prepare_events_us={prepare_events_us} tree_repair_us={tree_repair_us} advance_semantic_stage_us={semantic_stage_us}"
             );
@@ -1543,9 +1541,8 @@ impl NativeEvidence {
         #[cfg(test)]
         if timing && cold_diagnostic {
             let elapsed_us = started.map_or(0, |started| started.elapsed().as_micros());
-            let producer = crate::native_timing::id(&crate::events::EventCache::path(
-                &self.options.cache,
-            ));
+            let producer =
+                crate::native_timing::id(&crate::events::EventCache::path(&self.options.cache));
             eprintln!(
                 "semon sessions native: producer={producer} phase=cold_catalog_pending elapsed_us={elapsed_us}"
             );

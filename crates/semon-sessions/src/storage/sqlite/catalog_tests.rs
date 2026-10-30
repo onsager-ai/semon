@@ -1905,10 +1905,46 @@ fn large_families_repair_one_owner_without_replacing_related_publications() {
 #[test]
 fn exact_model_and_missing_repository_filters_bind_cursor_scope() {
     let fixture = Fixture::new();
-    fixture.publish(4);
-    let db = fixture.db();
-    db.execute("UPDATE session_catalog SET repo=NULL, metadata=json_set(metadata,'$.repo',NULL,'$.model','exact') WHERE session_key IN ('session-00000','session-00002')", []).unwrap();
-    db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.model','exact-other') WHERE session_key='session-00001'", []).unwrap();
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &crate::Facts {
+            version: crate::FACTS_VERSION,
+            hostname: "synthetic-catalog".into(),
+            repos: std::collections::BTreeMap::from([("/synthetic/project".into(), None)]),
+            ..crate::Facts::default()
+        },
+        &fixture.options.source,
+    )
+    .unwrap();
+    for (id, model) in [
+        ("session-00000", "exact"),
+        ("session-00001", "exact-other"),
+        ("session-00002", "exact"),
+        ("session-00003", "exact-other"),
+    ] {
+        let path = fixture.source(id);
+        let contents = fs::read_to_string(&path).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "{contents}{}\n",
+                json!({
+                    "type": "assistant",
+                    "sessionId": id,
+                    "uuid": format!("assistant-{id}"),
+                    "parentUuid": id,
+                    "timestamp": "2026-10-01T00:00:01Z",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "synthetic response"}],
+                        "model": model
+                    }
+                })
+            ),
+        )
+        .unwrap();
+    }
+    fixture.publish_existing();
     let response = session_catalog_page(
         &fixture.options,
         "source",

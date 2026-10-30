@@ -92,6 +92,58 @@ pub(crate) fn checkpoint(
     transaction(config, |tx| transfer::checkpoint_tx(tx, manifest))
 }
 
+/// Read the acknowledged Catalog head for the exact active source freeze.
+pub(crate) fn frozen_catalog_generation(
+    config: &StoreConfig,
+    manifest: &SnapshotManifest,
+) -> Result<String, StorageError> {
+    manifest.bind(config)?;
+    transaction(config, |tx| {
+        transfer::reported::require_ready_capture(tx, config, manifest)?;
+        let admission = super::namespace::require_semantic_admitted(tx.0, &config.namespace)?;
+        if admission.generation != manifest.binding_epoch {
+            return Err(StorageError::ScopeChanged);
+        }
+        let revision: i64 = tx
+            .0
+            .query_row(
+                "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                [tx.1],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        if u64::try_from(revision).ok() != Some(manifest.revision) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let generation: String = tx
+            .0
+            .query_row(
+                "SELECT CASE WHEN octet_length(value)=64 THEN value END FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+                [tx.1],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(failed)?
+            .flatten()
+            .ok_or(StorageError::ScopeChanged)?;
+        if !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let acknowledged: bool = tx
+            .0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.storage_semantic_publications WHERE namespace=?1 AND generation=?2)",
+                params![tx.1, generation.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        if !acknowledged {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(generation)
+    })
+}
+
 pub(crate) fn admit_catalog(
     config: &StoreConfig,
     import: &transfer::reported::CatalogImport,

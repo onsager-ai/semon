@@ -102,6 +102,50 @@ pub(crate) fn checkpoint(
     })
 }
 
+/// Read the acknowledged Catalog head for the exact active source freeze.
+/// This transfer-owned read does not create an ordinary Catalog reader lease.
+pub(crate) fn frozen_catalog_generation(
+    config: &StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+    manifest: &SnapshotManifest,
+) -> Result<String, StorageError> {
+    manifest.bind(config)?;
+    transaction(config, pool, control, |tx| {
+        let binding = model_cache::binding(tx.0)?;
+        if binding.admission != manifest.binding_epoch {
+            return Err(StorageError::ScopeChanged);
+        }
+        let revision: i64 = tx
+            .0
+            .driver
+            .query_one(
+                "SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                &[&config.namespace.as_str().as_bytes()],
+            )
+            .map_err(sqlstate::error)?
+            .get(0);
+        if u64::try_from(revision).ok() != Some(manifest.revision) {
+            return Err(StorageError::ScopeChanged);
+        }
+        transfer::reported::require_ready_capture(tx, config, manifest)?;
+        let generation = model_cache::generation(tx.0)?.ok_or(StorageError::ScopeChanged)?;
+        let acknowledged: bool = tx
+            .0
+            .driver
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)",
+                &[&config.namespace.as_str().as_bytes(), &generation.as_bytes()],
+            )
+            .map_err(sqlstate::error)?
+            .get(0);
+        if !acknowledged {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(generation)
+    })
+}
+
 pub(crate) fn admit_catalog(
     config: &StoreConfig,
     pool: &PgPool,

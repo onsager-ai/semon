@@ -44,7 +44,7 @@ impl TransferInbox {
         eprintln!("transfer_catalog_admission stage=source_catalog_head");
         let import = CatalogImport {
             manifest: manifest.clone(),
-            generation: source.0.catalog_generation()?,
+            generation: source.frozen_catalog_generation(manifest)?,
         };
         match &self.0.backend {
             StoreBackend::Sqlite { .. } => {
@@ -92,6 +92,24 @@ impl TransferInbox {
             #[cfg(feature = "postgres")]
             StoreBackend::Postgres { pool, control } => {
                 super::super::postgres::transfer::apply(&self.0, pool, control, manifest, sequence)
+            }
+        }
+    }
+
+    fn frozen_catalog_generation(
+        &self,
+        manifest: &SnapshotManifest,
+    ) -> Result<String, StorageError> {
+        manifest.bind(&self.0)?;
+        match &self.0.backend {
+            StoreBackend::Sqlite { .. } => {
+                super::super::sqlite::transfer::frozen_catalog_generation(&self.0, manifest)
+            }
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { pool, control } => {
+                super::super::postgres::transfer::frozen_catalog_generation(
+                    &self.0, pool, control, manifest,
+                )
             }
         }
     }
@@ -232,6 +250,25 @@ pub(crate) fn capture_state(
             Ok(state)
         })
         .transpose()
+}
+
+/// Require the exact completed source capture while its transfer freeze is
+/// still active. This is shared by the backend-private frozen Catalog reads.
+pub(crate) fn require_ready_capture(
+    tx: &mut impl InboxTransaction,
+    config: &StoreConfig,
+    manifest: &SnapshotManifest,
+) -> Result<(), StorageError> {
+    manifest.bind(config)?;
+    let state = capture_state(tx, config, &manifest.snapshot_id)?.ok_or(StorageError::Conflict)?;
+    if state.progress() != CaptureProgress::Ready(manifest.clone()) {
+        return Err(StorageError::Conflict);
+    }
+    let expected = encode_bounded(&manifest.snapshot_id, MAX_MANIFEST_BYTES)?;
+    if tx.get(FREEZE, MAX_MANIFEST_BYTES)?.as_deref() != Some(expected.as_slice()) {
+        return Err(StorageError::Conflict);
+    }
+    Ok(())
 }
 
 pub(crate) fn start_capture(

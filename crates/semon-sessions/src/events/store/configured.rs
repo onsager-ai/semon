@@ -1320,6 +1320,9 @@ impl Writer {
         if options.source.namespace().map_err(std::io::Error::other)? != self.config.namespace {
             return Err(std::io::ErrorKind::PermissionDenied.into());
         }
+        if !self.tree_repair_pending().map_err(std::io::Error::other)? {
+            return Ok((false, None));
+        }
         #[cfg(test)]
         let timing = crate::native_timing::enabled();
         #[cfg(test)]
@@ -1361,7 +1364,7 @@ impl Writer {
         #[cfg(test)]
         if timing {
             let cleanup_us = cleanup_started.map_or(0, |started| started.elapsed().as_micros());
-            let producer = crate::native_timing::id(&database);
+            let producer = crate::native_timing::id(database);
             eprintln!(
                 "semon sessions native: producer={producer} phase=configured_tree_repair connection_setup_us={connection_setup_us} native_usage_advance_us={native_usage_advance_us} cleanup_us={cleanup_us}"
             );
@@ -6222,6 +6225,10 @@ mod tests {
         assert!(!receipt.replayed);
         assert!(cache.event_operation.is_none());
         let mut unowned = EventCache::open_configured(&f.config).unwrap();
+        // Attempt real retention work using the admitted producer's ledgers;
+        // a newly opened cache has no in-memory disappearance inventory.
+        unowned.retention_base = cache.store.as_ref().unwrap().file_ledgers().unwrap();
+        assert!(!unowned.retention_base.is_empty());
         let before = f.state();
         let error = unowned
             .retain(&std::collections::BTreeSet::new(), &mut false)
