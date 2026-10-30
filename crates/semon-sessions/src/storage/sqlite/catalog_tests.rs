@@ -1,6 +1,6 @@
 use super::*;
 use crate::events::EventCache;
-use crate::storage::sqlite::catalog::{SQL_STEPS, rows};
+use crate::storage::sqlite::catalog::{SQL_STEPS, rows, runtime_source_cwds};
 use crate::{Refresh, ViewerCore};
 use rusqlite::{Connection, types::Value as SqlValue};
 use std::time::Duration;
@@ -3528,6 +3528,31 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
     let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(fresh_body["content_observation"]["state"], "available");
     assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
+    // MCP selects the retained recipe directly, without reconstructing a live
+    // runtime from the files ledger that the real producer removed above.
+    let mcp = crate::query::transcript::read(
+        &fixture.options,
+        "archived",
+        &json!({"id":"archived","after":0,"limit":2}),
+        Some(&fresh),
+        crate::SessionSourceReadMode::LocalThenProvider,
+        crate::model::now_ms(),
+    )
+    .unwrap()
+    .expect("retained MCP recipe must remain qualified without a files ledger");
+    assert_eq!(mcp["entries"][1]["text"], "retained native answer");
+    assert!(
+        crate::query::transcript::session(
+            &fixture.options,
+            "archived",
+            &json!({"id":"archived"}),
+            Some(&fresh),
+            crate::SessionSourceReadMode::LocalThenProvider,
+            crate::model::now_ms(),
+        )
+        .unwrap()
+        .is_some()
+    );
     let generation = fresh_body["projection"]["generation"].as_str().unwrap();
     let reply = crate::session_entry_field(
         &fixture.options,
@@ -3562,6 +3587,41 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
     );
     crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
     assert!(!path.exists());
+}
+
+#[test]
+fn mcp_history_selection_keeps_current_runtime_qualification() {
+    let fixture = Fixture::new();
+    fixture.source("live-history");
+    fixture.publish_existing();
+    let db = fixture.db();
+    // Preserve an exact original recipe beside its still-Current owner. This
+    // isolates history selection from source revision or proof mismatches.
+    db.execute_batch(
+        "INSERT INTO session_history_catalog SELECT namespace,session_key,metadata FROM session_catalog WHERE session_key='live-history';
+         INSERT INTO session_history_projections SELECT namespace,session_key,generation,source_generation,version,total,0 FROM session_slot_projections WHERE session_key='live-history';
+         INSERT INTO session_history_slots SELECT namespace,session_key,slot,metadata FROM session_slots WHERE session_key='live-history';",
+    )
+    .unwrap();
+    let read = || {
+        crate::query::transcript::read(
+            &fixture.options,
+            "live-history",
+            &json!({"id":"live-history"}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            crate::model::now_ms(),
+        )
+    };
+    assert!(read().unwrap().is_some(), "exact history recipe must qualify");
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.hostname = "changed-without-publication".into();
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    assert!(
+        read().unwrap().is_none(),
+        "history selection must not bypass a live Current runtime refusal"
+    );
 }
 
 #[test]
@@ -6709,6 +6769,116 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
         .unwrap(),
         0
     );
+}
+
+#[test]
+fn captured_family_qualifies_a_current_relative_outside_its_initial_cohort() {
+    use crate::storage::selected::{CapturedContext, PresentationObservations, selected_details};
+    let fixture = Fixture::new();
+    let parent_path = fixture.codex_source("capture-parent", None, 1);
+    let child_path = fixture.codex_source("capture-child", Some("capture-parent"), 2);
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.codex_rollouts = Some([parent_path, child_path].into_iter().collect());
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    fixture.publish_existing();
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let parent = rows(&tx, &Request::parse("sid=capture-parent").unwrap())
+        .unwrap()
+        .remove(0);
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "").unwrap();
+    let runtime_binding = binding.runtime_binding().unwrap();
+    let mut observations = PresentationObservations::capture(
+        &fixture.options,
+        runtime_binding.as_ref(),
+        std::iter::once(&parent),
+    );
+    let runtime = observations
+        .runtime_observation(&parent, &runtime_source_cwds(&tx, &parent.sources).unwrap())
+        .unwrap();
+    observations.capture_runtime(&parent, runtime).unwrap();
+    assert_eq!(observations.captured_source_count(), 1);
+    let context = CapturedContext::capture(
+        &super::selected::Context::owned(&tx),
+        &parent,
+        &[],
+        &mut |relative| {
+            observations.capture_relative_status(relative, || {
+                runtime_source_cwds(&tx, &relative.sources)
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(observations.captured_source_count(), 2);
+    let saved: crate::storage::selected::PresentationObservations =
+        serde_json::from_str(&serde_json::to_string(&observations).unwrap()).unwrap();
+    let details = selected_details(&context, &parent.key, &parent.sources, &mut |relative| {
+        saved.relative_statuses[&relative.key].clone()
+    })
+    .unwrap()
+    .unwrap();
+    let child = details["family"]["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == "capture-child")
+        .unwrap();
+    assert_eq!(child["status"]["observation"], "current");
+    assert!(child["status"]["state"].is_string());
+}
+
+#[test]
+fn captured_runtime_keeps_two_source_generations_of_the_same_owner() {
+    use crate::storage::selected::PresentationObservations;
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let path = fixture.source("capture-cohort");
+    fixture.publish_existing();
+    let db = fixture.db();
+    let selected = || {
+        let text: String = db
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key='capture-cohort'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<CatalogRow>(&text).unwrap()
+    };
+    let old = selected();
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "").unwrap();
+    let runtime_binding = binding.runtime_binding().unwrap();
+    let mut observations = PresentationObservations::capture(
+        &fixture.options,
+        runtime_binding.as_ref(),
+        std::iter::once(&old),
+    );
+    let old_status = observations.capture_relative_status(&old, || {
+        runtime_source_cwds(&db, &old.sources)
+    });
+    assert_eq!(old_status["observation"], "current");
+    let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(raw, "{}", json!({"type":"assistant","sessionId":"capture-cohort","uuid":"capture-answer","parentUuid":"capture-cohort","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"second cohort"}]}})).unwrap();
+    drop(raw);
+    fixture.publish_existing();
+    let new = selected();
+    assert_ne!(
+        crate::retention::source_generation(&old.sources).unwrap(),
+        crate::retention::source_generation(&new.sources).unwrap()
+    );
+    let new_status = observations.capture_relative_status(&new, || {
+        runtime_source_cwds(&db, &new.sources)
+    });
+    assert_eq!(new_status["observation"], "current");
+    assert_eq!(
+        observations.capture_relative_status(&old, || {
+            panic!("completed old cohort must remain self-contained")
+        }),
+        old_status
+    );
+    assert!(observations.runtime_for(&old).is_some());
+    assert!(observations.runtime_for(&new).is_some());
 }
 
 #[test]
