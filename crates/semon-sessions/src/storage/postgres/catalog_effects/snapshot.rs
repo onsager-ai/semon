@@ -100,7 +100,8 @@ pub(in crate::storage::postgres) fn catalog_search_paths(
         .bytes()
         .map(|byte| byte.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let query_json = serde_json::to_string(lookup.query).map_err(|_| StorageError::InvalidArguments)?;
+    let query_json =
+        serde_json::to_string(lookup.query).map_err(|_| StorageError::InvalidArguments)?;
     let roots = lookup
         .ranges
         .iter()
@@ -160,9 +161,7 @@ pub(in crate::storage::postgres) fn catalog_search_paths(
     let rows = tx.driver.query(SQL, parameters).map_err(sqlstate::error)?;
     tx.check()?;
     rows.into_iter()
-        .map(|row| {
-            String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
-        })
+        .map(|row| String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged))
         .collect()
 }
 

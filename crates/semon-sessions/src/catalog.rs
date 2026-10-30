@@ -782,7 +782,8 @@ pub(crate) fn page_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
-    match crate::storage::read_local_catalog_page_with_search(options, machine, &request, on_search) {
+    match crate::storage::read_local_catalog_page_with_search(options, machine, &request, on_search)
+    {
         Ok(reply) => reply,
         Err(cause) => {
             #[cfg(test)]

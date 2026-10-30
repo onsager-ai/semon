@@ -4,8 +4,8 @@ use super::{catalog_namespace, failed};
 use crate::storage::{
     NativeReaderBinding, StorageError, StoreConfig,
     source_observations::{
+        CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
-        CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier, CATALOG_SEARCH_LIMIT,
         operation_replay, validate_intent, validate_paths,
     },
 };
@@ -715,7 +715,10 @@ impl SourceObservationStore for SourceJournal {
         let fallback = {
             let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
             statement
-                .query_map(params![self.config.namespace.as_str(), limit as i64, excluded], |r| r.get(0))
+                .query_map(
+                    params![self.config.namespace.as_str(), limit as i64, excluded],
+                    |r| r.get(0),
+                )
                 .map_err(failed)?
                 .collect::<rusqlite::Result<Vec<String>>>()
                 .map_err(failed)?
@@ -730,9 +733,11 @@ impl SourceObservationStore for SourceJournal {
         }
         let paths = if let Some(search) = search {
             if let Some(retry) = &search.retry {
-                catalog_search_paths(&db, self.config.namespace.as_str(), retry, limit).map_err(failed)?
+                catalog_search_paths(&db, self.config.namespace.as_str(), retry, limit)
+                    .map_err(failed)?
             } else {
-                let encoded = serde_json::to_string(search.paths).map_err(|_| StorageError::InvalidArguments)?;
+                let encoded = serde_json::to_string(search.paths)
+                    .map_err(|_| StorageError::InvalidArguments)?;
                 db.prepare("SELECT i.source_path FROM json_each(?1) p JOIN main.session_catalog_invalidations i ON i.namespace=?2 AND i.source_path=p.value ORDER BY i.source_path LIMIT ?3").map_err(failed)?
                     .query_map(params![encoded, self.config.namespace.as_str(), limit.min(CATALOG_SEARCH_LIMIT) as i64], |row| row.get(0)).map_err(failed)?
                     .collect::<rusqlite::Result<Vec<String>>>().map_err(failed)?
@@ -1988,7 +1993,10 @@ mod tests {
             SourceMutationReceipt::AlreadyApplied
         );
         assert_eq!(store.claims(&paths).unwrap(), captured);
-        assert_eq!(store.pending_catalog_sources(1, None).unwrap().paths, vec!["seed".to_owned()]);
+        assert_eq!(
+            store.pending_catalog_sources(1, None).unwrap().paths,
+            vec!["seed".to_owned()]
+        );
         let mut concurrent = Box::new(SourceJournal::owned(
             crate::events::store::configured::NativeOwnership::restore(&f.config).unwrap(),
         )) as Box<dyn SourceObservationStore>;
@@ -2054,7 +2062,10 @@ mod tests {
             store.claims(&paths).unwrap(),
             vec![("first".into(), None), ("fault".into(), None)]
         );
-        assert_eq!(store.pending_catalog_sources(256, None).unwrap().paths, vec!["seed".to_owned()]);
+        assert_eq!(
+            store.pending_catalog_sources(256, None).unwrap().paths,
+            vec!["seed".to_owned()]
+        );
         let revision: i64 = db
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace='A'",
@@ -2111,8 +2122,14 @@ mod tests {
             store.claims(&vec!["x".into(); 257]),
             Err(StorageError::InvalidArguments)
         );
-        assert!(matches!(store.pending_catalog_sources(0, None), Err(StorageError::InvalidArguments)));
-        assert!(matches!(store.pending_catalog_sources(257, None), Err(StorageError::InvalidArguments)));
+        assert!(matches!(
+            store.pending_catalog_sources(0, None),
+            Err(StorageError::InvalidArguments)
+        ));
+        assert!(matches!(
+            store.pending_catalog_sources(257, None),
+            Err(StorageError::InvalidArguments)
+        ));
         let duplicate_claim = vec![("seed".into(), Some(1)), ("seed".into(), Some(1))];
         assert_eq!(
             store.invalidate(
