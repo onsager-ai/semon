@@ -2,7 +2,7 @@ name: ASI Jev standalone experiment
 
 on:
   push:
-    branches: [experiment/asi-jev]
+    branches: [experiment/asi-jev, experiment/asi-jev-real]
     paths:
       - experiments/asi-jev/**
       - .github/workflows/asi-jev.yml
@@ -19,6 +19,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Verify experiment and reproduce deterministic baseline
         run: |
+          if test -n "$(git ls-files experiments/asi-jev/private)"; then
+            echo 'Private evaluation artifacts must never be tracked.'
+            exit 1
+          fi
           python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
           python3 experiments/asi-jev/load_probe.py --help
           python3 experiments/asi-jev/projection_probe.py --help
