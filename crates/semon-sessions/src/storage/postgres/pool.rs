@@ -365,7 +365,12 @@ impl PgPool {
                 connection
                     .client
                     .context(deadline, cancel, self.inner.limits);
-                if connection.created_at.elapsed() >= self.inner.limits.max_lifetime {
+                // The server may close an idle session before our validation
+                // interval. Retire a known closed client before any SQL use.
+                if connection.client.raw.is_closed()
+                    || connection.io.as_ref().is_some_and(|io| io.is_finished())
+                    || connection.created_at.elapsed() >= self.inner.limits.max_lifetime
+                {
                     drop(lease);
                     continue;
                 }
@@ -490,5 +495,59 @@ impl Drop for Lease {
             // cannot admit a replacement until actual completion is observed.
         }
         self.inner.changed.notify_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::postgres::{
+        tests::{fixture, ns},
+        txn::TxnKind,
+    };
+
+    #[test]
+    fn pg_closed_idle_client_is_replaced_before_validation_interval() {
+        let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
+        assert_eq!(pool.inner.limits.idle_timeout, Duration::from_secs(60));
+        let control = PgCancellation::default();
+        let backend = |tx: &mut super::super::txn::PgTxn<'_>| {
+            tx.driver
+                .query_one("SELECT pg_backend_pid()", &[])
+                .map(|row| row.get::<_, i32>(0))
+                .map_err(super::super::sqlstate::error)
+        };
+        let old_pid = pool
+            .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, backend)
+            .unwrap();
+        assert_eq!(pool.accounted(), 1);
+        assert!(
+            factory
+                .client()
+                .query_one("SELECT pg_terminate_backend($1, 2000)", &[&old_pid])
+                .unwrap()
+                .get::<_, bool>(0)
+        );
+        // Observe driver closure before checkout, without using SQL or the
+        // idle validation interval to discover the dead connection.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let state = pool.inner.state.lock().unwrap();
+            let connection = state.idle.first().expect("one returned connection");
+            assert!(connection.returned_at.elapsed() < pool.inner.limits.idle_timeout);
+            if connection.client.raw.is_closed() {
+                break;
+            }
+            drop(state);
+            assert!(Instant::now() < deadline, "driver did not observe closure");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let fresh_pid = pool
+            .transaction(&ns("a"), TxnKind::ReadSnapshot, &control, backend)
+            .unwrap();
+        assert_ne!(fresh_pid, old_pid);
+        assert_eq!(pool.accounted(), 1);
+        drop(pool.acquire(&control).unwrap());
+        assert_eq!(pool.accounted(), 0, "replacement releases exactly one slot");
     }
 }
