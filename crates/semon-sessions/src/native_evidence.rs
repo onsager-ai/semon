@@ -785,7 +785,15 @@ impl NativeEvidence {
                 work.texts.release_published_derivations();
                 return Ok(true);
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if let Some(repair) = error
+                    .get_ref()
+                    .and_then(|cause| cause.downcast_ref::<crate::events::TreeProjectionRepair>())
+                {
+                    repair.queue(cache)?;
+                }
+                return Err(error);
+            }
         };
         let prepared = prepared.prepared();
         if let Some(discovery) = &mut work.cold_catalog {

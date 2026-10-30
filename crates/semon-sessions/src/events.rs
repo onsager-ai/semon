@@ -3283,6 +3283,41 @@ pub(crate) fn scan_committed_file(
     scan_file_with_mode(path, harness, cache, dirty, true)
 }
 
+#[derive(Debug)]
+pub(crate) struct TreeProjectionRepair {
+    path: String,
+    ledger: Ledger,
+    harness: String,
+}
+
+impl std::fmt::Display for TreeProjectionRepair {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native tree projection repair pending")
+    }
+}
+
+impl std::error::Error for TreeProjectionRepair {}
+
+impl TreeProjectionRepair {
+    pub(crate) fn queue(&self, cache: &mut EventCache) -> io::Result<()> {
+        let _source_lock = cache
+            .lock_cache
+            .as_ref()
+            .or(cache.v1_cache.as_ref())
+            .filter(|_| cache.store.is_some())
+            .map(|stem| crate::source_change::SourceLock::acquire_cache(stem, &self.path, false))
+            .transpose()?;
+        if Stat::of(Path::new(&self.path))? != self.ledger.stat {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        cache
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+            .queue_tree_repair(&self.path, &self.ledger, &self.harness)
+    }
+}
+
 fn scan_file_with_mode(
     path: &Path,
     harness: &str,
@@ -3295,20 +3330,18 @@ fn scan_file_with_mode(
     // configured writer persists it with the observed ledger and Source claim
     // in prepare_file before any Raw parsing or publication decision. Explicit
     // ingest retains its caller's identity; staged model readers remain reads.
-    let host_operation = if !committed_only
-        && cache.host_source.is_some()
-        && cache.event_operation.is_none()
-    {
-        Some(
-            crate::storage::source_observations::SourceOperation::capture(
-                &cache.observation_namespace,
-                "native_ingest",
-                path.as_os_str().as_encoded_bytes(),
-            ),
-        )
-    } else {
-        None
-    };
+    let host_operation =
+        if !committed_only && cache.host_source.is_some() && cache.event_operation.is_none() {
+            Some(
+                crate::storage::source_observations::SourceOperation::capture(
+                    &cache.observation_namespace,
+                    "native_ingest",
+                    path.as_os_str().as_encoded_bytes(),
+                ),
+            )
+        } else {
+            None
+        };
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3336,7 +3369,6 @@ fn scan_file_with_mode(
             .map_err(store_io_error)?
             .ok_or_else(|| io::Error::other(crate::storage::StorageError::Conflict))?;
         if ledger.stat != Stat::of(path)?
-            || (harness != "copilot" && index.tree_summary.is_none())
             || !index
                 .source_chunks
                 .as_ref()
@@ -3356,6 +3388,16 @@ fn scan_file_with_mode(
             ));
         }
         cache.require_usage_store(&index)?;
+        if harness != "copilot" && index.tree_summary.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                TreeProjectionRepair {
+                    path: key,
+                    ledger,
+                    harness: harness.to_owned(),
+                },
+            ));
+        }
         let index = Arc::new(index);
         cache.files.insert(
             key,
