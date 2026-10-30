@@ -16,11 +16,11 @@ def _gold(activity, *, failure="none", retry="none", anomaly=False, phase="activ
     }
 
 
-def _reference(event_id, session_id, order, gold, *, complete=True, eligible_count=2):
+def _reference(event_id, session_id, order, gold, *, harness="claude", complete=True, eligible_count=2):
     return {
         "id": event_id,
         "session_id": session_id,
-        "harness": "claude",
+        "harness": harness,
         "event_order": order,
         "complete_session": complete,
         "eligible_event_count": eligible_count if complete else None,
@@ -69,6 +69,48 @@ class RealMetricsTests(unittest.TestCase):
         self.assertEqual(score["prediction_rows"], 6)
         self.assertAlmostEqual(score["dimensions"]["activity"]["accuracy"]["estimate"], 5 / 6)
         self.assertEqual(score["dimensions"]["activity"]["per_class"]["task_request"]["positive_events"], 1)
+
+    def test_harness_points_are_descriptive_and_average_repetitions_per_event(self):
+        refs = [
+            _reference("claude-a", "claude-session", 1, _gold("task_request")),
+            _reference("claude-b", "claude-session", 2, _gold("progress")),
+            _reference("codex-a", "codex-session", 1, _gold("task_request"), harness="codex"),
+            _reference("codex-b", "codex-session", 2, _gold("progress"), harness="codex"),
+        ]
+        for row in refs:
+            row["causal_gold"] = row["gold"]
+        predictions = []
+        for repetition in (1, 2):
+            predictions.extend([
+                _prediction("claude-a", repetition, _gold("task_request" if repetition == 1 else "progress")),
+                _prediction("claude-b", repetition, _gold("progress")),
+                _prediction("codex-a", repetition, _gold("progress")),
+                _prediction("codex-b", repetition, _gold("wait")),
+            ])
+        result = score_records(refs, predictions, draws=20)
+        score = result["conditions"]["Rules"]["prefix"]
+        strata = score["harness_descriptive_points"]
+        self.assertEqual(strata["estimate_type"], "descriptive_point_estimate")
+        self.assertEqual(strata["confidence_intervals"], "not_computed")
+        self.assertEqual(strata["bootstrap_scope"], "pooled_condition_context_metrics_only")
+        self.assertTrue(strata["harness_role_confounded"])
+        self.assertEqual(strata["claude"]["unique_event_count"], 2)
+        self.assertEqual(strata["claude"]["session_count"], 1)
+        self.assertEqual(strata["codex"]["unique_event_count"], 2)
+        self.assertEqual(strata["codex"]["session_count"], 1)
+        self.assertEqual(strata["claude"]["dimensions"]["activity"]["accuracy"], 0.75)
+        self.assertEqual(strata["claude"]["dimensions"]["activity"]["per_class"]["task_request"]["positive_events"], 1)
+        self.assertEqual(
+            strata["claude"]["dimensions"]["activity"]["per_class"]["task_request"]["recall"],
+            0.5,
+        )
+        self.assertEqual(strata["codex"]["dimensions"]["activity"]["accuracy"], 0.0)
+        self.assertEqual(
+            strata["codex"]["dimensions"]["activity"]["per_class"]["progress"]["precision"],
+            0.0,
+        )
+        self.assertNotIn("event_bootstrap_ci95", strata["claude"]["dimensions"]["activity"])
+        self.assertIsNotNone(score["causal_reference_harness_descriptive_points"])
 
     def test_session_alert_budget_uses_complete_sessions_and_session_bootstrap(self):
         refs = [
