@@ -6620,6 +6620,7 @@ fn qualified_read_interest_resumes_a_durable_revision_after_owner_loss() {
 fn native_relocation_history_witness_survives_failed_publication_and_an_append() {
     use crate::{Input, InputRoot, SessionFactsWrite, SessionSourceWrite};
     use std::{collections::BTreeSet, io::Write};
+    use sha2::Digest;
     let fixture = Fixture::new();
     let active = "sessions/2026/10/01/rollout-replay.jsonl";
     let archived = "archived_sessions/2026/10/01/rollout-replay.jsonl";
@@ -6632,6 +6633,34 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
     facts.codex_rollouts = Some(BTreeSet::from([active.to_owned()]));
     crate::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
     fixture.publish_existing();
+    let original_bytes = fs::read(&old).unwrap();
+    let original_prefix_sha256: [u8; 32] = sha2::Sha256::digest(&original_bytes).into();
+    let original_tail_start = original_bytes.len().saturating_sub(4096);
+    let original_tail_sha256: [u8; 32] =
+        sha2::Sha256::digest(&original_bytes[original_tail_start..]).into();
+    let original_response = crate::session_transcript_range(
+        &fixture.options,
+        "local",
+        "sid=move-replay&limit=100",
+        None,
+    );
+    assert_eq!(original_response.status, 200);
+    let original: Value = serde_json::from_slice(&original_response.body).unwrap();
+    assert_eq!(original["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(original["entries"][0]["text"], "first");
+    let original_identity = original["identity"].clone();
+    let original_source: crate::SessionSourceRef = serde_json::from_value(
+        original_identity["source_refs"][0]["source"].clone(),
+    )
+    .unwrap();
+    assert_eq!(original_source.path, active);
+    assert_eq!(original_source.native_id, "move-replay");
+    assert_eq!(original_source.offset, original_bytes.len() as u64);
+    assert_eq!(original_source.prefix_sha256, original_prefix_sha256);
+    assert_eq!(original_source.tail_sha256, original_tail_sha256);
+    let original_entry = original["entries"][0].clone();
+    let original_recipe_generation = original["projection"]["generation"].clone();
+    assert_eq!(original["projection"]["total"], 1);
     let db = fixture.db();
     let file_id: i64 = db
         .query_row(
@@ -6701,17 +6730,182 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
     let parsed = crate::events::PARSED.with(std::cell::Cell::get);
     fixture.publish_existing();
     assert_eq!(crate::events::PARSED.with(std::cell::Cell::get) - parsed, 1);
-    for scope in ["", "&scope=retained_history"] {
-        let response = crate::session_transcript_range(
-            &fixture.options,
-            "local",
-            &format!("sid=move-replay&limit=100{scope}"),
-            None,
-        );
-        assert_eq!(response.status, 200);
-        let body: Value = serde_json::from_slice(&response.body).unwrap();
-        assert_eq!(body["entries"].as_array().unwrap().len(), 2, "{body}");
+    let current = crate::session_transcript_range(
+        &fixture.options,
+        "local",
+        "sid=move-replay&limit=100",
+        None,
+    );
+    assert_eq!(current.status, 200);
+    let current: Value = serde_json::from_slice(&current.body).unwrap();
+    assert_eq!(current["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(current["entries"][0]["text"], "first");
+    assert_eq!(current["entries"][1]["text"], "second");
+    assert_eq!(
+        current["identity"]["source_refs"][0]["source"]["path"],
+        archived
+    );
+
+    let retained_query = "sid=move-replay&scope=retained_history&limit=100";
+    let retained_unavailable =
+        crate::session_transcript_range(&fixture.options, "local", retained_query, None);
+    assert_eq!(retained_unavailable.status, 200);
+    let retained_unavailable: Value =
+        serde_json::from_slice(&retained_unavailable.body).unwrap();
+    assert_eq!(retained_unavailable["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(retained_unavailable["entries"][0]["text"], "");
+    assert_eq!(
+        retained_unavailable["entries"][0]["freshness"]["state"],
+        "incomplete"
+    );
+    assert_eq!(
+        retained_unavailable["content_observation"]["state"],
+        "incomplete"
+    );
+    assert_eq!(
+        retained_unavailable["identity"]["source_refs"][0]["source"],
+        original_identity["source_refs"][0]["source"]
+    );
+    assert_eq!(
+        retained_unavailable["identity"]["source_refs"][0]["state"],
+        "unavailable"
+    );
+
+    // The test reader stands for a host that independently authorized this
+    // exact archive path. Its mapping comes from the fixture's explicit rename,
+    // not from CatalogRelocation; it verifies the old source's complete
+    // consumed prefix before serving any requested range.
+    struct AuthorizedArchiveReader {
+        source: crate::SessionSourceRef,
+        archive_path: std::path::PathBuf,
+        authorized_archive_path: std::path::PathBuf,
+        original_bytes: Vec<u8>,
+        original_prefix_sha256: [u8; 32],
+        original_tail_sha256: [u8; 32],
+        calls: std::sync::atomic::AtomicUsize,
     }
+    impl crate::SessionSourceReader for AuthorizedArchiveReader {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            use sha2::Digest;
+            let denied = || io::Error::from(io::ErrorKind::PermissionDenied);
+            if source != &self.source
+                || source.root != "codex"
+                || source.native_id != "move-replay"
+                || source.offset != self.original_bytes.len() as u64
+            {
+                return Err(denied());
+            }
+            if max == 0
+                || max > crate::SESSION_SOURCE_CHUNK_MAX
+                || offset > source.offset
+                || max as u64 > source.offset - offset
+            {
+                return Err(io::Error::from(io::ErrorKind::InvalidInput));
+            }
+            let metadata = fs::symlink_metadata(&self.archive_path)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || fs::canonicalize(&self.archive_path)? != self.authorized_archive_path
+            {
+                return Err(denied());
+            }
+            let actual = fs::read(&self.archive_path)?;
+            let consumed = usize::try_from(source.offset)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            if actual.len() < consumed {
+                return Err(denied());
+            }
+            let original_prefix = &actual[..consumed];
+            let prefix_sha256: [u8; 32] = sha2::Sha256::digest(original_prefix).into();
+            let tail_start = consumed.saturating_sub(4096);
+            let tail_sha256: [u8; 32] =
+                sha2::Sha256::digest(&original_prefix[tail_start..]).into();
+            if original_prefix != self.original_bytes.as_slice()
+                || prefix_sha256 != self.original_prefix_sha256
+                || prefix_sha256 != source.prefix_sha256
+                || tail_sha256 != self.original_tail_sha256
+                || tail_sha256 != source.tail_sha256
+            {
+                return Err(denied());
+            }
+            let generation = format!("archive:{:x}", sha2::Sha256::digest(original_prefix));
+            if expected.is_some_and(|expected| expected != generation) {
+                return Err(io::Error::from(io::ErrorKind::InvalidData));
+            }
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let start = usize::try_from(offset)
+                .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            let end = start
+                .checked_add(max)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+            Ok(crate::SessionSourceRange {
+                generation,
+                length: source.offset,
+                offset,
+                bytes: std::sync::Arc::from(&original_prefix[start..end]),
+                cached: false,
+            })
+        }
+    }
+    let archive_reader = AuthorizedArchiveReader {
+        source: original_source,
+        archive_path: new.clone(),
+        authorized_archive_path: fs::canonicalize(&new).unwrap(),
+        original_bytes,
+        original_prefix_sha256,
+        original_tail_sha256,
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    };
+    let retained = crate::session_transcript_range(
+        &fixture.options,
+        "local",
+        retained_query,
+        Some(&archive_reader),
+    );
+    assert_eq!(retained.status, 200);
+    let retained: Value = serde_json::from_slice(&retained.body).unwrap();
+    assert_eq!(retained["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(retained["entries"][0]["text"], "first");
+    assert!(
+        !retained["entries"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("second")
+    );
+    assert_eq!(
+        retained["entries"][0]["entry_id"],
+        original_entry["entry_id"]
+    );
+    assert_eq!(
+        retained["entries"][0]["provenance"],
+        original_entry["provenance"]
+    );
+    assert_eq!(
+        retained["projection"]["generation"],
+        original_recipe_generation
+    );
+    assert_eq!(retained["projection"]["total"], 1);
+    for field in [
+        "catalog_key",
+        "harness",
+        "native_id",
+        "native_ids",
+        "owner_qualification",
+    ] {
+        assert_eq!(retained["identity"][field], original_identity[field], "{field}");
+    }
+    assert_eq!(
+        retained["identity"]["source_refs"][0]["source"],
+        original_identity["source_refs"][0]["source"]
+    );
+    assert!(archive_reader.calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM meta WHERE key LIKE 'native_catalog_relocation:%'",
