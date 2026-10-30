@@ -477,6 +477,14 @@ jobs:
       - name: Retain bounded per-case visual binding provenance
         if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
         run: node tests/ui/visual-provenance.mjs
+      - name: Qualify existing visual bindings against current captures
+        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        run: node tests/ui/visual-pathname-audit.mjs
+      - name: Propose qualified visual binding maintenance
+        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
+        env:
+          SEMON_VISUAL_PROPOSAL_SUITE: ${{ matrix.suite }}
+        run: node tests/ui/visual-binding-proposal.mjs
       - name: Server logs
         if: ${{ always() }}
         run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/two-machines-reference.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
