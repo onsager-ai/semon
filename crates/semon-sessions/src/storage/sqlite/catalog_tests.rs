@@ -2466,15 +2466,41 @@ fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
 #[test]
 fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
     let fixture = Fixture::new();
-    fixture.publish(2);
+    fixture.publish(1);
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    let single = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
+        .unwrap()
+        .unwrap();
+    assert_eq!(single.source_key, "stable-source");
+    assert_eq!(single.native_id.as_deref(), Some("session-00000"));
+    assert_eq!(single.native_ids, ["session-00000"]);
+    assert_eq!(single.freshness.state, "cached");
+    assert_eq!(single.source_refs.len(), 1);
+    assert_eq!(single.machine_label.as_deref(), Some("synthetic-catalog"));
+    crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
+
+    let linked_source = fixture
+        .options
+        .claude_home
+        .join("projects/project/session-00001.jsonl");
+    fs::write(
+        &linked_source,
+        format!(
+            "{}\n",
+            json!({"type":"user","sessionId":"session-00001","session_id":"session-00000","uuid":"session-00001","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic continuation"}})
+        ),
+    )
+    .unwrap();
+    fixture.publish_existing();
     crate::events::CACHE_READS.with(|reads| reads.set(0));
     let selected = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
         .unwrap()
         .unwrap();
     assert_eq!(selected.source_key, "stable-source");
-    assert_eq!(selected.native_id.as_deref(), Some("session-00000"));
+    assert_eq!(selected.native_id, None);
+    assert_eq!(selected.native_ids, ["session-00000", "session-00001"]);
     assert_eq!(selected.freshness.state, "cached");
-    assert_eq!(selected.source_refs.len(), 1);
+    assert_eq!(selected.source_refs.len(), 2);
     assert_eq!(selected.machine_label.as_deref(), Some("synthetic-catalog"));
     assert!(
         session_catalog_identity(&fixture.options, "stable-source", "missing")
@@ -2486,36 +2512,14 @@ fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         Err(CatalogIdentityError::InvalidArguments)
     );
     let connection = fixture.db();
-    let read = |key: &str| -> Value {
-        let text: String = connection
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                [key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        serde_json::from_str(&text).unwrap()
-    };
-    // Model a published multi-native continuation using two valid scoped
-    // source ledgers. No arbitrary first native target may become authority.
-    let mut row = read("session-00000");
-    let second = read("session-00001");
-    row["sources"]
-        .as_array_mut()
-        .unwrap()
-        .extend(second["sources"].as_array().unwrap().iter().cloned());
-    row["native_ids"] = json!(["session-00000", "session-00001"]);
-    connection
-        .execute(
-            "UPDATE session_catalog SET metadata=?1 WHERE session_key='session-00000'",
-            [row.to_string()],
+    let normalized_sources: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_sources WHERE session_key='session-00000' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
         )
         .unwrap();
-    let ambiguous = session_catalog_identity(&fixture.options, "stable-source", "session-00000")
-        .unwrap()
-        .unwrap();
-    assert_eq!(ambiguous.native_id, None);
-    assert_eq!(ambiguous.native_ids, ["session-00000", "session-00001"]);
+    assert_eq!(normalized_sources, 2);
     fs::remove_file(
         fixture
             .options
@@ -2527,7 +2531,10 @@ fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         .unwrap()
         .unwrap();
     assert_eq!(missing.freshness.state, "incomplete");
-    assert_eq!(missing.source_refs[0].state, "unavailable");
+    assert!(missing
+        .source_refs
+        .iter()
+        .any(|source| source.state == "unavailable"));
     assert_eq!(missing.facts_observation.state, "cached");
     assert_eq!(missing.native_selection, None);
     let mut changed = fixture.options.clone();
@@ -5076,15 +5083,22 @@ fn pinned_provider_keeps_each_carrier_fixed_after_its_first_bytes() {
 fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
     let fixture = Fixture::new();
     fixture.publish(2);
+    fs::remove_file(
+        fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00001.jsonl"),
+    )
+    .unwrap();
+    fixture.publish_existing();
     let connection = fixture.db();
-    connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='session-00001'",[]).unwrap();
     SQL_STEPS.with(|steps| steps.set(0));
     let (status, before) = fixture.body("limit=1");
     assert_eq!(status, 200);
     let baseline = SQL_STEPS.with(|steps| steps.get());
     assert_eq!(before["items"].as_array().unwrap().len(), 1);
     assert_eq!(before["items"][0]["key"], "session-00000");
-    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT namespace,'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(metadata,'$.key','retained-'||printf('%05d',x)) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
+    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) SELECT namespace,'retained-'||printf('%05d',x),'retained',last_ms,harness,repo,parent_key,json_set(json_remove(metadata,'$.query','$.native_ids'),'$.key','retained-'||printf('%05d',x),'$.lifecycle','retained','$.sources',json('[]')) FROM n,session_catalog WHERE session_key='session-00001'").unwrap();
     SQL_STEPS.with(|steps| steps.set(0));
     let (status, after) = fixture.body("limit=1");
     assert_eq!(status, 200);
@@ -5094,12 +5108,11 @@ fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them(
     assert_eq!(status, 200);
     assert_eq!(history["items"].as_array().unwrap().len(), 2);
     assert!(history["next_cursor"].is_string());
-    // Local absence does not revoke native-current authority by itself.
-    assert!(
-        session_catalog_identity(&fixture.options, "source", "session-00001")
-            .unwrap()
-            .is_some()
-    );
+    let retained = session_catalog_history_identity(&fixture.options, "source", "session-00001")
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.read_scope, CatalogReadScope::RetainedHistory);
+    assert_eq!(retained.source_refs[0].state, "unavailable");
 }
 
 #[cfg(unix)]
@@ -5692,29 +5705,23 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     let fixture = Fixture::new();
     let parent = fixture.codex_source("family-parent", None, 1);
     let child = fixture.codex_source("family-child", Some("family-parent"), 2);
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(fixture.options.codex_home.join(&child))
+            .unwrap(),
+        "{}",
+        json!({"type":"event_msg","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"task_started","turn_id":"family-child-turn"}})
+    )
+    .unwrap();
     let path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(path).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child]));
-    crate::write_facts(path, &facts, &crate::Options::default().source).unwrap();
+    facts.codex_locks.insert("family-child".into(), 77);
+    facts.proc_starts.insert(77, 777);
+    crate::write_facts(path, &facts, &fixture.options.source).unwrap();
     fixture.publish_existing();
-    let db = fixture.db();
-    let text: String = db
-        .query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key='family-child'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut row: Value = serde_json::from_str(&text).unwrap();
-    row["query"]["state"] = json!("work");
-    let save = |row: &Value| {
-        db.execute(
-            "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='family-child'",
-            rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
-        )
-        .unwrap();
-    };
-    save(&row);
     let status = || {
         let (code, body) = fixture.body("sid=family-parent");
         assert_eq!(code, 200);
@@ -5722,11 +5729,15 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     };
     assert_eq!(status(), json!({"state":"work","observation":"current"}));
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent]));
-    crate::write_facts(path, &facts, &crate::Options::default().source).unwrap();
+    crate::write_facts(path, &facts, &fixture.options.source).unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
-    row["lifecycle"] = json!("retained");
-    save(&row);
+    fixture.publish_existing();
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
+    let history = session_catalog_history_identity(&fixture.options, "local", "family-child")
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.read_scope, CatalogReadScope::RetainedHistory);
+    assert_eq!(history.native_selection.unwrap().state, "retired");
 }
 
 #[test]
@@ -6714,7 +6725,8 @@ fn bounded_cold_commit_retries_after_raw_append_and_persists_prefix() {
     assert!(size_before_commit_hook > 4 * 1024 * 1024);
 
     let changed_path = path.clone();
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     cache.scan_byte_budget = Some(4 * 1024 * 1024);
     crate::events::BEFORE_COMMIT.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
@@ -6740,17 +6752,9 @@ fn bounded_cold_commit_retries_after_raw_append_and_persists_prefix() {
         "the changed physical witness must force a second bounded parse"
     );
     let physical_size = fs::metadata(&path).unwrap().len();
-    let ledger = cache.recorded(path.to_str().unwrap()).unwrap().unwrap();
-    assert!(physical_size > size_before_commit_hook, "the hook appended Raw bytes");
-    assert!(ledger.offset > 4 * 1024 * 1024);
-    assert!(ledger.offset < physical_size, "the committed ledger is a prefix");
-    assert_eq!(ledger.stat.size, ledger.offset);
     assert!(
-        index
-            .source_chunks
-            .as_ref()
-            .is_some_and(|chunks| chunks.valid(ledger.offset)),
-        "the committed proof covers the exact prefix"
+        physical_size > size_before_commit_hook,
+        "the hook appended Raw bytes"
     );
     drop(cache);
 
@@ -6762,8 +6766,19 @@ fn bounded_cold_commit_retries_after_raw_append_and_persists_prefix() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert_eq!(stored_offset as u64, ledger.offset);
-    assert_eq!(stored_size as u64, ledger.offset);
+    assert!(stored_offset as u64 > 4 * 1024 * 1024);
+    assert!(
+        (stored_offset as u64) < physical_size,
+        "the committed ledger is a prefix"
+    );
+    assert_eq!(stored_size, stored_offset);
+    assert!(
+        index
+            .source_chunks
+            .as_ref()
+            .is_some_and(|chunks| chunks.valid(stored_offset as u64)),
+        "the committed proof covers the exact prefix"
+    );
 }
 
 #[test]
