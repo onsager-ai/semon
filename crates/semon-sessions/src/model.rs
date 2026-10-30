@@ -1388,11 +1388,11 @@ fn scan_selected(
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
             }
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(test)]
                 if selected.is_some() {
                     let source_path = path.to_string_lossy();
-                    let detail = error
+                    let detail = _error
                         .to_string()
                         .replace(source_path.as_ref(), "<source>")
                         .chars()
@@ -1400,7 +1400,7 @@ fn scan_selected(
                         .collect::<String>();
                     eprintln!(
                         "native selected scan failed harness=claude kind={:?} error={detail}",
-                        error.kind()
+                        _error.kind()
                     );
                 }
                 continue;
@@ -1463,11 +1463,11 @@ fn scan_selected(
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
             }
-            Err(error) => {
+            Err(_error) => {
                 #[cfg(test)]
                 if selected.is_some() {
                     let source_path = path.to_string_lossy();
-                    let detail = error
+                    let detail = _error
                         .to_string()
                         .replace(source_path.as_ref(), "<source>")
                         .chars()
@@ -1475,7 +1475,7 @@ fn scan_selected(
                         .collect::<String>();
                     eprintln!(
                         "native selected scan failed harness=codex kind={:?} error={detail}",
-                        error.kind()
+                        _error.kind()
                     );
                 }
                 continue;
