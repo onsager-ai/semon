@@ -53,6 +53,18 @@ Query runtime strings. Sorted CWDs are hashed incrementally with length prefixes
 only the fixed-size fingerprint enters the capture, even for a long native CWD.
 Conflicting observations for one identity or CWDs for one source cohort
 refuse capture; the existing 260-observation bound still applies.
+Ordinary PostgreSQL full, partial and closed publications carry this typed capture
+with a separate raw global runtime fingerprint and its current storage witness.
+The producer reuses its original runtime snapshot and in-memory source CWDs,
+recording each scope before assigning the row's Query runtime; its existing
+final global check brackets that capture. The physical publisher qualifies every
+row against its captured scope and uses only the witnessed global for owner
+state. Semantic publication additionally binds the raw global to its stage.
+Exact request replay precedes live qualification. Initial empty generic
+publication refuses; an empty successor retains the prior owner's runtime, while
+an empty semantic publication retains its explicit stage global. PostgreSQL's
+existing 64-row request bound remains; larger SQLite full/Sources publications
+keep their existing behavior outside this PostgreSQL qualification.
 The PostgreSQL producer prepares identity-and-activity-addressed dependency
 digests with its existing current Facts head, so ordinary reads use point keys
 without parsing whole Raw Facts. Immutable presentation manifests capture each

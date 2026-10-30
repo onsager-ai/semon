@@ -7736,38 +7736,6 @@ pub(crate) fn prepare_semantic_batch(
     Ok(SemanticModelBatch { prepared })
 }
 
-
-fn capture_publication_observations(
-    options: &Options,
-    cache: &EventCache,
-    rows: &[summary::CatalogRow],
-    relationships: Option<&relation_stage::Context>,
-    source_runtime: &str,
-) -> io::Result<crate::storage::selected::PresentationObservations> {
-    let binding = cache.query_runtime_binding()?;
-    let cohort = || rows.iter().chain(
-        relationships.into_iter().flat_map(|context| context.endpoints.values().map(|endpoint| &endpoint.row)),
-    );
-    let mut observations = crate::storage::selected::PresentationObservations::capture_with_authority(
-        options,
-        binding.as_ref(),
-        cohort(),
-        options.facts.as_ref().map(|path| cache.facts_authority(path)).transpose()?,
-    );
-    if observations.source_runtime.as_deref() != Some(source_runtime) {
-        return Err(io::Error::other("publication runtime changed during capture"));
-    }
-    for row in cohort().take(128) {
-        let observed = cache.runtime_source_cwds(&row.sources).and_then(|cwds| {
-            observations.runtime_observation(row, &cwds).map(|runtime| (runtime, cwds))
-        });
-        if let Ok((runtime, cwds)) = observed {
-            observations.capture_runtime(row, &cwds, runtime)?;
-        }
-    }
-    Ok(observations)
-}
-
 fn semantic_withdrawals(
     options: &Options,
     cache: &EventCache,
@@ -8696,6 +8664,15 @@ fn build_sources_inner(
         started,
         catalog.as_ref().map_or(0, Vec::len),
     );
+    // PG publication is bounded to 64 rows. Larger complete SQLite catalogs
+    // retain their existing writer path without a truncated runtime capture.
+    let mut presentation = (history_records.is_none()
+        && !matches!(
+            &selection,
+            BuildSelection::Identity { .. } | BuildSelection::Matching { .. }
+        )
+        && catalog.as_ref().is_some_and(|rows| rows.len() <= 64))
+    .then(crate::storage::selected::PresentationObservations::default);
     let derive_query_facts = || {
         builder.session_facts(
             &skipped,
@@ -8898,7 +8875,7 @@ fn build_sources_inner(
                     }
                 }
                 row.query = Some(
-                    serde_json::json!({"version":1,"runtime":query_runtime,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
+                    serde_json::json!({"version":1,"source_generation":crate::retention::source_generation(&row.sources)?,"rows":query_rows,"last":summaries[&row.key]["last"],"state":summaries[&row.key]["state"],
                         "transcript_observation":tx.get(&row.key).map(|transcript|crate::slot_projection::QueryObservation::capture(transcript))}),
                 );
                 measurements.record("projection_query_rows", started, 1);
@@ -8913,10 +8890,14 @@ fn build_sources_inner(
                         })
                         .collect::<BTreeSet<_>>();
                     let scoped = runtime_observations.scope(row, &cwds)?;
-                    match &runtime_binding {
+                    let runtime = match &runtime_binding {
                         Some(binding) => binding.witness(&scoped)?,
                         None => scoped,
+                    };
+                    if let Some(observations) = &mut presentation {
+                        observations.capture_runtime(row, &cwds, runtime.clone())?;
                     }
+                    runtime
                 });
                 row.query.as_mut().expect("query captured")["runtime"] =
                     serde_json::Value::String(runtime);
@@ -8956,6 +8937,43 @@ fn build_sources_inner(
         }
         crate::query_projection::complete_recipes(rows)?;
     }
+    let presentation = presentation
+        .map(|observations| {
+            let rows = catalog.as_deref().expect("publication catalog");
+            let cohort = rows.iter().chain(staged_relationships.into_iter().flat_map(
+                |context| context.endpoints.values().map(|endpoint| &endpoint.row),
+            ));
+            let mut observations = observations.with_publication_authority(
+                options,
+                runtime_binding.as_ref(),
+                cohort,
+                options
+                    .facts
+                    .as_ref()
+                    .map(|path| builder.cache.facts_authority(path))
+                    .transpose()?,
+                query_runtime.clone(),
+                runtime_observations,
+            );
+            if let Some(relationships) = staged_relationships {
+                for endpoint in relationships.endpoints.values().take(128 - rows.len()) {
+                    let row = &endpoint.row;
+                    let observed = builder
+                        .cache
+                        .runtime_source_cwds(&row.sources)
+                        .and_then(|cwds| {
+                            observations
+                                .runtime_observation(row, &cwds)
+                                .map(|runtime| (runtime, cwds))
+                        });
+                    if let Ok((runtime, cwds)) = observed {
+                        observations.capture_runtime(row, &cwds, runtime)?;
+                    }
+                }
+            }
+            Ok::<_, io::Error>(observations)
+        })
+        .transpose()?;
     if catalog.is_some()
         && measured!(
             "runtime_recheck",
@@ -8994,17 +9012,6 @@ fn build_sources_inner(
         builder.cache.emit_scan_measurements(&id);
         measurements.emit(&id, "model_preparation");
     }
-    // PG publication is bounded to 64 rows. Larger complete SQLite catalogs
-    // retain their existing writer path without a truncated runtime capture.
-    let presentation = if history_records.is_none()
-        && !matches!(&selection, BuildSelection::Identity { .. } | BuildSelection::Matching { .. })
-        && let Some(rows) = &catalog
-        && rows.len() <= 64
-    {
-        Some(capture_publication_observations(options, builder.cache, rows, staged_relationships, &query_runtime)?)
-    } else {
-        None
-    };
     match target {
         BuildTarget::Sources => {
             let sender_turns = builder.complete_sender_turns()?;
