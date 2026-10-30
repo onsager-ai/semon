@@ -2125,11 +2125,13 @@ fn current_catalog_index_work_is_constant_with_unrelated_retained_history() {
     let fixture = Fixture::new();
     fixture.publish(1);
     let connection = fixture.db();
-    let query = "SELECT metadata FROM session_catalog INDEXED BY session_catalog_current_harness_repo WHERE lifecycle='current' AND harness='claude' AND repo='project' ORDER BY last_ms DESC,session_key ASC LIMIT 3";
+    let query = "SELECT metadata,session_key,last_ms,harness,repo FROM main.session_catalog INDEXED BY session_catalog_current_harness_repo WHERE namespace=semon_namespace() AND lifecycle='current' AND harness = ? AND repo = ? AND 1 ORDER BY last_ms DESC,session_key ASC LIMIT ?";
     let measure = || {
         let mut statement = connection.prepare(query).unwrap();
         let values = statement
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map(rusqlite::params!["claude", "project", 3], |row| {
+                row.get::<_, String>(0)
+            })
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
@@ -2159,7 +2161,11 @@ fn current_catalog_index_work_is_constant_with_unrelated_retained_history() {
     let large = measure();
     assert_eq!(small, large);
     let plan: String = connection
-        .query_row(&format!("EXPLAIN QUERY PLAN {query}"), [], |row| row.get(3))
+        .query_row(
+            &format!("EXPLAIN QUERY PLAN {query}"),
+            rusqlite::params!["claude", "project", 3],
+            |row| row.get(3),
+        )
         .unwrap();
     assert!(plan.contains("session_catalog_current_harness_repo"));
     assert!(!plan.contains("SCAN"));
@@ -3263,9 +3269,21 @@ fn selected_slot_ranges_are_native_bounded_and_stable_across_unrelated_history()
     );
     crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
     let connection = fixture.db();
-    let leaked:i64=connection.query_row("SELECT COUNT(*) FROM session_slots WHERE metadata LIKE '%selected answer unique body%' OR metadata LIKE '%large answer unique body%'",[],|row|row.get(0)).unwrap();
+    let leaked: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM main.session_slots WHERE namespace=semon_namespace() AND (metadata LIKE '%selected answer unique body%' OR metadata LIKE '%large answer unique body%')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(leaked, 0);
-    let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT metadata FROM session_slots WHERE session_key='selected' AND slot>=0 AND slot<2 ORDER BY slot",[],|row|row.get(3)).unwrap();
+    let plan: String = connection
+        .query_row(
+            "EXPLAIN QUERY PLAN SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_slots WHERE namespace=semon_namespace() AND session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot",
+            rusqlite::params!["selected", 0, 2],
+            |row| row.get(3),
+        )
+        .unwrap();
     assert!(
         plan.contains("SEARCH session_slots USING PRIMARY KEY"),
         "{plan}"
@@ -4191,7 +4209,7 @@ fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
         assert_eq!(first.status, 200);
         let first: Value = serde_json::from_slice(&first.body).unwrap();
         let generation = first["projection"]["generation"].as_str().unwrap();
-        let cache = EventCache::path(&fixture.options.cache);
+        let writer = fixture.db();
         let collect: Box<dyn FnOnce()> = Box::new(move || {
             fs::File::options()
                 .write(true)
@@ -4202,9 +4220,12 @@ fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
             // Commit collection after recipe selection but before opening
             // any lazy proof header. Only the request's WAL snapshot keeps
             // this publication readable now.
-            Connection::open(cache).unwrap().execute(
-                    "DELETE FROM meta WHERE key LIKE 'native_source_chunks:%' OR key LIKE 'native_published_chunks:%' OR key LIKE 'native_proof_tree:%' OR key LIKE 'native_proof_repair:%'", []
-                ).unwrap();
+            writer
+                .execute(
+                    "DELETE FROM meta WHERE namespace=semon_namespace() AND (key LIKE 'native_source_chunks:%' OR key LIKE 'native_published_chunks:%' OR key LIKE 'native_proof_tree:%' OR key LIKE 'native_proof_repair:%')",
+                    [],
+                )
+                .unwrap();
         });
         if reader == "mcp" {
             crate::query_source::BEFORE_FOCUSED_CAPTURE

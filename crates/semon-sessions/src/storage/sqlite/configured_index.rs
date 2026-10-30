@@ -257,9 +257,9 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        let result = self
-            .native
-            .publish_catalog(publication, expected_generation, Some(claims), true)?;
+        let result =
+            self.native
+                .publish_catalog(publication, expected_generation, Some(claims), true)?;
         self.acknowledge_publication(expected_generation, result.as_ref());
         Ok(result)
     }

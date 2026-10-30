@@ -330,6 +330,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
 | `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
 | `storage/postgres/semantic_events.rs` | direct | Private PG event projection reuses the ordinary qualifier through its existing rusqlite result type; error-type decoupling remains required. It reads PG native rows and does not open SQLite. Full backend qualification remains incomplete. |
+| `storage/postgres/tests.rs` | direct | Test-only EventCache pathname check proves cold PostgreSQL Catalog waiting creates no SQLite session store; the readiness path uses PostgreSQL metadata. |
 | `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
 | `storage/transfer/reported_tests.rs` | direct | Test-only admitted SQLite context for authoritative Facts round trips; production SQL stays in adapters. Full transfer qualification remains incomplete. |

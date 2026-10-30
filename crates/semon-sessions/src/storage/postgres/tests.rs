@@ -156,23 +156,25 @@ fn pg_catalog_readiness_uses_deadline_and_view_lifecycle() {
     );
 
     let view = crate::viewer::MachineView::new(options);
-    let expired = view
-        .wait_until_initial_catalog(Instant::now())
-        .unwrap_err();
+    let expired = view.wait_until_initial_catalog(Instant::now()).unwrap_err();
     assert_eq!(expired.kind(), std::io::ErrorKind::TimedOut);
-    assert!(!view
-        .evidence
-        .catalog_demand
-        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(
+        !view
+            .evidence
+            .catalog_demand
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
 
     let cold = view
         .wait_until_initial_catalog(Instant::now() + Duration::from_secs(5))
         .unwrap_err();
     assert_eq!(cold.kind(), std::io::ErrorKind::WouldBlock);
-    assert!(!view
-        .evidence
-        .catalog_demand
-        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(
+        !view
+            .evidence
+            .catalog_demand
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
     assert!(!crate::events::EventCache::path(&cache).exists());
 
     view.retire();
@@ -180,10 +182,12 @@ fn pg_catalog_readiness_uses_deadline_and_view_lifecycle() {
         .wait_until_initial_catalog(Instant::now() + Duration::from_secs(1))
         .unwrap_err();
     assert_eq!(closed.kind(), std::io::ErrorKind::BrokenPipe);
-    assert!(!view
-        .evidence
-        .catalog_demand
-        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(
+        !view
+            .evidence
+            .catalog_demand
+            .load(std::sync::atomic::Ordering::Relaxed)
+    );
 }
 
 #[test]
