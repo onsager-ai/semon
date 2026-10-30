@@ -2821,7 +2821,6 @@ mod tests {
 
     enum FixtureAdmission {
         Native,
-        Public,
         Unbound,
     }
 
@@ -2833,12 +2832,6 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             Self::current("configured-events")
-        }
-        fn with_setup(setup: impl FnOnce(&Connection, &Path)) -> Self {
-            Self::with_named_setup("configured-events", setup)
-        }
-        fn with_named_setup(namespace: &str, setup: impl FnOnce(&Connection, &Path)) -> Self {
-            Self::with_admission(namespace, setup, FixtureAdmission::Public)
         }
         fn current(namespace: &str) -> Self {
             Self::with_admission(namespace, |_, _| {}, FixtureAdmission::Native)
@@ -2879,9 +2872,6 @@ mod tests {
             match admission {
                 FixtureAdmission::Native => {
                     NativeOwnership::admit(&config).unwrap();
-                }
-                FixtureAdmission::Public => {
-                    config.admit_namespace().unwrap();
                 }
                 FixtureAdmission::Unbound => {}
             }
