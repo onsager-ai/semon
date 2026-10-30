@@ -2590,12 +2590,71 @@ mod catalog_owner_tests {
     }
 
     #[test]
-    fn cold_catalog_search_rowless_and_deleted_sources_acknowledge_claim_completion() {
+    fn cold_catalog_search_deleted_source_rowless_publication_acknowledges_claim() {
         let (root, evidence, core, db) = cold_search_reader();
         db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
         let mut work = lock(&evidence.work);
-        let mut paths = Vec::new();
-        for (id, bytes) in [("empty", ""), ("invalid", "{invalid}\n"), ("deleted", "")] {
+        let path = pending_search_source(&evidence, &db, "deleted");
+        assert_eq!(
+            core.respond("GET", "/api/sessions", "q=deleted&harness=codex", None)
+                .status,
+            200
+        );
+        fs::remove_file(&path).unwrap();
+        evidence.prepare_events(&mut work, model::now_ms()).unwrap();
+        let cache = work.events.as_mut().unwrap();
+        let generation = cache.session_catalog_generation().unwrap();
+        let input = catalog_input(Path::new(&path), &evidence.options).unwrap();
+        let prepared = evidence
+            .prepare_catalog_component_mode(cache, vec![input], true, model::now_ms())
+            .unwrap()
+            .unwrap();
+        assert!(
+            prepared.rows.is_empty(),
+            "an observed absence emits no Catalog source row"
+        );
+        assert_eq!(prepared.claims, vec![(path.clone(), Some(100))]);
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([path.clone()])
+        );
+        assert!(matches!(
+            evidence
+                .prepare_catalog(&mut work, model::now_ms())
+                .unwrap(),
+            CatalogPreparation::PublishedPending
+        ));
+        assert_ne!(
+            work.events
+                .as_ref()
+                .unwrap()
+                .session_catalog_generation()
+                .unwrap(),
+            generation,
+            "the ordinary producer must commit the rowless publication"
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&path],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        assert!(lock(&evidence.catalog_search).tickets.is_empty());
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap());
+        drop(work);
+        core.close();
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cold_catalog_search_unqualified_empty_and_invalid_sources_keep_pending_demand() {
+        for (id, bytes) in [("empty", ""), ("invalid", "{invalid}\n")] {
+            let (root, evidence, core, db) = cold_search_reader();
+            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
+            let mut work = lock(&evidence.work);
             let path = pending_search_source(&evidence, &db, id);
             fs::write(&path, bytes).unwrap();
             assert_eq!(
@@ -2608,24 +2667,34 @@ mod catalog_owner_tests {
                 .status,
                 200
             );
-            if id == "deleted" {
-                fs::remove_file(&path).unwrap();
-            }
-            paths.push(path);
+            let error = match evidence.prepare_catalog(&mut work, model::now_ms()) {
+                Err(error) => error,
+                Ok(_) => {
+                    panic!("a present source without a native identity must refuse qualification")
+                }
+            };
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(error.to_string(), "selected source cannot be qualified");
+            assert!(
+                work.events
+                    .as_ref()
+                    .unwrap()
+                    .catalog_claims(std::slice::from_ref(&path))
+                    .unwrap()[0]
+                    .1
+                    .is_some()
+            );
+            assert_eq!(lock(&evidence.catalog_search).tickets.len(), 1);
+            assert_eq!(
+                lock(&evidence.catalog_search).tickets[0].waiting,
+                BTreeSet::from([path])
+            );
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap());
+            drop(work);
+            core.close();
+            drop(db);
+            fs::remove_dir_all(root).unwrap();
         }
-        assert_eq!(lock(&evidence.catalog_search).tickets.len(), 3);
-        for (at, path) in paths.iter().enumerate() {
-            evidence
-                .prepare_catalog(&mut work, model::now_ms())
-                .unwrap();
-            assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [path], |row| row.get::<_, bool>(0)).unwrap());
-            assert_eq!(lock(&evidence.catalog_search).tickets.len(), 2 - at);
-        }
-        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path='/unrelated/first.jsonl')", [], |row| row.get::<_, bool>(0)).unwrap());
-        drop(work);
-        core.close();
-        drop(db);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
