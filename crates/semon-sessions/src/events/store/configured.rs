@@ -2220,6 +2220,8 @@ mod tests {
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(super::COMPOSITE_CATALOG_SCHEMA).unwrap();
         db.execute_batch(crate::history_projection::SCHEMA).unwrap();
+        let [usage_schema, _] = crate::events::store::native_usage::schema();
+        db.execute_batch(usage_schema).unwrap();
         db.execute_batch(semantic_stage::metadata_indexes())
             .unwrap();
         let bind = |db: &Connection, namespace: &str| {
@@ -2306,6 +2308,17 @@ mod tests {
             tx.execute(
                 native_metadata_put(&tx).unwrap(),
                 params!["pricing_recompute_target", "one-store-pricing-table"],
+            )
+            .unwrap();
+            let receipt = crate::events::store::header_ledger(&ledger);
+            tx.execute(
+                "INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version,usage_ready) VALUES(?1,1,?2,?3,0,1,1)",
+                params![namespace, path, receipt],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO native_usage_current(namespace,source_path,source_id) VALUES(?1,?2,1)",
+                params![namespace, path],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -2927,22 +2940,53 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
-        let f = Fixture::with_setup(|db, raw| {
-            let path = raw.to_string_lossy();
-            db.execute("INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')", [path.as_ref()]).unwrap();
-            db.execute(
-                "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
-                [path.as_ref()],
-            )
-            .unwrap();
-            db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
-            db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
-            db.execute(
-                "INSERT INTO meta(namespace,key,value) VALUES('foreign','native_catalog_relocation:/foreign-old','foreign proof')",
-                [],
-            )
-            .unwrap();
-        });
+        let f = Fixture::current("configured-events");
+        let db = f.db();
+        // Seed each namespace only after private admission, through its scoped
+        // writer binding so the installed guards stay active.
+        let seed_as = |namespace: &str| {
+            let namespace = crate::storage::LogicalSourceNamespace::new(namespace).unwrap();
+            crate::storage::sqlite::catalog_namespace::register(&db, &namespace).unwrap();
+            for function in ["semon_event_writer", "semon_semantic_writer"] {
+                db.create_scalar_function(
+                    function,
+                    0,
+                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                    |_| Ok(1_i64),
+                )
+                .unwrap();
+            }
+        };
+        let path = f.raw.to_string_lossy();
+        seed_as("foreign");
+        db.execute(
+            "INSERT INTO catalog_native_dependencies VALUES('foreign',?1,'semantic-native:codex','native-session')",
+            [path.as_ref()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO session_source_mutations VALUES('foreign',?1,'foreign evidence')",
+            [path.as_ref()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')",
+            [path.as_ref()],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO meta(namespace,key,value) VALUES('foreign','native_catalog_relocation:/foreign-old','foreign proof')",
+            [],
+        )
+        .unwrap();
+        seed_as("configured-events");
+        db.execute(
+            "INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')",
+            [path.as_ref()],
+        )
+        .unwrap();
+        drop(seed_as);
+        drop(db);
         let foreign = |db: &Connection| -> Vec<(String, String)> {
             db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE namespace='foreign' AND key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
@@ -3018,7 +3062,7 @@ mod tests {
         assert!(before.contains_key("storage_source_journal"));
         assert!(matches!(
             crate::storage::sqlite::open_configured_index(&f.config),
-            Err(StorageError::Unavailable)
+            Err(StorageError::NamespaceUpgradePending)
         ));
         assert_eq!(f.state(), before);
     }
