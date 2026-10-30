@@ -6,6 +6,8 @@ gitignored `private/`; the fixture benchmark described below is separate.
 The completed [real-session report](REAL_REPORT.md) links the aggregate quality,
 operations and scoped Sol usage results. No candidate met the frozen acceptance
 criteria; the report recommends an optional async shadow experiment only.
+The [local visual viewer](VIEWER.md) puts the pending spot-check before an
+explicit results reveal and keeps every generated page under `private/`.
 
 ## Private real-session reproduction
 

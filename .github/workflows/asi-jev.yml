@@ -12,6 +12,17 @@ permissions:
   contents: read
 
 jobs:
+  viewer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Install browser tooling for synthetic viewer checks
+        run: |
+          python3 -m pip install playwright==1.55.0
+          python3 -m playwright install --with-deps chromium
+      - name: Check the local viewer without private inputs
+        run: python3 experiments/asi-jev/viewer_browser_check.py
   offline:
     runs-on: ubuntu-latest
     timeout-minutes: 10
