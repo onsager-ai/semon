@@ -41,6 +41,14 @@ Do not generalize across them. Entire serialized orchestration
 envelopes are replaced with a task-instructions-redacted marker before egress.
 This clarification precedes all blind labels and model predictions.
 
+Before the projection freeze, an independent privacy reviewer inspects every
+remaining projected string. Fixable residual paths, artifact references, or
+instruction fragments cause replacement of the entire affected text field
+with `[privacy review redacted]`, never selective rewriting. The private plan,
+original bundle, transform hashes, and review audit remain local. Re-review
+every changed field; exclude a whole session if any uncertainty remains.
+Publish only field/session counts. This privacy pass precedes all labels.
+
 Before predictions, stratify candidates using native errors, repeated tool
 invocations, unusual record kinds, and ordinary work. Choose varied local work
 without reading classifier output. Preserve full selected session order and
