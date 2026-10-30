@@ -515,17 +515,15 @@ pub(crate) fn observation_binding(
     let current_metadata =
         serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let retained_metadata = if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
-    {
-        current_metadata.clone()
-    } else {
-        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
-    };
+    let retained_metadata =
+        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current {
+            current_metadata.clone()
+        } else {
+            serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
+        };
     let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
     for (retained, original) in [(false, &current_metadata), (true, &retained_metadata)] {
-        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
-            && retained
-        {
+        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current && retained {
             continue;
         }
         let native: bool = db
@@ -769,12 +767,14 @@ pub(crate) fn reconcile_native_observation_owners(
     }
     let owned = |kind: &str, digest: Option<&String>| {
         digest.is_some_and(|digest| {
-            grants.iter().any(|(owner, actual, actual_admission, actual_stream)| {
-                owner == kind
-                    && actual == digest
-                    && *actual_admission == admission
-                    && actual_stream == stream
-            })
+            grants
+                .iter()
+                .any(|(owner, actual, actual_admission, actual_stream)| {
+                    owner == kind
+                        && actual == digest
+                        && *actual_admission == admission
+                        && actual_stream == stream
+                })
         })
     };
     if !owned("catalog", catalog_digest.as_ref()) {

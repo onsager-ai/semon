@@ -113,7 +113,11 @@ pub(in crate::storage::postgres) fn publish(
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     // Serialize against native advancement and other publishers, including
     // replay. An acknowledged operation is checked before its now-stale CAS.
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE source_state_lock");
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE operation_replay_lookup");
     let old = tx.driver.query("SELECT payload=$3,CASE WHEN octet_length(generation)=64 THEN generation END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns, &operation, &payload]).map_err(sqlstate::error)?;
     if let Some(row) = old.first() {
         if !row.get::<_, bool>(0) {
@@ -137,7 +141,11 @@ pub(in crate::storage::postgres) fn publish(
         .collect::<Result<std::collections::BTreeSet<_>, _>>()?
         .into_iter()
         .collect::<Vec<_>>();
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE admission_capture");
     let fence = admission::capture(tx, &paths)?;
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE source_claims");
     for (path, revision) in claims {
         let actual = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?;
         if actual.first().map(|row| row.get::<_, i64>(0)) != *revision {
@@ -146,6 +154,8 @@ pub(in crate::storage::postgres) fn publish(
     }
     let mut withdrawals = std::collections::BTreeSet::new();
     if let Some(semantic) = &semantic {
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE facts_withdrawal_authority");
         if semantic.withdrawals.len() > 64 {
             return Err(StorageError::Busy);
         }
@@ -176,6 +186,8 @@ pub(in crate::storage::postgres) fn publish(
         .iter()
         .filter_map(|row| row.query.as_ref()?.get("runtime")?.as_str())
         .collect::<std::collections::BTreeSet<_>>();
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE owner_state");
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let old_epoch = prior.first().map(|row| row.get::<_, i64>(0));
     let old_runtime = prior
@@ -214,6 +226,8 @@ pub(in crate::storage::postgres) fn publish(
             _ => return Err(StorageError::ScopeChanged),
         }
     };
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE owner_transition");
     semantic_owner::begin(
         semantic_owner::Observed {
             epoch: old_epoch,
@@ -276,10 +290,18 @@ pub(in crate::storage::postgres) fn publish(
             .collect::<Vec<_>>();
         carried = Some((previous, mentioned, claimed));
     }
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE binding_stage_bound");
     let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
     for reference in refs {
         tx.check()?;
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE proof_insert");
         tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
+    }
+    #[cfg(test)]
+    if expected.is_some() {
+        eprintln!("PG_PUBLISH_STAGE history_preserve");
     }
     if let Some(previous) = expected
         && !history::preserve(tx, &generation, previous, publication, &leaving)?
@@ -290,7 +312,11 @@ pub(in crate::storage::postgres) fn publish(
         return Ok((Outcome::Deferred, None));
     }
     if let Some((previous, mentioned, claimed)) = carried {
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE carry_unmentioned");
         super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE carry_retained_search");
         super::carry::retained_search(tx, &generation, previous, &leaving)?;
         // Staged counts predate the carried owners' memberships; the
         // unadmitted successor's aggregate is rebuilt once, as withdrawal does.
@@ -300,6 +326,8 @@ pub(in crate::storage::postgres) fn publish(
             tx: RefCell::new(&mut *tx),
             generation: &generation,
         };
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE search_counts");
         for scope in [
             crate::CatalogReadScope::Current,
             crate::CatalogReadScope::RetainedHistory,
@@ -308,10 +336,14 @@ pub(in crate::storage::postgres) fn publish(
         }
     }
     let expected_value = expected.map(str::to_owned);
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE state_cas");
     let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NOT DISTINCT FROM $3", &[&ns, &generation, &expected_value]).map_err(sqlstate::error)?;
     if changed != 1 {
         return Err(StorageError::Conflict);
     }
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE invalidation_removal");
     for (path, revision) in claims {
         if let Some(revision) = revision
             && tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3", &[&ns, &path.as_bytes(), revision]).map_err(sqlstate::error)? != 1
@@ -319,7 +351,11 @@ pub(in crate::storage::postgres) fn publish(
             return Err(StorageError::Conflict);
         }
     }
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE catalog_stage_update");
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_stage(namespace,singleton,stage_epoch,runtime,generation) VALUES($1,true,$2,$3,$4) ON CONFLICT(namespace_digest,singleton) DO UPDATE SET stage_epoch=excluded.stage_epoch,runtime=excluded.runtime,generation=excluded.generation WHERE semon_pg_native_catalog_stage.namespace=excluded.namespace AND semon_pg_native_catalog_stage.stage_epoch=$5", &[&ns, &epoch, &bound.as_bytes(), &generation.as_bytes(), &old_epoch.unwrap_or(0)]).map_err(sqlstate::error)?;
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE operation_insert");
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns, &operation, &payload, &generation.as_bytes(), &epoch]).map_err(sqlstate::error)?;
     let binding = super::super::model_cache::binding(tx)?;
     let native = encoded(&(binding.admission, &binding.stream_epoch, &generation))?;
@@ -328,15 +364,23 @@ pub(in crate::storage::postgres) fn publish(
             "catalog-native-observation:{:x}",
             Sha256::digest(encoded(row)?)
         );
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE native_observation");
         super::super::native_keys::put_meta(tx, key.as_bytes(), &native)?;
     }
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE catalog_change_insert");
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_changes(namespace,generation,previous,stage_epoch) VALUES($1,$2,$3,$4)", &[&ns, &generation.as_bytes(), &expected.map(str::as_bytes), &epoch]).map_err(sqlstate::error)?;
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE withdrawal_key_lookup");
     let withdrawn_keys = if let Some(previous) = expected {
         tx.driver.query("SELECT session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[])", &[&ns, &previous.as_bytes(), &leaving]).map_err(sqlstate::error)?
             .iter().map(|row| String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)).collect::<Result<Vec<_>, _>>()?
     } else {
         Vec::new()
     };
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE change_feed_publish");
     super::super::changes::publish(
         tx,
         publication

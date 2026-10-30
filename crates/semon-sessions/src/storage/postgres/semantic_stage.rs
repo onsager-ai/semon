@@ -399,7 +399,11 @@ pub(super) fn publish(
     if batch.phase != Phase::Publication || stage.revision != revision {
         return Err(StorageError::Conflict);
     }
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE semantic_claims");
     claims(tx, batch, prepared)?;
+    #[cfg(test)]
+    eprintln!("PG_PUBLISH_STAGE publication_call");
     let result = publication::publish(
         tx,
         &crate::slot_projection::Publication {
@@ -417,6 +421,8 @@ pub(super) fn publish(
     if result.0 == Outcome::Written {
         stage.active = false;
         stage.acknowledgement = result.1.clone();
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE stage_ack_save");
         save(tx, &stage, false)?;
     }
     Ok(result)

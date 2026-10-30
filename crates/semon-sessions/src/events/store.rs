@@ -7132,9 +7132,14 @@ mod tests {
     fn direct_catalog_grants_are_bounded_and_wal_snapshots_keep_their_generation() {
         let root = scratch("direct-catalog-grant-wal");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
-        let first = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
-            .unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
+        let first =
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         assert_eq!(first.0, Outcome::Written);
         let first_generation = first.1.unwrap();
         let original = rows[0].clone();
@@ -7172,8 +7177,7 @@ mod tests {
         for version in 1..=3 {
             rows[0].name = format!("direct grant replacement {version}");
             let published =
-                catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
-                    .unwrap();
+                catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
             assert_eq!(published.0, Outcome::Written);
             generation = published.1.unwrap();
             let grants: i64 = store
@@ -7212,9 +7216,7 @@ mod tests {
             assert_eq!(old_snapshot_marker, first_marker);
             assert!(
                 crate::storage::sqlite::proof_generations::observation_binding(
-                    &snapshot,
-                    &binding,
-                    &original
+                    &snapshot, &binding, &original
                 )
                 .is_ok(),
                 "the pinned WAL snapshot retains its old owner grant"
@@ -7237,7 +7239,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(generation_value, format!("{generation}:{admission}:{stream}"));
+        assert_eq!(
+            generation_value,
+            format!("{generation}:{admission}:{stream}")
+        );
         let old_marker_count: i64 = store
             .connection
             .query_row(
@@ -7246,7 +7251,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(old_marker_count, 0, "direct writes use only the stable marker");
+        assert_eq!(
+            old_marker_count, 0,
+            "direct writes use only the stable marker"
+        );
         drop(snapshot);
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -7256,7 +7264,12 @@ mod tests {
     fn direct_catalog_history_grants_preserve_only_existing_producer_metadata() {
         let root = scratch("direct-catalog-history-grant");
         let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let config = options.source.config(&options.cache).unwrap();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
         assert_eq!(
             catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
                 .unwrap()
@@ -7272,11 +7285,10 @@ mod tests {
             .as_deref()
             .unwrap()
             .to_owned();
-        let ordinary = crate::storage::sqlite::source_journal::SourceJournal::owned(
-            store.owner.clone(),
-        )
-        .connection()
-        .unwrap();
+        let ordinary =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                .connection()
+                .unwrap();
         assert!(ordinary
             .execute(
                 "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'history',?3,?4,?5)",
@@ -7359,9 +7371,14 @@ mod tests {
     fn direct_catalog_grant_replacement_rolls_back_with_the_catalog_marker() {
         let root = scratch("direct-catalog-grant-rollback");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
-        let first = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
-            .unwrap();
+        let config = options.source.config(&options.cache).unwrap();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
+        let first =
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         assert_eq!(first.0, Outcome::Written);
         let first_generation = first.1.unwrap();
         let namespace = store.owner.config().namespace.as_str().to_owned();
@@ -7395,7 +7412,9 @@ mod tests {
             .execute_batch("CREATE TRIGGER test_reject_catalog_native_marker BEFORE UPDATE ON main.meta WHEN OLD.key='catalog_native_publication' BEGIN SELECT RAISE(ABORT,'injected catalog marker failure'); END;")
             .unwrap();
         rows[0].name.push_str(" failed replacement");
-        assert!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).is_err());
+        assert!(
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).is_err()
+        );
         let after_row: String = store
             .connection
             .query_row(
@@ -7425,7 +7444,11 @@ mod tests {
         assert_eq!(after_marker, before_marker);
         assert_eq!(
             after_marker,
-            format!("{first_generation}:{}:{}", store.owner.admission(), before_grant.2)
+            format!(
+                "{first_generation}:{}:{}",
+                store.owner.admission(),
+                before_grant.2
+            )
         );
         store
             .connection

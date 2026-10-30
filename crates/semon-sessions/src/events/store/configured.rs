@@ -1410,11 +1410,11 @@ impl Writer {
         expected: Option<&str>,
         max: usize,
     ) -> Result<Option<Vec<crate::slot_projection::SavedSlot>>, StoreError> {
+        let Some(expected) = expected else {
+            return Ok(None);
+        };
         let db = self.snapshot().map_err(StoreError::Configured)?;
-        match expected {
-            Some(expected) => super::read_session_slots(&db, row, expected, max),
-            None => Ok(None),
-        }
+        super::read_session_slots(&db, row, expected, max)
     }
 
     pub(crate) fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
@@ -2237,9 +2237,9 @@ mod tests {
                 "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
         })
         .to_string();
-        db.execute("INSERT INTO session_catalog(session_key,lifecycle,last_ms,harness,metadata) VALUES('owner','current',0,'codex',?1)", [published]).unwrap();
+        db.execute("INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,metadata) VALUES('a','owner','current',0,'codex',?1)", [published]).unwrap();
         db.execute(
-            "INSERT INTO session_catalog_sources VALUES('owner','current','codex','owner',?1)",
+            "INSERT INTO session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES('a','owner','current','codex','owner',?1)",
             [path],
         )
         .unwrap();
@@ -2438,6 +2438,7 @@ mod tests {
         db.execute_batch(metadata_schema()).unwrap();
         db.execute_batch(CORE_SCHEMA).unwrap();
         db.execute_batch(copied_usage_schema()).unwrap();
+        tree_state::register(&db).unwrap();
         db.execute_batch(tree_state::schema()).unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON; CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
@@ -2725,6 +2726,12 @@ mod tests {
 
     include!("configured_recovery_tests.rs");
 
+    enum FixtureAdmission {
+        Native,
+        Public,
+        Unbound,
+    }
+
     struct Fixture {
         root: PathBuf,
         config: StoreConfig,
@@ -2732,21 +2739,24 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
-            Self::with_setup(|_, _| {})
+            Self::current("configured-events")
         }
         fn with_setup(setup: impl FnOnce(&Connection, &Path)) -> Self {
             Self::with_named_setup("configured-events", setup)
         }
         fn with_named_setup(namespace: &str, setup: impl FnOnce(&Connection, &Path)) -> Self {
-            Self::with_admission(namespace, setup, false)
+            Self::with_admission(namespace, setup, FixtureAdmission::Public)
         }
         fn current(namespace: &str) -> Self {
-            Self::with_admission(namespace, |_, _| {}, true)
+            Self::with_admission(namespace, |_, _| {}, FixtureAdmission::Native)
+        }
+        fn unbound(namespace: &str) -> Self {
+            Self::with_admission(namespace, |_, _| {}, FixtureAdmission::Unbound)
         }
         fn with_admission(
             namespace: &str,
             setup: impl FnOnce(&Connection, &Path),
-            current: bool,
+            admission: FixtureAdmission,
         ) -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
@@ -2773,10 +2783,14 @@ mod tests {
             )
             .unwrap();
             drop(db);
-            if current {
-                NativeOwnership::admit(&config).unwrap();
-            } else {
-                config.admit_namespace().unwrap();
+            match admission {
+                FixtureAdmission::Native => {
+                    NativeOwnership::admit(&config).unwrap();
+                }
+                FixtureAdmission::Public => {
+                    config.admit_namespace().unwrap();
+                }
+                FixtureAdmission::Unbound => {}
             }
             fs::write(&raw, concat!(
                 "{\"type\":\"session_meta\",\"payload\":{\"id\":\"native-session\",\"cwd\":\"/sanitized\"}}\n",
@@ -2909,19 +2923,17 @@ mod tests {
 
     #[test]
     fn configured_semantic_support_mixed_family_refuses_before_ingest() {
-        let f = Fixture::with_setup(|_, _| {});
-        // Establish valid current admission before injecting physical drift.
-        // The production factory must still refuse it before ingestion.
+        let f = Fixture::current("configured-events");
+        // Inject physical drift into a privately admitted owner. The configured
+        // index must refuse it without changing any admitted state.
         f.db().execute_batch("DROP TABLE catalog_native_dependencies; CREATE TABLE catalog_native_dependencies(source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,PRIMARY KEY(source_path,harness,native_id)) STRICT, WITHOUT ROWID;").unwrap();
         let before = f.state();
-        assert!(!before.contains_key("storage_source_journal"));
+        assert!(before.contains_key("storage_source_journal"));
         assert!(matches!(
-            f.config.native_events(),
+            crate::storage::sqlite::open_configured_index(&f.config),
             Err(StorageError::Unavailable)
         ));
         assert_eq!(f.state(), before);
-        assert!(!f.state().contains_key("storage_source_journal"));
-        assert!(!f.db().query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='storage_event_operations')", [], |r| r.get::<_,bool>(0)).unwrap());
     }
 
     #[test]
@@ -5759,11 +5771,16 @@ mod tests {
 
     #[test]
     fn configured_semantic_factory_refuses_malformed_stage_before_journal_and_keeps_fences() {
-        let f = Fixture::new();
+        let f = Fixture::unbound("configured-events");
         f.db()
             .execute_batch("ALTER TABLE catalog_semantic_events ADD COLUMN unexpected TEXT;")
             .unwrap();
         let before = f.state();
+        assert!(NativeOwnership::admit(&f.config).is_err());
+        assert_eq!(
+            f.config.admit_namespace(),
+            Err(StorageError::NamespaceUnadmitted)
+        );
         assert!(f.config.native_events().is_err());
         assert!(crate::storage::sqlite::open_configured_index(&f.config).is_err());
         assert_eq!(f.state(), before);
@@ -5787,11 +5804,17 @@ mod tests {
             "catalog_native_dependencies",
             "session_source_mutations",
         ] {
-            let f = Fixture::new();
+            let f = Fixture::unbound("configured-events");
             f.db()
                 .execute_batch(&format!("ALTER TABLE {table} ADD COLUMN unexpected TEXT;"))
                 .unwrap();
             let before = f.state();
+            assert!(NativeOwnership::admit(&f.config).is_err(), "{table}");
+            assert_eq!(
+                f.config.admit_namespace(),
+                Err(StorageError::NamespaceUnadmitted),
+                "{table}"
+            );
             assert!(f.config.native_events().is_err(), "{table}");
             assert_eq!(f.state(), before);
             assert!(!f.state().contains_key("storage_source_journal"));

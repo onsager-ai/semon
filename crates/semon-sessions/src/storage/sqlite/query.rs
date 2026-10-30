@@ -122,7 +122,10 @@ fn read(
         super::proof_generations::imported_catalog(db, admitted_binding).map_err(unavailable)?;
     let admission =
         i64::try_from(admitted_binding.admission).map_err(|_| unavailable("Invalid admission"))?;
-    let owner_grant = format!("{}:{}", admitted_binding.admission, admitted_binding.stream_epoch);
+    let owner_grant = format!(
+        "{}:{}",
+        admitted_binding.admission, admitted_binding.stream_epoch
+    );
     let publication_grant = format!(
         "{generation}:{}:{}",
         admitted_binding.admission, admitted_binding.stream_epoch

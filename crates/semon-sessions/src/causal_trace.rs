@@ -244,7 +244,9 @@ pub(crate) fn publish_owned(
     let mut measurements = crate::native_timing::Measurements::default();
     let record = publication_record(row, projection, &mut measurements)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    if let Some(query) = &projection.query {
+    if row.query.is_some()
+        && let Some(query) = &projection.query
+    {
         query.publish(tx, row, &record.0)?;
     }
     publish_record(&store, row, projection, record, &mut measurements)
