@@ -651,9 +651,10 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
+        use crate::storage::native_events::NativeEventStore;
         use transfer::reported::tests::{
-            apply, cache, root, seed_codex_usage, seed_native, seed_native_usage, sqlite, sqlite_core,
-            stage,
+            apply, cache, root, seed_codex_usage, seed_native, seed_native_usage, sqlite,
+            sqlite_core, stage,
         };
         let root = root();
         let source = sqlite(&root, "native-source");
@@ -661,10 +662,15 @@ mod tests {
         let path = root.join("old.jsonl");
         seed_native_usage(&source, &path, 130);
         let header_path = root.join("source-codex.jsonl");
-        let body = format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"TrAnSfEr-HeAdEr","cwd":"/sanitized"}}));
+        let body = format!(
+            "{}\n",
+            serde_json::json!({"type":"session_meta","payload":{"id":"TrAnSfEr-HeAdEr","cwd":"/sanitized"}})
+        );
         std::fs::write(&header_path, body).unwrap();
         let mut source_cache = cache(&source);
-        source_cache.ingest(&"6".repeat(64), &header_path, "codex").unwrap();
+        source_cache
+            .ingest(&"6".repeat(64), &header_path, "codex")
+            .unwrap();
         source_cache.flush_cold_writes().unwrap();
         drop(source_cache);
         let expected = sqlite_core(&source, &path);
@@ -720,11 +726,26 @@ mod tests {
         });
         assert_eq!(rolled_back, Err(StorageError::Conflict));
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            assert!(super::super::native_keys::read_meta(tx, header_key.as_bytes(), transfer::MAX_PAGE_BYTES)?.is_none());
-            let count: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_search_headers", &[]).map_err(sqlstate::error)?.get(0);
+            assert!(
+                super::super::native_keys::read_meta(
+                    tx,
+                    header_key.as_bytes(),
+                    transfer::MAX_PAGE_BYTES
+                )?
+                .is_none()
+            );
+            let count: i64 = tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_native_catalog_search_headers",
+                    &[],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
             assert_eq!(count, 0);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_file(&header_path).unwrap();
         apply(&config, &manifest);
