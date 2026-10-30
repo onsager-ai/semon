@@ -449,15 +449,12 @@ impl SourceJournal {
 impl SourceObservationStore for SourceJournal {
     fn recovery_is_current(&mut self) -> Result<bool, StorageError> {
         let mut connection = self.writer()?;
-        let db = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(failed)?;
+        let db = connection.transaction().map_err(failed)?;
         self.validate(&db)?;
         self.owner.as_ref().ok_or(StorageError::Unavailable)?;
         // EventCache reconciles durable intents before asking for this owner
         // witness. The scoped marker is the durable cursor; its absence means
-        // there is no recovery page to capture. The immediate transaction also
-        // preserves busy refusal while an owner write is pending.
+        // there is no recovery page to capture.
         let pending: bool = db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after')",
@@ -2329,13 +2326,6 @@ mod tests {
             .unwrap();
         assert!(!absent_receipt);
         assert!(!absent_intent);
-
-        // A pending owner writer still refuses this otherwise empty check.
-        let blocker = f.db();
-        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-        assert!(cache.discover_recovery_sources().is_err());
-        blocker.execute_batch("ROLLBACK").unwrap();
-        assert!(cache.discover_recovery_sources().unwrap());
 
         crate::events::store::begin_catalog_recovery(&options, "source-journal-test").unwrap();
         let present_cursor = recovery_operation("A", Some(""));
