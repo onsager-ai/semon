@@ -4521,9 +4521,13 @@ fn index_leading_catalog_list_keeps_qualified_current_row_readable() {
     assert_eq!(before["items"].as_array().unwrap().len(), 1);
     assert_eq!(before["items"][0]["key"], "local-proof");
 
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
-    let catalog_generation = cache.session_catalog_generation().unwrap().unwrap();
-    assert_eq!(before["generation"].as_str(), Some(catalog_generation.as_str()));
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let catalog_generation = cache.session_catalog_generation().unwrap();
+    assert_eq!(
+        before["generation"].as_str(),
+        Some(catalog_generation.as_str())
+    );
     writeln!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
         "{}",
@@ -4545,7 +4549,7 @@ fn index_leading_catalog_list_keeps_qualified_current_row_readable() {
         crate::model::now_ms(),
     )
     .unwrap();
-    let catalog_after = cache.session_catalog_generation().unwrap();
+    let catalog_after = cache.session_catalog_generation();
     assert_eq!(catalog_after.as_deref(), Some(catalog_generation.as_str()));
     drop(cache);
 
@@ -4557,7 +4561,10 @@ fn index_leading_catalog_list_keeps_qualified_current_row_readable() {
         String::from_utf8_lossy(&after.body)
     );
     let after: Value = serde_json::from_slice(&after.body).unwrap();
-    assert_eq!(after["generation"].as_str(), Some(catalog_generation.as_str()));
+    assert_eq!(
+        after["generation"].as_str(),
+        Some(catalog_generation.as_str())
+    );
     assert_eq!(after["items"].as_array().unwrap().len(), 1);
     assert_eq!(after["items"][0]["key"], "local-proof");
 }
