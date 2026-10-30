@@ -4270,32 +4270,100 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // the configured current Facts file has moved on. The same change refuses
     // Current selected rows above, where live runtime qualification applies.
     fs::write(&facts_path, b"changed current Facts after retained publication").unwrap();
-    let mut retained_options = facts_options.clone();
-    retained_options.all = false;
-    retained_options.since = Duration::from_secs(86400 * 365 * 100);
-    let retained_runtime_store = super::super::snapshot::query::QueryCatalog {
+    let retained_key = removed.iter().next().unwrap();
+    for all in [true, false] {
+        let mut retained_options = facts_options.clone();
+        retained_options.all = all;
+        retained_options.scan_window = false;
+        retained_options.since = Duration::from_secs(86400 * 365 * 100);
+        let retained_runtime_store = super::super::snapshot::query::QueryCatalog {
+            captured: false,
+            pool: pool.clone(),
+            namespace: namespace.clone(),
+            control: control.clone(),
+            generation: caught.clone(),
+            options: retained_options,
+        };
+        let retained_fields = query
+            .call_bound_selected_at(
+                "get_session",
+                &serde_json::json!({"id":retained_key}),
+                1790812802000,
+                &retained_runtime_store,
+                &withdrawal_host,
+                None,
+            )
+            .unwrap();
+        assert!(retained_fields["session"].is_object());
+        assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
+        assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
+        assert_eq!(retained_fields["session"]["open_question"], serde_json::Value::Null);
+        let body = query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":retained_key,"limit":100}),
+                1790812802000,
+                &retained_runtime_store,
+                &retained_host,
+                None,
+            )
+            .unwrap();
+        assert_eq!(body["sid"], *retained_key);
+        assert!(body.to_string().contains("sanitized agent answer"));
+    }
+    // The same genuine retained owner falls outside a later cutoff. Its last
+    // turn must not bring old completed handoffs back into the window.
+    let mut expired_options = facts_options.clone();
+    expired_options.all = false;
+    expired_options.scan_window = false;
+    expired_options.since = Duration::from_secs(1);
+    let expired_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
         generation: caught.clone(),
-        options: retained_options,
+        options: expired_options,
     };
-    let retained_key = removed.iter().next().unwrap();
-    let retained_fields = query
+    for tool in ["get_session", "read_transcript"] {
+        let error = query
+            .call_bound_selected_at(
+                tool,
+                &serde_json::json!({"id":retained_key}),
+                1790812802000 + 86_400_000,
+                &expired_store,
+                &withdrawal_host,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "unknown_session");
+    }
+    // Captured reads of a row that is physically Current in their immutable
+    // generation retain captured proof semantics even after live Facts change.
+    let captured_key = &facts_rows
+        .iter()
+        .find(|row| current.iter().any(|(key, _)| key == &row.key))
+        .unwrap()
+        .key;
+    let captured_current_store = super::super::snapshot::query::QueryCatalog {
+        captured: true,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: facts_options.clone(),
+    };
+    let captured_body = query
         .call_bound_selected_at(
-            "get_session",
-            &serde_json::json!({"id":retained_key}),
+            "read_transcript",
+            &serde_json::json!({"id":captured_key}),
             1790812802000,
-            &retained_runtime_store,
+            &captured_current_store,
             &withdrawal_host,
             None,
         )
         .unwrap();
-    assert!(retained_fields["session"].is_object());
-    assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
-    assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
-    assert_eq!(retained_fields["session"]["open_question"], serde_json::Value::Null);
+    assert_eq!(captured_body["sid"], *captured_key);
     assert!(
         !options.cache.exists(),
         "PG public request cannot create a SQLite cache"
