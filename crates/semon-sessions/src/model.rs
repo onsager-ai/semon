@@ -8954,6 +8954,8 @@ fn build_sources_inner(
                     .as_ref()
                     .map(|path| builder.cache.facts_authority(path))
                     .transpose()?
+            } else {
+                None
             };
             let mut observations = observations.with_publication_authority(
                 options,
