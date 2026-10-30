@@ -8946,15 +8946,20 @@ fn build_sources_inner(
                     .into_iter()
                     .flat_map(|context| context.endpoints.values().map(|endpoint| &endpoint.row)),
             );
-            let mut observations = observations.with_publication_authority(
-                options,
-                runtime_binding.as_ref(),
-                cohort,
+            // Generic publication uses this envelope for runtime scope only;
+            // semantic staging also binds selected Facts and source selection.
+            let recorded = if staged_relationships.is_some() {
                 options
                     .facts
                     .as_ref()
                     .map(|path| builder.cache.facts_authority(path))
-                    .transpose()?,
+                    .transpose()?
+            };
+            let mut observations = observations.with_publication_authority(
+                options,
+                runtime_binding.as_ref(),
+                cohort,
+                recorded,
                 query_runtime.clone(),
                 runtime_observations,
             );

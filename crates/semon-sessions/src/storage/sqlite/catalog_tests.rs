@@ -6870,7 +6870,9 @@ fn captured_family_qualifies_a_current_relative_outside_its_initial_cohort() {
     );
     let cwds = runtime_source_cwds(&tx, &parent.sources).unwrap();
     let runtime = observations.runtime_observation(&parent, &cwds).unwrap();
-    observations.capture_runtime(&parent, &cwds, runtime).unwrap();
+    observations
+        .capture_runtime(&parent, &cwds, runtime)
+        .unwrap();
     assert_eq!(observations.captured_source_count(), 1);
     let context = CapturedContext::capture(
         &crate::storage::sqlite::selected::Context::owned(&tx),
