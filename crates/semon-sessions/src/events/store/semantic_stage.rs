@@ -3125,6 +3125,8 @@ mod tests {
             removed_sources: BTreeSet::new(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
+            #[cfg(feature = "postgres")]
+            withdrawal_fence: None,
         }
     }
 

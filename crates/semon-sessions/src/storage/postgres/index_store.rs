@@ -157,6 +157,9 @@ impl IndexStore for NativeIndex {
     ) -> Result<Outcome, StoreError> {
         #[cfg(test)]
         eprintln!("PG_SEMANTIC_RECORD phase={:?}", batch.phase);
+        let _withdrawal_guard = prepared
+            .withdrawal_guard()
+            .map_err(|_| err(StorageError::Conflict))?;
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::semantic_stage::record(tx, batch, prepared)
@@ -168,6 +171,10 @@ impl IndexStore for NativeIndex {
         batch: &crate::model::relation_stage::Batch,
         prepared: &crate::model::PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        let withdrawals = prepared
+            .withdrawal_guard()
+            .map_err(|_| StorageError::Conflict);
+        let physical = withdrawals.as_ref().map(|_| ()).map_err(|error| *error);
         let lifecycle = (|| {
             if let Some(authority) = &prepared.relationships.lifecycle_authority {
                 self.pool.transaction(
@@ -189,11 +196,16 @@ impl IndexStore for NativeIndex {
                 prepared.relationships.lifecycle_authority.as_ref(),
             )
         })();
-        self.pool
+        let result = self
+            .pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                super::semantic_stage::publish(tx, batch, prepared, lifecycle)
+                super::semantic_stage::publish(tx, batch, prepared, lifecycle, physical)
             })
-            .map_err(err)
+            .map_err(err);
+        // The callback returns before COMMIT. Keep SourceChange exclusion
+        // until transaction() has acknowledged commit or completed rollback.
+        drop(withdrawals);
+        result
     }
     fn finish_semantic_stage(&mut self, epoch: i64) -> Result<Outcome, StoreError> {
         let outcome = self

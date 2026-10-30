@@ -337,6 +337,23 @@ impl SourceLock {
         path: &str,
         exclusive: bool,
     ) -> io::Result<Self> {
+        let operation = if exclusive {
+            libc::LOCK_EX
+        } else {
+            libc::LOCK_SH
+        };
+        Self::acquire_cache_with(cache, path, operation)
+    }
+    #[cfg(all(test, unix, feature = "postgres"))]
+    pub(crate) fn try_exclusive_cache(cache: &std::path::Path, path: &str) -> io::Result<Self> {
+        Self::acquire_cache_with(cache, path, libc::LOCK_EX | libc::LOCK_NB)
+    }
+    #[cfg(unix)]
+    fn acquire_cache_with(
+        cache: &std::path::Path,
+        path: &str,
+        operation: libc::c_int,
+    ) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
@@ -363,11 +380,6 @@ impl SourceLock {
         // Shared Catalog readers take the facts fence before per-source
         // fences. Writers hold one fence at a time (multi-source relocation
         // sorts its keys), so waiting here preserves the established order.
-        let operation = if exclusive {
-            libc::LOCK_EX
-        } else {
-            libc::LOCK_SH
-        };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             return Err(io::Error::last_os_error());
         }

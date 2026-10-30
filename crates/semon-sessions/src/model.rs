@@ -7468,9 +7468,99 @@ pub(crate) struct PreparedSources {
     pub(crate) removed_sources: BTreeSet<String>,
     pub(crate) indexed_native_parents: Vec<(String, String, String)>,
     pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
+    #[cfg(feature = "postgres")]
+    pub(crate) withdrawal_fence: Option<WithdrawalFence>,
+}
+
+/// Process-local fence provenance; never part of a persisted witness.
+#[derive(Clone)]
+#[cfg(feature = "postgres")]
+pub(crate) struct WithdrawalFence {
+    witness: String,
+    cache: PathBuf,
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) struct WithdrawalGuard {
+    _facts: crate::source_change::SourceLock,
+    _sources: Vec<crate::source_change::SourceLock>,
 }
 
 impl PreparedSources {
+    #[cfg(feature = "postgres")]
+    pub(crate) fn retain_withdrawal_fence(&mut self, options: &Options) -> io::Result<()> {
+        if self.withdrawals.len() > 64 {
+            return Err(io::Error::other("semantic withdrawal source budget exceeded"));
+        }
+        if self.withdrawals.is_empty() {
+            return Ok(());
+        }
+        let facts_path = options
+            .facts
+            .as_ref()
+            .ok_or_else(|| io::Error::other("withdrawal Facts path missing"))?;
+        let mut paths = BTreeSet::new();
+        for withdrawal in &self.withdrawals {
+            let input = crate::Input {
+                root: crate::InputRoot::Codex,
+                path: withdrawal.relative.clone(),
+            };
+            if withdrawal.facts_path != *facts_path
+                || input.full_path(options).to_string_lossy() != withdrawal.path
+                || !paths.insert(withdrawal.path.clone())
+            {
+                return Err(io::Error::other("withdrawal Source fence differs"));
+            }
+        }
+        self.withdrawal_fence = Some(WithdrawalFence {
+            witness: serde_json::to_string(&self.withdrawals).map_err(io::Error::other)?,
+            cache: options.cache.clone(),
+        });
+        Ok(())
+    }
+
+    /// Qualify physical witnesses before SQL admission while retaining the
+    /// supported SourceChange writers' exclusion through transaction return.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn withdrawal_guard(&self) -> io::Result<Option<WithdrawalGuard>> {
+        if self.withdrawals.len() > 64 {
+            return Err(io::Error::other("semantic withdrawal source budget exceeded"));
+        }
+        if self.withdrawals.is_empty() {
+            return Ok(None);
+        }
+        let witness = serde_json::to_string(&self.withdrawals).map_err(io::Error::other)?;
+        let fence = self
+            .withdrawal_fence
+            .as_ref()
+            .filter(|fence| fence.witness == witness);
+        let Some(fence) = fence else {
+            return Err(io::Error::other("withdrawal Source fence missing or changed"));
+        };
+        // Preparation has released its temporary locks. Acquire only the
+        // negative paths, Facts first, before any SQL writer is opened.
+        let facts = crate::source_change::SourceLock::acquire_cache(&fence.cache, "facts", false)?;
+        let paths = self
+            .withdrawals
+            .iter()
+            .map(|w| &w.path)
+            .collect::<BTreeSet<_>>();
+        let sources = paths
+            .into_iter()
+            .map(|path| crate::source_change::SourceLock::acquire_cache(&fence.cache, path, false))
+            .collect::<io::Result<Vec<_>>>()?;
+        let guard = WithdrawalGuard {
+            _facts: facts,
+            _sources: sources,
+        };
+        for withdrawal in &self.withdrawals {
+            if !withdrawal.current()? {
+                return Err(io::Error::other("native source admission withdrawal changed"));
+            }
+        }
+        Ok(Some(guard))
+    }
+
     pub(crate) fn presentation_observations(
         &self,
     ) -> Option<&crate::storage::selected::PresentationObservations> {
@@ -7654,6 +7744,8 @@ pub(crate) fn prepare_semantic_batch(
             ),
         );
     }
+    #[cfg(feature = "postgres")]
+    prepared.retain_withdrawal_fence(options)?;
     Ok(SemanticModelBatch { prepared })
 }
 
@@ -7884,6 +7976,8 @@ pub(crate) fn prepare_semantic_index_sources(
         removed_sources,
         indexed_native_parents,
         withdrawals,
+        #[cfg(feature = "postgres")]
+        withdrawal_fence: None,
         lineage_dependencies,
         message_dependencies: Some(Vec::new()),
         rows: Vec::new(),
@@ -8952,6 +9046,8 @@ fn build_sources_inner(
                 removed_sources: BTreeSet::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),
+                #[cfg(feature = "postgres")]
+                withdrawal_fence: None,
             })));
         }
         BuildTarget::Catalog => {
