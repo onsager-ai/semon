@@ -637,7 +637,7 @@ impl NativeEvidence {
         // left to save.
         let mut dirty = false;
         if self.options.facts.is_none() {
-            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty);
+            cache.refresh_reported_runs(&self.options.claude_json, now, &mut dirty)?;
         }
         Ok(())
     }
@@ -676,10 +676,11 @@ impl NativeEvidence {
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
+            let discovery_started = crate::native_timing::enabled().then(Instant::now);
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
-                crate::events::store::discover_recovery_sources(&self.options)?
+                cache.discover_recovery_sources()?
             };
             let page = {
                 let _timing =
@@ -687,6 +688,7 @@ impl NativeEvidence {
                 discovery.cursor.next(&self.options, 64, 512)?
             };
             debug_assert!(page.examined <= 512);
+            let candidates = page.inputs.len();
             {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "discovery_publication");
@@ -710,6 +712,13 @@ impl NativeEvidence {
                     discovery.newest.pop_last();
                 }
             }
+            discovery.timing.page(
+                &self.options.cache,
+                discovery_started,
+                page.examined,
+                candidates,
+                (page.complete, recovery_complete),
+            );
             if !page.complete || !recovery_complete {
                 return Ok(CatalogPreparation::Pending);
             }
@@ -1867,6 +1876,7 @@ struct ColdCatalog {
     pids: BTreeSet<u32>,
     snapshot: Option<Snapshot>,
     started: bool,
+    timing: crate::native_timing::ColdDiscoveryProgress,
     newest: BTreeSet<(
         std::cmp::Reverse<Option<std::time::SystemTime>>,
         crate::inputs::Input,

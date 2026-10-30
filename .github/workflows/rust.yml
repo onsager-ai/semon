@@ -60,6 +60,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
 
+      # Diagnostic only: leave both normal isolated and full-parallel gates
+      # below unchanged, and retain counters even if this diagnostic fails.
+      - name: Cold Index writer diagnostic (not qualification)
+        continue-on-error: true
+        env:
+          SEMON_BUILD_TIMING: "1"
+        run: cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+
       - name: Session URL shared vectors (ordinary PR gate)
         run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture
 

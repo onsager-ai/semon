@@ -1,0 +1,294 @@
+diff --git a/crates/semon-sessions/src/storage/sqlite/semantic.rs b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+index 2c45799b..0eba27be 100644
+--- a/crates/semon-sessions/src/storage/sqlite/semantic.rs
++++ b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+@@ -804,19 +804,44 @@ impl Stage {
+         let projection_rows: std::collections::BTreeMap<_, _> =
+             prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
+         let mut projection_keys = std::collections::BTreeSet::new();
++        let mut real_projection_keys = std::collections::BTreeSet::new();
+         let mut slot_bytes = 0usize;
+         for projection in &prepared.transcripts {
+-            let Some(row) = projection_rows.get(projection.key.as_str()) else {
+-                return Err(refuse("semantic_publication_projection_owner"));
+-            };
+-            if !projection_keys.insert(&projection.key) || projection.slots.len() > 64 {
++            // 64 bounds source/owner admission, not a native transcript's
++            // length. Slot work is bounded by the aggregate byte budget below,
++            // as the shared writer accepts complete multi-page transcripts.
++            if !projection_keys.insert(&projection.key) {
+                 return Err(refuse("semantic_publication_projection_budget"));
+             }
++            let row = projection_rows.get(projection.key.as_str());
++            if row.is_some() {
++                real_projection_keys.insert(&projection.key);
++            } else {
++                // Ordinary slot publication skips virtual trace endpoints. Keep
++                // their exact model witness, but never give them Raw membership
++                // or a Catalog/slot row. The real anchor is independently checked
++                // against this namespace's staged identity below, and the entire
++                // relation/projection payload must match the recorded witness.
++                let anchored_stub = prepared.relationships.relations.values().any(|relation| {
++                    relation.stubs.iter().any(|stub| stub.key == projection.key)
++                        && (relation.from == projection.key
++                            || relation.to.as_ref() == Some(&projection.key))
++                        && std::iter::once(&relation.from)
++                            .chain(relation.to.iter())
++                            .any(|key| {
++                                projection_rows.contains_key(key.as_str())
++                                    && prepared.relationships.endpoints.contains_key(key)
++                            })
++                });
++                if !anchored_stub {
++                    return Err(refuse("semantic_publication_projection_owner"));
++                }
++            }
+             for slot in &projection.slots {
+                 if slot
+                     .source_paths()
+                     .iter()
+-                    .any(|path| !row.sources.iter().any(|s| &s.path == *path))
++                    .any(|path| row.is_none_or(|row| !row.sources.iter().any(|s| &s.path == *path)))
+                 {
+                     return Err(refuse("semantic_publication_projection_source"));
+                 }
+@@ -830,7 +855,7 @@ impl Stage {
+                 }
+             }
+         }
+-        if !prepared.transcripts.is_empty() && projection_keys.len() != projection_rows.len() {
++        if !prepared.transcripts.is_empty() && real_projection_keys.len() != projection_rows.len() {
+             return Err(refuse("semantic_publication_projection_owner"));
+         }
+         let projection_witness = prepared
+@@ -1054,7 +1079,10 @@ impl Stage {
+             }
+         }
+         for projection in &prepared.transcripts {
+-            let row = projection_rows[projection.key.as_str()];
++            let Some(row) = projection_rows.get(projection.key.as_str()) else {
++                // Virtual stubs are witness-only, just as in publish_slot_rows.
++                continue;
++            };
+             let slots = projection
+                 .slots
+                 .iter()
+diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
+index 9f9c3c28..941bee16 100644
+--- a/crates/semon-sessions/src/events/store/configured.rs
++++ b/crates/semon-sessions/src/events/store/configured.rs
+@@ -6472,16 +6472,32 @@ mod tests {
+             ] {
+                 let before = shared_state(f);
+                 FAIL_EFFECT.with(|p| p.set(Some(point)));
+-                assert!(
+-                    cache
+-                        .publish_semantic_catalog(batch, model.prepared())
+-                        .is_err(),
+-                    "{point}"
+-                );
++                let result = cache.publish_semantic_catalog(batch, model.prepared());
++                assert!(result.is_err(), "{point}");
++                let reason = result
++                    .as_ref()
++                    .err()
++                    .map(ToString::to_string)
++                    .unwrap_or_default();
++                let refusal = if reason.starts_with("semantic_")
++                    && reason.len() < 128
++                    && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
++                {
++                    reason.as_str()
++                } else {
++                    "injected_or_other"
++                };
+                 assert_eq!(
+                     FAIL_EFFECT.with(|p| p.get()),
+                     None,
+-                    "unconsumed fault {point}"
++                    "unconsumed fault {point}; refusal={refusal}; max_slots={}",
++                    model
++                        .prepared()
++                        .transcripts
++                        .iter()
++                        .map(|p| p.slots.len())
++                        .max()
++                        .unwrap_or(0)
+                 );
+                 assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
+             }
+@@ -7920,6 +7936,80 @@ mod tests {
+             }
+         }
+ 
++        fn ordinary_claude_ready(
++            cache: &mut EventCache,
++            options: &crate::Options,
++            inputs: &[crate::Input],
++        ) -> Batch {
++            assert!(!cache.explicit_store);
++            claude_ingest(cache, options, inputs);
++            let paths = inputs
++                .iter()
++                .map(|i| i.full_path(options).to_string_lossy().into_owned())
++                .collect::<Vec<_>>();
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            assert_eq!(
++                cache
++                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
++                    .unwrap(),
++                Outcome::Written
++            );
++            for _ in 0..256 {
++                let batch = cache.semantic_batch(64).unwrap().unwrap();
++                if batch.paths.is_empty() {
++                    continue;
++                }
++                let mut selected = batch
++                    .paths
++                    .iter()
++                    .cloned()
++                    .collect::<std::collections::BTreeSet<_>>();
++                if batch.phase == Phase::Relations {
++                    selected.extend(batch.context.parent_paths(&batch.paths));
++                    selected.extend(batch.context.companions.iter().cloned());
++                }
++                assert!(selected.len() <= 64);
++                let selected = selected
++                    .iter()
++                    .map(|path| {
++                        crate::native_evidence::catalog_input(Path::new(path), options).unwrap()
++                    })
++                    .collect::<Vec<_>>();
++                let prepared = match batch.phase {
++                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
++                        options,
++                        cache,
++                        &selected,
++                        1_790_000_000_000,
++                    ),
++                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
++                        options,
++                        cache,
++                        &selected,
++                        &batch.context,
++                        1_790_000_000_000,
++                    ),
++                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
++                        options,
++                        cache,
++                        &selected,
++                        &batch.context,
++                        batch.phase == Phase::Relations,
++                        1_790_000_000_000,
++                    ),
++                }
++                .unwrap();
++                if batch.phase == Phase::Publication {
++                    return batch;
++                }
++                assert_eq!(
++                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
++                    Outcome::Written
++                );
++            }
++            panic!("ordinary Claude producer did not finish");
++        }
++
+         fn claude_ready(
+             cache: &mut EventCache,
+             options: &crate::Options,
+@@ -8027,7 +8117,7 @@ mod tests {
+                 let mut admitted = open(&f.config);
+                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
+                 let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+-                let (reference, _) = claude_ready(&mut ordinary, options, &inputs);
++                let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+                 let ordinary_db =
+                     Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+                 let actual = projection_rows(&f.db(), Some("source-a"));
+@@ -8085,7 +8175,75 @@ mod tests {
+             let before = namespace_state(&f, "source-b");
+             let mut own = open(&f.config);
+             let (batch, model) = claude_ready(&mut own, options, &inputs);
++            let mut altered = crate::model::prepare_staged_sources(
++                options,
++                &mut own,
++                &inputs,
++                &batch.context,
++                false,
++                1_790_000_000_000,
++            )
++            .unwrap();
++            let stub = altered
++                .transcripts
++                .iter()
++                .position(|projection| !altered.rows.iter().any(|row| row.key == projection.key))
++                .expect("real unmatched native call produces a virtual transcript");
++            let real_key = altered.transcripts[stub].key.clone();
++            let unchanged = shared_state(&f);
++            altered.transcripts[stub].key = "unrecorded-virtual-owner".into();
++            assert_eq!(
++                own.publish_semantic_catalog(&batch, &altered)
++                    .unwrap_err()
++                    .to_string(),
++                "semantic_publication_projection_owner"
++            );
++            assert_eq!(
++                shared_state(&f),
++                unchanged,
++                "arbitrary virtual projection has zero effects"
++            );
++            altered.transcripts[stub].key = real_key.clone();
++            let relation = altered
++                .relationships
++                .relations
++                .values_mut()
++                .find(|relation| relation.stubs.iter().any(|stub| stub.key == real_key))
++                .unwrap();
++            relation
++                .stubs
++                .iter_mut()
++                .find(|stub| stub.key == real_key)
++                .unwrap()
++                .name
++                .push_str("-unrecorded");
++            assert_eq!(
++                own.publish_semantic_catalog(&batch, &altered).unwrap().0,
++                Outcome::Conflict
++            );
++            assert_eq!(
++                shared_state(&f),
++                unchanged,
++                "typed anchored stub must match the recorded producer witness"
++            );
+             publish(&mut own, &f, &batch, &model);
++            for table in [
++                "session_catalog",
++                "session_catalog_sources",
++                "session_slot_projections",
++                "session_slots",
++                "catalog_semantic_owner_sources",
++            ] {
++                assert_eq!(
++                    f.db().query_row(
++                        &format!("SELECT count(*) FROM {table} WHERE namespace='source-a' AND session_key=?1"),
++                        [&real_key],
++                        |row| row.get::<_, i64>(0),
++                    ).unwrap(),
++                    0,
++                    "virtual stubs have no persisted owner or Raw membership in {table}"
++                );
++            }
+             assert_eq!(
+                 namespace_state(&f, "source-b"),
+                 before,
+@@ -8169,7 +8327,7 @@ mod tests {
+             let mut admitted = open(&f.config);
+             let (batch, model) = claude_ready(&mut admitted, options, &inputs);
+             let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
+-            let (reference, _) = claude_ready(&mut ordinary, options, &inputs);
++            let reference = ordinary_claude_ready(&mut ordinary, options, &inputs);
+             let db = f.db();
+             let counts:(i64,i64,i64)=db.query_row("SELECT count(*),sum(qualified),sum(copied) FROM catalog_semantic_events WHERE namespace='source-a'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+             assert_eq!(

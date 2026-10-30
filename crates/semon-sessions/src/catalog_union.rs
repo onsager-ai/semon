@@ -156,21 +156,8 @@ fn read_union(
                     true,
                 )
             };
-            let connection = Connection::open_with_flags(
-                EventCache::path(&source.options.cache),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(|_| unavailable())?;
-            connection
-                .busy_timeout(Duration::from_millis(100))
-                .map_err(|_| unavailable())?;
             Some(
-                connection
-                    .query_row(
-                        "SELECT value FROM meta WHERE key='catalog_generation'",
-                        [],
-                        |row| row.get::<_, String>(0),
-                    )
+                crate::storage::local_catalog_generation(&source.options, &source.key)
                     .map_err(|_| unavailable())?,
             )
         } else {
