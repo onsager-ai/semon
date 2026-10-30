@@ -40,7 +40,12 @@ pub(crate) fn read_local_catalog_page_with_search(
     ));
     let mut admission = None;
     let reply = sqlite::catalog::read_page(
-        &binding, options, source_key, request, on_search.is_some(), &mut admission,
+        &binding,
+        options,
+        source_key,
+        request,
+        on_search.is_some(),
+        &mut admission,
     )?;
     if reply.status == 200
         && let (Some(on_search), Some(admission)) = (on_search, admission)

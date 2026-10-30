@@ -1,8 +1,8 @@
-use crate::storage::source_observations::{CatalogPendingBatch, CatalogPendingSearch};
 use super::*;
 use crate::events::EventCache;
 use crate::storage::postgres::tests::{LOSE_ACK, fixture, ns};
 use crate::storage::source_observations::conformance::shared_source_observation_conformance;
+use crate::storage::source_observations::{CatalogPendingBatch, CatalogPendingSearch};
 
 fn journal(pool: &PgPool, namespace: &str) -> PgSourceJournal {
     PgSourceJournal {
@@ -126,7 +126,13 @@ fn pg_source_queue_bound_capture_order_and_foreign_zero_effects() {
             .unwrap()
             .is_empty()
     );
-    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
+    assert!(
+        store
+            .pending_catalog_sources(256, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     intents[0].apply(&mut store).unwrap();
     store.acknowledge_intent(intents[0].operation()).unwrap();
     let last = discover("queue", &["after-slot".into()], true);
@@ -142,8 +148,20 @@ fn pg_source_forced_rls_namespace_token_injection_and_no_unscoped_rows() {
     let a = "A\0'; RESET ROLE; --";
     let intent = discover(a, &["path\0bytes".into()], true);
     intent.apply(&mut journal(&pool, a)).unwrap();
-    assert_eq!(journal(&pool, a).pending_catalog_sources(1, None).unwrap().paths, vec!["path\0bytes"]);
-    assert!(journal(&pool, "B").pending_catalog_sources(1, None).unwrap().paths.is_empty());
+    assert_eq!(
+        journal(&pool, a)
+            .pending_catalog_sources(1, None)
+            .unwrap()
+            .paths,
+        vec!["path\0bytes"]
+    );
+    assert!(
+        journal(&pool, "B")
+            .pending_catalog_sources(1, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     for table in [
         "semon_pg_source_state",
         "semon_pg_source_members",
@@ -480,7 +498,13 @@ fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() 
     drop(store);
     let mut store = journal(&pool, namespace);
     assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
+    assert!(
+        store
+            .pending_catalog_sources(256, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     assert_eq!(
         store.claims(&["first".into(), "fault".into()]).unwrap(),
         vec![("first".into(), None), ("fault".into(), None)]

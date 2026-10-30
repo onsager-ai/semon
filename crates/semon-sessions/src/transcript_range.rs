@@ -511,7 +511,15 @@ pub(crate) fn read(
     mode: SessionSourceReadMode,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    read_inner(options, source_key, query, provider, mode, None, before_read)
+    read_inner(
+        options,
+        source_key,
+        query,
+        provider,
+        mode,
+        None,
+        before_read,
+    )
 }
 
 fn read_inner(
@@ -1012,7 +1020,9 @@ fn present(
             options, selection, provider, chunk, mode, reader,
         ));
     }
-    Ok(render_with_reader(options, selection, provider, mode, part, reader))
+    Ok(render_with_reader(
+        options, selection, provider, mode, part, reader,
+    ))
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races

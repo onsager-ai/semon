@@ -762,7 +762,6 @@ pub(crate) fn catalog_search_paths(
         .collect()
 }
 
-
 fn copied_usage_schema(composite: bool) -> &'static str {
     if composite {
         COMPOSITE_COPIED_USAGE_SCHEMA

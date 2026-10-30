@@ -1445,6 +1445,7 @@ mod tests {
             crate::events::store::catalog_schema(false),
             CATALOG_SUPPORT_SCHEMA,
             metadata_schema(false),
+            CATALOG_SEARCH_SCHEMA,
             LEGACY_EVENT_SCHEMA,
             copied_usage_schema(false),
             usage,
@@ -1484,9 +1485,9 @@ CREATE INDEX IF NOT EXISTS source_observation_intents_pending ON source_observat
         ];
         assert_eq!(storage_ddl(), original);
         let mut configured_original = original;
-        configured_original[4] = configured::CORE_SCHEMA;
-        configured_original[10] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
-        configured_original[21] = configured::pricing_file_schema(false);
+        configured_original[5] = configured::CORE_SCHEMA;
+        configured_original[11] = semantic_stage::SEMANTIC_CORE_INDEXES_NS;
+        configured_original[22] = configured::pricing_file_schema(false);
         assert_eq!(
             authored_storage_ddl(PhysicalLayout::CONFIGURED).unwrap(),
             configured_original

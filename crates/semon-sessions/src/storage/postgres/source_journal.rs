@@ -1,10 +1,12 @@
 //! Typed Source observation family only. There is deliberately no StoreConfig
 //! selector or public constructor: native ledger/publication TX ports are not PG
 //! yet. Tests inject this exact port into the normal EventCache producer.
-use crate::storage::source_observations::{CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier, CATALOG_SEARCH_LIMIT};
 use super::{
     PgCancellation, PgPool, sqlstate,
     txn::{PgTxn, TxnKind},
+};
+use crate::storage::source_observations::{
+    CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
 };
 use crate::storage::{
     LogicalSourceNamespace, StorageError,
@@ -240,7 +242,9 @@ impl SourceObservationStore for PgSourceJournal {
         limit: usize,
         search: Option<&CatalogPendingSearch<'_>>,
     ) -> Result<CatalogPendingBatch, StorageError> {
-        if limit == 0 || limit > 256 { return Err(StorageError::InvalidArguments); }
+        if limit == 0 || limit > 256 {
+            return Err(StorageError::InvalidArguments);
+        }
         self.read(|tx| {
             let excluded: Vec<Vec<u8>> = search.map_or(&[][..], |search| search.excluded)
                 .iter().map(|path| path.as_bytes().to_vec()).collect();
