@@ -1139,7 +1139,7 @@ fn recovery_tampered_preimage_refuses_before_producer_reads_or_writes() {
     assert_eq!(error.kind(), io::ErrorKind::Other);
     assert_eq!(
         error.to_string(),
-        crate::storage::StorageError::Unavailable.to_string()
+        crate::storage::StorageError::ScopeChanged.to_string()
     );
     assert_eq!(
         recovery_catalog_metadata(&db, "session_catalog", "first"),

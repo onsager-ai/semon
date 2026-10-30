@@ -72,6 +72,8 @@ jobs:
           cargo test --locked -p semon-sessions --lib recovery_history_helper_contract_ -- --nocapture
           cargo test --locked -p semon-sessions --lib recovery_stage_only_preimage_authenticates_before_inserting_current_grant -- --nocapture
           cargo test --locked -p semon-sessions --lib recovery_query_row_and_grant_roll_back_when_grant_update_fails -- --nocapture
+          cargo test --locked -p semon-sessions --lib recovery_tampered_preimage_refuses_before_producer_reads_or_writes -- --nocapture
+          cargo test --locked -p semon-sessions --lib recovery_selected_repair_cancellation_rolls_back_publication -- --nocapture
       - name: Current SQLite transfer inbox restart and atomic checkpoint
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture
