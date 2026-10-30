@@ -34,7 +34,7 @@ finalized bundle. Manually review every projected field for privacy before
 attesting to the freeze; exclude uncertain sessions before any provider call.
 For fixable findings, create a local plan with a `redactions` array containing
 `packet` basenames, `event_order`, and text `field`, then run
-`real_privacy.py --plan experiments/asi-jev/private/privacy-plan.json` from the
+`python3 experiments/asi-jev/real_privacy.py --plan experiments/asi-jev/private/privacy-plan.json` from the
 repository root. It preserves the original bundle and replaces entire fields.
 Re-review the changed packets before freezing. The plan and audit stay local.
 
@@ -78,6 +78,11 @@ and summary files, both independent annotations, `--adjudication-status frozen`,
 2,000 draws and seed 20261030. Its public output schema permits numeric metrics
 and fixed taxonomy labels only. Inspect that export before committing it.
 Private examples and the 50-event user review packet must remain local.
+`real_operations.py --run-dir PRIVATE_RUN --output AGGREGATE_JSON` separately
+exports pooled request P50/P95 and measured wall-time throughput; repeat
+`--run-dir` for each condition. Both remote model arms use the same gateway.
+The local Magpie ledger cannot establish remote gateway bills, so Haiku billed
+cost remains unknown. Jev list-price estimates are explicitly separate.
 
 This experiment compares a small deterministic rules baseline with TypeSafe Jev and, optionally, an OpenAI-compatible lightweight LLM. It reads only the reviewed sanitized fixture corpus at `data/events.jsonl`; it is not a reader for private native session files and does not change the production parser.
 
