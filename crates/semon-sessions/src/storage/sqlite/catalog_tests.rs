@@ -2531,10 +2531,12 @@ fn scoped_catalog_identity_preserves_native_ambiguity_and_source_authority() {
         .unwrap()
         .unwrap();
     assert_eq!(missing.freshness.state, "incomplete");
-    assert!(missing
-        .source_refs
-        .iter()
-        .any(|source| source.state == "unavailable"));
+    assert!(
+        missing
+            .source_refs
+            .iter()
+            .any(|source| source.state == "unavailable")
+    );
     assert_eq!(missing.facts_observation.state, "cached");
     assert_eq!(missing.native_selection, None);
     let mut changed = fixture.options.clone();

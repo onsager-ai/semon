@@ -3708,7 +3708,10 @@ mod tests {
                 true
             )
         );
-        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some("/newer"));
+        assert_eq!(
+            journal.recovery_cursor().unwrap().as_deref(),
+            Some("/newer")
+        );
         assert!(journal.pending_intents().unwrap().is_empty());
         assert!(other.recover(&operation, None).is_err());
         assert_eq!(other.recovery_cursor().unwrap(), None);
@@ -3731,7 +3734,10 @@ mod tests {
             )
         );
         assert!(journal.pending_intents().unwrap().is_empty());
-        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some("/newer"));
+        assert_eq!(
+            journal.recovery_cursor().unwrap().as_deref(),
+            Some("/newer")
+        );
     }
 
     fn ordinary_catalog_publication_lifecycle() {
@@ -6365,7 +6371,14 @@ mod tests {
         };
         assert_eq!(
             writer
-                .commit(&[(&path, None, None, &ledger, &ledger.stat, &FileIndex::default())])
+                .commit(&[(
+                    &path,
+                    None,
+                    None,
+                    &ledger,
+                    &ledger.stat,
+                    &FileIndex::default()
+                )])
                 .unwrap_err(),
             StorageError::Conflict
         );
