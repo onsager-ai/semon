@@ -2932,7 +2932,7 @@ mod tests {
     #[test]
     fn configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback() {
         let f = Fixture::current("configured-events");
-        let db = f.db();
+        let db = connection(&f.config).unwrap();
         // Seed each namespace only after private admission, through its scoped
         // writer binding so the installed guards stay active.
         let seed_as = |namespace: &str| {
@@ -6175,7 +6175,16 @@ mod tests {
             .unwrap();
         assert_eq!(custody, "preserve-verbatim");
         // Already-open configured writers also reject a replaced epoch.
-        connection(&f.config).unwrap().execute_batch("DROP TRIGGER storage_owned_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE namespace='' AND key='catalog_changes_epoch';").unwrap();
+        let db = connection(&f.config).unwrap();
+        let guard: String = db
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='storage_owned_guard_meta_UPDATE'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_owned_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE namespace='' AND key='catalog_changes_epoch';").unwrap();
+        db.execute_batch(&guard).unwrap();
         assert_eq!(
             restarted.ingest(&"a".repeat(64), &f.raw, "codex"),
             Err(StorageError::ScopeChanged)
