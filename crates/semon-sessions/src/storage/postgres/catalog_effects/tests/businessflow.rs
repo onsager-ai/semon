@@ -1174,17 +1174,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             altered.relationships.presentation.as_ref().unwrap(),
                         )
                         .unwrap();
-                        capture["runtime_rows"].as_object_mut().unwrap().remove(&key);
+                        capture["runtime_rows"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove(&key);
                         altered.relationships.presentation =
                             Some(serde_json::from_value(capture).unwrap());
                     }
                     "global_drift" => {
-                        altered
-                            .relationships
-                            .presentation
-                            .as_mut()
-                            .unwrap()
-                            .runtime = Some("different global observation".into());
+                        altered.relationships.presentation.as_mut().unwrap().runtime =
+                            Some("different global observation".into());
                     }
                     _ => unreachable!(),
                 }
