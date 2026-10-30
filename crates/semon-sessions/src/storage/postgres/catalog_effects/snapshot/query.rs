@@ -100,6 +100,23 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
 
+fn edge_timed(edge: &serde_json::Value, cutoff: i64) -> bool {
+    edge["at"].as_i64().is_some_and(|at| at >= cutoff)
+        || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
+        || edge["status"]
+            .as_str()
+            .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
+}
+
+fn turn_kept(turn: &serde_json::Value, cutoff: i64, timed_edges: &BTreeSet<String>) -> bool {
+    turn["last"] == serde_json::json!(true)
+        || turn["last"] == serde_json::json!(1)
+        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
+        || turn["start"]
+            .as_str()
+            .is_some_and(|id| timed_edges.contains(id))
+}
+
 fn retained_window(
     row: &crate::model::summary::CatalogRow,
     generation: &str,
@@ -121,27 +138,20 @@ fn retained_window(
         let id = recipe["id"]
             .as_str()
             .ok_or_else(|| cohort_scope_changed("retained_query_edge_id_missing"))?;
-        let edge = &recipe["query"];
-        if edge["at"].as_i64().is_some_and(|at| at >= cutoff)
-            || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
-            || edge["status"]
-                .as_str()
-                .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
-        {
+        if edge_timed(&recipe["query"], cutoff) {
             timed_edges.insert(id.to_owned());
         }
     }
+    // An old last turn keeps its links only after the owner qualifies for the
+    // window; the turn alone cannot revive an expired retained owner.
+    let member = saved["last"].as_i64().is_some_and(|last| last >= cutoff)
+        || matches!(saved["state"].as_str(), Some("work" | "wait"))
+        || !timed_edges.is_empty();
     let mut kept_turns = BTreeSet::new();
     let mut kept_edges = timed_edges.clone();
-    for recipe in turns {
+    for recipe in turns.iter().filter(|_| member) {
         let turn = &recipe["query"];
-        let keep = turn["last"] == serde_json::json!(true)
-            || turn["last"] == serde_json::json!(1)
-            || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
-            || turn["start"]
-                .as_str()
-                .is_some_and(|id| timed_edges.contains(id));
-        if !keep {
+        if !turn_kept(turn, cutoff, &timed_edges) {
             continue;
         }
         let id = recipe["id"]
@@ -155,9 +165,6 @@ fn retained_window(
             kept_edges.extend(sent.iter().filter_map(|id| id.as_str().map(str::to_owned)));
         }
     }
-    let member = saved["last"].as_i64().is_some_and(|last| last >= cutoff)
-        || matches!(saved["state"].as_str(), Some("work" | "wait"))
-        || !kept_edges.is_empty();
     let mut rows = BTreeMap::new();
     if member {
         let summaries = saved["rows"]
@@ -218,7 +225,7 @@ impl QueryCatalogStore for QueryCatalog {
             return Err(unavailable(StorageError::InvalidArguments));
         }
         let needs_window = !self.options.all && !self.options.scan_window;
-        let (selected_current, retained_window) = with_admitted_snapshot(
+        let (selected_current, retained_window_data) = with_admitted_snapshot(
             &self.pool,
             &self.namespace,
             &self.control,
@@ -264,7 +271,7 @@ impl QueryCatalogStore for QueryCatalog {
             },
         )
         .map_err(unavailable)?;
-        let runtime_observation = if selected_current {
+        let runtime_observation = if !self.captured && selected_current {
             Some(
                 super::super::super::current_sources::Runtime::open(
                     &self.pool,
@@ -331,7 +338,7 @@ impl QueryCatalogStore for QueryCatalog {
                     && let (Some(window), Some(runtime)) = (&window, runtime.as_deref())
                     && window.runtime != runtime
                 {
-                    return Err(unavailable(StorageError::ScopeChanged));
+                    return Err(StorageError::ScopeChanged);
                 }
                 let (row, header, _) = snapshot
                     .selected(key, history, 0, 1)
@@ -704,8 +711,7 @@ impl QueryCatalogStore for QueryCatalog {
                         let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
                         let id = text(row.get(3))?;
                         let metadata = json(row.get(4))?;
-                        let status = metadata["status"].as_str().is_some_and(|status| matches!(status, "work" | "wait" | "new"));
-                        if !(metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["done"].as_i64().is_some_and(|done| done >= c) || status) { continue; }
+                        if !edge_timed(&metadata, c) { continue; }
                         let (from, to) = endpoint(&metadata)?;
                         *bytes_left = bytes_left.checked_sub(owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len)).ok_or(StorageError::Busy)?;
                         needed.insert(owner);
@@ -729,8 +735,7 @@ impl QueryCatalogStore for QueryCatalog {
                         for row in &page {
                             let id = text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
                             let metadata = json(row.get(2))?;
-                            let last = metadata["last"] == serde_json::json!(1) || metadata["last"] == serde_json::json!(true);
-                            if !(last || metadata["at"].as_i64().is_some_and(|at| at >= c) || metadata["start"].as_str().is_some_and(|id| timed_edges.contains(id))) { continue; }
+                            if !turn_kept(&metadata, c, &timed_edges) { continue; }
                             let start = metadata["start"].as_str().map(str::to_owned);
                             let sent: Vec<String> = metadata["sent"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_owned)).collect();
                             *bytes_left = bytes_left.checked_sub(id.len() + start.as_ref().map_or(0, String::len) + sent.iter().map(String::len).sum::<usize>()).ok_or(StorageError::Busy)?;
