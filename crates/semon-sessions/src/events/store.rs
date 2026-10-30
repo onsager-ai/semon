@@ -2495,6 +2495,7 @@ impl IndexStore for SqliteStore {
         expected: Option<&Ledger>,
         changes: Option<&super::DirtyRows>,
         ledger: &Ledger,
+        _physical_stat: &Stat,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError> {
         self.write_one_dirty(path, expected, changes, ledger, index)

@@ -1331,20 +1331,23 @@ pub(crate) trait IndexStore: Send {
         expected: &Stat,
     ) -> Result<Option<(Ledger, crate::native_tree::Metadata)>, StoreError>;
 
-    /// Commits `path`'s new ledger and index if its ledger is still
-    /// `expected`. `changes` names rows the append parser touched. Without
-    /// it the file's rows are replaced; no previous index is needed.
     fn commit_initial_files(
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError>;
 
+    /// Commits `path`'s new ledger and index if its ledger is still
+    /// `expected`. `physical_stat` is the full file metadata captured before
+    /// parsing; the persisted `ledger.stat` may name only a bounded prefix.
+    /// `changes` names rows the append parser touched. Without it the file's
+    /// rows are replaced; no previous index is needed.
     fn commit_file(
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
         changes: Option<&DirtyRows>,
         ledger: &Ledger,
+        physical_stat: &Stat,
         index: &FileIndex,
     ) -> Result<Outcome, StoreError>;
 
@@ -3324,12 +3327,15 @@ impl EventCache {
     /// Writes a file's change through to the store. `true` when another
     /// process moved the file on first, so the change must be redone. A
     /// change that isn't written is noted, and read again next scan.
+    /// Commit against the scanner's full open-file witness, which can be
+    /// larger than the persisted prefix ledger on a bounded cold scan.
     fn commit(
         &mut self,
         path: &str,
         expected: Option<&Ledger>,
         changes: Option<&DirtyRows>,
         ledger: &Ledger,
+        physical_stat: &Stat,
         index: &FileIndex,
     ) -> io::Result<bool> {
         self.require_current_store()?;
@@ -3344,7 +3350,7 @@ impl EventCache {
         let committed = self
             .store
             .as_mut()
-            .map(|store| store.commit_file(path, expected, changes, ledger, index));
+            .map(|store| store.commit_file(path, expected, changes, ledger, physical_stat, index));
         if let Some(started) = started {
             self.index_write_duration += started.elapsed();
         }
@@ -3717,7 +3723,7 @@ fn scan_file_with_mode(
                 if path.to_str().is_none() {
                     Arc::make_mut(&mut index).native_path = Some(path.to_owned());
                 }
-                if cache.commit(&key, Some(&ledger), None, &ledger, &index)? {
+                if cache.commit(&key, Some(&ledger), None, &ledger, &stat, &index)? {
                     trace("conflict");
                     if last {
                         return Err(io::Error::other(crate::storage::StorageError::Conflict));
@@ -4042,6 +4048,7 @@ fn scan_file_with_mode(
             recorded.as_ref(),
             append.then_some(&changes),
             &ledger,
+            &stat,
             &index,
         )? {
             trace("conflict");

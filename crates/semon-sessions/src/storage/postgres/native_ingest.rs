@@ -161,9 +161,10 @@ pub(super) fn commit(
     expected: Option<&Ledger>,
     changes: Option<&DirtyRows>,
     ledger: &Ledger,
+    physical_stat: &Stat,
     index: &FileIndex,
 ) -> Result<(), StorageError> {
-    validate_input(intent, path, expected, ledger, index)?;
+    validate_input(intent, path, expected, ledger, physical_stat, index)?;
     let result = pool.apply_operation(namespace, &identity(intent), control, |tx| {
         qualify_intent(tx, intent, path, expected)?;
         complete(tx, intent, path, expected, changes, ledger, index)
@@ -192,6 +193,7 @@ fn validate_input(
     path: &str,
     expected: Option<&Ledger>,
     ledger: &Ledger,
+    physical_stat: &Stat,
     index: &FileIndex,
 ) -> Result<(), StorageError> {
     if path != intent.path || intent.base != expected.map(header_ledger).unwrap_or_default() {
@@ -201,7 +203,7 @@ fn validate_input(
     }
     // The shared scanner qualified the open descriptor, parsed prefix and proof
     // on that same handle. Recheck the named witness before reserving SQL.
-    if Stat::of(std::path::Path::new(path)).ok().as_ref() != Some(&ledger.stat) {
+    if Stat::of(std::path::Path::new(path)).ok().as_ref() != Some(physical_stat) {
         #[cfg(test)]
         eprintln!("PG_INGEST_REFUSED input_stat");
         return Err(StorageError::Conflict);
@@ -367,7 +369,7 @@ pub(super) fn commit_initial(
             }
             for (path, ledger, index) in &ordered {
                 let intent = &intents[path];
-                validate_input(intent, path, None, ledger, index)?;
+                validate_input(intent, path, None, ledger, &ledger.stat, index)?;
                 qualify_intent(tx, intent, path, None)?;
             }
             for (path, ledger, index) in &ordered {
