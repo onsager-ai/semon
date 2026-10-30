@@ -8692,10 +8692,7 @@ mod tests {
                 let before = shared_state(&f);
                 match cache.semantic_batch(64) {
                     Err(error) => {
-                        assert_eq!(
-                            error.to_string(),
-                            "semantic_affected_owner_source_budget"
-                        );
+                        assert_eq!(error.to_string(), "semantic_affected_owner_source_budget");
                         assert_eq!(
                             shared_state(&f),
                             before,

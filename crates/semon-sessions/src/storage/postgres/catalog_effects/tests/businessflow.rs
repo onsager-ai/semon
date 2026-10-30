@@ -2,8 +2,8 @@
 //! SQLite oracle, admitted publication and lease-bound Query bodies/fields.
 use super::*;
 use crate::events::{EventCache, Outcome};
-use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
 use crate::storage::native_events::NativeEventStore;
+use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
 
 fn stage_inputs(
     options: &Options,
