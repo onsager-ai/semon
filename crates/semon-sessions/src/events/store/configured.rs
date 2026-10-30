@@ -5775,7 +5775,9 @@ mod tests {
         let mut store = owned_semantic(&f.config);
         let paths = vec![f.raw.to_string_lossy().into_owned()];
         assert_eq!(
-            store.begin_semantic_stage(&paths, "runtime-a", true).unwrap(),
+            store
+                .begin_semantic_stage(&paths, "runtime-a", true)
+                .unwrap(),
             Outcome::Written
         );
         let batch = store.semantic_batch(64).unwrap().unwrap();
