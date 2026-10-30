@@ -325,6 +325,10 @@ impl Sources {
             db,
             crate::storage::NativeReaderBinding::Semantic(owner.clone()),
         );
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_FOCUSED_CAPTURE.with(|hook| hook.borrow_mut().take()) {
+            hook();
+        }
         let mut proofs = Vec::with_capacity(sources.len());
         for source in sources {
             let proof = crate::events::store::chunk_proofs::Focused::with_db(

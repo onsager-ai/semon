@@ -7,6 +7,116 @@
 use super::*;
 use std::{collections::BTreeMap, sync::mpsc, time::Instant};
 
+fn recovery_catalog_row(
+    db: &rusqlite::Connection,
+    table: &str,
+    key: &str,
+) -> crate::model::summary::CatalogRow {
+    let metadata: String = db
+        .query_row(
+            &format!("SELECT metadata FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"),
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    serde_json::from_str(&metadata).unwrap()
+}
+
+fn recovery_catalog_metadata(db: &rusqlite::Connection, table: &str, key: &str) -> String {
+    db.query_row(
+        &format!(
+            "SELECT metadata FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"
+        ),
+        [key],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn recovery_observation_grant(
+    db: &rusqlite::Connection,
+    key: &str,
+    owner: &str,
+) -> Option<(String, i64, String)> {
+    use rusqlite::OptionalExtension;
+    db.query_row(
+        "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key=?1 AND owner_kind=?2",
+        rusqlite::params![key, owner],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .unwrap()
+}
+
+fn recovery_proof_snapshot(
+    db: &rusqlite::Connection,
+    key: &str,
+) -> Vec<(String, String, String, String, i64, String)> {
+    let mut statement = db
+        .prepare(
+            "SELECT r.kind,r.id,g.publication,g.proof,g.admission,g.stream FROM storage_proof_refs r JOIN storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=semon_namespace() AND r.session_key=?1 ORDER BY r.kind,r.id",
+        )
+        .unwrap();
+    statement
+        .query_map([key], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn recovery_stage_observation_grants(db: &rusqlite::Connection) -> Vec<(String, String)> {
+    let mut statement = db
+        .prepare(
+            "SELECT key,value FROM main.meta WHERE namespace=semon_namespace() AND key LIKE 'catalog_native_observation:%' AND value IS NOT NULL ORDER BY key",
+        )
+        .unwrap();
+    let grants = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    // A producer Stage proof binds the exact preimage. Keep the complete scoped
+    // set so publication cannot silently rewrite any retained proof grant.
+    grants
+}
+
+fn recovery_stage_provenance(db: &rusqlite::Connection, key: &str) -> Vec<String> {
+    let mut statement = db
+        .prepare(
+            "SELECT json_array(g.id,g.publication,g.proof,g.admission,g.stream,g.metadata,g.slots,g.prefix,r.base,r.manifest,r.digest,v.metadata,p.epoch,p.base_generation,p.source_revision,p.claims,p.metadata) FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE g.namespace=semon_namespace() AND g.session_key=?1 ORDER BY g.id,p.epoch",
+        )
+        .unwrap();
+    statement
+        .query_map([key], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+fn recovery_publication_snapshot(db: &rusqlite::Connection, key: &str) -> Vec<(String, String)> {
+    let mut statement = db
+        .prepare(
+            "SELECT 'overview',summary FROM main.session_overview WHERE session_key=?1 UNION ALL SELECT 'header',metadata FROM main.session_trace_headers WHERE session_key=?1 UNION ALL SELECT 'turn',metadata FROM main.session_trace_turns WHERE session_key=?1 UNION ALL SELECT 'edge',metadata FROM main.session_trace_edges WHERE session_key=?1 ORDER BY 1,2",
+        )
+        .unwrap();
+    statement
+        .query_map([key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
 fn publish(home: &Home) {
     crate::model::observe_catalog(
         &home.options,
@@ -17,6 +127,77 @@ fn publish(home: &Home) {
         NOW,
     )
     .unwrap();
+}
+
+fn publish_semantic(home: &Home) {
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "the semantic producer fixture must converge");
+    drop(work);
+    evidence.retire();
+}
+
+fn publish_semantic_stage(home: &Home, input: &crate::Input) {
+    use crate::model::relation_stage::Phase;
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut cache = crate::events::EventCache::open_semantic(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    let paths = vec![
+        input
+            .full_path(&home.options)
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut published = false;
+    for _ in 0..128 {
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        if batch.paths.is_empty() {
+            if batch.phase == Phase::Publication {
+                assert!(
+                    published,
+                    "the real model must publish before Stage cleanup"
+                );
+                assert_eq!(
+                    cache.finish_semantic_stage(batch.epoch).unwrap(),
+                    crate::events::Outcome::Written
+                );
+                return;
+            }
+            continue;
+        }
+        let model = cache
+            .prepare_semantic_model_batch(&home.options, std::slice::from_ref(input), &batch, NOW)
+            .unwrap();
+        if batch.phase == Phase::Publication {
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                crate::events::Outcome::Written
+            );
+            published = true;
+        }
+        cache.end_scan();
+    }
+    panic!("the real semantic Stage fixture must converge");
 }
 
 fn shared_home(prefix: usize, leading_user: bool) -> (Home, String) {
@@ -410,6 +591,31 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         let before = generations();
         assert_eq!(before.0, before.1);
         assert_eq!(before.0, before.2);
+        let observation_grant = || {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='long'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut row: crate::model::summary::CatalogRow =
+                serde_json::from_str(&metadata).unwrap();
+            row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            let expected = crate::storage::proof_codec::digest(
+                serde_json::to_string(&row).unwrap().as_bytes(),
+            );
+            let grant: (String, i64, String) = db
+                .query_row(
+                    "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='long' AND owner_kind='catalog'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(grant.0, expected, "exact Catalog metadata grant");
+            grant
+        };
+        let grant_before = observation_grant();
         let mut journal = config.source_observations().unwrap();
         let paths: Vec<String> = Vec::new();
         let operation = crate::storage::source_observations::SourceOperation::capture(
@@ -488,6 +694,10 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
             crate::slot_projection::VERSION
         );
         assert_eq!(generations(), before);
+        let grant_after = observation_grant();
+        assert_ne!(grant_after.0, grant_before.0, "repaired Query row digest");
+        assert_eq!(grant_after.1, grant_before.1, "repair preserves admission");
+        assert_eq!(grant_after.2, grant_before.2, "repair preserves stream");
         assert_eq!(std::fs::read(&source_path).unwrap(), raw);
         eprintln!("slot_upgrade stage=selected_publication version=6 raw=unchanged");
         let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -504,17 +714,20 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 .as_ref()
                 .map(|value| format!("&generation={value}"))
                 .unwrap_or_default();
+            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
             let reply = crate::session_transcript_range(
                 &home.options,
                 "local",
                 &format!("sid=long&after={after}&limit=17{pin}"),
                 None,
             );
+            let stage = crate::transcript_range::last_selected_read_stage();
+            let local_stage = crate::transcript_range::LAST_LOCAL_FAILURE
+                .with(|stage| stage.get().map(|stage| stage.name()))
+                .unwrap_or("none");
             assert_eq!(
-                reply.status,
-                200,
-                "{}",
-                String::from_utf8_lossy(&reply.body)
+                reply.status, 200,
+                "selected range refused at closed stage {stage:?}; local source stage {local_stage}"
             );
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             let current = page["projection"]["generation"]
@@ -873,7 +1086,11 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         .unwrap()
         .into_test_connection();
         if !ready {
-            db.execute("UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'", []).unwrap();
+            db.execute(
+                "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
+                [],
+            )
+            .unwrap();
         }
         db.execute(
             "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
@@ -887,17 +1104,7 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
                 |row| row.get(0),
             )
             .unwrap();
-        let publication = || {
-            let mut statement = db.prepare("SELECT 'overview',summary FROM session_overview WHERE session_key='first' UNION ALL SELECT 'header',metadata FROM session_trace_headers WHERE session_key='first' UNION ALL SELECT 'turn',metadata FROM session_trace_turns WHERE session_key='first' UNION ALL SELECT 'edge',metadata FROM session_trace_edges WHERE session_key='first' ORDER BY 1,2").unwrap();
-            statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        let original_publication = publication();
+        let original_publication = recovery_publication_snapshot(&db, "first");
         let generation = catalog_generation(&home);
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let control =
@@ -916,7 +1123,10 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(catalog_generation(&home), generation);
-        assert_eq!(publication(), original_publication);
+        assert_eq!(
+            recovery_publication_snapshot(&db, "first"),
+            original_publication
+        );
         assert_eq!(
             db.query_row(
                 "SELECT metadata FROM session_catalog WHERE session_key='first'",
@@ -943,6 +1153,90 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn recovery_tampered_preimage_refuses_before_producer_reads_or_writes() {
+    let home = Home::new("recovery-tampered-preimage");
+    home.top(
+        "first",
+        &[human("first", ts(1, 0), "tampered preimage refusal")],
+    );
+    publish_semantic(&home);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    db.execute(
+        "UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
+        [],
+    )
+    .unwrap();
+
+    let metadata_before = recovery_catalog_metadata(&db, "session_catalog", "first");
+    let grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    let stage_grants_before = recovery_stage_observation_grants(&db);
+    let publication_before = recovery_publication_snapshot(&db, "first");
+    let generation_before = catalog_generation(&home);
+    let file_reads_before = crate::events::FILE_READS.with(std::cell::Cell::get);
+    let source_read_bytes_before = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
+    let direct_source_reads_before = crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get);
+
+    let error = crate::repair_session_overview(
+        &home.options,
+        "local",
+        "first",
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        error.to_string(),
+        crate::storage::StorageError::ScopeChanged.to_string()
+    );
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        metadata_before
+    );
+    assert_eq!(
+        recovery_observation_grant(&db, "first", "catalog"),
+        Some(grant_before)
+    );
+    assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
+    assert_eq!(
+        recovery_publication_snapshot(&db, "first"),
+        publication_before
+    );
+    assert_eq!(catalog_generation(&home), generation_before);
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='overview_needed:first' AND value='1')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    assert_eq!(
+        crate::events::FILE_READS.with(std::cell::Cell::get),
+        file_reads_before
+    );
+    assert_eq!(
+        crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get),
+        source_read_bytes_before
+    );
+    assert_eq!(
+        crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get),
+        direct_source_reads_before
+    );
 }
 
 #[test]
@@ -978,4 +1272,316 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
         .is_err()
     );
     assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), before);
+}
+
+#[test]
+fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key() {
+    let home = Home::new("recovery-history-owner");
+    home.top(
+        "reused",
+        &[human("reused", ts(1, 0), "original native prompt")],
+    );
+    publish_semantic(&home);
+    std::fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/reused.jsonl"),
+    )
+    .unwrap();
+    publish_semantic(&home);
+    home.top(
+        "reused",
+        &[human("reused", ts(1, 0), "replacement native prompt")],
+    );
+    publish_semantic(&home);
+    home.process(30, 777);
+    home.pid_file(30, "reused", "busy", 777);
+    publish_semantic(&home);
+
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let history = recovery_catalog_row(&db, "session_history_catalog", "reused");
+    let current = recovery_catalog_row(&db, "session_catalog", "reused");
+    assert_ne!(
+        crate::retention::source_generation(&history.sources).unwrap(),
+        crate::retention::source_generation(&current.sources).unwrap(),
+        "the real producer must retain a divergent Current row for this key"
+    );
+    let history_query = history.query.as_ref().unwrap();
+    let current_query = current.query.as_ref().unwrap();
+    assert_ne!(history_query["runtime"], current_query["runtime"]);
+    // This focused helper-contract test supplies a genuine producer runtime
+    // witness from the later Current publication while retaining History's
+    // own original row and source generation.
+    let mut repaired_query = history_query.clone();
+    // The runtime witness comes from the producer's later Current publication;
+    // the History observation and its source generation remain independently
+    // bound to the retained original.
+    repaired_query["runtime"] = current_query["runtime"].clone();
+    assert_eq!(
+        repaired_query["source_generation"],
+        crate::retention::source_generation(&history.sources).unwrap()
+    );
+
+    let catalog_before = recovery_catalog_metadata(&db, "session_catalog", "reused");
+    let history_before = recovery_catalog_metadata(&db, "session_history_catalog", "reused");
+    let catalog_grant_before = recovery_observation_grant(&db, "reused", "catalog").unwrap();
+    let history_grant_before = recovery_observation_grant(&db, "reused", "history").unwrap();
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    crate::storage::sqlite::proof_generations::publish_repaired_query_observation(
+        &tx,
+        &current_binding,
+        crate::storage::sqlite::proof_generations::CatalogObservationOwner::History,
+        &history,
+        &repaired_query,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "reused"),
+        catalog_before,
+        "repairing History must leave the divergent Current row byte for byte intact"
+    );
+    let history_after = recovery_catalog_row(&db, "session_history_catalog", "reused");
+    assert_eq!(history_after.query.as_ref(), Some(&repaired_query));
+    assert_ne!(
+        recovery_catalog_metadata(&db, "session_history_catalog", "reused"),
+        history_before
+    );
+    let catalog_grant_after = recovery_observation_grant(&db, "reused", "catalog").unwrap();
+    assert_eq!(catalog_grant_after, catalog_grant_before);
+    let mut normalized_history = history.clone();
+    normalized_history.query = Some(repaired_query);
+    normalized_history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let expected_history_digest = crate::storage::proof_codec::digest(
+        serde_json::to_string(&normalized_history)
+            .unwrap()
+            .as_bytes(),
+    );
+    let history_grant_after = recovery_observation_grant(&db, "reused", "history").unwrap();
+    assert_eq!(history_grant_after.0, expected_history_digest);
+    assert_eq!(history_grant_after.1, history_grant_before.1);
+    assert_eq!(history_grant_after.2, history_grant_before.2);
+}
+
+#[test]
+fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
+    let home = Home::new("recovery-stage-only");
+    home.top(
+        "first",
+        &[human("first", ts(1, 0), "stage-only query repair")],
+    );
+    publish_semantic(&home);
+    // A closed single-source component normally takes the direct publisher.
+    // Explicitly drive the admitted Stage with the producer's real indexed
+    // Claude input so its immutable receipt, presentation and grant exist.
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    assert!(
+        !proof_snapshot.is_empty(),
+        "fixture must have immutable Stage proof"
+    );
+    let provenance_before = recovery_stage_provenance(&db, "first");
+    assert!(!provenance_before.is_empty());
+    let stage_grants_before = recovery_stage_observation_grants(&db);
+    let preimage_stage_digest = crate::storage::proof_codec::digest(
+        recovery_catalog_metadata(&db, "session_catalog", "first").as_bytes(),
+    );
+    assert!(
+        stage_grants_before
+            .iter()
+            .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest))
+    );
+    let direct_grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
+    db.execute(
+        "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
+        [],
+    )
+    .unwrap();
+    home.process(31, 778);
+    home.pid_file(31, "first", "busy", 778);
+    assert_eq!(recovery_observation_grant(&db, "first", "catalog"), None);
+    assert_eq!(recovery_observation_grant(&db, "first", "history"), None);
+
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    assert_eq!(current_binding.namespace, config.namespace);
+    assert!(stage_grants_before.iter().any(|(key, value)| {
+        key == &format!("catalog_native_observation:{preimage_stage_digest}")
+            && value
+                == &format!(
+                    "{}:{}",
+                    current_binding.admission, current_binding.stream_epoch
+                )
+    }));
+    assert_eq!(
+        crate::storage::sqlite::proof_generations::observation_binding(
+            &tx,
+            &current_binding,
+            &selected
+        )
+        .unwrap()
+        .admission,
+        current_binding.admission,
+        "the exact immutable Stage proof must authorize after the direct slot is removed"
+    );
+    tx.rollback().unwrap();
+    assert_eq!(recovery_observation_grant(&db, "first", "catalog"), None);
+
+    assert!(
+        crate::repair_session_overview(
+            &home.options,
+            "local",
+            "first",
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap()
+    );
+
+    let repaired = recovery_catalog_row(&db, "session_catalog", "first");
+    assert_ne!(
+        repaired.query.as_ref().unwrap()["runtime"],
+        selected.query.as_ref().unwrap()["runtime"],
+        "runtime evidence changed in the real producer"
+    );
+    assert_eq!(
+        repaired.query.as_ref().unwrap()["source_generation"],
+        crate::retention::source_generation(&selected.sources).unwrap()
+    );
+    let expected_direct_digest = {
+        let mut normalized = repaired.clone();
+        normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+        crate::storage::proof_codec::digest(serde_json::to_string(&normalized).unwrap().as_bytes())
+    };
+    let direct_grant_after = recovery_observation_grant(&db, "first", "catalog").unwrap();
+    assert_eq!(direct_grant_after.0, expected_direct_digest);
+    assert_eq!(direct_grant_after.1, direct_grant_before.1);
+    assert_eq!(direct_grant_after.2, direct_grant_before.2);
+    assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(recovery_stage_provenance(&db, "first"), provenance_before);
+    assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let resolved = crate::storage::sqlite::proof_generations::observation_binding(
+        &tx,
+        &current_binding,
+        &repaired,
+    )
+    .unwrap();
+    assert_eq!(resolved.admission, current_binding.admission);
+    assert_eq!(resolved.stream_epoch, current_binding.stream_epoch);
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn recovery_query_row_and_grant_roll_back_when_grant_update_fails() {
+    let home = Home::new("recovery-grant-rollback");
+    home.top("first", &[human("first", ts(1, 0), "atomic query repair")]);
+    publish_semantic(&home);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let metadata_before = recovery_catalog_metadata(&db, "session_catalog", "first");
+    let grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    crate::storage::sqlite::proof_generations::observation_binding(
+        &tx,
+        &current_binding,
+        &selected,
+    )
+    .unwrap();
+    tx.rollback().unwrap();
+    db.execute(
+        "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",
+        [],
+    )
+    .unwrap();
+    db.execute_batch(
+        "CREATE TRIGGER recovery_fail_catalog_grant_update BEFORE UPDATE ON storage_catalog_native_observation_grants WHEN OLD.session_key='first' AND OLD.owner_kind='catalog' BEGIN SELECT RAISE(ABORT,'recovery test grant update failure'); END;",
+    )
+    .unwrap();
+    home.process(32, 779);
+    home.pid_file(32, "first", "busy", 779);
+
+    let error = crate::repair_session_overview(
+        &home.options,
+        "local",
+        "first",
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        error.to_string(),
+        crate::storage::StorageError::Unavailable.to_string(),
+        "the row had valid authority and the grant update trigger caused the refusal"
+    );
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        metadata_before,
+        "the row update must roll back when its matching grant write fails"
+    );
+    assert_eq!(
+        recovery_observation_grant(&db, "first", "catalog"),
+        Some(grant_before)
+    );
+    assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='overview_needed:first'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap(),
+        "1",
+        "other repair publication effects must share the transaction"
+    );
 }
