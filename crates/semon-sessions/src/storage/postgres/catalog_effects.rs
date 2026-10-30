@@ -351,6 +351,7 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 "source_path",
                 "metadata",
                 "native_digest",
+                "folded_native_id",
             ],
             "key_digest,path_digest",
             &[
@@ -360,6 +361,7 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 &path,
                 &encoded(source)?,
                 &digest(source.native_id.as_bytes()),
+                &super::native_keys::ascii_fold(&source.native_id),
             ],
         )
     }

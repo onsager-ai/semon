@@ -13,7 +13,7 @@ const OWNED: &[(&str, &str)] = &[
     ),
     (
         "catalog_sources",
-        "key_digest,session_key,path_digest,source_path,metadata,native_digest",
+        "key_digest,session_key,path_digest,source_path,metadata,native_digest,folded_native_id",
     ),
     ("catalog_links", "key_digest,session_key,peer_digest,peer"),
     (

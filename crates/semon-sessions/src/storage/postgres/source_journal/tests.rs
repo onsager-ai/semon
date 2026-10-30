@@ -524,15 +524,23 @@ fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
     .unwrap();
 
     let generation = "a".repeat(64);
+    let row: crate::model::summary::CatalogRow = serde_json::from_value(serde_json::json!({
+        "key": "current-session", "name": "current-session", "harness": "claude",
+        "kind": "session", "native_ids": ["Native-ID"], "model": "model",
+        "tokens": [0.0, 0.0, 0.0],
+        "cost": {"usd": null, "unpriced_models": [], "split_unknown_messages": 0,
+                 "by_model": {}, "by_day": {}},
+        "sources": [{"path": current_path, "native_id": "Native-ID", "dev": 0,
+                     "ino": 0, "size": 0, "modified_ns": 0, "offset": 0,
+                     "prefix_sha256": vec![0; 32], "tail_sha256": vec![0; 32]}]
+    }))
+    .unwrap();
     pool.transaction(
         &ns(namespace),
         TxnKind::Write,
         &PgCancellation::default(),
         |tx| {
             let ns = tx.namespace.as_str().as_bytes();
-            let key = b"current-session";
-            let path = current_path.as_bytes();
-            let metadata = br#"{"native_id":"Native-ID"}"#;
             tx.driver.execute(
                 "UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
                 &[&ns, &generation],
@@ -541,15 +549,14 @@ fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
                 "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,0)",
                 &[&ns, &b"current-operation".as_slice(), &b"fixture-payload".as_slice(), &generation.as_bytes()],
             ).map_err(sqlstate::error)?;
-            tx.driver.execute(
-                "INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,1,$5,$6,$7)",
-                &[&ns, &generation.as_bytes(), &key.as_slice(), &b"{}".as_slice(), &b"claude".as_slice(), &b"repo".as_slice(), &b"model".as_slice()],
-            ).map_err(sqlstate::error)?;
-            tx.driver.execute(
-                "INSERT INTO semon_pg_native_catalog_sources(namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea))",
-                &[&ns, &generation.as_bytes(), &key.as_slice(), &path, &metadata.as_slice(), &b"Native-ID".as_slice()],
-            ).map_err(sqlstate::error)?;
-            Ok(())
+            super::super::catalog_effects::stage(
+                tx,
+                &generation,
+                &crate::slot_projection::Publication {
+                    rows: std::slice::from_ref(&row),
+                    transcripts: None,
+                },
+            )
         },
     )
     .unwrap();
@@ -563,6 +570,54 @@ fn pg_catalog_search_matches_current_filename_copilot_and_codex_header_ids() {
         catalog_search(&pool, namespace, "nAtIvE-iD", &roots, 64),
         vec![current_path]
     );
+
+    // Fold the typed id's bytes, including JSON escapes and NUL, without
+    // passing metadata through PostgreSQL text/jsonb. Its projection must
+    // become visible and roll back with the surrounding Catalog effects.
+    let mut escaped = row.clone();
+    escaped.key = "escaped-session".into();
+    escaped.sources[0].native_id = "Quote\"Slash\\Line\n\0".into();
+    escaped.native_ids = vec![escaped.sources[0].native_id.clone()];
+    let query = "qUoTe\"sLaSh\\lInE\n\0";
+    let next = "b".repeat(64);
+    let rolled_back: Result<(), StorageError> = pool.transaction(
+        &ns(namespace),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            let ns = tx.namespace.as_str().as_bytes();
+            tx.driver.execute(
+                "UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                &[&ns, &next],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,0)",
+                &[&ns, &b"next-operation".as_slice(), &b"fixture-payload".as_slice(), &next.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            super::super::catalog_effects::stage(
+                tx,
+                &next,
+                &crate::slot_projection::Publication {
+                    rows: std::slice::from_ref(&escaped),
+                    transcripts: None,
+                },
+            )?;
+            assert_eq!(
+                super::super::catalog_effects::snapshot::catalog_search_paths(
+                    tx,
+                    &CatalogSearchLookup {
+                        query,
+                        ranges: &roots,
+                    },
+                    64,
+                )?,
+                vec![current_path]
+            );
+            Err(StorageError::Conflict)
+        },
+    );
+    assert_eq!(rolled_back, Err(StorageError::Conflict));
+    assert!(catalog_search(&pool, namespace, query, &roots, 64).is_empty());
 }
 
 #[test]

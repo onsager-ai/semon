@@ -165,7 +165,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_sources",
-        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea,native_digest bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,path_digest bytea,source_path bytea,metadata bytea,native_digest bytea,folded_native_id bytea",
         key: "generation,key_digest,path_digest",
     },
     Table {

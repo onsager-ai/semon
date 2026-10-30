@@ -149,7 +149,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         self.require_current()?;
         let value = if key == "catalog_backfill_state" {
-            let mut tx = self
+            let tx = self
                 .tx
                 .lock()
                 .map_err(|_| io::Error::other(StorageError::Unavailable))?;
