@@ -9747,6 +9747,52 @@ fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
 }
 
 #[test]
+fn prepublication_persisted_description_reuses_exact_current_summary() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "prepublication prompt")]);
+    let expected = home.build_query();
+    let (version, inputs, description) = {
+        let connection =
+            rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+        connection
+            .query_row(
+                "SELECT version,inputs,description FROM session_descriptions WHERE session_key='root'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, u32>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+    };
+
+    let options = Options {
+        cache: home.root.join("prepublication-index.json"),
+        ..home.options.clone()
+    };
+    let mut cache = EventCache::open(&options.cache, &options.source).unwrap();
+    assert_eq!(cache.session_catalog_generation(), None);
+    cache.save_session_description("root", version, &inputs, &description);
+    cache.publish_session_descriptions();
+    assert_eq!(cache.session_catalog_generation(), None);
+
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    let mut dirty = false;
+    let actual = build_with_cache(
+        &options,
+        &mut cache,
+        &mut dirty,
+        &mut Texts::default(),
+        NOW,
+    );
+    assert_equivalent(&expected, &actual, NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert!(counts.borrow().is_empty()));
+}
+
+#[test]
 fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
@@ -9755,6 +9801,12 @@ fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
         rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
     connection
         .execute("UPDATE session_descriptions SET version = version + 1", [])
+        .unwrap();
+    SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
+    assert_equivalent(&first, &home.build_query(), NOW);
+    SESSION_DESCRIPTIONS.with(|counts| assert_eq!(counts.borrow().get("root"), Some(&1)));
+    connection
+        .execute("UPDATE session_descriptions SET inputs = 'other'", [])
         .unwrap();
     SESSION_DESCRIPTIONS.with(|counts| counts.borrow_mut().clear());
     assert_equivalent(&first, &home.build_query(), NOW);
