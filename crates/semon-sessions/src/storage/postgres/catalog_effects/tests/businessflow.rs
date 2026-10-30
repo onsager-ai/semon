@@ -3113,10 +3113,24 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .values()
             .any(|body| body.to_string().contains("sanitized continuation"))
     );
+    // This handle still names the earlier generation, where the selected row
+    // is Current and must pass its live runtime qualification. The immutable
+    // captured-generation path below retains its separate authority.
+    let stale_current = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":prepared.rows[0].key,"limit":100}),
+            1790812802000,
+            &query_store,
+            &retained_host,
+            None,
+        )
+        .unwrap_err();
+    assert_eq!(stale_current.code, "unavailable");
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
-        expected_bodies,
-        "old authorized body must survive successor publication"
+        stale_current.message,
+        StorageError::ScopeChanged.to_string(),
+        "the old Current row's runtime receipt must not be refreshed in place"
     );
     assert_eq!(
         captured_bodies(&pool),
