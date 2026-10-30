@@ -99,6 +99,24 @@ fn publish(home: &Home) {
     .unwrap();
 }
 
+fn publish_semantic(home: &Home) {
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    assert!(complete, "the semantic producer fixture must converge");
+    drop(work);
+    evidence.retire();
+}
+
 fn shared_home(prefix: usize, leading_user: bool) -> (Home, String) {
     let home = Home::new("recovery-shared");
     for sid in ["first", "second"] {
@@ -1093,23 +1111,23 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
 }
 
 #[test]
-fn recovery_repair_updates_only_authorized_history_owner_for_reused_key() {
+fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key() {
     let home = Home::new("recovery-history-owner");
     let source = home.top(
         "reused",
         &[human("reused", ts(1, 0), "original native prompt")],
     );
-    publish(&home);
+    publish_semantic(&home);
     std::fs::remove_file(&source).unwrap();
-    publish(&home);
+    publish_semantic(&home);
     home.top(
         "reused",
         &[human("reused", ts(1, 0), "replacement native prompt")],
     );
-    publish(&home);
+    publish_semantic(&home);
     home.process(30, 777);
     home.pid_file(30, "reused", "busy", 777);
-    publish(&home);
+    publish_semantic(&home);
 
     let config = home.options.source.config(&home.options.cache).unwrap();
     let mut db = crate::storage::sqlite::semantic::Stage::open(
@@ -1127,6 +1145,9 @@ fn recovery_repair_updates_only_authorized_history_owner_for_reused_key() {
     let history_query = history.query.as_ref().unwrap();
     let current_query = current.query.as_ref().unwrap();
     assert_ne!(history_query["runtime"], current_query["runtime"]);
+    // This focused helper-contract test supplies a genuine producer runtime
+    // witness from the later Current publication while retaining History's
+    // own original row and source generation.
     let mut repaired_query = history_query.clone();
     // The runtime witness comes from the producer's later Current publication;
     // the History observation and its source generation remain independently
@@ -1188,7 +1209,7 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
         "first",
         &[human("first", ts(1, 0), "stage-only query repair")],
     );
-    publish(&home);
+    publish_semantic(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let mut db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -1287,7 +1308,7 @@ fn recovery_query_row_and_grant_roll_back_when_grant_update_fails() {
         "first",
         &[human("first", ts(1, 0), "atomic query repair")],
     );
-    publish(&home);
+    publish_semantic(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
