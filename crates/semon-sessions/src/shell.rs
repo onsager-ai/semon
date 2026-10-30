@@ -196,16 +196,13 @@ pub(crate) fn escape(text: &str) -> String {
 /// machine, session and trace routes must have the right number of valid, decoded path segments. Dynamic routes are
 /// matched without checking whether their ids exist in the model.
 pub fn is_page_path(path: &str) -> bool {
-    if matches!(
-        path,
-        "/" | "/timeline" | "/analytics" | "/sessions" | "/machines"
-    ) {
+    if matches!(path, "/" | "/analytics" | "/sessions" | "/machines") {
         return true;
     }
-    if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
+    if path.starts_with("/session/") {
         return crate::session_route::SessionRoute::parse(path, "").is_ok();
     }
-    if !(path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")) {
+    if !path.starts_with("/machines/") {
         return false;
     }
 
@@ -218,10 +215,7 @@ pub fn is_page_path(path: &str) -> bool {
         return false;
     };
     let parts = parts.iter().map(String::as_str).collect::<Vec<_>>();
-    matches!(
-        parts.as_slice(),
-        ["machines", _] | ["s", _, _] | ["trace", _, _, _]
-    )
+    matches!(parts.as_slice(), ["machines", _])
 }
 
 /// Font file names used by [`VIEWER_CSS`], as served under `/fonts/`.

@@ -5,11 +5,27 @@ use serde_json::{Value, json};
 /// The host authorizes one Source before calling this function. Legacy failed
 /// send bookmarks resolve to real originating sessions, never virtual readers.
 pub fn session_bookmark(options: &Options, source: &str, query: &str) -> ViewerReply {
+    session_bookmark_with_gate(options, source, query, || Ok(()))
+}
+
+pub(crate) fn session_bookmark_with_gate(
+    options: &Options,
+    source: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    let sid = match parse_session_bookmark_query(source, query) {
+        Ok(sid) => sid,
+        Err(reply) => return reply,
+    };
+    if let Err(reply) = before_read() {
+        return reply;
+    }
     let binding = match crate::storage::local_navigation_binding(options, source) {
         Ok(binding) => binding,
         Err(_) => return catalog::error(400, "invalid_arguments", "Invalid source.", false),
     };
-    with_binding(options, source, query, &binding)
+    with_binding_sid(options, source, &sid, &binding)
 }
 
 pub(crate) fn with_binding(
@@ -18,43 +34,19 @@ pub(crate) fn with_binding(
     query: &str,
     binding: &crate::storage::NativeReaderBinding,
 ) -> ViewerReply {
-    let args = query
-        .split('&')
-        .map(|part| {
-            let (key, value) = part.split_once('=')?;
-            Some((crate::viewer::decoded(key)?, crate::viewer::decoded(value)?))
-        })
-        .collect::<Option<Vec<_>>>();
-    let Some(args) = args else {
-        return catalog::error(
-            400,
-            "invalid_arguments",
-            "Invalid bookmark encoding.",
-            false,
-        );
+    let sid = match parse_session_bookmark_query(source, query) {
+        Ok(sid) => sid,
+        Err(reply) => return reply,
     };
-    let sids: Vec<_> = args.iter().filter(|(key, _)| key == "sid").collect();
-    if query.len() > 8192
-        || sids.len() != 1
-        || sids[0].1.is_empty()
-        || sids[0].1.len() > 4096
-        || sids[0].1.chars().any(char::is_control)
-        || args
-            .iter()
-            .any(|(key, _)| !matches!(key.as_str(), "sid" | "machine"))
-        || args.iter().filter(|(key, _)| key == "machine").count() > 1
-        || args
-            .iter()
-            .any(|(key, value)| key == "machine" && value != source)
-    {
-        return catalog::error(
-            400,
-            "invalid_arguments",
-            "Supply one session bookmark.",
-            false,
-        );
-    }
-    let sid = &sids[0].1;
+    with_binding_sid(options, source, &sid, binding)
+}
+
+fn with_binding_sid(
+    options: &Options,
+    source: &str,
+    sid: &str,
+    binding: &crate::storage::NativeReaderBinding,
+) -> ViewerReply {
     let selected = format!(
         "sid={}&scope=retained_history&limit=1",
         crate::viewer::percent_encode(sid)
@@ -103,6 +95,46 @@ pub(crate) fn with_binding(
         }
     }
     reply(matches, unavailable)
+}
+
+fn parse_session_bookmark_query(source: &str, query: &str) -> Result<String, ViewerReply> {
+    let args = query
+        .split('&')
+        .map(|part| {
+            let (key, value) = part.split_once('=')?;
+            Some((crate::viewer::decoded(key)?, crate::viewer::decoded(value)?))
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(args) = args else {
+        return Err(catalog::error(
+            400,
+            "invalid_arguments",
+            "Invalid bookmark encoding.",
+            false,
+        ));
+    };
+    let sids: Vec<_> = args.iter().filter(|(key, _)| key == "sid").collect();
+    if query.len() > 8192
+        || sids.len() != 1
+        || sids[0].1.is_empty()
+        || sids[0].1.len() > 4096
+        || sids[0].1.chars().any(char::is_control)
+        || args
+            .iter()
+            .any(|(key, _)| !matches!(key.as_str(), "sid" | "machine"))
+        || args.iter().filter(|(key, _)| key == "machine").count() > 1
+        || args
+            .iter()
+            .any(|(key, value)| key == "machine" && value != source)
+    {
+        return Err(catalog::error(
+            400,
+            "invalid_arguments",
+            "Supply one session bookmark.",
+            false,
+        ));
+    }
+    Ok(sids[0].1.clone())
 }
 
 fn reply(matches: Vec<Value>, unavailable: usize) -> ViewerReply {

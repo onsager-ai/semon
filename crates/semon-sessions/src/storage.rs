@@ -44,6 +44,57 @@ pub(crate) fn read_local_catalog_page(
     sqlite::catalog::read_page(&binding, options, source_key, request)
 }
 
+pub(crate) fn catalog_page_ready(options: &crate::Options) -> std::io::Result<bool> {
+    let config = options
+        .source
+        .config(&options.cache)
+        .map_err(std::io::Error::other)?;
+    match &config.backend {
+        StoreBackend::Sqlite { database } => {
+            match std::fs::metadata(database) {
+                Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(false),
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "configured session index is not a regular file",
+                    ));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error),
+            }
+            let binding = if options.source.selected_store().is_some() {
+                NativeReaderBinding::Admitted(config.clone())
+            } else {
+                NativeReaderBinding::Semantic(
+                    crate::events::store::configured::NativeOwnership::restore(&config)
+                        .map_err(std::io::Error::other)?,
+                )
+            };
+            sqlite::catalog::page_ready(&binding)
+        }
+        #[cfg(feature = "postgres")]
+        StoreBackend::Postgres { pool, control } => {
+            postgres::catalog_page_ready(&config, pool, control).map_err(std::io::Error::other)
+        }
+    }
+}
+
+pub(crate) fn is_postgres_selected(options: &crate::Options) -> bool {
+    #[cfg(feature = "postgres")]
+    {
+        matches!(
+            options.source.selected_store().map(|config| &config.backend),
+            Some(StoreBackend::Postgres { .. })
+        )
+    }
+    #[cfg(not(feature = "postgres"))]
+    {
+        let _ = options;
+        false
+    }
+}
+
 pub(crate) fn source_proof_observation(
     options: &crate::Options,
     root: &str,

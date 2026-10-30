@@ -199,6 +199,25 @@ fn configured_generation(
     )
 }
 
+pub(crate) fn catalog_page_ready(
+    config: &super::StoreConfig,
+    pool: &PgPool,
+    control: &PgCancellation,
+) -> Result<bool, super::StorageError> {
+    pool.transaction(
+        &config.namespace,
+        txn::TxnKind::ReadSnapshot,
+        &control.for_selected_read(),
+        |tx| {
+            let binding = model_cache::binding(tx)?;
+            if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {
+                return Err(super::StorageError::ScopeChanged);
+            }
+            Ok(model_cache::generation(tx)?.is_some())
+        },
+    )
+}
+
 pub(crate) fn catalog_page(
     config: &super::StoreConfig,
     pool: &PgPool,

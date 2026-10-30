@@ -757,6 +757,18 @@ pub(crate) fn relative_status(
 }
 
 pub(crate) fn page(options: &Options, machine: &str, request: Request) -> ViewerReply {
+    page_with_gate(options, machine, request, || Ok(()))
+}
+
+pub(crate) fn page_with_gate(
+    options: &Options,
+    machine: &str,
+    request: Request,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+) -> ViewerReply {
+    if let Err(reply) = before_read() {
+        return reply;
+    }
     match crate::storage::read_local_catalog_page(options, machine, &request) {
         Ok(reply) => reply,
         Err(cause) => {
@@ -771,6 +783,13 @@ pub(crate) fn page(options: &Options, machine: &str, request: Request) -> Viewer
             )
         }
     }
+}
+
+/// Whether the selected backend has a readable persisted Catalog publication.
+/// Completeness is deliberately not required: source-scoped consumers may read
+/// a partial publication while its producer continues.
+pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
+    crate::storage::catalog_page_ready(options)
 }
 
 pub(crate) fn read_page_snapshot(

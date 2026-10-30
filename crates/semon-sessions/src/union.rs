@@ -11,6 +11,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     sync::{Arc, Condvar, Mutex, PoisonError, RwLock, Weak},
+    time::{Duration, Instant},
 };
 
 use serde_json::{Value, json};
@@ -25,6 +26,14 @@ use crate::{
         query_value, read_lock, write_lock,
     },
 };
+
+const INITIAL_CATALOG_WAIT: Duration = Duration::from_secs(20);
+
+#[derive(Clone, Copy)]
+struct CatalogReadContext {
+    deadline: Instant,
+    allow_wait: bool,
+}
 
 /// A link to the embedding server's own machine-management page, shown on
 /// the Machines page. The local viewer never sets one.
@@ -61,6 +70,44 @@ fn valid_href(href: &str) -> bool {
         && !href.contains('\\')
         && href.len() <= 512
         && !href.chars().any(char::is_control)
+}
+
+fn wait_for_catalog_read(
+    view: &MachineView,
+    deadline: Instant,
+    allow_wait: bool,
+) -> Result<Option<io::Error>, ViewerReply> {
+    if crate::storage::is_postgres_selected(view.options()) {
+        if !matches!(crate::session_catalog_page_ready(view.options()), Ok(true)) {
+            return Err(catalog_unavailable());
+        }
+        return Ok(None);
+    }
+    if allow_wait {
+        view.wait_until_initial_catalog(deadline)
+            .map_err(|_| catalog_unavailable())?;
+    } else {
+        match crate::session_catalog_page_ready(view.options()) {
+            // A native page may still hold its source Work fence here. Serve
+            // a published generation without waiting; cold reads request the
+            // ordinary coalesced producer and keep the existing retry path.
+            Ok(true) => {}
+            _ => {
+                let _ = view.note_catalog_read();
+                return Err(catalog_unavailable());
+            }
+        }
+    }
+    Ok(view.note_catalog_read().err())
+}
+
+fn catalog_unavailable() -> ViewerReply {
+    crate::catalog::error(
+        503,
+        "catalog_unavailable",
+        "The selected session catalog is unavailable. Retry after the background observation completes.",
+        true,
+    )
 }
 
 /// One named workspace listed by an embedding server in an account menu.
@@ -949,9 +996,11 @@ impl ViewerCore {
     /// percent-encoded, and the request's `If-None-Match`. Only GET is
     /// answered (405 otherwise); every URL the viewer uses is a GET. The
     /// caller authenticates first: the core serves whoever it is handed.
-    /// Any number of threads may call it at once. Embedding metadata uses the
-    /// defaults configured by the setters; native session APIs authorize and
-    /// fence their selected source and generation independently.
+    /// Any number of threads may call it at once. Catalog-backed APIs may wait
+    /// up to 20 seconds for the first persisted Catalog publication; call from
+    /// a blocking thread when using a single-thread async runtime. Embedding
+    /// metadata uses the defaults configured by the setters; native session
+    /// APIs authorize and fence their selected source and generation independently.
     pub fn respond(
         &self,
         method: &str,
@@ -959,7 +1008,14 @@ impl ViewerCore {
         query: &str,
         if_none_match: Option<&str>,
     ) -> ViewerReply {
-        self.respond_with(&self.extras, method, path, query, if_none_match)
+        self.respond_with_deadline(
+            &self.extras,
+            method,
+            path,
+            query,
+            if_none_match,
+            Instant::now() + INITIAL_CATALOG_WAIT,
+        )
     }
 
     /// [`ViewerCore::respond`], with this request's own [`Extras`] in the
@@ -972,6 +1028,51 @@ impl ViewerCore {
         query: &str,
         if_none_match: Option<&str>,
     ) -> ViewerReply {
+        self.respond_with_deadline(
+            extras,
+            method,
+            path,
+            query,
+            if_none_match,
+            Instant::now() + INITIAL_CATALOG_WAIT,
+        )
+    }
+
+    pub(crate) fn respond_with_deadline(
+        &self,
+        extras: &Extras,
+        method: &str,
+        path: &str,
+        query: &str,
+        if_none_match: Option<&str>,
+        deadline: Instant,
+    ) -> ViewerReply {
+        self.respond_with_deadline_mode(
+            extras,
+            method,
+            path,
+            query,
+            if_none_match,
+            CatalogReadContext {
+                deadline,
+                allow_wait: true,
+            },
+        )
+    }
+
+    fn respond_with_deadline_mode(
+        &self,
+        extras: &Extras,
+        method: &str,
+        path: &str,
+        query: &str,
+        if_none_match: Option<&str>,
+        context: CatalogReadContext,
+    ) -> ViewerReply {
+        let CatalogReadContext {
+            deadline,
+            allow_wait: allow_catalog_wait,
+        } = context;
         if method != "GET" {
             return text(405, "Method not allowed");
         }
@@ -993,13 +1094,8 @@ impl ViewerCore {
                 etag: None,
             };
         }
-        if path.starts_with("/session/") || path.starts_with("/s/") || path.starts_with("/trace/") {
-            return self.session_page(extras, path, query);
-        }
-        if crate::shell::is_page_path(path) && query_value(query, "native") == Some("1") {
-            return crate::native_page::reply(path, query, |endpoint, args| {
-                self.respond_with(extras, "GET", endpoint, args, None)
-            });
+        if path.starts_with("/session/") {
+            return self.session_page(path, query);
         }
         self.follow();
         let views = self.views();
@@ -1074,7 +1170,7 @@ impl ViewerCore {
                 | "/api/session-observe"
                 | "/api/session-resolve"
         ) {
-            return self.catalog(&views, path, query);
+            return self.catalog(&views, path, query, deadline, allow_catalog_wait);
         }
         if views.is_empty() {
             return text(404, "Not found");
@@ -1088,24 +1184,18 @@ impl ViewerCore {
         views[0].1.respond(method, path, query, if_none_match)
     }
 
-    fn session_page(&self, extras: &Extras, path: &str, query: &str) -> ViewerReply {
-        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve_bookmark};
+    fn session_page(&self, path: &str, query: &str) -> ViewerReply {
+        use crate::session_route::{Candidate, Resolution, SessionRoute, resolve};
         let route = match SessionRoute::parse(path, query) {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
         };
-        let native_requested = route
-            .controls
-            .get("native")
-            .is_some_and(|value| value == "1");
         self.follow();
         let views = self.views();
         let inventory = self.source_inventory(&views);
         let shell = || {
-            let selected = route
-                .source
-                .as_deref()
-                .and_then(|source| inventory.index(source))
+            let selected = inventory
+                .index(&route.source)
                 .and_then(|index| views.get(index))
                 .or_else(|| views.first());
             selected
@@ -1114,7 +1204,6 @@ impl ViewerCore {
         };
         let mut candidates = Vec::<Candidate>::new();
         let mut unavailable = false;
-        let mut unavailable_views = Vec::new();
         let mut work_guards = Vec::new();
         for (index, (internal, view)) in views.iter().enumerate() {
             let source = if internal.is_empty() {
@@ -1122,11 +1211,7 @@ impl ViewerCore {
             } else {
                 internal
             };
-            if route
-                .source
-                .as_ref()
-                .is_some_and(|selected| selected != source)
-            {
+            if route.source != source {
                 continue;
             }
             // Inventory qualification also rejects duplicated or unstable source keys.
@@ -1137,7 +1222,6 @@ impl ViewerCore {
                 Ok(guard) => guard,
                 Err(_) => {
                     unavailable = true;
-                    unavailable_views.push(view);
                     continue;
                 }
             };
@@ -1150,7 +1234,6 @@ impl ViewerCore {
             let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
             if reply.status >= 500 || value["unavailable"].as_u64().is_some_and(|n| n > 0) {
                 unavailable = true;
-                unavailable_views.push(view);
             }
             for candidate in value["matches"].as_array().into_iter().flatten() {
                 if let Ok(candidate) = serde_json::from_value(candidate.clone()) {
@@ -1160,32 +1243,12 @@ impl ViewerCore {
         }
         if unavailable {
             drop(work_guards);
-            if native_requested {
-                // No selected API follows a no-JavaScript retry. Request the
-                // ordinary coalesced source producer after releasing all work
-                // guards; note_catalog_read never waits for that producer.
-                for view in unavailable_views {
-                    let _ = view.note_catalog_read();
-                }
-                // Keep the unavailable observation: rereading the old Catalog
-                // without the producer lock could infer absence from stale rows.
-                let mut arguments = route.controls.clone();
-                if route.legacy_harness.is_some() {
-                    if let Some(source) = &route.source {
-                        arguments.insert("machine".into(), source.clone());
-                    }
-                    if let Some(anchor) = &route.anchor {
-                        arguments.insert("turn".into(), anchor.clone());
-                    }
-                }
-                return crate::native_page::retry_unavailable(path, &arguments);
-            }
             // A valid address can load before its bounded source observation
             // finishes. Keep the shell available so the selected APIs own the
             // retry state and content still waits for exact resolution.
             return shell();
         }
-        let resolution = resolve_bookmark(&route, &candidates);
+        let resolution = resolve(&route, &candidates);
         match resolution {
             Resolution::Valid(index) => {
                 let candidate = &candidates[index];
@@ -1210,11 +1273,6 @@ impl ViewerCore {
                     }
                     if anchor.status != 200 {
                         if anchor.status >= 500 || matches!(anchor.status, 409 | 423 | 429) {
-                            if native_requested {
-                                return crate::native_page::reply(path, query, |endpoint, args| {
-                                    self.respond_with(extras, "GET", endpoint, args, None)
-                                });
-                            }
                             return shell();
                         }
                         return anchor;
@@ -1250,52 +1308,37 @@ impl ViewerCore {
                                         != Some("incomplete")
                             });
                     if !exact_anchor {
-                        if native_requested {
-                            return crate::native_page::reply(path, query, |endpoint, args| {
-                                self.respond_with(extras, "GET", endpoint, args, None)
-                            });
-                        }
                         return shell();
                     }
                     match anchor_body.as_ref().and_then(|value| value.get("slot")) {
                         Some(slot) if slot.is_null() => return text(404, "Not found"),
                         Some(slot) if slot.as_u64().is_some() => {}
                         _ => {
-                            if native_requested {
-                                return crate::native_page::reply(path, query, |endpoint, args| {
-                                    self.respond_with(extras, "GET", endpoint, args, None)
-                                });
-                            }
                             return shell();
                         }
                     }
                 }
                 drop(work_guards);
-                if route.legacy_harness.is_some() {
-                    return ViewerReply::redirect(
-                        route.canonical(&candidate.source_key, &candidate.catalog_key),
-                    );
-                }
-                if native_requested {
-                    crate::native_page::reply(path, query, |endpoint, args| {
-                        self.respond_with(extras, "GET", endpoint, args, None)
-                    })
-                } else if let Some((_, view)) = views.first() {
+                if let Some((_, view)) = views.first() {
                     view.respond("GET", "/", "", None)
                 } else {
                     text(404, "Not found")
                 }
             }
-            Resolution::Ambiguous => crate::native_page::reply(path, query, |endpoint, args| {
-                self.respond_with(extras, "GET", endpoint, args, None)
-            }),
-            Resolution::NotFound | Resolution::Mismatch => text(404, "Not found"),
+            Resolution::Ambiguous | Resolution::NotFound => text(404, "Not found"),
         }
     }
 
     /// Focused lists are scoped by the embedder's stable machine key. A
     /// hostname is a label, and never selects a source access boundary.
-    fn catalog(&self, views: &Arc<Views>, path: &str, query: &str) -> ViewerReply {
+    fn catalog(
+        &self,
+        views: &Arc<Views>,
+        path: &str,
+        query: &str,
+        deadline: Instant,
+        allow_catalog_wait: bool,
+    ) -> ViewerReply {
         if path == "/api/session-locate"
             && query_value(query, "machine").is_none()
             && views.len() > 1
@@ -1308,8 +1351,10 @@ impl ViewerCore {
             let mut unavailable = 0_u64;
             for (source, view) in views.iter() {
                 let source = if source.is_empty() { "local" } else { source };
-                let _ = view.note_catalog_read();
-                let reply = crate::session_bookmark(view.options(), source, query);
+                let reply =
+                    crate::session_bookmark_with_gate(view.options(), source, query, || {
+                        wait_for_catalog_read(view, deadline, allow_catalog_wait).map(|_| ())
+                    });
                 if reply.status != 200 {
                     return reply;
                 }
@@ -1389,32 +1434,81 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
-        // Record demand without waiting for an initial model build. The
-        // shared native coordinator performs coherent observation in every
-        // refresh mode, including default library callers.
-        let refresh_error =
-            (path != "/api/session-capabilities").then(|| view.note_catalog_read().err());
+        let mut refresh_error = None;
         let mut reply = match path {
-            "/api/session-locate" => crate::session_bookmark(view.options(), key, query),
-            "/api/session-observe" => crate::session_overview_observe(view.options(), key, query),
-            "/api/session-home" => crate::session_home_details_with_mode(
+            "/api/session-locate" => {
+                crate::session_bookmark_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-observe" => {
+                crate::session_overview_observe_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-home" => crate::session_home_details_with_gate(
                 view.options(),
                 key,
                 query,
                 None,
                 crate::SessionSourceReadMode::ProviderOnly,
+                true,
+                || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                },
             ),
-            "/api/session-anchor" => crate::session_turn_anchor(view.options(), key, query),
-            "/api/session-annotations" => crate::session_annotations(view.options(), key, query),
-            "/api/session-trace" => crate::session_causal_trace(view.options(), key, query),
-            "/api/session-resolve" => crate::native_resolution::page(view.options(), key, query),
+            "/api/session-anchor" => {
+                crate::session_turn_anchor_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-annotations" => {
+                crate::session_annotations_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-trace" => {
+                crate::session_causal_trace_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-resolve" => {
+                crate::session_catalog_resolve_page_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
             "/api/session-identity" => {
                 let sid = query_value(query, "sid").and_then(decoded);
-                match sid
-                    .as_deref()
-                    .map(|sid| crate::session_catalog_identity(view.options(), key, sid))
-                {
-                    Some(Ok(Some(identity))) => ViewerReply {
+                let Some(sid) = sid.filter(|sid| !sid.is_empty() && sid.len() <= 4096) else {
+                    return crate::catalog::error(
+                        400,
+                        "invalid_arguments",
+                        "A canonical sid is required.",
+                        false,
+                    );
+                };
+                refresh_error = Some(
+                    match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                        Ok(error) => error,
+                        Err(reply) => return reply,
+                    },
+                );
+                match crate::session_catalog_identity(view.options(), key, &sid) {
+                    Ok(Some(identity)) => ViewerReply {
                         status: 200,
                         content_type: "application/json; charset=utf-8",
                         body: json!({"api":1,"identity":identity})
@@ -1422,25 +1516,25 @@ impl ViewerCore {
                             .into_bytes(),
                         etag: None,
                     },
-                    Some(Ok(None)) => crate::catalog::error(
+                    Ok(None) => crate::catalog::error(
                         404,
                         "session_not_found",
                         "The selected session is absent from this catalog.",
                         false,
                     ),
-                    Some(Err(crate::CatalogIdentityError::ScopeChanged)) => crate::catalog::error(
+                    Err(crate::CatalogIdentityError::ScopeChanged) => crate::catalog::error(
                         503,
                         "catalog_scope_changed",
                         "The configured native source authority changed.",
                         true,
                     ),
-                    Some(Err(crate::CatalogIdentityError::Unavailable)) => crate::catalog::error(
+                    Err(crate::CatalogIdentityError::Unavailable) => crate::catalog::error(
                         503,
                         "catalog_unavailable",
                         "The selected identity observation is unavailable.",
                         true,
                     ),
-                    _ => crate::catalog::error(
+                    Err(crate::CatalogIdentityError::InvalidArguments) => crate::catalog::error(
                         400,
                         "invalid_arguments",
                         "A canonical sid is required.",
@@ -1448,10 +1542,30 @@ impl ViewerCore {
                     ),
                 }
             }
-            "/api/session-transcript" => {
-                crate::session_transcript_range(view.options(), key, query, None)
-            }
-            "/api/session-entry" => crate::session_entry_field(view.options(), key, query, None),
+            "/api/session-transcript" => crate::session_transcript_range_with_gate(
+                view.options(),
+                key,
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                },
+            ),
+            "/api/session-entry" => crate::session_entry_field_with_gate(
+                view.options(),
+                key,
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                },
+            ),
             "/api/session-capabilities" => crate::session_catalog_capabilities(
                 key,
                 crate::SessionReadEndpoints {
@@ -1461,10 +1575,15 @@ impl ViewerCore {
                     selected_entry: true,
                 },
             ),
-            _ => crate::catalog::page(
+            _ => crate::catalog::page_with_gate(
                 view.options(),
                 key,
                 request.expect("catalog route parsed request"),
+                || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                },
             ),
         };
         if let Ok(mut body) = serde_json::from_slice::<Value>(&reply.body) {

@@ -14,6 +14,11 @@ use std::{
 use serde_json::Value;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
+#[cfg(test)]
+thread_local! {
+    static INITIAL_CATALOG_WAIT_STARTED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
+}
+
 use crate::{
     Node, Options, collect_with_index,
     events::EventCache,
@@ -286,23 +291,6 @@ pub struct ViewerReply {
 }
 
 impl ViewerReply {
-    /// Redirects carry their same-origin canonical target as their plain body.
-    /// HTTP adapters must forward it as Location, including for no-JS clients.
-    pub fn redirect(location: String) -> Self {
-        Self {
-            status: 308,
-            content_type: "text/plain; charset=utf-8",
-            body: location.into_bytes(),
-            etag: None,
-        }
-    }
-
-    pub fn redirect_location(&self) -> Option<&str> {
-        (self.status == 308)
-            .then(|| std::str::from_utf8(&self.body).ok())
-            .flatten()
-    }
-
     /// The headers to send with this reply besides `Content-Type` and
     /// `ETag`: [`SECURITY_HEADERS`], except for an attachment's image (a 200
     /// whose type is one of the four native selected image types,
@@ -481,11 +469,7 @@ fn header(name: &str, value: &str) -> Header {
 
 fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let headers = reply.headers();
-    let location = reply.redirect_location().map(str::to_owned);
     let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
-    if let Some(location) = location {
-        response.add_header(header("Location", &location));
-    }
     if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }
@@ -903,11 +887,15 @@ impl MachineView {
     /// queued in the one before moves to it.
     pub(crate) fn set_pool(&self, pool: Arc<RefreshPool>) {
         let mut state = lock(&self.live.state);
+        self.set_pool_state(&mut state, pool);
+    }
+
+    fn set_pool_state(&self, state: &mut LiveState, pool: Arc<RefreshPool>) {
         if let Slot::Queued(key) = state.slot {
             state.pool.remove(key);
             state.slot = Slot::Idle;
             state.pool = pool;
-            self.queue(&mut state, key.0, true);
+            self.queue(state, key.0, true);
         } else {
             state.pool = pool;
         }
@@ -1049,7 +1037,16 @@ impl MachineView {
 
     fn note_read_with(&self, kind: Kind, prepare: bool) -> io::Result<()> {
         let mut state = lock(&self.live.state);
-        let now = Instant::now();
+        self.note_read_state(&mut state, kind, prepare, Instant::now())
+    }
+
+    fn note_read_state(
+        &self,
+        state: &mut LiveState,
+        kind: Kind,
+        prepare: bool,
+        now: Instant,
+    ) -> io::Result<()> {
         state.read_at = Some(now);
         if state.closed {
             return Ok(());
@@ -1070,7 +1067,7 @@ impl MachineView {
             Slot::Idle => {
                 if prepare || state.invalidated {
                     state.unconfirmed = [true; 2];
-                    self.queue(&mut state, now, false);
+                    self.queue(state, now, false);
                 }
                 false
             }
@@ -1109,6 +1106,89 @@ impl MachineView {
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
         self.note_read_with(Kind::Catalog, pending)
+    }
+
+    /// Wait for the first readable persisted Catalog publication, using the
+    /// existing source owner and refresh worker. A warm persisted page returns
+    /// before creating a cold demand. The caller must wait off its reactor.
+    pub(crate) fn wait_until_initial_catalog(&self, deadline: Instant) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, None)
+    }
+
+    pub(crate) fn wait_until_initial_catalog_in_pool(
+        &self,
+        pool: Arc<RefreshPool>,
+        deadline: Instant,
+    ) -> io::Result<()> {
+        self.wait_for_initial_catalog(deadline, Some(pool))
+    }
+
+    fn wait_for_initial_catalog(
+        &self,
+        deadline: Instant,
+        mut pool: Option<Arc<RefreshPool>>,
+    ) -> io::Result<()> {
+        let mut state = lock(&self.live.state);
+        let mut demanded = false;
+        loop {
+            if state.closed {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "session catalog source is closed",
+                ));
+            }
+            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "initial session catalog was not published before the deadline",
+                ));
+            }
+            if ready {
+                return Ok(());
+            }
+            let at = Kind::Catalog as usize;
+            let stalled = match state.slot {
+                Slot::Running => state.running_since.is_some_and(|since| {
+                    now.saturating_duration_since(since) >= state.stalled_after
+                }),
+                Slot::Queued(key) => now.saturating_duration_since(key.0) >= state.stalled_after,
+                Slot::Idle => false,
+            };
+            if stalled {
+                return Err(io::Error::other("rebuilds stalled"));
+            }
+            if let (Some(message), Some(since)) = (&state.error[at], state.failing_since[at])
+                && !state.unconfirmed[at]
+                && now.saturating_duration_since(since) >= FAILING_AFTER
+            {
+                return Err(io::Error::other(message.clone()));
+            }
+            if !demanded {
+                if let Some(pool) = pool.take()
+                    && !Arc::ptr_eq(&state.pool, &pool)
+                {
+                    self.set_pool_state(&mut state, pool);
+                }
+                self.evidence.catalog_demand.store(true, Ordering::Relaxed);
+                self.note_read_state(&mut state, Kind::Catalog, true, now)?;
+                demanded = true;
+                #[cfg(test)]
+                INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                    if let Some(send) = started.borrow_mut().take() {
+                        let _ = send.send(());
+                    }
+                });
+            }
+            let wait = deadline.saturating_duration_since(now);
+            let (next, _) = self
+                .live
+                .changed
+                .wait_timeout(state, wait)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
     }
 
     /// A read's own refresh of the kind it wants, when none is built yet
@@ -1361,7 +1441,9 @@ impl MachineView {
     /// longer served. [`MachineView::close`] still waits out one running.
     pub(crate) fn retire(&self) {
         self.evidence.retire();
-        Self::stop(&mut lock(&self.live.state));
+        let mut state = lock(&self.live.state);
+        Self::stop(&mut state);
+        self.live.changed.notify_all();
     }
 
     /// Stops this view's background checks and waits out a check or a
@@ -1372,6 +1454,7 @@ impl MachineView {
         self.evidence.retire();
         let mut state = lock(&self.live.state);
         Self::stop(&mut state);
+        self.live.changed.notify_all();
         while state.slot == Slot::Running {
             state = self
                 .live
@@ -1433,9 +1516,7 @@ impl MachineView {
         let html = "text/html; charset=utf-8";
         let json = "application/json; charset=utf-8";
         match path {
-            "/" | "/timeline" | "/analytics" | "/sessions" | "/machines" => {
-                Ok((200, html, PAGE.into()))
-            }
+            "/" | "/analytics" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
             "/viewer.js" => Ok((
                 200,
                 "text/javascript; charset=utf-8",
@@ -1502,10 +1583,9 @@ impl MachineView {
     }
 }
 
-/// Whether `path` is a page URL that names something: `/machines/<id>`,
-/// `/s/<harness>/<id>` or `/trace/<harness>/<id>/<turn>`, by its prefix.
+/// Whether `path` is a page URL that names something: `/machines/<id>`, by its prefix.
 pub(crate) fn is_named_page(path: &str) -> bool {
-    path.starts_with("/machines/") || path.starts_with("/s/") || path.starts_with("/trace/")
+    path.starts_with("/machines/")
 }
 
 /// A page URL's path segments, decoded; `None` when one doesn't decode.
@@ -1795,88 +1875,6 @@ mod tests {
     }
 
     #[test]
-    fn native_html_uses_selected_history_without_showing_a_workspace_model() {
-        let fixture = Fixture::new();
-        fixture.claude("native-html", &[
-            json!({"type":"user","sessionId":"native-html","uuid":"u","origin":{"kind":"human"},"timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"<script>private prompt</script>"}}),
-            json!({"type":"assistant","sessionId":"native-html","uuid":"a","timestamp":"2026-10-01T00:01:00Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"collapsed reasoning"},{"type":"tool_use","id":"read-call","name":"Read","input":{"file_path":"safe-file.txt"}}]}}),
-            json!({"type":"user","sessionId":"native-html","uuid":"result","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"read-call","content":"native tool output"}]}}),
-        ]);
-        let core = ViewerCore::new(fixture.options.clone());
-        core.demand_catalog_source("local").unwrap();
-        eventually("native HTML fixture publication", || {
-            let reply = core.respond("GET", "/api/sessions", "limit=60", None);
-            let page: Value = serde_json::from_slice(&reply.body).ok()?;
-            (reply.status == 200 && page["completeness"]["state"] == "complete").then_some(())
-        });
-        let listing = core.respond("GET", "/sessions", "native=1", None);
-        assert_eq!(listing.status, 200);
-        let listing = String::from_utf8(listing.body).unwrap();
-        assert!(listing.contains("/session/local/native-html?native=1"));
-        assert_eq!(
-            core.respond("GET", "/machines/local", "machine=local", None)
-                .status,
-            200
-        );
-        let machine = core.respond("GET", "/machines/local", "native=1&machine=local", None);
-        assert_eq!(machine.status, 200);
-        let machine = String::from_utf8(machine.body).unwrap();
-        assert!(machine.contains("native-html") && machine.contains("All sessions"));
-        assert_eq!(
-            core.respond("GET", "/machines/local", "native=1&machine=foreign", None)
-                .status,
-            400
-        );
-        assert_eq!(
-            core.respond("GET", "/machines/foreign", "native=1", None)
-                .status,
-            404
-        );
-        let selected = core.respond("GET", "/session/local/native-html", "native=1", None);
-        assert_eq!(selected.status, 200);
-        let html = String::from_utf8(selected.body).unwrap();
-        assert!(
-            html.contains("&lt;script&gt;private prompt&lt;/script&gt;"),
-            "{html}"
-        );
-        assert!(html.contains("<summary>Thinking</summary>"), "{html}");
-        assert!(html.contains("<summary>Read</summary>"), "{html}");
-        assert!(html.contains("native tool output"), "{html}");
-        assert!(!html.contains("<script") && !html.contains("secret-bootstrap"));
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/s/codex/native-html",
-                "native=1&machine=local",
-                None
-            )
-            .status,
-            404
-        );
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/sessions",
-                "native=1&machine=local&machine=local",
-                None
-            )
-            .status,
-            400
-        );
-        assert_eq!(
-            core.respond(
-                "GET",
-                "/session/local/native-html",
-                "native=1&after=0&generation=obsolete",
-                None
-            )
-            .status,
-            409
-        );
-        core.close();
-    }
-
-    #[test]
     fn http_session_bootstrap_is_consumed_before_routing() {
         let fixture = Fixture::new();
         fixture.claude("bootstrap-session", &[
@@ -1886,7 +1884,7 @@ mod tests {
         let cold = http_with_publication(
             &fixture,
             &format!(
-                "GET /s/claude/bootstrap-session?machine=local&t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
+                "GET /session/local/bootstrap-session?t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
             ),
             None,
             true,
@@ -1908,55 +1906,16 @@ mod tests {
                 );
             }
         }
-
-        for path in [
-            format!("/s/claude/bootstrap-session?machine=local&t={token}"),
-            format!("/s/claude/bootstrap-session?t={token}&native=1"),
-        ] {
-            let wire = http_with_publication(
-                &fixture,
-                &format!(
-                    "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n"
-                ),
-                Some("bootstrap-session"),
-                false,
-            );
-            assert!(wire.starts_with("HTTP/1.1 308"), "{wire}");
-            let (headers, body) = wire.split_once("\r\n\r\n").unwrap();
-            assert!(!body.contains(token), "credential leaked into content");
-            let cookie = headers
-                .lines()
-                .find(|line| line.starts_with("Set-Cookie:"))
-                .unwrap();
-            assert!(cookie.contains(token), "{cookie}");
-            for header in headers.lines().skip(1) {
-                if !header.starts_with("Set-Cookie:") {
-                    assert!(
-                        !header.contains(token),
-                        "credential leaked into header: {header}"
-                    );
-                }
-            }
-            let location = headers
-                .lines()
-                .find(|line| line.starts_with("Location:"))
-                .unwrap();
-            assert!(
-                location.contains("/session/local/bootstrap-session"),
-                "{location}"
-            );
-            assert!(!location.contains("t="), "{location}");
-        }
         let continuation = http_with_publication(
             &fixture,
             &format!(
-                "GET /session/local/bootstrap-session?native=1 HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
+                "GET /session/local/bootstrap-session HTTP/1.1\r\nHost: localhost:PORT\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n"
             ),
             Some("bootstrap-session"),
             false,
         );
         assert!(continuation.starts_with("HTTP/1.1 200"), "{continuation}");
-        assert!(continuation.contains("Bootstrap transcript"));
+        assert!(continuation.contains("<!doctype html") || continuation.contains("<!DOCTYPE html"));
         for query in [
             "t=invalid".to_owned(),
             format!("t={token}&t={token}"),
@@ -1999,37 +1958,6 @@ mod tests {
     }
 
     #[test]
-    fn cold_native_session_retry_observes_source_without_javascript() {
-        let fixture = Fixture::new();
-        fixture.claude(
-            "readiness",
-            &[json!({
-                "type":"user",
-                "sessionId":"readiness",
-                "uuid":"u",
-                "timestamp":"2026-10-01T00:00:00Z",
-                "message":{"role":"user","content":"Cold native observation"}
-            })],
-        );
-        let core = ViewerCore::new(fixture.options.clone());
-        let view = core.machine_views().into_iter().next().unwrap();
-        let work = view.evidence.work.lock().unwrap();
-        let unavailable = core.respond("GET", "/session/local/readiness", "native=1", None);
-        assert_eq!(unavailable.status, 503);
-        assert!(unavailable.content_type.starts_with("text/html"));
-        let unavailable = String::from_utf8(unavailable.body).unwrap();
-        assert!(unavailable.contains("The recorded session index is updating."));
-        assert!(unavailable.contains("href=\"/session/local/readiness?native=1\""));
-        drop(work);
-        eventually("direct native session retry", || {
-            let reply = core.respond("GET", "/session/local/readiness", "native=1", None);
-            let body = String::from_utf8_lossy(&reply.body);
-            (reply.status == 200 && body.contains("Cold native observation")).then_some(())
-        });
-        core.close();
-    }
-
-    #[test]
     fn http_guards_and_headers() {
         let fixture = Fixture::new();
         let token = "0123456789abcdef0123456789abcdef";
@@ -2038,7 +1966,7 @@ mod tests {
             &format!("GET /?t={token} HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"),
         );
         assert!(good.starts_with("HTTP/1.1 200"));
-        assert!(good.contains("Open native session history"));
+        assert!(good.contains("JavaScript is required"));
         for header in [
             "Cache-Control: no-store",
             "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
@@ -2642,7 +2570,7 @@ mod tests {
             .to_owned();
         for path in [
             "/".to_owned(),
-            "/timeline".into(),
+            "/analytics".into(),
             "/sessions".into(),
             "/machines".into(),
             "/machines/testbox".into(),
@@ -2660,35 +2588,12 @@ mod tests {
                 assert!(wire.contains(header), "{path}: missing {header}");
             }
         }
-        for (legacy, canonical) in [
-            (
-                "/s/claude/lane".to_owned(),
-                "/session/local/lane".to_owned(),
-            ),
-            (
-                format!("/s/claude/lane?turn={turn}"),
-                format!("/session/local/lane#{turn}"),
-            ),
-            (
-                format!("/trace/claude/lane/{turn}"),
-                format!("/session/local/lane/trace/{turn}"),
-            ),
-        ] {
-            let wire = get(&fixture, &legacy);
-            assert!(wire.starts_with("HTTP/1.1 308"), "{legacy}: {wire}");
-            assert!(
-                wire.contains(&format!("Location: {canonical}\r\n")),
-                "{wire}"
-            );
-        }
-        let wire = get(&fixture, "/s/claude/lane/more");
-        assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
         for path in [
             "/machines/elsewhere",
+            "/s/claude/lane",
             "/s/claude/nobody",
-            "/s/codex/lane",
             "/trace/claude/lane/no-such-turn",
-            "/trace/claude/nobody/x",
+            "/timeline",
             "/fonts/nope.woff2",
             "/elsewhere",
         ] {
@@ -2702,7 +2607,7 @@ mod tests {
         assert!(
             http(
                 &fixture,
-                "GET /timeline HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
+                "GET /analytics HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\n\r\n"
             )
             .starts_with("HTTP/1.1 403")
         );
@@ -3767,7 +3672,7 @@ mod tests {
         let fixture = lane_fixture();
         let core = ViewerCore::new(fixture.options.clone());
         publish_native(&core.machine_views()[0]);
-        let page = core.respond("GET", "/timeline", "", None);
+        let page = core.respond("GET", "/analytics", "", None);
         assert_eq!(
             (
                 page.status,
@@ -3826,7 +3731,7 @@ mod tests {
             assert_eq!(refused.status, 405, "{method}");
         }
         // The loopback server sends exactly these, and the same body.
-        let wire = get(&fixture, "/timeline");
+        let wire = get(&fixture, "/analytics");
         assert!(wire.ends_with(PAGE));
         for (name, value) in SECURITY_HEADERS {
             assert!(wire.contains(&format!("{name}: {value}")), "{name}");
@@ -3856,7 +3761,6 @@ mod tests {
 
         let paths = [
             "/".to_owned(),
-            "/timeline".into(),
             "/analytics".into(),
             "/sessions".into(),
             "/machines".into(),
@@ -3872,8 +3776,11 @@ mod tests {
         }
 
         // The predicate checks dynamic route shapes without querying the model.
-        assert!(crate::shell::is_page_path("/s/claude/not-in-model"));
+        assert!(crate::shell::is_page_path("/machines/not-in-model"));
         for path in [
+            "/timeline",
+            "/s/claude/not-in-model",
+            "/trace/claude/not-in-model/turn",
             "/api/model",
             "/api/analytics",
             "/viewer.js",
@@ -4597,10 +4504,8 @@ mod tests {
             (&embedded, "some-key"),
             (&background, "some-key"),
         ] {
-            let legacy = core.respond("GET", "/s/claude/lane", "", None);
-            assert_eq!(legacy.status, 308);
+            assert_eq!(core.respond("GET", "/s/claude/lane", "", None).status, 404);
             let canonical = format!("/session/{source}/lane");
-            assert_eq!(legacy.redirect_location(), Some(canonical.as_str()));
             let page = core.respond("GET", &canonical, "", None);
             assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
         }
@@ -4787,7 +4692,7 @@ mod tests {
             ("/machines/alpha", 200),
             ("/machines/bravo", 200),
             ("/machines/gamma", 404),
-            ("/timeline", 200),
+            ("/timeline", 404),
             ("/analytics", 200),
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, status, "{path}");
@@ -4827,11 +4732,11 @@ mod tests {
             assert_eq!(body_of(&selected)["identity"]["source_key"], source);
             assert!(String::from_utf8_lossy(&selected.body).contains(&format!("done on {name}")));
         }
-        let chooser = core.respond("GET", "/s/claude/same", "", None);
-        assert_eq!(chooser.status, 200);
-        let chooser = String::from_utf8(chooser.body).unwrap();
-        assert!(chooser.contains("/session/a/same") && chooser.contains("/session/b/same"));
-        assert!(!chooser.contains("done on"));
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
+        for source in ["a", "b"] {
+            let page = core.respond("GET", &format!("/session/{source}/same"), "", None);
+            assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
+        }
         let analytics = analytics_of(&core, "range=7d");
         assert_eq!(
             analytics["machine_labels"],
@@ -5471,11 +5376,9 @@ mod tests {
                 "{path}"
             );
         }
-        let legacy = core.respond("GET", "/s/claude/lane-alpha", "", None);
-        assert_eq!(legacy.status, 308);
         assert_eq!(
-            legacy.redirect_location(),
-            Some("/session/alpha/lane-alpha")
+            core.respond("GET", "/s/claude/lane-alpha", "", None).status,
+            404
         );
         assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
         // DIR is only read.
@@ -5755,7 +5658,7 @@ mod tests {
             .collect();
         assert_eq!(same.len(), 1);
         assert_eq!(same[0]["machine"], "home");
-        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 200);
+        assert_eq!(core.respond("GET", "/s/claude/same", "", None).status, 404);
     }
 
     #[test]
@@ -7503,28 +7406,30 @@ mod tests {
         view.close();
     }
 
-    /// With no model built yet, the first read waits for the first build,
-    /// as before (here it is held for 300 ms and more); the reads after it
-    /// answer from that model and build nothing.
+    /// A cold selected read waits for the first Catalog publication without
+    /// holding Work, and a warm read answers while the later build is held.
     #[test]
-    fn a_cold_native_read_returns_retry_without_waiting_for_the_producer() {
+    fn a_cold_native_read_waits_for_publication_without_holding_work() {
         let fixture = lane_fixture();
         let view = fixture.viewer();
         view.set_refresh(Refresh::Background);
         let (starts, release) = view.hooks.hold();
         let observing = lock(&view.evidence.work);
-        let first = ask(
-            "cold selected read",
-            &view,
-            "/api/session-transcript",
-            "sid=lane&limit=100",
-        );
-        assert_eq!(first.status, 503);
-        assert_eq!(body_of(&first)["error"]["retryable"], true);
+        let (wait_started_send, wait_started_receive) = mpsc::channel();
+        let (first_send, first_receive) = mpsc::channel();
+        let reader = view.clone();
+        let request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(wait_started_send);
+            });
+            let reply = native_api(&reader, "/api/session-transcript", "sid=lane&limit=100");
+            let _ = first_send.send(reply);
+        });
+        let wait_started = wait_started_receive.recv_timeout(HUNG_AFTER).is_ok();
         drop(observing);
-        starts
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the native producer starts");
+        let producer_started = starts.recv_timeout(Duration::from_secs(10)).is_ok();
+        assert!(wait_started, "cold read did not enter its publication wait");
+        assert!(producer_started, "the native producer did not start");
         assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), 0);
         let during = ask(
             "cold selected read during observation",
@@ -7545,6 +7450,9 @@ mod tests {
             "<img src=x onerror=alert(2)>"
         );
         drop(release);
+        let first = first_receive.recv_timeout(Duration::from_secs(10)).ok();
+        assert_eq!(first.as_ref().map(|reply| reply.status), Some(200));
+        assert!(request.join().is_ok());
         eventually("the first qualified native read", || {
             let reply = native_api(&view, "/api/session-transcript", "sid=lane&limit=100");
             (reply.status == 200).then_some(())
@@ -7708,13 +7616,11 @@ mod tests {
         for path in [
             "/s/claude/missing",
             "/s/codex/lane-a",
-            "/s/claude/lane-b@unconfigured",
             "/machines/missing",
             "/trace/claude/lane-a/missing-turn",
         ] {
             assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
         }
-        assert_eq!(core.respond("GET", "/s/claude/%FF", "", None).status, 400);
         assert_eq!(
             core.respond("GET", "/session/a/lane-a/extra", "", None)
                 .status,
@@ -7739,11 +7645,6 @@ mod tests {
             (during.status, during.body.as_slice()),
             (200, PAGE.as_bytes())
         );
-        let retry = core.respond("GET", "/session/a/brand-new", "native=1", None);
-        assert_eq!(retry.status, 503);
-        let html = String::from_utf8(retry.body).unwrap();
-        assert!(html.contains("The recorded session index is updating."));
-        assert!(html.contains("href=\"/session/a/brand-new?native=1\""));
         drop(observing);
         core.close();
     }
@@ -7771,13 +7672,10 @@ mod tests {
             assert_eq!(reply.body, PAGE.as_bytes(), "{path}");
         };
         // No model yet: every page is the shell, and nothing is read.
-        for path in ["/", "/timeline", "/machines/testbox"] {
+        for path in ["/", "/analytics", "/machines/testbox"] {
             page(path);
         }
         page("/session/local/lane");
-        let retry = core.respond("GET", "/session/local/lane", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
         let api =
             crate::session_transcript_range(&fixture.options, "local", "sid=lane&limit=100", None);
         assert_eq!(api.status, 503);
@@ -7799,7 +7697,7 @@ mod tests {
             "/session/local/lane".to_owned(),
             "/machines/testbox".into(),
             format!("/session/local/lane/trace/{turn}"),
-            "/timeline".into(),
+            "/analytics".into(),
         ] {
             page(&path);
         }
@@ -7834,7 +7732,12 @@ mod tests {
             "an API read refreshed first"
         );
         // A URL the built model lacks: checked against a fresh one, 404.
-        for path in ["/s/claude/nobody", "/machines/elsewhere", "/s/codex/lane"] {
+        for path in [
+            "/s/claude/nobody",
+            "/machines/elsewhere",
+            "/s/codex/lane",
+            "/timeline",
+        ] {
             assert_eq!(core.respond("GET", path, "", None).status, 404, "{path}");
         }
         core.close();
@@ -7866,9 +7769,6 @@ mod tests {
         };
         shell("/machines/alpha");
         shell("/session/b/lane-b");
-        let retry = core.respond("GET", "/session/b/lane-b", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
         let api =
             crate::session_transcript_range(&bravo.options, "b", "sid=lane-b&limit=100", None);
         assert_eq!(api.status, 503);
@@ -7937,9 +7837,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("the warm builds");
 
+        let source = if key.is_empty() { "local" } else { key };
         let page = {
             let core = core.clone();
-            thread::spawn(move || core.respond("GET", "/s/claude/brand-new", "", None))
+            let path = format!("/session/{source}/brand-new");
+            thread::spawn(move || core.respond("GET", &path, "", None))
         };
         thread::sleep(Duration::from_millis(300));
         assert!(
@@ -7948,11 +7850,6 @@ mod tests {
         );
         let page = page.join().expect("the page request panicked");
         assert_eq!((page.status, page.body.as_slice()), (200, PAGE.as_bytes()));
-        let retry = core.respond("GET", "/s/claude/brand-new", "native=1", None);
-        assert_eq!(retry.status, 503);
-        assert!(String::from_utf8_lossy(&retry.body).contains("Reload to retry"));
-        // The last complete publication cannot prove a newly written key absent
-        // while its producer is held. Native reads must retain that retry state.
         drop(release);
         let published = warming.join().expect("native publication panicked");
         assert!(
@@ -7963,7 +7860,7 @@ mod tests {
                 .any(|item| item["key"] == "brand-new")
         );
         assert_eq!(
-            core.respond("GET", "/s/claude/not-even-new", "", None)
+            core.respond("GET", &format!("/session/{source}/not-even-new"), "", None)
                 .status,
             404
         );
@@ -8240,6 +8137,383 @@ mod tests {
         });
         assert!(serves(&view, "after the hang"));
         view.close();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn initial_catalog_waiters_time_out_while_raw_writer_holds_the_shared_pool() {
+        use sha2::{Digest, Sha256};
+        use std::os::fd::AsRawFd;
+
+        let blocked = lane_fixture();
+        blocked.claude(
+            "held",
+            &[json!({
+                "type": "user",
+                "timestamp": "2026-09-24T00:00:00Z",
+                "sessionId": "held",
+                "message": {"role": "user", "content": "held source"}
+            })],
+        );
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/held.jsonl".into(),
+        };
+        let lock_key = crate::source_change::lock_key(&blocked.options, &input);
+        let raw_writer =
+            crate::source_change::SourceLock::acquire(&blocked.options, &lock_key, true).unwrap();
+        let lock_path = blocked
+            .options
+            .cache
+            .with_extension("source-locks")
+            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+        let probe_exclusive = || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .ok()?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                Some(false)
+            } else {
+                Some(std::io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+            }
+        };
+        let raw_lock_held_before_wait = probe_exclusive();
+
+        let available = lane_fixture();
+        let pool = RefreshPool::new(2);
+        let blocked_observer =
+            crate::SessionCatalogObserver::with_pool(blocked.options.clone(), pool.clone());
+        let available_observer =
+            crate::SessionCatalogObserver::with_pool(available.options.clone(), pool.clone());
+        let blocked_view = blocked_observer.shared_view();
+        let sources = Arc::new(crate::SessionSources::from_catalog_observers(vec![
+            ("held".into(), &blocked_observer),
+            ("available".into(), &available_observer),
+        ]));
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let short_deadline = Instant::now() + Duration::from_secs(3);
+        let available_deadline = Instant::now() + Duration::from_secs(10);
+        let (send, receive) = mpsc::channel();
+        let mut waiters = Vec::new();
+        for name in ["held-1", "held-2"] {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result = sources.wait_until_initial_catalog("held", pool, short_deadline);
+                let _ = send.send((name, Instant::now(), result));
+            }));
+        }
+        {
+            let sources = sources.clone();
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            let send = send.clone();
+            waiters.push(thread::spawn(move || {
+                barrier.wait();
+                let result =
+                    sources.wait_until_initial_catalog("available", pool, available_deadline);
+                let _ = send.send(("available", Instant::now(), result));
+            }));
+        }
+        drop(send);
+        barrier.wait();
+
+        let collect_by = Instant::now() + Duration::from_secs(12);
+        let mut replies = BTreeMap::new();
+        while replies.len() < 3 {
+            let remaining = collect_by.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match receive.recv_timeout(remaining) {
+                Ok((name, completed, result)) => {
+                    replies.insert(name, (completed, result));
+                }
+                Err(_) => break,
+            }
+        }
+
+        let raw_lock_held_with_waiters = probe_exclusive();
+        let blocked_ready_with_waiters = crate::session_catalog_page_ready(&blocked.options);
+        let available_ready_with_waiters = crate::session_catalog_page_ready(&available.options);
+        let (blocked_producer_running, blocked_producer_has_error) =
+            match blocked_view.live.state.try_lock() {
+                Ok(state) => (
+                    state.slot == Slot::Running,
+                    state.error[Kind::Catalog as usize].is_some(),
+                ),
+                Err(_) => (false, true),
+            };
+        let blocked_queue_entries = pool.entries_for(&blocked_view);
+        let held_1_completed_by_deadline = replies
+            .get("held-1")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+        let held_2_completed_by_deadline = replies
+            .get("held-2")
+            .is_some_and(|(completed, _)| *completed <= short_deadline + Duration::from_secs(2));
+
+        // Release the real writer before cleanup, joining waiters, or assertions.
+        drop(raw_writer);
+        let published_after_release = sources.wait_until_initial_catalog(
+            "held",
+            pool.clone(),
+            Instant::now() + Duration::from_secs(10),
+        );
+        sources.close();
+        for waiter in waiters {
+            waiter.join().unwrap();
+        }
+
+        let timed_out = |name| matches!(replies.get(name), Some((_, Err(error))) if error.kind() == std::io::ErrorKind::TimedOut);
+        assert_eq!(pool.size(), 2);
+        assert_eq!(raw_lock_held_before_wait, Some(true));
+        assert_eq!(raw_lock_held_with_waiters, Some(true));
+        assert!(
+            timed_out("held-1"),
+            "first waiter did not time out while Raw was held"
+        );
+        assert!(
+            timed_out("held-2"),
+            "second waiter did not time out while Raw was held"
+        );
+        assert!(
+            held_1_completed_by_deadline,
+            "first waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(
+            held_2_completed_by_deadline,
+            "second waiter did not return within two seconds after its deadline while Raw was held"
+        );
+        assert!(!blocked_ready_with_waiters.unwrap());
+        assert!(available_ready_with_waiters.unwrap());
+        assert!(matches!(replies.get("available"), Some((_, Ok(true)))));
+        assert!(
+            blocked_producer_running,
+            "the held source producer did not remain blocked"
+        );
+        assert!(
+            !blocked_producer_has_error,
+            "Raw contention was recorded as a producer error"
+        );
+        assert_eq!(
+            blocked_queue_entries, 0,
+            "a second producer was queued for the held owner"
+        );
+        assert!(published_after_release.unwrap());
+        let (peak, _) = pool.peak_and_started();
+        assert!(
+            peak <= pool.size(),
+            "refresh workers exceeded the shared pool size"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_home_waits_for_first_catalog_publication_without_holding_raw_writer() {
+        use sha2::{Digest, Sha256};
+        use std::os::fd::AsRawFd;
+
+        let fixture = lane_fixture();
+        let home_generation = |cache: &Path| -> Option<String> {
+            let db = rusqlite::Connection::open_with_flags(
+                EventCache::path(cache),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .ok()?;
+            let encoded: String = db
+                .query_row(
+                    "SELECT summary FROM session_overview WHERE session_key='lane'",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok()?;
+            let summary: crate::overview::Summary = serde_json::from_str(&encoded).ok()?;
+            Some(crate::overview::content_generation(&summary))
+        };
+        let mut warm_options = fixture.options.clone();
+        warm_options.cache = fixture.root.join("warm-cache");
+        let warm_core = ViewerCore::new(warm_options.clone());
+        let warm_view = warm_core.machine_views().into_iter().next().unwrap();
+        let catalog_warmed = warm_view
+            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(15))
+            .is_ok();
+        let expected_generation = home_generation(&warm_options.cache);
+        warm_core.close();
+
+        let mut cold_options = fixture.options.clone();
+        cold_options.cache = fixture.root.join("cold-cache");
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/lane.jsonl".into(),
+        };
+        let lock_key = crate::source_change::lock_key(&cold_options, &input);
+        let raw_writer =
+            crate::source_change::SourceLock::acquire(&cold_options, &lock_key, true).unwrap();
+        let lock_path = cold_options
+            .cache
+            .with_extension("source-locks")
+            .join(format!("{:x}", Sha256::digest(lock_key.as_bytes())));
+        let probe_shared = || {
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .ok()?;
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result == 0 {
+                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
+                Some(false)
+            } else {
+                Some(io::Error::last_os_error().raw_os_error() == Some(libc::EAGAIN))
+            }
+        };
+        let raw_held_before_request = probe_shared();
+        let core = Arc::new(ViewerCore::new(cold_options.clone()));
+        let view = core.machine_views().into_iter().next().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let request_query = expected_generation
+            .as_ref()
+            .map(|generation| format!("sid=lane&generation={generation}&scope=retained_history"));
+        let cold_direct_reply = request_query.as_ref().map(|query| {
+            crate::session_home_details_with_mode(
+                &cold_options,
+                "local",
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+        });
+        let (send, receive) = mpsc::channel();
+        let (wait_started_send, wait_started_receive) = mpsc::channel();
+        let waiting_core = core.clone();
+        let first_query = request_query.clone();
+        let request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(wait_started_send);
+            });
+            let reply = first_query.map_or_else(
+                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
+                |query| {
+                    waiting_core.respond_with_deadline(
+                        waiting_core.extras(),
+                        "GET",
+                        "/api/session-home",
+                        &query,
+                        None,
+                        deadline,
+                    )
+                },
+            );
+            let _ = send.send((Instant::now(), reply));
+        });
+        let first_wait_started = wait_started_receive
+            .recv_timeout(Duration::from_secs(4))
+            .is_ok();
+        let first_reply = receive.recv_timeout(Duration::from_secs(6)).ok();
+        let returned_while_raw_held = first_reply.is_some();
+        let raw_held_at_deadline = probe_shared();
+        let catalog_ready_at_deadline = crate::session_catalog_page_ready(&cold_options).ok();
+        let producer_running_at_deadline = view
+            .live
+            .state
+            .try_lock()
+            .is_ok_and(|state| state.slot == Slot::Running);
+
+        let (success_send, success_receive) = mpsc::channel();
+        let (success_wait_send, success_wait_receive) = mpsc::channel();
+        let success_core = core.clone();
+        let success_query = request_query.clone();
+        let success_request = thread::spawn(move || {
+            INITIAL_CATALOG_WAIT_STARTED.with(|started| {
+                *started.borrow_mut() = Some(success_wait_send);
+            });
+            let reply = success_query.map_or_else(
+                || crate::catalog::error(500, "test_setup", "Home summary unavailable.", false),
+                |query| {
+                    success_core.respond_with_deadline(
+                        success_core.extras(),
+                        "GET",
+                        "/api/session-home",
+                        &query,
+                        None,
+                        Instant::now() + Duration::from_secs(10),
+                    )
+                },
+            );
+            let _ = success_send.send(reply);
+        });
+        let success_wait_started = success_wait_receive
+            .recv_timeout(Duration::from_secs(4))
+            .is_ok();
+
+        // Release only after both cold API requests have reached their waiter.
+        drop(raw_writer);
+        let published = view
+            .wait_until_initial_catalog(Instant::now() + Duration::from_secs(10))
+            .is_ok();
+        let first_reply =
+            first_reply.or_else(|| receive.recv_timeout(Duration::from_secs(10)).ok());
+        let success_reply = success_receive.recv_timeout(Duration::from_secs(10)).ok();
+        let request_joined = request.join().is_ok();
+        let success_request_joined = success_request.join().is_ok();
+        core.close();
+
+        assert!(
+            catalog_warmed,
+            "warm source did not publish its test summary"
+        );
+        assert!(
+            expected_generation.is_some(),
+            "warm Home summary was absent"
+        );
+        assert_eq!(
+            cold_direct_reply.as_ref().map(|reply| reply.status),
+            Some(503)
+        );
+        assert_eq!(raw_held_before_request, Some(true));
+        assert!(
+            first_wait_started,
+            "deadline request did not reach catalog wait"
+        );
+        assert!(
+            success_wait_started,
+            "success request did not reach catalog wait"
+        );
+        assert!(
+            returned_while_raw_held,
+            "request remained blocked past its deadline while Raw was held"
+        );
+        let (completed, reply) = first_reply.unwrap();
+        assert!(
+            completed >= deadline,
+            "cold response returned before its deadline"
+        );
+        assert!(
+            completed <= deadline + Duration::from_secs(2),
+            "cold response exceeded the request deadline by more than two seconds"
+        );
+        assert_eq!(reply.status, 503);
+        let error: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(error["error"]["code"], "catalog_unavailable");
+        assert_eq!(error["error"]["retryable"], true);
+        assert_eq!(raw_held_at_deadline, Some(true));
+        assert_eq!(catalog_ready_at_deadline, Some(false));
+        assert!(
+            producer_running_at_deadline,
+            "cold producer was not still blocked"
+        );
+        assert!(request_joined);
+        assert!(success_request_joined);
+        assert!(published, "Catalog did not publish after Raw was released");
+        assert_eq!(success_reply.as_ref().map(|reply| reply.status), Some(200));
     }
 
     /// A view whose check waits STALLED_AFTER (two seconds here) behind

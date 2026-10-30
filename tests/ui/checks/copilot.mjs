@@ -64,7 +64,7 @@ export default async function copilotCheck(browser) {
             ...server,
             size,
             dark,
-            path: '/s/copilot/' + fixture.id,
+            path: '/session/local/' + fixture.id,
           });
           try {
             await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {

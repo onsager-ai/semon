@@ -9,10 +9,9 @@ const { outputFiles } = await build({
   format: 'esm',
   platform: 'node',
 });
-const { parseSessionRoute, resolveSessionRoute, resolveSessionBookmark, canonicalSessionRoute } =
-  await import(
-    'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
-  );
+const { parseSessionRoute, resolveSessionRoute, canonicalSessionRoute } = await import(
+  'data:text/javascript;base64,' + Buffer.from(outputFiles[0].contents).toString('base64')
+);
 const vectors = JSON.parse(
   await readFile(
     new URL('../../tests/fixtures/session-route-vectors.json', import.meta.url),
@@ -26,10 +25,7 @@ for (const vector of vectors)
       return;
     }
     const route = parseSessionRoute(vector.path, vector.query);
-    const result = (vector.indexed_bookmark ? resolveSessionBookmark : resolveSessionRoute)(
-      route,
-      vector.candidates,
-    );
+    const result = resolveSessionRoute(route, vector.candidates);
     assert.equal(result.outcome, vector.outcome);
     if (result.outcome === 'valid')
       assert.equal(

@@ -11,11 +11,9 @@ export function mountViewerApplication(
   mounted?.destroy();
   const url = new URL(location.href);
   const before = url.href;
-  if (url.pathname === '/timeline') url.pathname = '/analytics';
   // The standalone HTTP boundary already authenticated this bootstrap credential.
   // Consume it before any shared route parsing or canonical history update.
   url.searchParams.delete('t');
-  if (url.searchParams.has('compat')) url.searchParams.delete('compat');
   if (url.href !== before) {
     history.replaceState(history.state, '', url.pathname + url.search + url.hash);
   }
