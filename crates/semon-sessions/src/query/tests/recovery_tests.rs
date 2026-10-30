@@ -516,8 +516,7 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 .with(|stage| stage.get().map(|stage| stage.name()))
                 .unwrap_or("none");
             assert_eq!(
-                reply.status,
-                200,
+                reply.status, 200,
                 "selected range refused at closed stage {stage:?}; local source stage {local_stage}"
             );
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
