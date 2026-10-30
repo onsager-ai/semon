@@ -527,6 +527,17 @@ jobs:
             -p semon-store --bin semon --features semon-sessions/test-clock
           cp target/debug/semon "$RUNNER_TEMP/semon-reference"
 
+      - name: Build the selected Catalog readiness baseline
+        env:
+          READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
+        run: |
+          git fetch --no-tags --depth=1 origin "$READINESS_BASELINE"
+          git worktree add --detach "$RUNNER_TEMP/catalog-readiness-baseline" "$READINESS_BASELINE"
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked \
+            --manifest-path "$RUNNER_TEMP/catalog-readiness-baseline/Cargo.toml" \
+            -p semon-cli --bin semon --features semon-sessions/test-clock
+          cp target/debug/semon "$RUNNER_TEMP/semon-readiness-baseline"
+
       - name: Measure focused multi-machine reads and archived tail scope in Source
         env:
           MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
@@ -567,14 +578,18 @@ jobs:
             --counts 0,256,2048 \
             --output "$MEASUREMENT_OUT"
 
-      - name: Run the candidate browser journey
+      - name: Compare browser readiness on identical native fixtures
         env:
           SOURCE_CANDIDATE: ${{ github.sha }}
+          READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
+          SEMON_BUILD_TIMING: '1'
           BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
         run: |
           python3 scripts/catalog-journey.py \
             --binary "$RUNNER_TEMP/semon-candidate" \
             --source-revision "$SOURCE_CANDIDATE" \
+            --baseline-binary "$RUNNER_TEMP/semon-readiness-baseline" \
+            --baseline-revision "$READINESS_BASELINE" \
             --counts 0,2048 \
             --output "$BROWSER_MEASUREMENT_OUT"
 
@@ -593,6 +608,14 @@ jobs:
             ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json
             ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json.result
             ${{ runner.temp }}/native-foundation-browser/*-browser.log
+            ${{ runner.temp }}/native-foundation-browser/baseline/*-first-import.json*
+            ${{ runner.temp }}/native-foundation-browser/baseline/*-persisted-restart.json*
+            ${{ runner.temp }}/native-foundation-browser/baseline/*-browser.log
+            ${{ runner.temp }}/native-foundation-browser/baseline/*-stages.log
+            ${{ runner.temp }}/native-foundation-browser/candidate/*-first-import.json*
+            ${{ runner.temp }}/native-foundation-browser/candidate/*-persisted-restart.json*
+            ${{ runner.temp }}/native-foundation-browser/candidate/*-browser.log
+            ${{ runner.temp }}/native-foundation-browser/candidate/*-stages.log
           if-no-files-found: warn
           retention-days: 14
 
