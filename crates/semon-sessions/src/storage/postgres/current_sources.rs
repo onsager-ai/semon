@@ -386,33 +386,6 @@ pub(super) fn withdrawal_recorded(
         && selected(tx, &head, &withdrawal.relative)? == Some(false))
 }
 
-/// Physical metadata qualification currently runs inside semantic claim
-/// validation's transaction. It reads no body bytes, but still performs
-/// filesystem I/O; moving it needs a retained host/Source fence.
-pub(super) fn withdrawal_current(
-    tx: &mut PgTxn<'_>,
-    withdrawal: &crate::model::relation_stage::Withdrawal,
-) -> Result<bool, StorageError> {
-    if !withdrawal_recorded(tx, withdrawal)?
-        || identity(&withdrawal.facts_path)? != withdrawal.facts_identity
-    {
-        return Ok(false);
-    }
-    let source =
-        crate::open_input(Path::new(&withdrawal.path)).map_err(|_| StorageError::ScopeChanged)?;
-    let before = crate::events::Stat::from_metadata(
-        &source.metadata().map_err(|_| StorageError::ScopeChanged)?,
-    )
-    .map_err(|_| StorageError::ScopeChanged)?;
-    let after = crate::events::Stat::of(Path::new(&withdrawal.path))
-        .map_err(|_| StorageError::ScopeChanged)?;
-    Ok(crate::is_input_path("codex", &withdrawal.relative)
-        && withdrawal.relative.ends_with(".jsonl")
-        && before == withdrawal.stat
-        && after == before
-        && identity(&withdrawal.facts_path)? == withdrawal.facts_identity)
-}
-
 /// One request's recorded runtime witness. Rechecks inside a leased read use
 /// only the exact canonical identity and independent runtime-file stamps.
 pub(crate) struct Runtime(Option<CurrentSources>);

@@ -61,6 +61,19 @@ through the existing removal writer after its physical observations, retaining
 its Source locks and read snapshot through the ledger comparison and write.
 PostgreSQL staging likewise consumes prepared physical absence with durable
 removal evidence; an unledgered missing path alone cannot authorize retirement.
+PostgreSQL Facts-admission withdrawals retain exact process-local Facts/path
+fence provenance with the prepared model. Before each record or publication,
+the adapter acquires the existing shared Facts and sorted negative Source locks
+and revalidates the complete physical witness before opening its SQL writer.
+The live guard remains outside the transaction callback through commit or
+rollback, then releases even if the prepared model is retained. The SQL stage
+rechecks persisted Facts selection and its existing exact claims, runtime,
+epoch, model and Catalog witnesses without physical withdrawal I/O. Completed
+publication replay still qualifies its original request and acknowledgement.
+This exclusion covers cooperating SourceChange writers sharing the lock
+domain. Advisory locks do not exclude arbitrary external writers; non-Unix
+shared locks retain their existing no-op behavior and exclusive SourceChange
+writes remain unsupported. SQLite's existing physical validation is unchanged.
 Completed PostgreSQL native relocation keeps the old path's exact removal claim
 until qualified successor publication acknowledges it. Re-observing that removed
 path during semantic staging is a metadata-only no-op only when both exact native

@@ -2,6 +2,12 @@ use super::{PgCancellation, PgPool, pool::Driver, schema, sqlstate};
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use std::time::Instant;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static BEFORE_WRITE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Clone, Copy)]
 pub(super) enum TxnKind {
     ReadSnapshot,
@@ -155,6 +161,14 @@ impl PgPool {
             }
             let value = operation(&mut tx)?;
             tx.check()?;
+            #[cfg(test)]
+            if matches!(kind, TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer) {
+                BEFORE_WRITE_COMMIT.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() {
+                        hook();
+                    }
+                });
+            }
             // batch_execute constructs no protocol request until first poll.
             // Mark conservatively BEFORE that poll: any error from this point
             // lacks a COMMIT ACK and requires exact-operation reconciliation.

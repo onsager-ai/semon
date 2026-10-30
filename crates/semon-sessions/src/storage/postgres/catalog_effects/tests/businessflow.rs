@@ -4,6 +4,7 @@ use super::*;
 use crate::events::{EventCache, Outcome};
 use crate::storage::native_events::NativeEventStore;
 use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
+use crate::storage::{LogicalSourceNamespace, postgres::PgPool};
 
 fn stage_inputs(
     options: &Options,
@@ -30,6 +31,108 @@ fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
         }
     }
     value
+}
+
+fn withdrawal_preflight(
+    pool: &PgPool,
+    namespace: &LogicalSourceNamespace,
+    options: &Options,
+    batch: &crate::model::relation_stage::Batch,
+    saved: &crate::model::PreparedSources,
+) {
+    let relative = "sessions/withdrawal-fence-check.jsonl";
+    let path = options.codex_home.join(relative);
+    fs::write(&path, b"").unwrap();
+    let mut negative = saved.withdrawals[0].clone();
+    negative.relative = relative.into();
+    negative.path = path.to_string_lossy().into_owned();
+    negative.stat = crate::events::Stat::of(&path).unwrap();
+    let mut prepared = crate::model::PreparedSources {
+        base_generation: saved.base_generation.clone(),
+        claims: Vec::new(),
+        rows: Vec::new(),
+        transcripts: Vec::new(),
+        pids: Default::default(),
+        lineage_dependencies: Vec::new(),
+        message_dependencies: None,
+        relationships: Default::default(),
+        indexed_sources: Vec::new(),
+        removed_sources: Default::default(),
+        indexed_native_parents: Vec::new(),
+        withdrawals: vec![negative],
+        withdrawal_fence: None,
+    };
+    prepared.retain_withdrawal_fence(options).unwrap();
+    assert!(prepared.withdrawal_guard().unwrap().is_some());
+
+    let cancelled = PgCancellation::default();
+    let (mut refused, _) = crate::storage::postgres::index_store::open(
+        pool.clone(),
+        namespace.clone(),
+        cancelled.clone(),
+    )
+    .unwrap();
+    cancelled.cancel();
+    assert!(matches!(
+        refused.record_semantic_batch(batch, &prepared),
+        Err(crate::events::StoreError::Configured(StorageError::Busy))
+    ));
+    fs::write(&path, b"changed").unwrap();
+    assert!(
+        matches!(
+            refused.record_semantic_batch(batch, &prepared),
+            Err(crate::events::StoreError::Configured(StorageError::Conflict))
+        ),
+        "changed physical witness refuses before cancelled SQL admission"
+    );
+    fs::remove_file(&path).unwrap();
+    assert!(
+        matches!(
+            refused.record_semantic_batch(batch, &prepared),
+            Err(crate::events::StoreError::Configured(StorageError::Conflict))
+        ),
+        "missing physical witness refuses before cancelled SQL admission"
+    );
+}
+
+#[cfg(unix)]
+fn withdrawal_commit_hook(
+    options: &Options,
+    prepared: &crate::model::PreparedSources,
+) -> std::rc::Rc<std::cell::Cell<bool>> {
+    let cache = options.cache.clone();
+    let paths = prepared
+        .withdrawals
+        .iter()
+        .map(|w| w.path.clone())
+        .collect::<Vec<_>>();
+    let checked = std::rc::Rc::new(std::cell::Cell::new(false));
+    let hit = checked.clone();
+    let callback = Box::new(move || {
+        for path in std::iter::once("facts").chain(paths.iter().map(String::as_str)) {
+            assert!(
+                matches!(
+                    crate::source_change::SourceLock::try_exclusive_cache(&cache, path),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                ),
+                "withdrawal guard must survive the SQL callback through COMMIT"
+            );
+        }
+        hit.set(true);
+    });
+    crate::storage::postgres::txn::BEFORE_WRITE_COMMIT.with(|hook| {
+        assert!(hook.borrow_mut().replace(callback).is_none());
+    });
+    checked
+}
+
+#[cfg(unix)]
+fn withdrawal_guard_released(options: &Options, prepared: &crate::model::PreparedSources) {
+    for path in std::iter::once("facts")
+        .chain(prepared.withdrawals.iter().map(|w| w.path.as_str()))
+    {
+        assert!(crate::source_change::SourceLock::try_exclusive_cache(&options.cache, path).is_ok());
+    }
 }
 
 #[test]
@@ -1023,6 +1126,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         removed_sources: saved.removed_sources.clone(),
         indexed_native_parents: saved.indexed_native_parents.clone(),
         withdrawals: saved.withdrawals.clone(),
+        withdrawal_fence: saved.withdrawal_fence.clone(),
     };
     let claim = &mut altered.claims.first_mut().unwrap().1;
     *claim = Some(claim.unwrap_or(0) + 1);
@@ -3088,6 +3192,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(!options.cache.exists());
     // (a) Ordinary incremental stages grow Current beyond 64 owners. Each
     // stage names only its changed paths; unmentioned owners carry forward.
+    let withdrawal_fence_checked = std::cell::Cell::new(false);
     let stage_publish = |cache: &mut EventCache, inputs: &[crate::Input], at: i64| {
         let paths = inputs
             .iter()
@@ -3110,6 +3215,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 // the qualified head is unchanged until the final CAS publishes.
                 let head = cache.session_catalog_generation().unwrap();
                 if !model.prepared().withdrawals.is_empty() {
+                    if !withdrawal_fence_checked.replace(true) {
+                        withdrawal_preflight(
+                            &pool,
+                            &namespace,
+                            &facts_options,
+                            &batch,
+                            model.prepared(),
+                        );
+                        #[cfg(unix)]
+                        {
+                            let checked = withdrawal_commit_hook(&facts_options, model.prepared());
+                            assert_eq!(
+                                cache
+                                    .record_semantic_batch(&batch, model.prepared())
+                                    .unwrap(),
+                                Outcome::Written
+                            );
+                            assert!(checked.get());
+                            withdrawal_guard_released(&facts_options, model.prepared());
+                        }
+                    }
                     let stale_runtime = format!("{}:stale", batch.runtime);
                     let mut stale_withdrawals = model.prepared().withdrawals.clone();
                     for withdrawal in &mut stale_withdrawals {
@@ -3146,9 +3272,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 }
                 let mut deferred = 0;
                 let ack = loop {
+                    #[cfg(unix)]
+                    let checked = (!model.prepared().withdrawals.is_empty())
+                        .then(|| withdrawal_commit_hook(&facts_options, model.prepared()));
                     let ack = cache
                         .publish_semantic_catalog(&batch, model.prepared())
                         .unwrap();
+                    #[cfg(unix)]
+                    if let Some(checked) = checked {
+                        assert!(checked.get());
+                        withdrawal_guard_released(&facts_options, model.prepared());
+                    }
                     if ack.0 != crate::events::Outcome::Deferred {
                         break ack;
                     }
@@ -3158,6 +3292,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     assert!(deferred < 64, "custody makes bounded progress");
                 };
                 assert_eq!(ack.0, crate::events::Outcome::Written);
+                if let Some(negative) = model.prepared().withdrawals.first() {
+                    let path = std::path::Path::new(&negative.path);
+                    let moved = path.with_extension("withdrawal-replay");
+                    fs::rename(path, &moved).unwrap();
+                    let replay = cache.publish_semantic_catalog(&batch, model.prepared());
+                    fs::rename(&moved, path).unwrap();
+                    assert_eq!(replay.unwrap(), ack, "completed replay uses its original ACK");
+                }
                 cache.finish_semantic_stage(batch.epoch).unwrap();
                 break (ack.1.unwrap(), batch, model, deferred);
             }
@@ -3971,6 +4113,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }];
     let (retired, retired_batch, retired_model, _) =
         stage_publish(&mut reopened, &rollout, 1790812810000);
+    assert!(withdrawal_fence_checked.get(), "withdrawal fence regression ran");
     assert!(retired_model.prepared().rows.is_empty(), "zero-row batch");
     assert_eq!(
         retired_batch.runtime,

@@ -113,12 +113,14 @@ proofs, Catalog/retained references, then outbox/checkpoint. SQL commit does not
 prove Raw durability. Uncertain effects are reconciled by the same durable OpID;
 a later cursor or peer result cannot manufacture the original ACK.
 
-PostgreSQL semantic withdrawal still opens descriptors and checks Facts/Source
-metadata while holding its Source SQL write lock. These checks read no body bytes
-but violate the transaction boundary above. Moving them requires physical
-preflight protected through commit by a host/Source fence plus SQL-only durable
-revalidation; this remains an acceptance blocker. The publisher's additional
-withdrawal recheck uses only persisted SQL authority.
+PostgreSQL semantic withdrawal qualifies Facts/Source metadata before opening
+the SQL writer, under the existing shared Facts and sorted Source locks. The
+operation retains those locks through transaction return, while SQL rechecks
+persisted authority and exact stage/claim witnesses. Completed publication replay
+retains its original acknowledgement semantics. This excludes cooperating
+SourceChange writers in the same advisory lock domain; it does not fence arbitrary
+external writers or add non-Unix exclusion. The correction and its before-COMMIT
+lock-lifetime regressions remain subject to exact-revision CI qualification.
 
 Busy, conflict, refusal and uncertain commit remain distinct outcomes. Diagnostics
 are closed and exclude credentials, paths and native contents. Engine errors

@@ -323,7 +323,7 @@ fn withdrawals(
                 .iter()
                 .flat_map(|row| &row.sources)
                 .any(|source| source.path == std::path::Path::new(&negative.path))
-            || !super::current_sources::withdrawal_current(tx, negative)?
+            || !super::current_sources::withdrawal_recorded(tx, negative)?
         {
             return Err(StorageError::Conflict);
         }
@@ -442,6 +442,7 @@ pub(super) fn publish(
     batch: &Batch,
     prepared: &PreparedSources,
     lifecycle: Result<Option<publication::ValidatedLifecycle<'_>>, StorageError>,
+    withdrawals: Result<(), StorageError>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let revision = lock(tx)?;
     let witness = prepared
@@ -469,6 +470,7 @@ pub(super) fn publish(
         }
         return Ok((Outcome::Written, stage.acknowledgement));
     }
+    withdrawals?;
     let mut stage = checked(tx, batch)?;
     let lifecycle = lifecycle?;
     if serde_json::to_vec(&lifecycle).map_err(|_| StorageError::ScopeChanged)?
