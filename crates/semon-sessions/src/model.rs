@@ -7490,7 +7490,9 @@ impl PreparedSources {
     #[cfg(feature = "postgres")]
     pub(crate) fn retain_withdrawal_fence(&mut self, options: &Options) -> io::Result<()> {
         if self.withdrawals.len() > 64 {
-            return Err(io::Error::other("semantic withdrawal source budget exceeded"));
+            return Err(io::Error::other(
+                "semantic withdrawal source budget exceeded",
+            ));
         }
         if self.withdrawals.is_empty() {
             return Ok(());
@@ -7524,7 +7526,9 @@ impl PreparedSources {
     #[cfg(feature = "postgres")]
     pub(crate) fn withdrawal_guard(&self) -> io::Result<Option<WithdrawalGuard>> {
         if self.withdrawals.len() > 64 {
-            return Err(io::Error::other("semantic withdrawal source budget exceeded"));
+            return Err(io::Error::other(
+                "semantic withdrawal source budget exceeded",
+            ));
         }
         if self.withdrawals.is_empty() {
             return Ok(None);
@@ -7535,7 +7539,9 @@ impl PreparedSources {
             .as_ref()
             .filter(|fence| fence.witness == witness);
         let Some(fence) = fence else {
-            return Err(io::Error::other("withdrawal Source fence missing or changed"));
+            return Err(io::Error::other(
+                "withdrawal Source fence missing or changed",
+            ));
         };
         // Preparation has released its temporary locks. Acquire only the
         // negative paths, Facts first, before any SQL writer is opened.
@@ -7555,7 +7561,9 @@ impl PreparedSources {
         };
         for withdrawal in &self.withdrawals {
             if !withdrawal.current()? {
-                return Err(io::Error::other("native source admission withdrawal changed"));
+                return Err(io::Error::other(
+                    "native source admission withdrawal changed",
+                ));
             }
         }
         Ok(Some(guard))
