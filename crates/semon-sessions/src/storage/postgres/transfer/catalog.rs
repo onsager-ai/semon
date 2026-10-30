@@ -961,6 +961,38 @@ mod tests {
             eprintln!("transfer_query_direction forward_pg");
             ordinary(&config).unwrap()
         };
+        let (root_publication, root_digest, root_manifest) = pool
+            .transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                let ns = config.namespace.as_str().as_bytes();
+                let rows = tx.driver.query(
+                    "SELECT DISTINCT r.publication,r.digest,r.manifest FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND f.kind=convert_to('current','UTF8') LIMIT 1",
+                    &[&ns, &expected[0].key.as_bytes()],
+                ).map_err(sqlstate::error)?;
+                assert!(!rows.is_empty(), "real transfer must expose a selected-root proof for the current owner");
+                Ok((rows[0].get::<_, Vec<u8>>(0), rows[0].get::<_, Vec<u8>>(1), rows[0].get::<_, Vec<u8>>(2)))
+            })
+            .unwrap();
+        let mut tampered_manifest = root_manifest.clone();
+        tampered_manifest.push(b' ');
+        pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            assert_eq!(tx.driver.execute(
+                "UPDATE semon_pg_native_selected_roots SET manifest=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND publication=$2 AND digest=$3",
+                &[&ns, &root_publication, &root_digest, &tampered_manifest],
+            ).map_err(sqlstate::error)?, 1);
+            Ok(())
+        }).unwrap();
+        let refused_manifest = ordinary(&config);
+        pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            assert_eq!(tx.driver.execute(
+                "UPDATE semon_pg_native_selected_roots SET manifest=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND publication=$2 AND digest=$3",
+                &[&ns, &root_publication, &root_digest, &root_manifest],
+            ).map_err(sqlstate::error)?, 1);
+            Ok(())
+        }).unwrap();
+        assert!(refused_manifest.is_err(), "admitted reader must refuse a changed real selected-root manifest");
+        assert_eq!(ordinary(&config).unwrap(), forward_ordinary);
         let listed = forward_ordinary.0["sessions"].as_array().unwrap();
         assert_eq!(listed.len(), 2);
         for key in [&initial[0].key, &expected[0].key] {
