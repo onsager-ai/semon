@@ -509,9 +509,7 @@ fn generic_runtime_publication_facades(
                     None,
                 )
                 .expect("generic typed capture admits an old row while Index is ahead");
-            let mut expected = fields.clone();
-            expected["session"]["machine"] = serde_json::json!(namespace.as_str());
-            assert_eq!(ahead, expected);
+            assert_eq!(ahead, fields);
 
             let hostname = options.proc_root.join("sys/kernel/hostname");
             let original_hostname = fs::read(&hostname).unwrap();
