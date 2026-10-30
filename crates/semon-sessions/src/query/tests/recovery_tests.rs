@@ -89,10 +89,7 @@ fn recovery_stage_observation_grants(db: &rusqlite::Connection) -> Vec<(String, 
     grants
 }
 
-fn recovery_publication_snapshot(
-    db: &rusqlite::Connection,
-    key: &str,
-) -> Vec<(String, String)> {
+fn recovery_publication_snapshot(db: &rusqlite::Connection, key: &str) -> Vec<(String, String)> {
     let mut statement = db
         .prepare(
             "SELECT 'overview',summary FROM main.session_overview WHERE session_key=?1 UNION ALL SELECT 'header',metadata FROM main.session_trace_headers WHERE session_key=?1 UNION ALL SELECT 'turn',metadata FROM main.session_trace_turns WHERE session_key=?1 UNION ALL SELECT 'edge',metadata FROM main.session_trace_edges WHERE session_key=?1 ORDER BY 1,2",
@@ -1125,8 +1122,7 @@ fn recovery_tampered_preimage_refuses_before_producer_reads_or_writes() {
     let generation_before = catalog_generation(&home);
     let file_reads_before = crate::events::FILE_READS.with(std::cell::Cell::get);
     let source_read_bytes_before = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
-    let direct_source_reads_before =
-        crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get);
+    let direct_source_reads_before = crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get);
 
     let error = crate::repair_session_overview(
         &home.options,
