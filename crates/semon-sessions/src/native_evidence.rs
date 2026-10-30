@@ -643,11 +643,9 @@ impl NativeEvidence {
         Ok(())
     }
 
-    /// Advance cold candidate discovery without reading native bodies. The
-    /// latest page is published after discovery finishes, so a flat directory's
-    /// enumeration order cannot displace recent sessions with old history.
-    /// Workers yield after 512 entries or 64 accepted candidates; only the 64
-    /// newest candidates remain resident between steps.
+    /// Advance cold candidate discovery without reading native bodies. Workers
+    /// yield after 512 entries or 64 accepted candidates; only the 64 newest
+    /// candidates remain resident between steps.
     pub(crate) fn prepare_catalog(
         &self,
         work: &mut Work,

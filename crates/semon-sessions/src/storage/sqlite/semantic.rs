@@ -170,6 +170,16 @@ impl SemanticStaging {
             .map(|owner| crate::events::store::configured::Writer::owned(owner.clone()))
             .unwrap_or_else(|| crate::events::store::configured::Writer::new(&self.config))
     }
+    /// Primitive staging has no reported-facts port. Its reported reads/writes
+    /// still refuse; only a composite owner restores the persisted stamp.
+    pub(super) fn reported_stamp(
+        &self,
+    ) -> Result<Option<crate::events::ReportedFileStamp>, StorageError> {
+        let Some(owner) = &self.owner else {
+            return Ok(None);
+        };
+        crate::events::store::configured::Writer::owned(owner.clone()).reported_stamp()
+    }
     pub(crate) fn validate(config: &StoreConfig) -> Result<Self, StorageError> {
         crate::events::store::configured::validate_semantic_schema(config)?;
         let mut db = SourceJournal(config.clone()).connection()?;

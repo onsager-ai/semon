@@ -6,6 +6,9 @@ on:
   push:
     branches:
       - task/479-pg-foundation-20261025
+      - task/479-pg-facts-20261026
+      - task/479-pg-native-ingest-20261026
+      - task/479-pg-catalog-20261026
 
 permissions:
   contents: read
@@ -13,6 +16,8 @@ permissions:
 env:
   SEMON_PRICING_REFRESH: "off"
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+  SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
+  SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
   SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
 
 jobs:
@@ -51,6 +56,8 @@ jobs:
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          CREATE ROLE semon_source LOGIN PASSWORD 'ephemeral-source' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT ON DATABASE postgres TO semon_source;
           SQL
       - name: Ephemeral verified TLS PostgreSQL service
         run: |
@@ -99,9 +106,103 @@ jobs:
           name: pg-foundation-review-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Catalog native proof binding before physical effects
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog135 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog135.log"
+      - name: Retain Catalog native proof binding diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-catalog135-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-catalog135.log
+          if-no-files-found: error
+      - name: Actual native EventCache PostgreSQL integration
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native126 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-native126.log"
+      - name: Retain early native ingest diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-native126-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-native126.log
+          if-no-files-found: error
+      - name: Private immutable Catalog Current and recipe producer qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog124 -- --nocapture
+      - name: Private Catalog original custody shared-producer qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog127.log"
+      - name: Borrowed immutable Catalog metadata snapshot qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog131 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog131.log"
+      - name: Retain borrowed Catalog snapshot diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-catalog131-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-catalog131.log
+      - name: Retain private Catalog custody diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-catalog127-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-catalog127.log
+      - name: Native keys125 long file and metadata producer oracle
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys125.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys128 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys128.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys132 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys132.log"
+          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys134 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys134.log"
+      - name: Retain native key measurements
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-keys125-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/pg-keys125.log
+            ${{ runner.temp }}/pg-keys134.log
+            ${{ runner.temp }}/pg-keys128.log
+            ${{ runner.temp }}/pg-keys132.log
+          if-no-files-found: error
+      - name: Strict published Tree scalar and deferred interpretation qualification
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-scalar119.log"
+      - name: Retain early scalar diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-scalar119-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-scalar119.log
+          if-no-files-found: error
+      - name: Native ownership after source replacement
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture
+      - name: Progressive native source capacity refusal
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls configured_semantic_domain61_progressive_index_overflow_is_capacity_not_conflict -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-capacity.log"
+      - name: Retain early native capacity diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-capacity-${{ github.sha }}
+          path: ${{ runner.temp }}/native-capacity.log
+          if-no-files-found: error
+      - name: Reported facts exact writer and snapshot qualification
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
+      - name: Reported facts shared codec and SQLite history oracle
+        run: |
+          cargo test -p semon-sessions --locked --features postgres-test-tls reported_rows -- --nocapture
+          cargo test -p semon-sessions --locked --features postgres-test-tls reported_runs -- --nocapture
+          cargo test -p semon-sessions --locked --features postgres-test-tls configured_reported_runs_corruption_and_ownership_refuse_before_effect -- --nocapture
       - name: Default build excludes PostgreSQL driver dependencies
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: |
@@ -117,7 +218,15 @@ jobs:
         run: cargo fmt --all --check
       - name: PostgreSQL strict Clippy
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
-        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings
+        shell: bash
+        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/pg-keys125-clippy.log"
+      - name: Retain strict Clippy diagnostics
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-keys125-clippy-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-keys125-clippy.log
+          if-no-files-found: error
       - name: Real PostgreSQL and existing session regressions
         if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls

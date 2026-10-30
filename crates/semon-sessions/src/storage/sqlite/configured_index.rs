@@ -7,6 +7,7 @@ use crate::storage::{StorageError, StoreConfig};
 use std::{collections::BTreeSet, io, sync::Arc};
 
 pub(super) struct ConfiguredIndex {
+    reported_selection: Option<BTreeSet<String>>,
     native: crate::events::store::configured::Writer,
     semantic: Option<super::semantic::Stage>,
     journal: super::source_journal::SourceJournal,
@@ -17,6 +18,7 @@ pub(crate) fn open(config: &StoreConfig) -> Result<Box<dyn IndexStore>, StorageE
     let journal = super::source_journal::SourceJournal(config.clone());
     journal.prepare()?;
     Ok(Box::new(ConfiguredIndex {
+        reported_selection: None,
         native: crate::events::store::configured::Writer::new(config),
         semantic: None,
         journal,
@@ -39,10 +41,18 @@ pub(crate) fn open_semantic(
     journal.prepare()?;
     let native = capability.writer();
     Ok(Box::new(ConfiguredIndex {
+        reported_selection: None,
         native,
         semantic: Some(super::semantic::Stage::open(capability)?),
         journal,
     }))
+}
+
+pub(crate) fn open_semantic_with_stamp(
+    capability: super::semantic::SemanticStaging,
+) -> Result<(Box<dyn IndexStore>, Option<ReportedFileStamp>), StorageError> {
+    let stamp = capability.reported_stamp()?;
+    Ok((open_semantic(capability)?, stamp))
 }
 
 impl IndexStore for ConfiguredIndex {
@@ -353,11 +363,10 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError> {
-        if files
-            .iter()
-            .any(|(_, ledger, _)| ledger.offset != ledger.stat.size)
+        if !crate::events::native_commit::initial_batch(files)
+            .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?
         {
-            return Err(StoreError::Configured(StorageError::InvalidArguments));
+            return Ok(Outcome::Conflict);
         }
         let files = files
             .iter()
@@ -379,11 +388,14 @@ impl IndexStore for ConfiguredIndex {
     }
     fn select_reported_runs(
         &mut self,
-        _ids: &BTreeSet<String>,
+        ids: &BTreeSet<String>,
     ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        let runs = self
+            .native
+            .reported_runs(ids)
+            .map_err(StoreError::Configured)?;
+        self.reported_selection = Some(ids.clone());
+        Ok(runs)
     }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
         Err(StoreError::Configured(
@@ -397,11 +409,12 @@ impl IndexStore for ConfiguredIndex {
     }
     fn save_runs(
         &mut self,
-        _runs: &[crate::facts::ReportedRunSnapshot],
-        _stamp: &ReportedFileStamp,
+        runs: &[crate::facts::ReportedRunSnapshot],
+        stamp: &ReportedFileStamp,
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError> {
-        Err(StoreError::Configured(
-            StorageError::NamespaceUpgradePending,
-        ))
+        self.native
+            .save_reported_runs(runs, stamp, self.reported_selection.as_ref())
+            .map(Some)
+            .map_err(StoreError::Configured)
     }
 }

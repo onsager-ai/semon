@@ -22,11 +22,14 @@
 pub(crate) mod chunk_proofs;
 pub(crate) mod configured;
 mod launch_calls;
+pub(crate) mod native_commit;
+mod native_decode;
 pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
 pub(crate) mod semantic_stage;
 pub(crate) mod tree_state;
+mod tree_capture;
 
 use std::{
     collections::BTreeMap,
@@ -47,12 +50,12 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::native_aux::{ClaudeSidecarRecord, CodexHeaderRecord, ParentMarkerRecord};
 #[cfg(test)]
-use super::Yield;
-use super::native_rows::EventState;
+use super::{BillingUsage, Peer, Reply, Yield};
 use super::{
-    BillingUsage, CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded,
-    MessageUsage, ModelTokens, Outcome, Peer, Reply, ReportedFileStamp, Signal, Stat, StoreError,
+    CACHE_VERSION, CodexUsageEvent, Event, FileIndex, IndexStore, Ledger, Loaded, MessageUsage,
+    ModelTokens, Outcome, ReportedFileStamp, Signal, Stat, StoreError,
 };
 use crate::storage::sqlite::source_journal;
 use crate::storage::{
@@ -256,9 +259,8 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: older owned indexes rebuild together. Version 34 adds the
-// matching NOCASE scheduling indexes; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 34;
+// Schema 35 fences the current native representations and scheduling indexes.
+pub(crate) const SCHEMA_VERSION: i64 = 35;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -869,6 +871,102 @@ fn copied_usage_sql<'a>(
     Ok(if composite { scoped } else { legacy })
 }
 
+// A writer page has already passed its owner, namespace, schema and epoch
+// admission before this is constructed.  Keep the physical-family choices
+// borrowed by that owner transaction: they are never connection, thread or
+// process caches, and a fresh transaction must qualify them again.
+struct WriterLayout<'tx, 'connection> {
+    transaction: &'tx Transaction<'connection>,
+    core_composite: bool,
+    meta_composite: bool,
+    copied_usage_composite: bool,
+    support_composite: bool,
+    schema_version: i64,
+}
+
+impl<'tx, 'connection> WriterLayout<'tx, 'connection> {
+    fn new(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
+        // Each selector retains its authored validation; use distinct sentinels
+        // only to retain the selected physical statement for this transaction.
+        let core_composite = configured::sql(transaction, "singleton", "composite")? == "composite";
+        let meta_composite =
+            configured::metadata_sql(transaction, "singleton", "composite")? == "composite";
+        let copied_usage_composite =
+            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
+        let support_composite =
+            semantic_stage::support_sql(transaction, "singleton", "composite")? == "composite";
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        Ok(Self {
+            transaction,
+            core_composite,
+            meta_composite,
+            copied_usage_composite,
+            support_composite,
+            schema_version,
+        })
+    }
+
+    #[cfg(test)]
+    fn copied_usage_only(transaction: &'tx Transaction<'connection>) -> rusqlite::Result<Self> {
+        let copied_usage_composite =
+            copied_usage_sql(transaction, "singleton", "composite")? == "composite";
+        let schema_version =
+            transaction.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        Ok(Self {
+            transaction,
+            core_composite: false,
+            meta_composite: false,
+            copied_usage_composite,
+            support_composite: false,
+            schema_version,
+        })
+    }
+
+    fn core<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.core_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn meta<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.meta_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn copied_usage<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.copied_usage_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn support<'a>(&self, singleton: &'a str, composite: &'a str) -> &'a str {
+        if self.support_composite {
+            composite
+        } else {
+            singleton
+        }
+    }
+
+    fn ensure_current(&self) -> rusqlite::Result<()> {
+        let observed: i64 = self
+            .transaction
+            .pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        if observed == self.schema_version {
+            Ok(())
+        } else {
+            Err(rusqlite::Error::InvalidQuery)
+        }
+    }
+}
+
 fn child_predicate(c: &Connection, table: &str) -> rusqlite::Result<&'static str> {
     match table {
         "usage_identity" | "usage" | "codex_usage" => {
@@ -924,6 +1022,8 @@ const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool
 const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, cost, duration, \
      api_duration, tool_duration, lines_added, lines_removed, model_usage, capture_at) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+
+const PUT_RUN_SCOPED: &str = "INSERT OR REPLACE INTO reported_runs (namespace,session_id,start,cost,duration,api_duration,tool_duration,lines_added,lines_removed,model_usage,capture_at) VALUES(semon_namespace(),?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)";
 
 /// The SQLite [`IndexStore`]: one connection, used by one
 /// [`super::EventCache`].
@@ -2115,9 +2215,7 @@ pub(super) fn read_selected(
         }
         loaded.files.push((path, ledger, index));
     }
-    let mut runs = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
-    ))?;
+    let mut runs = connection.prepare(&reported_select_sql(connection, true)?)?;
     for id in native_ids {
         let mut rows = runs.query([id])?;
         while let Some(row) = rows.next()? {
@@ -2466,8 +2564,15 @@ impl SourceObservationStore for SqliteStore {
                 .map_err(source_journal::local_failure)?;
         let committed =
             DiscoveryWitness::read(&tx, &self.discovery).map_err(source_journal::local_failure)?;
-        // Intent triggers cannot smuggle a changed current contract into a witness.
-        require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        // Intent triggers cannot smuggle a changed physical contract into a
+        // committed witness. The admission qualification remains mandatory;
+        // this same-TX delta avoids re-probing an unchanged layout.
+        if committed.contract != witness.contract
+            || committed.main_schema != witness.main_schema
+            || committed.temp_schema != witness.temp_schema
+        {
+            require_current_sql(&tx).map_err(source_journal::local_failure)?;
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         if recovery_complete {
             self.discovery.recovery = Some(committed);
@@ -3134,11 +3239,6 @@ impl IndexStore for SqliteStore {
         &mut self,
         files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
     ) -> Result<Outcome, StoreError> {
-        if files.len() > 64 {
-            return Err(StoreError::Data(
-                "initial index batch exceeds source budget".into(),
-            ));
-        }
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let mut row_measurements = crate::native_timing::Measurements::new(timing);
@@ -3158,17 +3258,20 @@ impl IndexStore for SqliteStore {
         if !current(&transaction).map_err(failure)? {
             return Ok(Outcome::Stale);
         }
-        for (path, ledger, _) in files {
-            if ledger.offset != ledger.stat.size
-                || ledger_row(&transaction, path).map_err(failure)?.is_some()
-                || Stat::of(Path::new(path)).ok().as_ref() != Some(&ledger.stat)
-            {
+        if !super::native_commit::initial_batch(files)
+            .map_err(|message| StoreError::Data(message.into()))?
+        {
+            return Ok(Outcome::Conflict);
+        }
+        for (path, _, _) in files {
+            if ledger_row(&transaction, path).map_err(failure)?.is_some() {
                 return Ok(Outcome::Conflict);
             }
         }
         measurements.record("fences", started, files.len());
         write_activity.stage("fences", &transaction);
         let started = measurements.start();
+        let layout = WriterLayout::new(&transaction).map_err(failure)?;
         let mut usage_deletes = UsageDeletes::default();
         for (path, ledger, index) in files {
             write_index_changes_with_usage_deletes(
@@ -3180,6 +3283,7 @@ impl IndexStore for SqliteStore {
                 None,
                 &mut row_measurements,
                 None,
+                &layout,
                 &mut usage_deletes,
             )
             .map_err(failure)?;
@@ -3744,21 +3848,7 @@ impl SqliteStore {
                     self.semantic_rejection = Some("source_ledger_missing");
                     return Ok(Outcome::Conflict);
                 };
-                if (
-                    ledger.stat.dev,
-                    ledger.stat.ino,
-                    ledger.offset,
-                    ledger.prefix,
-                    ledger.tail,
-                    ledger.stat.changed_ns,
-                ) != (
-                    source.dev,
-                    source.ino,
-                    source.offset,
-                    source.prefix_sha256,
-                    source.tail_sha256,
-                    source.changed_ns,
-                ) {
+                if !crate::storage::catalog::source_matches_ledger(source, &ledger) {
                     self.semantic_rejection = Some("source_identity");
                     return Ok(Outcome::Conflict);
                 }
@@ -4679,6 +4769,7 @@ impl SqliteStore {
             return Ok(Outcome::Stale);
         }
         require_current_sql(&transaction)?;
+        let layout = WriterLayout::new(&transaction)?;
         let found = ledger_row(&transaction, path)?;
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
             return Ok(Outcome::Conflict);
@@ -4688,7 +4779,15 @@ impl SqliteStore {
         {
             clear(&transaction, file_id)?;
         }
-        write_index_changes(&transaction, path, ledger, index, changes, expected)?;
+        write_index_changes(
+            &transaction,
+            path,
+            ledger,
+            index,
+            changes,
+            expected,
+            &layout,
+        )?;
         transaction.commit()?;
         crate::pricing::runtime::notify_reprice();
         Ok(Outcome::Written)
@@ -4798,16 +4897,19 @@ impl SqliteStore {
         runs: &[ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> rusqlite::Result<Option<Vec<ReportedRunSnapshot>>> {
+        let rows = super::reported_rows::plan(runs)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !current(&transaction)? {
             return Ok(None);
         }
+        validate_prior_reported(&transaction, &rows)?;
         {
             let mut put = transaction.prepare(PUT_RUN)?;
-            for run in runs {
-                put_run(&mut put, run)?;
+            for row in rows {
+                put_run(&mut put, &row.run)?;
             }
         }
         transaction.execute(
@@ -5038,8 +5140,16 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
 /// Classify in a read snapshot, before journal, schema or recovery writes.
 /// Version zero is fresh only when there are no schema objects.
 fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
+    tree_state::register(connection)?;
     if crate::storage::sqlite::namespace::is_bound(connection)? {
         return Ok(Init::Unsupported("namespace writer upgrade is pending"));
+    }
+    let application: i64 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if application != 0 {
+        return Ok(Init::Unsupported(
+            "unsupported session index: application id",
+        ));
     }
     let schema: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if schema == 0 {
@@ -5128,6 +5238,23 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         return Ok(Init::Unsupported(
             "unsupported session index: publication version",
         ));
+    }
+    if !current_objects_present(connection)? {
+        return Ok(Init::Unsupported(
+            "unsupported session index: missing current schema object",
+        ));
+    }
+    for sql in [
+        "SELECT namespace,operation_id,payload_digest,outcome,recovery_done FROM source_observation_receipts LIMIT 0",
+        "SELECT sequence,namespace,operation_id,payload_digest,payload FROM source_observation_intents LIMIT 0",
+    ] {
+        if let Err(error) = connection.prepare(sql) {
+            return malformed_schema(error);
+        }
+    }
+    let mode: String = connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Ok(Init::Unsupported("unsupported session index: journal mode"));
     }
     Ok(Init::Ready)
 }
@@ -5230,7 +5357,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 /// Physical families, not API qualification or permission to publish. The
 /// unported support/history/stage owners remain singleton and fenced even in
 /// private composite fixtures. No individual member table can be selected.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 struct PhysicalLayout {
     core: bool,
     metadata: bool,
@@ -5513,10 +5640,93 @@ fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
     }
 }
 
+/// Qualify the complete authored current profile without changing the store.
+/// Reference databases contain only schema and seed metadata, never user data.
+/// Comparing definitions also checks columns, keys, constraints and trigger
+/// bodies; an object with the right name alone cannot qualify a corrupt family.
+fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
+    let scoped = connection.prepare_cached("SELECT s.name FROM main.sqlite_schema s JOIN pragma_table_info(s.name,'main') p ON p.name='namespace' WHERE s.type='table' AND s.name IN ('files','meta','session_catalog','session_trace_headers','usage_identity','native_usage_sources','native_tree_headers','pricing_recompute_pending','reported_runs','catalog_semantic_stage')")?
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+    let mut flags = [false; 10];
+    for (flag, table) in flags.iter_mut().zip([
+        "files",
+        "meta",
+        "session_catalog",
+        "session_trace_headers",
+        "usage_identity",
+        "native_usage_sources",
+        "native_tree_headers",
+        "pricing_recompute_pending",
+        "reported_runs",
+        "catalog_semantic_stage",
+    ]) {
+        *flag = scoped.contains(table);
+    }
+    let [
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
+    ] = flags;
+    let profile = PhysicalLayout {
+        core,
+        metadata,
+        catalog,
+        trace,
+        copied_usage,
+        native_usage,
+        tree,
+        pricing_queue,
+        semantic_support,
+        semantic_stage,
+    };
+    let Ok(ddl) = authored_storage_ddl(profile) else {
+        return Ok(false);
+    };
+    static INVENTORIES: OnceLock<Mutex<BTreeMap<PhysicalLayout, std::sync::Arc<String>>>> =
+        OnceLock::new();
+    let mut inventories = INVENTORIES
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if let std::collections::btree_map::Entry::Vacant(entry) = inventories.entry(profile) {
+        let reference = Connection::open_in_memory()?;
+        tree_state::register(&reference)?;
+        for chunk in ddl {
+            reference.execute_batch(chunk)?;
+        }
+        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY type,name")?
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
+            .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        entry.insert(std::sync::Arc::new(format!(
+            "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
+            objects.len(),
+            objects.join(",")
+        )));
+    }
+    let sql = inventories
+        .get(&profile)
+        .cloned()
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    drop(inventories);
+    connection
+        .prepare_cached(sql.as_str())?
+        .query_row([], |row| row.get(0))
+}
+
 /// Reclassify inside SQLite's writer lock. Reset and current DDL commit as one
 /// transaction: WAL readers keep their old snapshots; producers cannot reset a
 /// store that another producer has already rebuilt. No files are unlinked.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
+    tree_state::register(connection)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
     let read = connection.transaction()?;
@@ -5562,9 +5772,6 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
             unsupported => return Ok(unsupported),
         }
         transaction.commit()?;
-    }
-    if !initialized {
-        connection.execute_batch(SOURCE_OBSERVATION_RECEIPTS_SCHEMA)?;
     }
     #[cfg(test)]
     if initialized && let Some(hook) = BEFORE_FRESH_WAL.with(|slot| slot.borrow_mut().take()) {
@@ -5969,21 +6176,6 @@ fn from_json<T: DeserializeOwned>(column: usize, text: &str) -> rusqlite::Result
     })
 }
 
-fn event_state(column: usize, text: &str) -> rusqlite::Result<EventState> {
-    let state: EventState = from_json(column, text)?;
-    if state.version != 1 {
-        return Err(rusqlite::Error::FromSqlConversionFailure(
-            column,
-            Type::Text,
-            Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "unsupported event-state version",
-            )),
-        ));
-    }
-    Ok(state)
-}
-
 /// An enum's serde name (`Kind`, `SignalKind`), so a new variant needs no
 /// table change and an unknown name fails to decode.
 fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
@@ -5994,12 +6186,6 @@ fn tag<T: Serialize>(value: &T) -> rusqlite::Result<String> {
         )),
         Err(error) => Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error))),
     }
-}
-
-fn untag<T: DeserializeOwned>(column: usize, text: String) -> rusqlite::Result<T> {
-    serde_json::from_value(Value::String(text)).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(column, Type::Text, Box::new(error))
-    })
 }
 
 const NATIVE_METADATA_MAX: usize = 1024 * 1024;
@@ -6049,18 +6235,7 @@ fn native_metadata_delete(connection: &Connection) -> rusqlite::Result<&'static 
     )
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct TreeSummaryRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    #[serde(default)]
-    projection_witness: Option<String>,
-    #[serde(default)]
-    interpretation_witness: Option<String>,
-    summary: crate::native_tree::Summary,
-}
+use super::tree_rows::TreeSummaryRecord;
 
 fn tree_summary_key(path: &str) -> String {
     format!("native_tree_summary:{path}")
@@ -6089,7 +6264,12 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
             r.get(0)
         })?;
     values.push(pricing);
-    Ok(format!("{:x}", Sha256::digest(json(&values)?.as_bytes())))
+    super::tree_rows::interpretation(
+        &values
+            .try_into()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+    )
+    .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn tree_reusable(
@@ -6105,24 +6285,23 @@ fn tree_reusable(
             r.get(0)
         })
         .optional()?;
-    let Some(record) = encoded
-        .flatten()
-        .and_then(|value| serde_json::from_str::<TreeSummaryRecord>(&value).ok())
-    else {
+    let Some(encoded) = encoded.flatten() else {
+        return Ok(false);
+    };
+    let projection = tree_state::witness(connection, path, ledger)?;
+    let interpretation = tree_interpretation(connection, path)?;
+    let Some(record) = TreeSummaryRecord::decode_current(
+        encoded.as_bytes(),
+        &header_ledger(ledger),
+        projection.as_deref(),
+        &interpretation,
+    ) else {
         return Ok(false);
     };
     let Some(summary) = index.tree_summary.as_ref() else {
         return Ok(false);
     };
-    if record.version != 3
-        || record.parser_version != CACHE_VERSION
-        || record.ledger != header_ledger(ledger)
-        || record.projection_witness.is_none()
-        || tree_state::witness(connection, path, ledger)? != record.projection_witness
-        || record.interpretation_witness.as_deref()
-            != Some(tree_interpretation(connection, path)?.as_str())
-        || json(&record.summary)?
-            != json(&summary.compact(index.native_usage_observations.is_some()))?
+    if json(&record.summary)? != json(&summary.compact(index.native_usage_observations.is_some()))?
     {
         return Ok(false);
     }
@@ -6143,6 +6322,15 @@ fn read_tree_summary(
     path: &str,
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let failed: Option<Option<String>> = statement
+        .query_row([format!("native_tree_failure:{path}")], |row| {
+            crate::selected_read::row(row, 64)?;
+            row.get(0)
+        })
+        .optional()?;
+    if failed.is_some() {
+        return Ok(None);
+    }
     let encoded: Option<Option<String>> = statement
         .query_row([tree_summary_key(path)], |row| {
             crate::selected_read::row(row, 512)?;
@@ -6152,25 +6340,16 @@ fn read_tree_summary(
     let Some(text) = encoded.flatten() else {
         return Ok(None);
     };
-    let Some(record) = serde_json::from_str::<TreeSummaryRecord>(&text).ok() else {
+    let projection = tree_state::witness(connection, path, ledger)?;
+    let interpretation = tree_interpretation(connection, path)?;
+    let Some(record) = TreeSummaryRecord::decode_current(
+        text.as_bytes(),
+        &header_ledger(ledger),
+        projection.as_deref(),
+        &interpretation,
+    ) else {
         return Ok(None);
     };
-    if record.version != 3
-        || record.parser_version != CACHE_VERSION
-        || record.ledger != header_ledger(ledger)
-    {
-        return Ok(None);
-    }
-    if let Some(witness) = &record.projection_witness
-        && tree_state::witness(connection, path, ledger)?.as_ref() != Some(witness)
-    {
-        return Ok(None);
-    }
-    if let Some(witness) = &record.interpretation_witness
-        && tree_interpretation(connection, path)? != *witness
-    {
-        return Ok(None);
-    }
     let mut summary = record.summary;
     if !tree_state::restore(connection, path, ledger, &mut summary)? {
         return Ok(None);
@@ -6186,14 +6365,13 @@ fn write_tree_summary(
     normalized_usage: bool,
 ) -> rusqlite::Result<()> {
     if let Some(summary) = summary {
-        let current = TreeSummaryRecord {
-            version: 3,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            projection_witness: tree_state::witness(transaction, path, ledger)?,
-            interpretation_witness: Some(tree_interpretation(transaction, path)?),
-            summary: summary.compact(normalized_usage),
-        };
+        let current = TreeSummaryRecord::new(
+            header_ledger(ledger),
+            tree_state::witness(transaction, path, ledger)?,
+            tree_interpretation(transaction, path)?,
+            summary,
+            normalized_usage,
+        );
         if current.projection_witness.is_some() {
             let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
@@ -6216,14 +6394,13 @@ fn write_tree_summary(
     let encoded = summary
         .map(|summary| {
             tree_state::write(transaction, path, ledger, summary)?;
-            json(&TreeSummaryRecord {
-                version: 3,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                projection_witness: tree_state::witness(transaction, path, ledger)?,
-                interpretation_witness: Some(tree_interpretation(transaction, path)?),
-                summary: summary.compact(normalized_usage),
-            })
+            json(&TreeSummaryRecord::new(
+                header_ledger(ledger),
+                tree_state::witness(transaction, path, ledger)?,
+                tree_interpretation(transaction, path)?,
+                summary,
+                normalized_usage,
+            ))
         })
         .transpose()?;
     if let Some(encoded) = encoded {
@@ -6251,24 +6428,6 @@ fn write_tree_summary(
         )?;
     }
     Ok(())
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexHeaderRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    header: crate::native_header::CodexHeader,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ParentMarkerRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    index: crate::native_marker::Index,
 }
 
 fn parent_marker_key(path: &str) -> String {
@@ -6315,13 +6474,9 @@ fn write_parent_marker(
     ledger: &Ledger,
     index: Option<&crate::native_marker::Index>,
 ) -> rusqlite::Result<()> {
-    if let Some(index) = index.filter(|index| index.valid(ledger)) {
-        let encoded = json(&ParentMarkerRecord {
-            version: 1,
-            parser_version: CACHE_VERSION,
-            ledger: header_ledger(ledger),
-            index: index.clone(),
-        })?;
+    if let Some(encoded) = super::native_aux::parent_marker(ledger, index)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?
+    {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![parent_marker_key(path), encoded])?;
@@ -6396,16 +6551,8 @@ fn write_codex_header(
     ledger: &Ledger,
     header: Option<&crate::native_header::CodexHeader>,
 ) -> rusqlite::Result<()> {
-    let encoded = header
-        .map(|header| {
-            json(&CodexHeaderRecord {
-                version: 1,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                header: header.clone(),
-            })
-        })
-        .transpose()?;
+    let encoded = super::native_aux::codex_header(ledger, header)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
@@ -6418,15 +6565,6 @@ fn write_codex_header(
             .execute([codex_header_key(path)])?;
     }
     Ok(())
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClaudeSidecarRecord {
-    version: u32,
-    parser_version: u32,
-    ledger: String,
-    sidecar: crate::native_sidecar::ClaudeSidecar,
 }
 
 fn claude_sidecar_key(path: &str) -> String {
@@ -6476,16 +6614,8 @@ fn write_claude_sidecar(
     if sidecar.is_none() && !crate::native_sidecar::agent_path(Path::new(path)) {
         return Ok(());
     }
-    let encoded = sidecar
-        .map(|sidecar| {
-            json(&ClaudeSidecarRecord {
-                version: 1,
-                parser_version: CACHE_VERSION,
-                ledger: header_ledger(ledger),
-                sidecar: sidecar.clone(),
-            })
-        })
-        .transpose()?;
+    let encoded = super::native_aux::claude_sidecar(ledger, sidecar)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if let Some(encoded) = encoded.filter(|text| text.len() <= NATIVE_METADATA_MAX) {
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
@@ -6528,21 +6658,8 @@ pub(crate) fn ledger_row(
 }
 
 fn read_ledger(row: &Row<'_>) -> rusqlite::Result<(i64, Ledger)> {
-    Ok((
-        row.get(0)?,
-        Ledger {
-            stat: Stat {
-                dev: uint(row.get(1)?),
-                ino: uint(row.get(2)?),
-                size: uint(row.get(3)?),
-                modified_ns: u128::from_be_bytes(row.get(4)?),
-                changed_ns: row.get::<_, Option<[u8; 16]>>(8)?.map(i128::from_be_bytes),
-            },
-            offset: uint(row.get(5)?),
-            prefix: row.get(6)?,
-            tail: row.get(7)?,
-        },
-    ))
+    crate::events::native_decode::ledger(&native_decode::values(row, &[])?)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 /// The per-file child queries, prepared once per read.
@@ -6631,14 +6748,11 @@ fn read_file(
         if seq_of(signal_row.get(0)?) != signals.len() {
             return Err(gap("signals"));
         }
-        signals.push(Signal {
-            k: untag(1, signal_row.get(1)?)?,
-            o: uint(signal_row.get(2)?),
-            t: signal_row.get(3)?,
-            at: signal_row.get(4)?,
-            n: signal_row.get(5)?,
-            v: signal_row.get::<_, Option<i64>>(6)?.map(uint),
-        });
+        signals.push(
+            crate::events::native_decode::signal(&native_decode::values(signal_row, &[])?)
+                .map_err(|_| native_decode::malformed(0, Type::Text))?
+                .1,
+        );
     }
 
     let mut usage_by_id = BTreeMap::new();
@@ -6656,20 +6770,14 @@ fn read_file(
         if seq_of(codex_row.get(0)?) != codex_usage_events.len() {
             return Err(gap("codex usage"));
         }
-        codex_usage_events.push(CodexUsageEvent {
-            model: codex_row.get(1)?,
-            tokens: ModelTokens {
-                input: uint(codex_row.get(2)?),
-                output: uint(codex_row.get(3)?),
-                cache_write: uint(codex_row.get(4)?),
-                cache_read: uint(codex_row.get(5)?),
-            },
-            timestamp: codex_row.get(6)?,
-        });
+        codex_usage_events.push(
+            crate::events::native_decode::codex_usage(&native_decode::values(codex_row, &[])?)
+                .map_err(|_| native_decode::malformed(0, Type::Text))?
+                .1,
+        );
     }
 
-    let index = FileIndex {
-        dirty_rows: None,
+    let children = crate::events::native_decode::Children {
         native_usage_observations: native_usage::normalized(readers.connection, &path, &ledger)?
             .then(Vec::new),
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
@@ -6690,141 +6798,34 @@ fn read_file(
         events,
         extras,
         signals,
-        pending: from_json(18, &row.get::<_, String>(18)?)?,
-        tool_ids: from_json(19, &row.get::<_, String>(19)?)?,
-        yields: from_json(20, &row.get::<_, String>(20)?)?,
-        busy: from_json(21, &row.get::<_, String>(21)?)?,
-        links: from_json(22, &row.get::<_, String>(22)?)?,
-        entrypoint: row.get(9)?,
-        title: row.get(10)?,
-        agent_name: row.get(11)?,
-        last_model: row.get(12)?,
-        failed: row.get(13)?,
-        first: row.get(14)?,
-        last: row.get(15)?,
-        cwd: row.get(16)?,
-        branch: row.get(17)?,
         usage_by_id,
-        codex_tokens: from_json(23, &row.get::<_, String>(23)?)?,
-        codex_tokens_by_model: from_json(24, &row.get::<_, String>(24)?)?,
         codex_usage_events,
-        copilot: row
-            .get::<_, Option<String>>(27)?
-            .map(|text| from_json(27, &text))
-            .transpose()?,
         codex_native_usage: native_usage::restore(
             readers.connection,
             &path,
             &ledger,
             row.get(26)?,
         )?,
-        rate_limits: row
-            .get::<_, Option<String>>(25)?
-            .map(|text| from_json(25, &text))
-            .transpose()?,
     };
+    let index = crate::events::native_decode::file(&native_decode::values(row, &[13])?, children)
+        .map_err(|_| native_decode::malformed(0, Type::Text))?;
     Ok((path, ledger, index))
 }
 
 /// One `events` row, selected as [`EVENT_COLUMNS`].
 fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
-    let state = row
-        .get::<_, Option<String>>(12)?
-        .map(|text| event_state(12, &text))
-        .transpose()?;
-    let (y, poll_target, result_source, native_direct_call) = match state {
-        Some(state) => (
-            state.yielded,
-            state.poll_target,
-            state.result_source,
-            state.native_direct_call,
-        ),
-        None => (None, None, false, false),
-    };
-    let r = if row.get::<_, bool>(14)? {
-        Some(Reply {
-            o: uint(row.get(15)?),
-            b: row.get(16)?,
-            t: row.get(17)?,
-            e: row.get(18)?,
-            f: row.get(19)?,
-            m: row.get(20)?,
-        })
-    } else {
-        None
-    };
-    let peer = if row.get::<_, bool>(22)? {
-        Some(Peer {
-            sock: row.get(23)?,
-            pid: row.get::<_, Option<i64>>(24)?.map(uint),
-            start: row.get(25)?,
-        })
-    } else {
-        None
-    };
-    let event = Event {
-        k: untag(2, row.get(2)?)?,
-        o: uint(row.get(3)?),
-        b: row.get(4)?,
-        t: row.get(5)?,
-        id: row.get(6)?,
-        n: row.get(7)?,
-        code_mode: row.get(8)?,
-        native_direct_call,
-        code_mode_open: row.get(9)?,
-        parent: row.get::<_, Option<i64>>(10)?.map(seq_of),
-        script: row.get(11)?,
-        poll_target,
-        result_source,
-        y,
-        poll: row.get::<_, Option<i64>>(13)?.map(seq_of),
-        r,
-        item: row.get::<_, Option<i64>>(21)?.map(uint),
-        peer,
-        u: row.get(26)?,
-    };
-    Ok((row.get(0)?, seq_of(row.get(1)?), event))
+    crate::events::native_decode::event(&native_decode::values(row, &[0, 8, 9, 14, 18, 22])?)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 /// One `usage` row, selected as [`USAGE_COLUMNS`].
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
-    let usage = MessageUsage {
-        record_ids: from_json(22, &row.get::<_, String>(22)?)?,
-        model: row.get(1)?,
-        tokens: Tokens {
-            input: uint(row.get(2)?),
-            cached_input: uint(row.get(3)?),
-            output: uint(row.get(4)?),
-            reasoning_output: uint(row.get(5)?),
-            total: uint(row.get(6)?),
-        },
-        model_tokens: ModelTokens {
-            input: uint(row.get(7)?),
-            output: uint(row.get(8)?),
-            cache_write: uint(row.get(9)?),
-            cache_read: uint(row.get(10)?),
-        },
-        billing: BillingUsage {
-            input: uint(row.get(11)?),
-            output: uint(row.get(12)?),
-            cache_read: uint(row.get(13)?),
-            cache_write_5m: uint(row.get(14)?),
-            cache_write_1h: uint(row.get(15)?),
-            web_search_requests: uint(row.get(16)?),
-            speed: row.get(17)?,
-            service_tier: row.get(18)?,
-            prompt_size: uint(row.get(19)?),
-            timestamp: row.get(20)?,
-            split_unknown: row.get(21)?,
-        },
-    };
-    Ok((row.get(0)?, usage))
+    crate::events::native_decode::usage(&native_decode::values(row, &[21])?)
+        .map_err(|_| native_decode::malformed(0, Type::Text))
 }
 
 fn read_runs(connection: &Connection) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id, start"
-    ))?;
+    let mut statement = connection.prepare(&reported_select_sql(connection, false)?)?;
     let mut rows = statement.query([])?;
     let mut runs = Vec::new();
     while let Some(row) = rows.next()? {
@@ -6837,9 +6838,7 @@ fn read_runs_selected(
     connection: &Connection,
     ids: &std::collections::BTreeSet<String>,
 ) -> rusqlite::Result<Vec<ReportedRunSnapshot>> {
-    let mut statement = connection.prepare(&format!(
-        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE session_id=?1 ORDER BY start"
-    ))?;
+    let mut statement = connection.prepare(&reported_select_sql(connection, true)?)?;
     let mut runs = Vec::new();
     for id in ids {
         let mut rows = statement.query([id])?;
@@ -6850,8 +6849,54 @@ fn read_runs_selected(
     Ok(runs)
 }
 
+fn reported_select_sql(connection: &Connection, selected: bool) -> rusqlite::Result<String> {
+    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    Ok(if selected {
+        format!("SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 ORDER BY start")
+    } else if scope.is_empty() {
+        format!("SELECT {RUN_COLUMNS} FROM reported_runs ORDER BY session_id,start")
+    } else {
+        format!(
+            "SELECT {RUN_COLUMNS} FROM reported_runs WHERE namespace=semon_namespace() ORDER BY session_id,start"
+        )
+    })
+}
+
+fn validate_prior_reported(
+    connection: &Connection,
+    rows: &[super::reported_rows::ReportedRow],
+) -> rusqlite::Result<()> {
+    let scope = semantic_stage::support_sql(connection, "", "namespace=semon_namespace() AND ")?;
+    let mut statement = connection.prepare(&format!(
+        "SELECT {RUN_COLUMNS} FROM reported_runs WHERE {scope}session_id=?1 AND start=?2"
+    ))?;
+    for row in rows {
+        let mut prior =
+            statement.query(params![row.run.last_session_id, row.run.last_start_time])?;
+        if let Some(prior) = prior.next()? {
+            read_run(prior)?;
+        }
+    }
+    let stamp: Option<String> = connection.query_row(configured::metadata_sql(connection,"SELECT value FROM meta WHERE key='claude_json_stamp'","SELECT value FROM meta WHERE namespace=semon_meta_scope('claude_json_stamp') AND key='claude_json_stamp'")?,[],|row|row.get(0)).optional()?;
+    if let Some(stamp) = stamp {
+        super::reported_rows::decode_stamp(stamp.as_bytes())
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    } else {
+        let exists = connection.query_row(
+            &format!("SELECT EXISTS(SELECT 1 FROM reported_runs WHERE {scope}1=1 LIMIT 1)"),
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if exists {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(())
+}
+
 fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
-    Ok(ReportedRunSnapshot {
+    let model_usage: String = row.get(8)?;
+    let run = ReportedRunSnapshot {
         last_session_id: row.get(0)?,
         last_start_time: row.get(1)?,
         last_cost: row.get(2)?,
@@ -6860,9 +6905,25 @@ fn read_run(row: &Row<'_>) -> rusqlite::Result<ReportedRunSnapshot> {
         last_tool_duration: row.get::<_, Option<i64>>(5)?.map(uint),
         last_lines_added: row.get::<_, Option<i64>>(6)?.map(uint),
         last_lines_removed: row.get::<_, Option<i64>>(7)?.map(uint),
-        last_model_usage: from_json(8, &row.get::<_, String>(8)?)?,
+        last_model_usage: from_json(8, &model_usage)?,
         capture_at: row.get(9)?,
-    })
+    };
+    super::reported_rows::ReportedRow::new(&run)
+        .and_then(|row| {
+            if row.model_usage != model_usage {
+                return Err(<serde_json::Error as serde::de::Error>::custom(
+                    "noncanonical reported model usage",
+                ));
+            }
+            Ok(row.run)
+        })
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                8,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })
 }
 
 // ---- Writing -------------------------------------------------------------------------------
@@ -6921,6 +6982,7 @@ fn write_index_changes(
     index: &FileIndex,
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
+    layout: &WriterLayout<'_, '_>,
 ) -> rusqlite::Result<()> {
     write_index_changes_with_usage_deletes(
         transaction,
@@ -6931,6 +6993,7 @@ fn write_index_changes(
         expected,
         &mut crate::native_timing::Measurements::default(),
         None,
+        layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -6946,6 +7009,7 @@ fn write_index_changes_measured(
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
 ) -> rusqlite::Result<()> {
+    let layout = WriterLayout::new(transaction)?;
     write_index_changes_with_usage_deletes(
         transaction,
         path,
@@ -6955,6 +7019,7 @@ fn write_index_changes_measured(
         expected,
         measurements,
         namespace,
+        &layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -6969,15 +7034,13 @@ fn write_index_changes_with_usage_deletes<'tx>(
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
     namespace: Option<&str>,
+    layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<()> {
     let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
-    copied_usage_sql(transaction, "", "")?;
-    semantic_stage::support_sql(transaction, "", "")?;
+    layout.ensure_current()?;
     #[cfg(test)]
     let written_before: i64 = transaction.query_row("SELECT total_changes()", [], |r| r.get(0))?;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
     // The source ledger fences raw bytes; the sidecar is an independent
     // interpretation dependency. Re-encoding derived proofs changes neither.
     let semantic_change = expected != Some(ledger)
@@ -6986,144 +7049,26 @@ fn write_index_changes_with_usage_deletes<'tx>(
             read_claude_sidecar(&mut statement, path, ledger)?.as_ref()
                 != index.claude_sidecar.as_ref()
         });
-    relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
-    native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
-    measurements.record("relocation", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "relocation_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("relocation")?;
-    let started = measurements.start();
-    let full = super::DirtyRows {
-        usage: if changes.is_none() {
-            index.usage_by_id.keys().cloned().collect()
-        } else {
-            Default::default()
-        },
-        ..super::DirtyRows::default()
-    };
-    measurements.record("dirty_rows", started, 1);
-    write_file_with_usage_deletes(
-        transaction,
-        path,
-        ledger,
-        changes.unwrap_or(&full),
-        index,
-        measurements,
-        usage_deletes,
-    )?;
-    native_usage::write(transaction, path, ledger, index)?;
-    #[cfg(test)]
-    configured::effect("native_usage")?;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(semantic_stage::support_sql(transaction,
-        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')",
-        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')")?, [path])?;
-    for id in index
-        .links
-        .session_ids
-        .iter()
-        .chain(&index.links.continued_in)
-    {
-        transaction.execute(
-            semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'lineage:claude',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'lineage:claude',?2)")?,
-            params![path, id],
-        )?;
-    }
-    for id in &index.links.bridges {
-        transaction.execute(
-            semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'bridge:claude',?2)")?,
-            params![path, id],
-        )?;
-    }
-    measurements.record("dependencies", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "dependencies_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("dependencies")?;
-
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(semantic_stage::support_sql(transaction,
-        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')",
-        "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')")?, [path])?;
-    if let Some(header) = &index.codex_header {
-        if let Some(id) = header.native_id(Path::new(path)) {
-            transaction.execute(semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-native:codex',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-native:codex',?2)")?, params![path,id])?;
-        }
-        let metadata =
-            serde_json::to_value(&header.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if metadata.get("guardian_review").and_then(Value::as_bool) != Some(true)
-            && let Some(parent) = metadata.get("parent_thread").and_then(Value::as_str)
-        {
-            transaction.execute(semantic_stage::support_sql(transaction,
-                "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'semantic-parent:codex',?2)",
-                "INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,'semantic-parent:codex',?2)")?, params![path,parent])?;
-        }
-    }
-    measurements.record("semantic_dependencies", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "semantic_dependencies_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("semantic_dependencies")?;
-    let started = measurements.start();
-    transaction.execute(
-        native_metadata_delete(transaction)?,
-        [archive_index_key(path)],
-    )?;
-    measurements.record("archive_metadata", started, 1);
-    #[cfg(test)]
-    configured::effect("archive_metadata")?;
-    let started = measurements.start();
-    if semantic_change {
-        crate::storage::sqlite::source_journal::invalidate(
+    crate::events::native_commit::write(
+        &mut native_commit::Writer {
             transaction,
+            layout,
+            measurements,
             namespace,
+            usage_deletes,
+            relationship_started: None,
+            relationship_rows_before: None,
+            dirty_started: None,
+        },
+        crate::events::native_commit::Input {
             path,
-            "changed",
-        )?;
-        measurements.record("invalidation", started, 1);
-        #[cfg(test)]
-        configured::effect("invalidation")?;
-    } else {
-        measurements.record("representation_repair", started, 1);
-    }
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    transaction.execute(
-        semantic_stage::support_sql(transaction,
-            "DELETE FROM session_source_mutations WHERE source_path=?1",
-            "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1")?,
-        [path],
+            ledger,
+            index,
+            changes,
+            expected,
+            semantic_change,
+        },
     )?;
-    measurements.record("mutation_retirement", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "mutation_retirement_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("mutation_retirement")?;
     #[cfg(test)]
     {
         let written_after: i64 =
@@ -7160,178 +7105,115 @@ fn write_file(
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
+    let layout = WriterLayout::new(transaction)?;
     write_file_with_usage_deletes(
-        transaction,
         path,
         ledger,
         changes,
         index,
         measurements,
+        &layout,
         &mut UsageDeletes::default(),
-    )
+    )?;
+    write_native_tree(transaction, path, ledger, index, measurements)?;
+    for stage in crate::events::native_commit::AUXILIARY_ORDER {
+        write_native_aux(transaction, path, ledger, index, measurements, stage)?;
+    }
+    Ok(())
 }
 
-fn write_file_with_usage_deletes<'tx>(
-    transaction: &'tx Transaction<'_>,
+fn write_native_aux(
+    transaction: &Transaction<'_>,
     path: &str,
     ledger: &Ledger,
-    changes: &super::DirtyRows,
     index: &FileIndex,
     measurements: &mut crate::native_timing::Measurements,
-    usage_deletes: &mut UsageDeletes<'tx>,
+    stage: crate::events::native_commit::Auxiliary,
 ) -> rusqlite::Result<()> {
-    let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
-    copied_usage_sql(transaction, "", "")?;
+    use crate::events::native_commit::Auxiliary;
     let FileIndex {
-        dirty_rows: _,
-        native_usage_observations: _,
-        tree_summary,
+        codex_header,
+        claude_sidecar,
         source_chunks,
         marker_index,
         handoff_index,
-        codex_header,
-        claude_sidecar,
-        events,
-        extras,
-        signals,
-        pending,
-        tool_ids,
-        yields,
-        busy,
-        links,
-        entrypoint,
-        title,
-        agent_name,
-        last_model,
-        failed,
-        first,
-        last,
-        cwd,
-        branch,
-        usage_by_id,
-        codex_tokens,
-        codex_tokens_by_model,
-        codex_usage_events,
-        codex_native_usage: _,
-        copilot,
-        rate_limits,
+        ..
     } = index;
-    let Ledger {
-        stat:
-            Stat {
-                dev,
-                ino,
-                size,
-                modified_ns,
-                changed_ns,
-            },
-        offset,
-        prefix,
-        tail,
-    } = ledger;
-    let started = measurements.start();
-    write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
-    measurements.record("proof_header", started, 1);
-    #[cfg(test)]
-    configured::effect("proof_header")?;
-    let started = measurements.start();
-    write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
-    measurements.record("proof_sidecar", started, 1);
-    #[cfg(test)]
-    configured::effect("proof_sidecar")?;
-    let started = measurements.start();
-    let rows_before = started.map(|_| transaction.total_changes());
-    if started.is_some() {
-        chunk_proofs::write_measured(
-            transaction,
-            path,
-            ledger,
-            source_chunks.as_deref(),
-            measurements,
-        )?;
-    } else {
-        chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+    match stage {
+        Auxiliary::Header => {
+            let started = measurements.start();
+            write_codex_header(transaction, path, ledger, codex_header.as_ref())?;
+            measurements.record("proof_header", started, 1);
+            #[cfg(test)]
+            configured::effect("proof_header")?;
+        }
+        Auxiliary::Sidecar => {
+            let started = measurements.start();
+            write_claude_sidecar(transaction, path, ledger, claude_sidecar.as_ref())?;
+            measurements.record("proof_sidecar", started, 1);
+            #[cfg(test)]
+            configured::effect("proof_sidecar")?;
+        }
+        Auxiliary::Chunks => {
+            let started = measurements.start();
+            let rows_before = started.map(|_| transaction.total_changes());
+            if started.is_some() {
+                chunk_proofs::write_measured(
+                    transaction,
+                    path,
+                    ledger,
+                    source_chunks.as_deref(),
+                    measurements,
+                )?;
+            } else {
+                chunk_proofs::write(transaction, path, ledger, source_chunks.as_deref())?;
+            }
+            measurements.record("proof_chunks", started, 1);
+            record_writer_rows(
+                transaction,
+                measurements,
+                "proof_chunks_written_rows",
+                rows_before,
+            );
+            #[cfg(test)]
+            configured::effect("proof_chunks")?;
+        }
+        Auxiliary::Parent => {
+            let started = measurements.start();
+            write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
+            measurements.record("proof_parent", started, 1);
+            #[cfg(test)]
+            configured::effect("proof_parent")?;
+        }
+        Auxiliary::Launch => {
+            let started = measurements.start();
+            if started.is_some() {
+                launch_calls::write_measured(
+                    transaction,
+                    path,
+                    ledger,
+                    handoff_index.as_ref(),
+                    measurements,
+                )?;
+            } else {
+                launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
+            }
+            measurements.record("proof_launch", started, 1);
+            #[cfg(test)]
+            configured::effect("proof_launch")?;
+        }
     }
-    measurements.record("proof_chunks", started, 1);
-    record_writer_rows(
-        transaction,
-        measurements,
-        "proof_chunks_written_rows",
-        rows_before,
-    );
-    #[cfg(test)]
-    configured::effect("proof_chunks")?;
-    let started = measurements.start();
-    write_parent_marker(transaction, path, ledger, marker_index.as_ref())?;
-    measurements.record("proof_parent", started, 1);
-    #[cfg(test)]
-    configured::effect("proof_parent")?;
-    let started = measurements.start();
-    if started.is_some() {
-        launch_calls::write_measured(
-            transaction,
-            path,
-            ledger,
-            handoff_index.as_ref(),
-            measurements,
-        )?;
-    } else {
-        launch_calls::write(transaction, path, ledger, handoff_index.as_ref())?;
-    }
-    measurements.record("proof_launch", started, 1);
-    #[cfg(test)]
-    configured::effect("proof_launch")?;
-    let started = measurements.start();
-    let rate_limits = rate_limits.as_ref().map(json).transpose()?;
-    measurements.record("rate_limit_serialization", started, 1);
-    let file_id: i64 = {
-        let started = measurements.start();
-        let mut statement = transaction.prepare_cached(configured::sql(
-            transaction,
-            PUT_FILE,
-            configured::PUT_FILE,
-        )?)?;
-        measurements.record("file_prepare", started, 1);
-        let started = measurements.start();
-        let parameters = params![
-            path,
-            int(*dev),
-            int(*ino),
-            int(*size),
-            modified_ns.to_be_bytes(),
-            int(*offset),
-            prefix,
-            tail,
-            entrypoint,
-            title,
-            agent_name,
-            last_model,
-            failed,
-            first,
-            last,
-            cwd,
-            branch,
-            json(pending)?,
-            json(tool_ids)?,
-            json(yields)?,
-            json(busy)?,
-            json(links)?,
-            json(codex_tokens)?,
-            json(codex_tokens_by_model)?,
-            rate_limits,
-            native_usage::encoded(index)?,
-            copilot.as_ref().map(json).transpose()?,
-            changed_ns.map(i128::to_be_bytes),
-        ];
-        measurements.record("file_parameters", started, 1);
-        let started = measurements.start();
-        let file_id = statement.query_row(parameters, |row| row.get(0))?;
-        measurements.record("file_upsert", started, 1);
-        #[cfg(test)]
-        configured::effect("file_upsert")?;
-        file_id
-    };
+    Ok(())
+}
 
+fn write_native_tree(
+    transaction: &Transaction<'_>,
+    path: &str,
+    ledger: &Ledger,
+    index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let tree_summary = &index.tree_summary;
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
     write_tree_summary(
@@ -7350,14 +7232,81 @@ fn write_file_with_usage_deletes<'tx>(
     );
     #[cfg(test)]
     configured::effect("proof_tree")?;
+    Ok(())
+}
+
+fn write_file_with_usage_deletes<'tx>(
+    path: &str,
+    ledger: &Ledger,
+    changes: &super::DirtyRows,
+    index: &FileIndex,
+    measurements: &mut crate::native_timing::Measurements,
+    layout: &WriterLayout<'tx, '_>,
+    usage_deletes: &mut UsageDeletes<'tx>,
+) -> rusqlite::Result<()> {
+    let transaction = layout.transaction;
+    let row_plan = super::native_rows::NativeRowPlan::new(index, changes);
+    let file_row = super::file_rows::FileRow::new(ledger, index);
+    let FileIndex {
+        events,
+        extras,
+        signals,
+        usage_by_id,
+        codex_usage_events,
+        ..
+    } = index;
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(
-        transaction,
-        PUT_EVENT,
-        configured::PUT_EVENT,
-    )?)?;
+    let rate_limits = file_row.rate_limits.as_ref().map(json).transpose()?;
+    measurements.record("rate_limit_serialization", started, 1);
+    let file_id: i64 = {
+        let started = measurements.start();
+        let mut statement =
+            transaction.prepare_cached(layout.core(PUT_FILE, configured::PUT_FILE))?;
+        measurements.record("file_prepare", started, 1);
+        let started = measurements.start();
+        let parameters = params![
+            path,
+            int(file_row.dev),
+            int(file_row.ino),
+            int(file_row.size),
+            file_row.modified_ns.to_be_bytes(),
+            int(file_row.offset),
+            file_row.prefix,
+            file_row.tail,
+            file_row.entrypoint,
+            file_row.title,
+            file_row.agent_name,
+            file_row.last_model,
+            file_row.failed,
+            file_row.first,
+            file_row.last,
+            file_row.cwd,
+            file_row.branch,
+            json(file_row.pending)?,
+            json(file_row.tool_ids)?,
+            json(file_row.yields)?,
+            json(file_row.busy)?,
+            json(file_row.links)?,
+            json(file_row.codex_tokens)?,
+            json(file_row.codex_tokens_by_model)?,
+            rate_limits,
+            native_usage::encoded(file_row.index)?,
+            file_row.copilot.as_ref().map(json).transpose()?,
+            file_row.changed_ns.map(i128::to_be_bytes),
+        ];
+        measurements.record("file_parameters", started, 1);
+        let started = measurements.start();
+        let file_id = statement.query_row(parameters, |row| row.get(0))?;
+        measurements.record("file_upsert", started, 1);
+        #[cfg(test)]
+        configured::effect("file_upsert")?;
+        file_id
+    };
+
+    let started = measurements.start();
+    let mut put = transaction.prepare_cached(layout.core(PUT_EVENT, configured::PUT_EVENT))?;
     let mut cut = transaction
-        .prepare_cached(configured::sql(transaction, "DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3")?)?;
+        .prepare_cached(layout.core("DELETE FROM events WHERE file_id=?1 AND extra=?2 AND seq>=?3", "DELETE FROM events WHERE namespace=semon_namespace() AND file_id=?1 AND extra=?2 AND seq>=?3"))?;
     for (extra, rows) in [(false, &row_plan.events), (true, &row_plan.extras)] {
         rows.apply(
             |seq, event| put_event(&mut put, file_id, extra, seq, event),
@@ -7373,11 +7322,7 @@ fn write_file_with_usage_deletes<'tx>(
     measurements.count("event_records", events.len().saturating_add(extras.len()));
 
     let started = measurements.start();
-    let mut put = transaction.prepare_cached(configured::sql(
-        transaction,
-        PUT_SIGNAL,
-        configured::PUT_SIGNAL,
-    )?)?;
+    let mut put = transaction.prepare_cached(layout.core(PUT_SIGNAL, configured::PUT_SIGNAL))?;
     row_plan.signals.apply(
         |seq, signal| {
             let Signal { k, o, t, at, n, v } = signal;
@@ -7396,7 +7341,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    configured::sql(transaction, "DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
+                    layout.core("DELETE FROM signals WHERE file_id=?1 AND seq>=?2", "DELETE FROM signals WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -7415,6 +7360,7 @@ fn write_file_with_usage_deletes<'tx>(
         changes,
         usage_by_id,
         measurements,
+        layout,
         usage_deletes,
     )?;
     measurements.record("usage", started, changes.usage.len());
@@ -7424,11 +7370,8 @@ fn write_file_with_usage_deletes<'tx>(
 
     let started = measurements.start();
     let rows_before = started.map(|_| transaction.total_changes());
-    let mut put = transaction.prepare_cached(copied_usage_sql(
-        transaction,
-        PUT_CODEX_USAGE,
-        COMPOSITE_PUT_CODEX_USAGE,
-    )?)?;
+    let mut put = transaction
+        .prepare_cached(layout.copied_usage(PUT_CODEX_USAGE, COMPOSITE_PUT_CODEX_USAGE))?;
     row_plan.codex_usage.apply(
         |seq, usage| {
             let CodexUsageEvent {
@@ -7457,7 +7400,7 @@ fn write_file_with_usage_deletes<'tx>(
         |from| {
             transaction
                 .execute(
-                    copied_usage_sql(transaction, "DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2")?,
+                    layout.copied_usage("DELETE FROM codex_usage WHERE file_id = ?1 AND seq >= ?2", "DELETE FROM codex_usage WHERE namespace=semon_namespace() AND file_id=?1 AND seq>=?2"),
                     params![file_id, seq_int(from)],
                 )
                 .map(drop)
@@ -7502,12 +7445,14 @@ fn write_copied_usage_rows(
     usage_by_id: &BTreeMap<String, MessageUsage>,
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<UsageDeleteWork> {
+    let layout = WriterLayout::copied_usage_only(transaction)?;
     write_copied_usage_rows_with_deletes(
         transaction,
         file_id,
         changes,
         usage_by_id,
         measurements,
+        &layout,
         &mut UsageDeletes::default(),
     )
 }
@@ -7518,25 +7463,23 @@ fn write_copied_usage_rows_with_deletes<'tx>(
     changes: &super::DirtyRows,
     usage_by_id: &BTreeMap<String, MessageUsage>,
     measurements: &mut crate::native_timing::Measurements,
+    layout: &WriterLayout<'tx, '_>,
     deletes: &mut UsageDeletes<'tx>,
 ) -> rusqlite::Result<UsageDeleteWork> {
+    layout.ensure_current()?;
     let rows = super::native_rows::UsageChanges::new(changes, usage_by_id);
     let mut work = UsageDeleteWork::default();
-    let mut put = transaction.prepare_cached(copied_usage_sql(
-        transaction,
-        PUT_USAGE,
-        COMPOSITE_PUT_USAGE,
-    )?)?;
+    let mut put =
+        transaction.prepare_cached(layout.copied_usage(PUT_USAGE, COMPOSITE_PUT_USAGE))?;
     let mut put_identity = transaction.prepare_cached(
-        copied_usage_sql(transaction, "INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)")?,
+        layout.copied_usage("INSERT INTO usage_identity(file_id,message_id,record_uuid) VALUES (?1,?2,?3)", "INSERT INTO usage_identity(namespace,file_id,message_id,record_uuid) VALUES (semon_namespace(),?1,?2,?3)"),
     )?;
     for (id, usage) in rows.iter() {
         let started = measurements.start();
-        let selected = copied_usage_sql(
-            transaction,
+        let selected = layout.copied_usage(
             "DELETE FROM usage_identity WHERE file_id=?1 AND message_id=?2",
             "DELETE FROM usage_identity WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-        )?;
+        );
         measurements.record("usage_identity_delete_qualification", started, 1);
         if deletes
             .identity
@@ -7566,11 +7509,10 @@ fn write_copied_usage_rows_with_deletes<'tx>(
             }
         } else {
             let started = measurements.start();
-            let selected = copied_usage_sql(
-                transaction,
+            let selected = layout.copied_usage(
                 "DELETE FROM usage WHERE file_id = ?1 AND message_id = ?2",
                 "DELETE FROM usage WHERE namespace=semon_namespace() AND file_id=?1 AND message_id=?2",
-            )?;
+            );
             measurements.record("usage_delete_qualification", started, 1);
             if deletes
                 .usage
@@ -7688,6 +7630,8 @@ fn put_usage(
 }
 
 fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite::Result<()> {
+    let row = super::reported_rows::ReportedRow::new(run)
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let ReportedRunSnapshot {
         last_session_id,
         last_start_time,
@@ -7697,7 +7641,7 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
         last_tool_duration,
         last_lines_added,
         last_lines_removed,
-        last_model_usage,
+        last_model_usage: _,
         capture_at,
     } = run;
     statement.execute(params![
@@ -7709,7 +7653,7 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
         last_tool_duration.map(int),
         last_lines_added.map(int),
         last_lines_removed.map(int),
-        json(last_model_usage)?,
+        row.model_usage,
         capture_at,
     ])?;
     Ok(())
@@ -12332,6 +12276,7 @@ mod tests {
             };
             let before = usage_delete_snapshot(&db);
             let tx = db.unchecked_transaction().unwrap();
+            let layout = WriterLayout::copied_usage_only(&tx).unwrap();
             let mut deletes = UsageDeletes::default();
             tx.execute_batch("CREATE TEMP TRIGGER fail_last BEFORE DELETE ON usage WHEN OLD.message_id='z' BEGIN SELECT RAISE(ABORT,'last usage delete'); END;").unwrap();
             for _ in 0..2 {
@@ -12342,6 +12287,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .unwrap_err();
@@ -12359,6 +12305,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .is_err()
@@ -12373,6 +12320,7 @@ mod tests {
                 &changes,
                 &BTreeMap::new(),
                 &mut Default::default(),
+                &layout,
                 &mut deletes,
             )
             .unwrap();
@@ -12388,6 +12336,7 @@ mod tests {
                     &changes,
                     &BTreeMap::new(),
                     &mut Default::default(),
+                    &layout,
                     &mut deletes,
                 )
                 .unwrap();
@@ -12643,6 +12592,22 @@ mod tests {
                 "nonempty schema zero",
             ),
             ("newer", "PRAGMA user_version=2147483647", "newer schema"),
+            ("older", "PRAGMA user_version=32", "older schema"),
+            (
+                "application",
+                "PRAGMA application_id=1234",
+                "application id",
+            ),
+            (
+                "missing-index",
+                "DROP INDEX session_catalog_current_order",
+                "missing current schema object",
+            ),
+            (
+                "missing-journal",
+                "DROP TABLE source_observation_receipts",
+                "missing current schema object",
+            ),
             (
                 "foreign",
                 "DROP TABLE events; DROP TABLE files",
@@ -12785,6 +12750,10 @@ mod tests {
             fail(SqliteStore::attempt_scoped(&path, true));
             unchanged();
             if name != "archive" {
+                assert!(
+                    SqliteStore::attempt_selected(&path).is_err(),
+                    "selected {name}"
+                );
                 assert!(focused_connection(&path).is_err(), "focused {name}");
             } else {
                 let db = focused_connection(&path).unwrap();
@@ -13084,6 +13053,116 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_configured_store_preserves_live_wal_and_retained_facts() {
+        use crate::storage::{LogicalSourceNamespace, StoreBackend, StoreConfig};
+        let root = scratch("unsupported-configured-live-wal");
+        let path = root.join("index.sqlite3");
+        let raw = root.join("native.jsonl");
+        fs::write(&raw, b"authoritative native bytes\n").unwrap();
+        let config = StoreConfig {
+            backend: StoreBackend::Sqlite { database: path.clone() },
+            namespace: LogicalSourceNamespace::new("custody").unwrap(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        configured::create(&config).unwrap();
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(r#"INSERT INTO reported_runs(session_id,start,model_usage,capture_at) VALUES('retained',1,'[]',1);
+INSERT INTO session_history_catalog VALUES('retained','{"custody":"retained custody"}');
+INSERT INTO meta VALUES('archive-custody','independent authority');"#).unwrap();
+        config.admit_namespace().unwrap();
+        let mut complete = false;
+        for _ in 0..128 {
+            if config.assign_catalog_namespace(64).unwrap().complete {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+        drop(crate::storage::sqlite::configured_index::open(&config).unwrap());
+        db.pragma_update(None, "user_version", SCHEMA_VERSION - 1).unwrap();
+        let paths = [path.clone(), sibling(&path, "-wal"), sibling(&path, "-shm"), raw];
+        let state = catalog_state(&db);
+        let before = paths.iter().map(|path| fs::read(path).unwrap()).collect::<Vec<_>>();
+        assert!(crate::storage::sqlite::configured_index::open(&config).is_err());
+        assert!(configured::NativeOwnership::admit(&config).is_err());
+        for scoped in [false, true] {
+            assert!(matches!(SqliteStore::attempt_scoped(&path, scoped), Err(Unopened::Unsupported(_))));
+        }
+        assert!(SqliteStore::attempt_selected(&path).is_err());
+        assert!(focused_connection(&path).is_err());
+        for (path, bytes) in paths.iter().zip(&before) {
+            let actual = fs::read(path).unwrap();
+            assert_eq!(Sha256::digest(&actual), Sha256::digest(bytes));
+            assert_eq!(&actual, bytes);
+        }
+        assert_eq!(catalog_state(&db), state);
+        assert_eq!(db.query_row("SELECT count(*) FROM reported_runs", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(db.query_row("SELECT metadata FROM session_history_catalog", [], |row| row.get::<_, String>(0)).unwrap(), "{\"custody\":\"retained custody\"}");
+        assert_eq!(db.query_row("SELECT value FROM meta WHERE key='archive-custody'", [], |row| row.get::<_, String>(0)).unwrap(), "independent authority");
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn current_reopen_keeps_wal_reader_and_concurrent_publication() {
+        let root = scratch("current-wal-reopen");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store
+            .write_one("original", None, None, &ledger(1), &full())
+            .unwrap();
+        let reader = focused_connection(&path).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        let other_path = path.clone();
+        BEFORE_STORAGE_INIT.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    let (mut other, _) = opened(&other_path);
+                    other
+                        .write_one("concurrent", None, None, &ledger(2), &full())
+                        .unwrap();
+                })
+                .join()
+                .unwrap();
+            }));
+        });
+        let (current, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 2);
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        reader.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            current
+                .connection
+                .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        drop(reader);
+        drop(current);
+        drop(store);
+        let (_, loaded) = opened(&path);
+        assert_eq!(loaded.files.len(), 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn storage_initialization_holds_its_lock_through_the_first_wal_switch() {
         let root = scratch("first-wal-lock");
         let path = root.join("index.sqlite3");
@@ -13342,6 +13421,99 @@ mod tests {
     }
 
     #[test]
+    fn recovery_file_row_codec_matches_persisted_dimensions_through_append_and_truncation() {
+        use crate::events::file_rows::FileRow;
+
+        let root = scratch("file-row-codec");
+        let db = root.join("index.sqlite3");
+        let (mut store, _) = opened(&db);
+        let mut cold = full();
+        cold.entrypoint = Some("entry\0中".into());
+        cold.title = None;
+        cold.agent_name = Some("agent é e\u{301}".into());
+        cold.last_model = None;
+        let first = ledger(1);
+        assert_eq!(
+            store
+                .write_one("file.jsonl", None, None, &first, &cold)
+                .unwrap(),
+            Outcome::Written
+        );
+
+        let mut appended = cold.clone();
+        appended.events.push(Event {
+            k: Kind::A,
+            o: 900,
+            ..Event::default()
+        });
+        appended.title = Some("append \0 😀".into());
+        let second = ledger(2);
+        assert_eq!(
+            store
+                .write_one("file.jsonl", Some(&first), Some(&cold), &second, &appended)
+                .unwrap(),
+            Outcome::Written
+        );
+
+        let mut truncated = appended.clone();
+        truncated.events.truncate(1);
+        truncated.title = None;
+        let third = ledger(3);
+        assert_eq!(
+            store
+                .write_one(
+                    "file.jsonl",
+                    Some(&second),
+                    Some(&appended),
+                    &third,
+                    &truncated,
+                )
+                .unwrap(),
+            Outcome::Written
+        );
+
+        let row = FileRow::new(&third, &truncated);
+        let persisted: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            i64,
+        ) = store
+            .connection
+            .query_row(
+                "SELECT entrypoint,title,agent_name,last_model,failed FROM files WHERE path=?1",
+                ["file.jsonl"],
+                |record| {
+                    Ok((
+                        record.get(0)?,
+                        record.get(1)?,
+                        record.get(2)?,
+                        record.get(3)?,
+                        record.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.0.as_ref(), row.entrypoint.as_ref());
+        assert_eq!(persisted.1.as_ref(), row.title.as_ref());
+        assert_eq!(persisted.2.as_ref(), row.agent_name.as_ref());
+        assert_eq!(persisted.3.as_ref(), row.last_model.as_ref());
+        assert_eq!(persisted.4 != 0, row.failed);
+        let (read_ledger, read) = store.read_one("file.jsonl").unwrap().unwrap();
+        assert_eq!(read_ledger, third);
+        assert_eq!(format!("{read:?}"), format!("{truncated:?}"));
+
+        drop(store);
+        let (store, _) = opened(&db);
+        let (read_ledger, read) = store.read_one("file.jsonl").unwrap().unwrap();
+        assert_eq!(read_ledger, third);
+        assert_eq!(format!("{read:?}"), format!("{truncated:?}"));
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recovery_tree_rows_canonical_witness_matches_persisted_dimensions() {
         use crate::events::tree_rows::{TreeRows, witness};
         let root = scratch("tree-rows-witness");
@@ -13443,6 +13615,106 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
         tree_rows_json_array_encoding_matches_sqlite_edge_values();
         tree_metadata_and_evidence_share_one_snapshot_during_concurrent_commit();
+    }
+
+    #[test]
+    fn recovery_scalar119_sqlite_current_record_refusal_preserves_bytes() {
+        let root = scratch("strict-tree-scalar");
+        let path = root.join("one.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"fixture\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"id\":\"m\",\"role\":\"assistant\",\"model\":\"claude\",\"usage\":{\"input_tokens\":3,\"output_tokens\":2}}}\n",
+                "not-json\n"
+            ),
+        )
+        .unwrap();
+        let cache_path = root.join("index.json");
+        let mut cache = crate::events::EventCache::open(&cache_path).unwrap();
+        let index = crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        cache.flush_cold_writes().unwrap();
+        drop(cache);
+        let (store, _) = opened(&crate::events::EventCache::path(&cache_path));
+        let path = path.to_str().unwrap();
+        let (_, ledger) = ledger_row(&store.connection, path).unwrap().unwrap();
+        let key = tree_summary_key(path);
+        let original: String = store
+            .connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+            .unwrap();
+        let base: serde_json::Value = serde_json::from_str(&original).unwrap();
+        let read = || {
+            let mut statement = store
+                .connection
+                .prepare(native_metadata_value(&store.connection).unwrap())
+                .unwrap();
+            read_tree_summary(&store.connection, &mut statement, path, &ledger).unwrap()
+        };
+        let actual = read().unwrap();
+        let expected = index.tree_summary.as_ref().unwrap();
+        assert!(expected.line_count > 0);
+        assert!(expected.malformed_lines > 0);
+        assert_eq!(
+            json(&actual.compact(false)).unwrap(),
+            json(&expected.compact(false)).unwrap()
+        );
+        let mut invalid = vec!["{".to_owned(), " ".repeat(1048577)];
+        for field in [
+            "version",
+            "parser_version",
+            "ledger",
+            "projection_witness",
+            "interpretation_witness",
+        ] {
+            let mut changed = base.clone();
+            changed[field] = serde_json::Value::Null;
+            invalid.push(changed.to_string());
+        }
+        let mut unsupported = base;
+        unsupported["version"] = serde_json::json!(2);
+        invalid.push(unsupported.to_string());
+        for encoded in invalid {
+            store
+                .connection
+                .execute(
+                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    params![key, encoded],
+                )
+                .unwrap();
+            assert!(read().is_none());
+            let after: String = store
+                .connection
+                .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                after, encoded,
+                "refusal must leave unsupported bytes untouched"
+            );
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE meta SET value=?2 WHERE key=?1",
+                params![key, original],
+            )
+            .unwrap();
+        let failure = format!("native_tree_failure:{path}");
+        store
+            .connection
+            .execute(
+                "INSERT INTO meta(key,value) VALUES(?1,'failed')",
+                [&failure],
+            )
+            .unwrap();
+        assert!(read().is_none());
+        store
+            .connection
+            .execute("DELETE FROM meta WHERE key=?1", [&failure])
+            .unwrap();
+        assert_eq!(read().unwrap().line_count, expected.line_count);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

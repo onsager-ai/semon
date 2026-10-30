@@ -2,15 +2,36 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::time::Instant;
 
 #[derive(Clone, Default)]
-pub struct PgCancellation(Arc<AtomicBool>);
+pub struct PgCancellation {
+    host: Arc<AtomicBool>,
+    request: Option<(Arc<AtomicBool>, Instant)>,
+}
 impl PgCancellation {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.host.store(true, Ordering::SeqCst);
     }
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.host.load(Ordering::SeqCst)
+            || self
+                .request
+                .as_ref()
+                .is_some_and(|(cancelled, _)| cancelled.load(Ordering::Acquire))
+    }
+    /// Bind only at a read call, never in a retained checkpoint. Nested scopes
+    /// already resolve to their outer request in selected_read.
+    pub(super) fn for_selected_read(&self) -> Self {
+        Self {
+            host: self.host.clone(),
+            request: crate::selected_read::io_control(),
+        }
+    }
+    pub(super) fn deadline(&self, pool_deadline: Instant) -> Instant {
+        self.request
+            .as_ref()
+            .map_or(pool_deadline, |(_, request)| pool_deadline.min(*request))
     }
     pub(super) async fn cancelled(&self) {
         while !self.is_cancelled() {
