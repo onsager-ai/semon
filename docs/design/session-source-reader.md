@@ -307,20 +307,27 @@ survives until that pipeline permits ordinary scheduling again.
 Before the first readable generation, the newest native cohort still resolves
 actual pending whole JSON inputs first. This replays sidecar and PID dependency
 intents without mapping unrelated pending native paths into that cohort.
+After hint qualification chooses the final tier, whole JSON inputs in a selected
+FIFO fallback likewise resolve before native mapping. A discarded fallback does
+not displace a qualified hint.
 
 After successful publication and concurrent-source requeue, completed source
 claims acknowledge demand even when an empty, invalid, deleted or folded source
 produced no Catalog row. Deferred publication, byte checkpoints that remain
 pending and failed publication fences retain demand. Completion closes admission;
 only actual cold recovery reopens a fresh epoch.
+If the advisory acknowledgement's claim probe fails after publication, demand
+remains for a later pending-path probe and the committed publication retains its
+progress signal. Source requeue and final pending/readiness checks remain fallible.
 
 The scheduling shortcut covers ASCII identity matches. Generic Catalog metadata
 search retains its Unicode lowercase substring semantics; other identities use
 ordinary FIFO. The header hint's NOCASE index is distinct from the semantic
 frontier's BINARY index: native Codex header IDs are preserved verbatim, including
 mixed ASCII case. A full raw candidate cohort containing unqualified in-root
-paths is unknown and explicitly refuses qualification; it is never reported as
-a successful empty identity lookup.
+paths remains unknown at read admission. Producer retry refuses that scheduling
+hint and continues with its ordinary fallback, preserving every durable source
+claim and the native allowlist.
 
 ## Current Semon storage contract
 
