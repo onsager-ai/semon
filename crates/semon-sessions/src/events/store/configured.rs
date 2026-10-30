@@ -3664,6 +3664,13 @@ mod tests {
             SourceIntent, SourceObservationStore, SourceOperation,
         };
         let (a, b, _) = same_db_sources();
+        connection(&a.config)
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'catalog_recovery_after','')",
+                [],
+            )
+            .unwrap();
         let mut journal = SourceJournal::owned(NativeOwnership::admit(&a.config).unwrap());
         let mut other = SourceJournal::owned(NativeOwnership::admit(&b).unwrap());
         assert!(!journal.recovery_is_current().unwrap());
@@ -3675,32 +3682,33 @@ mod tests {
         );
         let intent = SourceIntent::Recover {
             operation: operation.clone(),
-            cursor,
+            cursor: cursor.clone(),
         };
         journal.persist_intent(&intent).unwrap();
         assert_eq!(
-            journal.recover(&operation, None).unwrap(),
+            journal.recover(&operation, cursor.as_deref()).unwrap(),
             (
                 crate::storage::source_observations::SourceMutationReceipt::Applied,
                 true
             )
         );
         assert!(journal.pending_intents().unwrap().is_empty());
+        assert!(journal.recovery_is_current().unwrap());
         // A lost ACK must return its original Done after restart, even if a
         // later recovery request has installed a different durable cursor.
         let db = connection(&a.config).unwrap();
-        db.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'catalog_recovery_after','')", []).unwrap();
+        db.execute("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'catalog_recovery_after','/newer')", []).unwrap();
         drop(journal);
         let mut journal = SourceJournal::owned(NativeOwnership::restore(&a.config).unwrap());
         journal.persist_intent(&intent).unwrap();
         assert_eq!(
-            journal.recover(&operation, None).unwrap(),
+            journal.recover(&operation, cursor.as_deref()).unwrap(),
             (
                 crate::storage::source_observations::SourceMutationReceipt::AlreadyApplied,
                 true
             )
         );
-        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some("/newer"));
         assert!(journal.pending_intents().unwrap().is_empty());
         assert!(other.recover(&operation, None).is_err());
         assert_eq!(other.recovery_cursor().unwrap(), None);
@@ -3723,7 +3731,7 @@ mod tests {
             )
         );
         assert!(journal.pending_intents().unwrap().is_empty());
-        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some(""));
+        assert_eq!(journal.recovery_cursor().unwrap().as_deref(), Some("/newer"));
     }
 
     fn ordinary_catalog_publication_lifecycle() {
@@ -6357,7 +6365,7 @@ mod tests {
         };
         assert_eq!(
             writer
-                .commit(&[(&path, None, None, &ledger, &FileIndex::default())])
+                .commit(&[(&path, None, None, &ledger, &ledger.stat, &FileIndex::default())])
                 .unwrap_err(),
             StorageError::Conflict
         );
