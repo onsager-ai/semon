@@ -5,7 +5,73 @@ Catalog/Query metadata, bounded native navigation and source observations now
 have semantic storage interfaces, with SQLite adapters, explicit `StoreConfig`
 and `LogicalSourceNamespace`. The existing parser, identity and semantic
 projection algorithms are unchanged. The full native commit unit remains pending.
-PostgreSQL (#479) and Hub adoption/migration (#313) are not implemented.
+PostgreSQL (#479) has private pool, schema and native-row prerequisites. Its
+complete session backend and Hub adoption/migration (#313) remain undelivered.
+
+## Native EventCache integration (Worker126, unaccepted WIP)
+
+`storage/postgres/index_store.rs` injects an authorized pool and logical source
+namespace into the ordinary EventCache scanner. It never derives SQLite paths.
+`native_ingest.rs` persists exact request intents in the existing native metadata
+family before Raw opens and records completion through `PgPool::apply_operation`.
+The request binds namespace, path, harness and current parser contract. Replay
+checks the durable operation before Raw I/O. Catalog operations remain fenced.
+
+`events/native_decode.rs` is the shared current row restoration used by the
+production SQLite reader and private PG native reader. PG reads select one path
+and its child families, qualify Usage/pages/auxiliary metadata and restore Tree
+through the existing typed checkpoint. Payload pages use keysets with at most
+64 size probes and 1 MiB per page before decoding. Selected-file restoration
+still loads its history; compact/deferred shared restoration and full resource
+qualification remain open.
+
+The `pg_native126` isolated-process test runs configured SQLite first, then
+PG-only EventCache ingestion with SQLite's connection initializer rejecting all
+opens, including other threads. It covers initial ingest, restart/noop, exact
+replay after Raw changes/disappearance and request rebinding refusal. This WIP
+still needs the complete append/replacement/truncation/concurrency/fault/lost-ACK,
+resource/noise and security matrix. Removal/retirement and native recovery
+remain fenced. No independent acceptance or full-backend
+qualification is claimed; applicable exact-head CI is required.
+
+Inventory additions: `storage/postgres/{index_store,native_ingest,native_reader}.rs`
+contain PG-only production adapter code; `native_ingest_tests.rs` contains the
+test-only SQLite oracle and actual process-wide no-SQLite instrumentation.
+
+Worker133 adds private request-owned cold batches through the ordinary scanner.
+Both SQLite adapters and PostgreSQL consume the current cold-source validation
+plan. PostgreSQL validates every prepared intent, base ledger and captured Source
+claim before family effects. Borrowed `PgTxn::apply_operation` retains exact
+individual completions and all family effects in the same transaction. The
+request boundary reconciles every receipt before Raw and refuses mixed replays.
+Partial/incomplete cold files refuse before family effects; individual ingestion
+remains the path for bounded progress. Tests extend the existing isolated native
+integration with SQLite-first multi-harness batches, every measured bundle-effect
+whole-schema rollback, stale claims, competing writers and missing-Raw restart
+replay. This is unaccepted WIP pending exact-head CI and independent review.
+
+## Connected native writer (Worker122, unaccepted WIP)
+
+SQLite and the private PostgreSQL bundle now consume the same ordered callbacks:
+core rows, normalized usage, Tree, Codex header, Claude sidecar, chunk pages,
+parent marker, launch pages, invalidation/mutation retirement, dependencies and
+archive metadata retirement. All effects stay in the caller's transaction.
+The PostgreSQL current page pointer follows the launch stage; old generations
+are retained. A core ledger alone still does not prove a complete ingest.
+
+Current PostgreSQL schema 6 adds a destination index for relocation evidence
+advancement. It is fresh creation only: unsupported schema state is refused
+without an upgrade, reset or deletion. SQLite and PostgreSQL share the existing
+relocation-evidence advancement rule; Raw-prefix verification and Catalog
+relocation reuse are still unported. The private result remains `PartialFile`.
+
+The retained-page parity test materializes and closes its SQLite oracles first,
+then runs its PostgreSQL phase in an isolated test process with SQLite's actual
+connection initializer rejecting and counting all connection attempts. This is
+scoped native-family evidence, not complete-backend no-SQLite qualification.
+Resource/noise measurements, long metadata keys, Tree retirement, Catalog
+references/reader leases/GC, selected consumers and a Raw-qualified durable
+ingest receipt remain open. No factory or public backend is enabled.
 
 MERGE HOLD: do not merge before #380 completes (Source #484 / Hub #318,
 Hub #321, Sessions-default #279, Source #483). Their independent browser,
@@ -20,6 +86,11 @@ cold-start results below describe the earlier gate and do not qualify this revis
 The initial five-second revision passed the isolated producer check but measured
 5.82 seconds under the full parallel PostgreSQL regression; the eight-second
 revision requires a fresh full run.
+
+The streamed Tree witness repair passed scoped independent review at d794ef2a:
+43 focused PostgreSQL tests, 1142 full library tests and every Storage contract
+group passed, including the actual encoded-byte and cancellation cases. This
+qualifies the witness component; full backend and migration acceptance remain open.
 
 ## Worker 21 repair: preserve the metadata physical contract
 
@@ -500,6 +571,8 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `events/store/configured.rs` | direct | Configured composite files/events/signals transaction; 22 native families remain singleton and global qualification stays zero. |
 | `events/store/configured_selected60.rs` | direct | Test-only committed-publication assertions for selected facts, retained-generation witnesses, independent private-witness binding, tamper-before-Raw refusal, negative reference/lease GC and real native multi-window range oracles; writer qualification remains zero. |
 | `events/store.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/native_commit.rs` | direct | SQLite physical native commit stages and independent production parser oracle; shared ordering and relationship semantics live in events/native_commit.rs. |
+| `events/store/native_decode.rs` | direct | SQLite row adapter for shared current native decoders consumed by SQLite and private PostgreSQL native readers; full backend qualification remains incomplete. |
 | `events.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/native_names.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `facts/source_authority.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -527,6 +600,16 @@ The file inventory below was discovered by CI run 40101653609 at Source
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `session_bookmark.rs` | ported | Shared request/identity/JSON algorithm uses configured semantic navigation reads; SQLite target lookup lives in storage/sqlite/navigation.rs. |
 | `source_change.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `storage/postgres/catalog_effects/tests.rs` | direct | Catalog124 real parser/model and ordinary SQLite Current/recipe producer oracle runs before private PG immutable effects; no complete Catalog or no-SQLite backend qualification. |
+| `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
+| `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
+| `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
+| `storage/postgres/native_ingest_tests.rs` | direct | Independent ordinary SQLite parser oracle for the private PostgreSQL native EventCache integration; no complete backend qualification. |
+| `storage/postgres/native_usage/tests.rs` | direct | Shared-parser SQLite oracle for the partial PG stateful usage family; no complete backend qualification. |
+| `storage/postgres/native_usage_identity/tests.rs` | direct | Test-only shared-parser SQLite oracle for PG copied-identity effects; no PG backend or no-SQLite qualification. |
+| `storage/postgres/reported_facts.rs` | direct | Test-only real reported-source SQLite producer/oracle; the private PG effects use no SQLite connection or path. Public backend qualification remains zero. |
+| `storage/postgres/tree_checkpoint/tests.rs` | direct | Test-only real-parser SQLite oracle for the private PG checkpoint family; public backend qualification remains zero. |
+| `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle in private PG Tree tests; no production backend qualification. |
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
@@ -1071,8 +1154,29 @@ its relocation/dependency/mutation input witnesses. The production default and
 configured factory still select their original profiles. The composite stage
 requires composite metadata, Catalog and input witnesses; unsupported combinations
 are rejected before creating a configured file. Its invalidation/backfill keys
-are also composite. Descriptions, reported facts, history and slot owners are
-not qualified by either new flag.
+are also composite. Descriptions, history and slot owners are not qualified by
+either new flag. Facts118 adds reported facts to this private authored Source
+family and its registered OLD/NEW namespace guards; public qualification stays 0.
+
+Facts118 shares the production reported-run `(session_id,start)` merge plan and
+allowlisted row validation between SQLite and the private PG family. Missing
+reported input retains every earlier run. A save writes its observations and
+current file stamp atomically. PG fresh schema 5 adds
+`semon_pg_native_reported_runs` and `semon_pg_native_reported_stamp`; Root must
+coordinate this fresh contract with the independent Proof117 tables. There is
+no schema upgrade chain. Opaque IDs and namespace bytes retain NUL/full UTF-8;
+indexed SHA-256 keys always retain a full-equality collision guard. Unsigned
+counters remain exact in the shared codec, including `u64::MAX`.
+
+The PG family uses existing schema/STORE/publication admission, then locks the
+Source revision before effects. Its durable operation receipt binds the exact
+request; retry reuses that identity. Named reads use a SQL keyset and charge row
+length before fetching and decoding the body under the existing transaction
+cancellation/deadline. All records and stamps remain content-free metadata.
+This private family is not a PgIndexStore or a selectable public PG backend.
+Complete migration snapshots, catch-up, fenced cutover/rollback, Hub #313 and
+fresh independent acceptance remain required. Facts118 CI is recorded separately
+from historical evidence; this paragraph is not an acceptance claim.
 
 The input-witness profile is connected to the existing configured parser/ingest
 transaction. Native lineage/bridge and Codex identity/parent dependency writes,
@@ -1580,3 +1684,197 @@ over-budget components and transitions without a complete positive replacement
 remain explicit pending/refusal classes. Public qualification remains 0/None,
 completeness partial, and selected factories closed. This increment requires
 exact-head CI and fresh scoped review; it does not complete D3/D4 or #477.
+
+### Private PG STORE authority qualification (UNIT115, pending CI/review)
+
+The host provisioning LOGIN owns the immutable STORE owner row and resources;
+Source LOGINs receive Source-table/sequence access and SELECT only on STORE
+metadata. Neither a Source namespace nor a GUC establishes STORE control.
+Transactions acquire the schema STORE advisory lock before SourceState, file or
+UsageSource locks. Source publication holds a shared advisory lock; host metadata
+mutation takes its exclusive form, then the STORE state row FOR UPDATE, and
+never requests SourceState. PostgreSQL requires UPDATE privilege for FOR SHARE,
+so Source does not take a STORE row lock or receive UPDATE privilege. Independently
+authorized host mutations must use this lock protocol; arbitrary host SQL that
+ignores it is outside the injected control contract.
+
+Warm admission checks STORE shape, validated checks, keys, defaults, policies,
+forced RLS, effective privileges, actual table owners and immutable owner/epoch.
+Mutation reauthorizes its host role and uses revision CAS with a durable STORE
+receipt. These receipts cannot acknowledge Source ingestion. The distinct-login
+CI fixture exercises the normal injected pool and Source observation conformance;
+STORE fault hooks cover before state write, after state write and after receipt.
+This component is pending exact-head CI and independent review. Writer/backend
+qualification remains zero, and complete native bundle, read/repricing integration,
+no-SQLite proof and migration/cutover/rollback are still required.
+
+## Worker114 connected private native file increment
+
+The PG partial bundle consumes the same native_commit Input/Effects sequence
+as SQLite in one borrowed transaction: exact Core CAS, Usage enrollment and
+facts, complete Tree scalar/checkpoint publication, dependencies/invalidation,
+shared Codex header/Claude sidecar/parent marker plans, archive metadata
+retirement and source-mutation retirement. Current PG physical schema includes
+source_mutations and relocation_candidates; pending relocation candidates
+refuse before family effects because relocation proof advancement is unported.
+
+This is WIP, not a successful native ingest. The returned PartialFile explicitly
+names missing immutable chunk-proof generations/reader lifetimes, launch calls
+and EOF markers, relocation qualification, and complete durable ingest receipt/Raw
+qualification. It has no conversion to EventReceipt. Public qualification stays
+zero; no public backend factory or IndexStore implementation is activated.
+Meaningful real-parser, independent SQLite metadata, connected rollback and
+stale-CAS tests are registered in the existing PG filter; exact CI is required.
+
+
+## Worker117: private native file page persistence (WIP)
+
+The native SQLite chunk and launch writers and private PG file bundle consume
+`events/native_pages` encoding plans. The current PG layout is version 5, created
+fresh only. It stores lossless namespace bytes, content-addressed page blobs,
+exact Usage-source/ledger/header-bound native generations, immutable page
+references and a transactionally updated path-digest pointer with full-path
+collision checks. Old generations are retained; this adapter has no GC.
+
+The private reader checks namespace, exact ledger, generation binding, byte
+limits, cancellation/deadline, payload digests and chunk Merkle witnesses before
+returning a hash. Launch reconstruction shares the production SQLite validator,
+including EOF and its complete-index fingerprint. SQL snapshots grant no Raw
+access. A native generation is not a Catalog publication generation.
+
+This increment is unqualified WIP. Catalog Current/history references, actual
+reader/pool lease ownership, GC ownership and selected publication integration
+remain unported. No complete native ingest receipt, public PG backend, full
+no-SQLite path, migration, cutover or rollback is claimed. History-noise resource
+measurements and complete page/lease adversarial qualification remain required.
+Exact CI and independent review determine acceptance; public qualification is 0.
+
+## Current schema contract (2026-10-26 amendment)
+
+Semon supports one current schema contract per engine. The #477 transfer,
+catch-up, cutover and rollback paths exchange that current contract only.
+Old Semon schema readers, writers, importers, upgrade chains, dual writes and
+compatibility-only tests are outside scope and must not be retained to support
+older installations. Unsupported old state is refused explicitly without
+resetting, deleting or silently replacing retained data. Raw and non-rebuildable
+current facts/history retain their existing preservation requirements.
+This supersedes any earlier proposal to import older singleton/composite
+profiles. Current producer/consumer correctness and integrity checks still apply.
+
+## Private published Tree scalar reader (scalar119)
+
+The private PG Tree checkpoint restores the actual version-3 `TreeSummaryRecord`
+through the same strict current-format codec as SQLite `read_tree_summary`.
+Both witnesses are mandatory. PG qualifies the exact namespace, full file ledger,
+UsageSource receipt/parser/checkpoint, complete nonpending generation and header,
+then checks persisted dimensions and current store pricing, Source recipe and File
+pricing fingerprint before decoding the admitted scalar. No missing scalar can
+be returned as a default-valued complete Current summary.
+
+Deferred tool/usage calls retain the captured PG checkpoint and host cancellation.
+Each call uses the current selected request scope and a fresh SQL snapshot to
+reauthorize the scalar digest, dimensions and interpretation before payload.
+A changed Current generation refuses explicitly; this component does not promise
+retained L1 reader leases. Scalar and variable metadata are length checked and
+charged before retrieval/decoding; dimension queries retain keyset LIMIT 1 reads.
+
+`Snapshot::restore(pool, namespace, path, ledger, host_cancellation)` keeps its
+existing private signature and now requires real `tree_writer::publish` state.
+The future native117 caller must supply the committed full ledger and request
+cancellation only after Usage/Core/Tree publication completes. No NativeBundle
+caller hook exists in this base, and none is claimed here. Checkpoint fixtures
+now publish through the production PG Tree writer instead of importing a header
+without a scalar. Public backend qualification remains zero, with complete
+IndexStore/reader/proof lifetimes, recovery, migration and Hub #313 still pending.
+The #380 predecessor completion requirement before MAIN remains unchanged.
+
+Worker120 continues this component with one current record contract only. The
+SQLite reuse path now consumes the same typed validator too, and a persisted
+failure marker refuses SQLite scalar restoration. PG publication uses an exact
+namespace/key delete (the unique key bounds it); PostgreSQL does not support a
+`DELETE ... LIMIT` clause.
+
+The exact native117 integration API remains crate-private:
+`Snapshot::restore(PgPool, LogicalSourceNamespace, &str, &Ledger, PgCancellation)
+-> io::Result<Summary>`. The host cancellation is independent of the active
+`selected_read::Scope`; callers retain their worker guard until real I/O ends.
+The returned Summary owns its deferred `TreeCheckpoint::Pg`. A future bundle
+reader must not replace a refusal with an empty Summary or qualify an unpublished
+checkpoint. No old-schema importer or upgrade path is part of this component.
+
+The `pg_tree_scalar119` CI group covers real producer initial/append/replacement
+and restart scalar parity, field-by-field initial and deferred refusal, committed
+interpretation drift, and equal physical IDs in two namespaces. Unsupported
+record bytes remain untouched while the other namespace stays readable. The
+independent SQLite phase also captures persisted closed tool IDs, compared with
+PG alongside the complete scalar and open dimensions. Unrelated-history checks
+cover 0/256/2048 rows; their decoded-row counter is a bounded-read assertion, not
+a claim about allocator peak, SQL planner cost, or full backend qualification.
+
+## Catalog native binding prerequisite (Worker135, incomplete)
+
+The private Catalog-local `admission::capture` records the actual head, Source
+revision and bounded source-claim vector before model construction.
+`admission::stage_bound` locks the existing SourceState row, rejects changed
+heads/revisions/claims or a foreign namespace, qualifies the entire publication source cohort, then calls the existing
+shared physical producer in that same borrowed PgTxn. It creates no SourceState
+or authority. The ordinary SQLite publisher and PG binding use the same
+`source_matches_ledger` predicate. PG additionally opens the actual immutable
+current native page generation against its full Ledger and header contract,
+then requires its source ID to equal current Usage with the same receipt
+and parser. Native Usage availability is retained explicitly; Claude's absent
+native Usage is not incomplete file publication or a fabricated ready Usage.
+Conflicting duplicate sources, more than 64 distinct sources or
+more than 1 MiB of Catalog metadata refuse before Catalog effects.
+
+The returned private references are observations, not durable ownership or an
+admitted publication/selected lease. This does not qualify every page's payload
+availability, runtime/Source admission/epoch, head CAS, claim ACK, OpID, overview
+or retained proof owners. Those missing ports prevent an honest admitted head;
+the flow deliberately leaves claims pending and Catalog head unset. No tables,
+schema version, compatibility readers or public backend activation are added.
+
+`pg_catalog135_real_native_binding_before_effects_and_atomic_refusal` executes
+the ordinary SQLite oracle first, enables a tested process-wide SQLite refusal
+hook, and ingests the identical Raw with the actual private PG EventCache. It
+checks native-source binding and immutable Catalog parity, pre-effect refusal,
+all measured Catalog effect rollback boundaries, stale head/revision/claims, missing/corrupt page/Usage
+authority, namespace isolation and precancellation. Its rollback comparison
+covers every table in the ephemeral store with byte-exact complete rows. The Storage workflow runs
+`storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics`;
+the PG workflow runs the `pg_catalog135` group. Authored tests require exact-head
+CI and fresh independent review; no qualification is claimed here.
+
+## Borrowed immutable Catalog reads (Worker131, incomplete)
+
+The private `postgres::catalog_effects::snapshot::with_generation` callback owns
+one real repeatable-read transaction. `catalog`, `recipe` and `selected` read
+namespace-qualified immutable Current or retained-owner generations. Recipe
+windows use the indexed slot interval, at most 64 rows and 1 MiB measured in SQL
+before retrieval. The full total remains in the header; long recipes are paged,
+not rejected or materialized. `selected` compares the typed Catalog source
+vector with the recipe source-generation witness. A dangling retained owner,
+malformed metadata, unsupported header or changed source witness refuses.
+
+These physical observations are not an admitted CatalogSnapshot or ReaderLease.
+The generation argument is an immutable address, not authority. The caller still
+needs store/source/runtime/epoch/claim and native page/Usage proof admission,
+transactional reference ownership, head CAS/ACK and operation reconciliation.
+Navigation, complete list/search/selected-presentation ports and the admitted
+publisher remain unimplemented. No backend selector is opened; qualification
+stays zero. No table, schema version or old-format reader is added.
+
+`pg_catalog131_borrowed_snapshot_real_producer_mvcc_and_source_witness` uses the
+real SQLite producer oracle before PG, holds the borrowed snapshot across a
+second-connection commit, checks Current/recipe bytes, namespace isolation,
+cancellation and source-witness refusal. The existing
+`pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners` also
+checks the borrowed retained reader. These are scoped physical tests; effective
+whole-backend no-SQLite instrumentation and complete admission qualification
+remain required. PostgreSQL CI runs the `pg_catalog131` group; Storage CI checks
+formatting/default conformance but does not have a PostgreSQL service.
+
+The scalar119 interpretation-drift fixture now uses `native_keys::put_meta`.
+Its former `(namespace_digest,key)` conflict target was obsolete after the
+current NativeMeta physical key became `(namespace_digest,key_digest)`; strict
+scalar validation remains unchanged.

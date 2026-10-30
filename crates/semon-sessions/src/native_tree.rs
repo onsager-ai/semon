@@ -155,6 +155,10 @@ impl Summary {
     }
 
     pub(crate) fn tool_name(&self, id: &str) -> io::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        if let Some(stored @ events::store::tree_state::TreeCheckpoint::Pg(_)) = &self.stored {
+            return stored.tool_name(id);
+        }
         if let Some(name) = self.tools.get(id) {
             return Ok(Some(name.clone()));
         }

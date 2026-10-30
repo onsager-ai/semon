@@ -6,6 +6,7 @@ use std::time::Instant;
 pub(super) enum TxnKind {
     ReadSnapshot,
     Write,
+    StoreWrite,
 }
 
 /// No driver values escape this adapter; callbacks are synchronous, borrowed,
@@ -55,7 +56,7 @@ impl PgPool {
         }
         let mut lease = self.acquire(control)?;
         let limits = self.inner.limits;
-        let deadline = Instant::now() + limits.txn_deadline;
+        let deadline = control.deadline(Instant::now() + limits.txn_deadline);
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
         connection.client.context(deadline, control, limits);
         let mut phase = Phase::PreBegin;
@@ -65,7 +66,7 @@ impl PgPool {
                 .batch_execute(match kind {
                     TxnKind::ReadSnapshot => "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY",
                     // Future effects require explicit locks/fences/unique keys.
-                    TxnKind::Write => "BEGIN ISOLATION LEVEL READ COMMITTED",
+                    TxnKind::Write | TxnKind::StoreWrite => "BEGIN ISOLATION LEVEL READ COMMITTED",
                 })
                 .map_err(sqlstate::error)?;
             phase = Phase::InTxn;
@@ -97,6 +98,10 @@ impl PgPool {
             tx.check()?;
             if verify_schema {
                 schema::verify(&mut tx)?;
+                super::store_metadata::lock(&mut tx, matches!(kind, TxnKind::StoreWrite))?;
+                if matches!(kind, TxnKind::Write) {
+                    super::store_metadata::lock_publication(&mut tx)?;
+                }
             }
             let value = operation(&mut tx)?;
             tx.check()?;

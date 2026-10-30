@@ -94,6 +94,63 @@ pub(super) fn fixture(mut configure: impl FnMut(&mut PoolLimits)) -> (PgPool, Ar
     (pool, factory)
 }
 
+/// A separate LOGIN principal, provisioned only in the ephemeral CI service.
+/// Credentials remain inside this test factory and never enter library APIs.
+pub(super) fn admin_factory(host: &Factory) -> Arc<Factory> {
+    let dsn = std::env::var("SEMON_PG_ADMIN_TEST_DSN")
+        .expect("ephemeral CI corruption observer required");
+    Arc::new(Factory {
+        dsn,
+        schema: host.schema.clone(),
+    })
+}
+
+pub(super) fn source_factory(host: &Factory) -> Arc<Factory> {
+    let dsn = std::env::var("SEMON_PG_SOURCE_TEST_DSN")
+        .expect("distinct Source principal required in CI");
+    let source = Arc::new(Factory {
+        dsn,
+        schema: host.schema.clone(),
+    });
+    let mut client = host.client();
+    client
+        .batch_execute(&format!(
+            "GRANT USAGE ON SCHEMA {} TO semon_source",
+            host.schema
+        ))
+        .unwrap();
+    let tables = client.query("SELECT relname FROM pg_class WHERE relnamespace=current_schema()::regnamespace AND relkind='r'", &[]).unwrap();
+    for row in tables {
+        let name: String = row.get(0);
+        if !name.starts_with("semon_pg_") {
+            continue;
+        }
+        let privilege = if name.starts_with("semon_pg_store_") || name == "semon_pg_schema" {
+            "SELECT"
+        } else {
+            "SELECT,INSERT,UPDATE,DELETE"
+        };
+        assert!(name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'));
+        client
+            .batch_execute(&format!(
+                "GRANT {privilege} ON TABLE {name} TO semon_source"
+            ))
+            .unwrap();
+    }
+    client
+        .batch_execute(&format!(
+            "GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA {} TO semon_source",
+            host.schema
+        ))
+        .unwrap();
+    let row = source.client().query_one("SELECT current_user<>$1::name,NOT rolsuper AND NOT rolbypassrls FROM pg_roles WHERE rolname=current_user", &[&"semon_f1"]).unwrap();
+    assert!(
+        row.get::<_, bool>(0) && row.get::<_, bool>(1),
+        "distinct restricted Source role"
+    );
+    source
+}
+
 pub(super) fn ns(value: &str) -> LogicalSourceNamespace {
     LogicalSourceNamespace::new(value).unwrap()
 }
@@ -695,14 +752,32 @@ fn pg_digest_collision_refuses_without_alias_or_effect() {
             "ALTER TABLE semon_pg_operations ALTER COLUMN namespace_digest DROP EXPRESSION",
         )
         .unwrap();
-    pool.transaction(&ns("b"), TxnKind::Write, &PgCancellation::default(), |tx| {
+    // Deliberate corruption bypasses admission only in this fixture. Ordinary
+    // calls now refuse the changed generated column before entering effects.
+    pool.transaction_inner(&ns("b"), TxnKind::Write, &PgCancellation::default(), false, |tx| {
         tx.driver.execute("INSERT INTO semon_pg_operations(namespace, namespace_digest, operation_id, kind, request_digest, outcome) VALUES ($1, sha256($2::bytea), $3, $4, $5, '1')",
             &[&b"b".as_slice(), &b"a".as_slice(), &identity().operation_id, &identity().kind, &&identity().request_digest[..]]).unwrap();
         Ok(())
     }).unwrap();
     assert_eq!(
+        pool.transaction_inner(
+            &ns("a"),
+            TxnKind::ReadSnapshot,
+            &PgCancellation::default(),
+            false,
+            |tx| {
+                tx.driver
+                    .query("SELECT namespace FROM semon_pg_operations", &[])
+                    .map_err(super::sqlstate::error)?;
+                Ok(())
+            }
+        ),
+        Err(StorageError::Unavailable),
+        "the RLS collision guard still refuses independently of admission"
+    );
+    assert_eq!(
         pool.reconcile(&ns("a"), &identity(), &PgCancellation::default()),
-        Err(StorageError::Unavailable)
+        Err(StorageError::ScopeChanged)
     );
     assert!(matches!(
         pool.apply_operation(

@@ -11,6 +11,11 @@
   "native_event_metadata_composite": false,
   "semantic_stage_publication_qualification": 0,
   "semantic_stage_wip": [
+    "Worker135 exact tests: pg_catalog135_real_native_binding_before_effects_and_atomic_refusal; storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics. PG performs actual native ingest after the ordinary SQLite producer oracle with an effective process-wide deny hook; validates current full Ledger/Usage/page binding before Catalog effects. No admitted head/CAS/ACK/runtime epoch, durable references or full backend qualification; CI and independent acceptance pending",
+    "Worker127 exact CI names: pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries; pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects; pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners. Registered in PostgreSQL pg_catalog127 filter; Storage runs catalog_search::tests::; implementation and independent acceptance remain incomplete",
+    "Worker131 exact CI name: pg_catalog131_borrowed_snapshot_real_producer_mvcc_and_source_witness. Registered in PostgreSQL pg_catalog131 filter. Borrowed immutable metadata and bounded recipe windows only; admitted CatalogSnapshot, publisher and navigation remain incomplete; public qualification stays zero",
+    "Worker127 WIP: single generic metadata-search producer now serves SQLite and PG; private immutable PG search documents/postings/counts plus shared original custody/composite history physical staging added; five new history tables retain immutable owner generations and bounded progress. No admitted Catalog head/CAS/ACK, snapshot/navigation/presentation, proof ownership or complete backend qualification; public qualification stays zero; exact CI and independent review pending",
+    "Facts118 WIP: reported-run namespace keys, registered Source owner guards, shared row/merge/codec plan, atomic observation/stamp operations and private PG typed persistence/read family; current fresh PG schema 5 adds reported_runs/reported_stamp. CI and independent acceptance pending; all public qualifications remain zero",
     "Worker43 WIP: typed PID/native-parent/lineage/endpoint/relation/withdrawal effects use the existing shared model and parent/root reducer; shared relation witness merge; namespace-keyed bounded incident replay; exact owner profile validation; explicit withdrawal-only Current retirement retains recipes/trace/history search; owner observations join durable model/proof witness; four real-producer collision/parity/rollback/refusal/withdrawal CI gates authored, not run; other owner retirement and complete selectors remain refused; public qualifications zero",
     "Worker40 WIP: complete namespace-keyed trace header/turn/edge/bookmark physical family and typed shared trace publication effects; exact trace/header/recipe producer witness participates in model record, publication proof and component generation; private runtime fingerprints bind logical Source/admission/stream plus aggregate runtime without opening Options.cache; stored trace, equal-native-ID Source isolation, unsupported nonempty profile refusal and trace rollback tests authored; CI not run and all public qualifications remain zero",
     "Worker38 private committed Index/ledger/proof model handoff avoids ingestion intents; same-runtime begin advances epoch atomically while retaining progress and model witness; ownership-backed Query listing uses semantic_listing_generation while global completeness stays partial and other reader factories refuse; current-schema-only, qualifications 0, CI and independent review pending",
@@ -30,7 +35,8 @@
     "SourceJournal seed reads, physical reader epoch and source change-stream floors",
     "store.rs observation/recovery/backfill/generation/slot/search/publication metadata, schema qualification/init and reported-file stamp; archive GLOB/current file count selects core and meta layouts independently"
   ],
-  "native_tree_noop_witness": "transaction-local current header/generation/dimension digest plus parser/ledger/pricing/recipe interpretation; missing or stale witnesses repair",
+  "native_tree_noop_witness": "tree4 current domain-separated SHA-256 stream in stored fixed-width model/tool address order; all tool names, NULL names and closed states authenticated; header binds full namespace/owner, scalar binds parser/ledger/pricing/recipe interpretation; fresh SQLite35/PG9 only; no old reader; large-dimension defer/resource qualification remains pending",
+  "native_tree_scalar_reader": "scalar119 private PG restore and SQLite read/reuse share the strict current TreeSummaryRecord codec; PG deferred calls requalify captured scalar/dimensions/interpretation under the caller snapshot; no retained L1 lease or public backend qualification; real-producer lifecycle, namespace collision and refusal CI pending",
   "native_usage_composite": false,
   "native_usage_scoped_helpers": "bound-selector five-table family plus repair queue/claims/clock and Tree generations/headers/dimensions/work/snapshots; native repricing current-source/fact/dimension operations ported; private physical composite fixtures, production activation closed",
   "native_usage_activation_pending": [
@@ -49,6 +55,7 @@
     "fresh configured composite-meta activation and complete writer/guard qualification; performance qualification remains pending"
   ],
   "unqualified_paths": [
+    "storage/postgres/catalog_effects/tests.rs",
     "catalog_observer.rs",
     "catalog_search.rs",
     "causal_trace.rs",
@@ -60,6 +67,8 @@
     "events/store/configured.rs",
     "events/store/configured_selected60.rs",
     "events/store/launch_calls.rs",
+    "events/store/native_commit.rs",
+    "events/store/native_decode.rs",
     "events/store/native_usage.rs",
     "events/store/native_usage/repair.rs",
     "events/store/relocation.rs",
@@ -90,6 +99,14 @@
     "selected_read.rs",
     "source_change.rs",
     "storage.rs",
+    "storage/postgres/native_bundle/tests.rs",
+    "storage/postgres/native_core/tests.rs",
+    "storage/postgres/native_ingest_tests.rs",
+    "storage/postgres/native_usage/tests.rs",
+    "storage/postgres/native_usage_identity/tests.rs",
+    "storage/postgres/reported_facts.rs",
+    "storage/postgres/tree_checkpoint/tests.rs",
+    "storage/postgres/tree_writer/tests.rs",
     "test_hooks.rs",
     "transcript_range.rs",
     "viewer.rs"
@@ -97,6 +114,9 @@
   "native_tree_repair_readiness": "same bounded read_tree_summary validation as the consumer, including projection and interpretation witnesses; original 256-iteration Catalog convergence oracle unchanged; revalidation required on this revision",
   "native_usage_composite_ddl": "authored_storage_ddl(PhysicalLayout) selects all 21 authored chunks, including changes::schema metadata/Catalog variants, with explicit cross-family refusal; default singleton and configured-core factory DDL preserved; private composite assembly awaits CI and review, no public activation",
   "native_usage_ci_filters": [
+    "pg_native_keys134_current_witness_long_keys_real_producer_without_sqlite: real SQLite current producer FIRST, then isolated PG physical write/read/restart with process-wide SQLite-open rejection, >2704-byte nonrepeating model/tool/name/path, NUL/non-BMP, same foreign namespace keys, actual forced-address collision rollback. Authored only; exact CI and fresh independent review pending; whole-dimension deferred capture and full resource/fault qualification remain unfinished",
+    "pg_native_keys132: Tree work/header/repair/usage-model/copied physical-address WIP; real SQLite producer long-path publication/restart/foreign namespace and warm generated/index/RLS drift tests authored; Worker134 evolves the shared witness and models/tools physical addresses; exact CI and independent review pending",
+    "pg_native_keys128: private PG Usage current/identity/dimension and dependency digest addressing; real SQLite producer long-key/restart/namespace/wrong-heap-witness and actual SQL selected-row/byte noise probes authored; exact CI and independent review pending; public qualification remains zero",
     "configured_semantic_domain94_unfinished_member_keyset_resumes_after_restart commits actual unfinished native member discovery, reopens its keyset and verifies ordinary-producer parity without duplicate native history; domain94 CI filter registers it",
     "configured_semantic_domain94_name_members_source_overflow_rolls_back_before_raw and configured_semantic_domain94_late_native_member_fences_publication_and_restarts use real native producers; existing domain94 member replay additionally checks durable keysets across reopen; exact-head CI required",
     "events::store::native_usage::namespace_tests:: covers private usage/repair collisions; file_namespace_tests:: now explicitly selects file-backed append/replay/reopen/conflict rollback (distinct module); native_usage_ separately covers Tree and native repricing",

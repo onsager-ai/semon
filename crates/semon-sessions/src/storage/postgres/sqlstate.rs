@@ -15,6 +15,11 @@ pub(super) fn classify(code: Option<&str>, committing: bool) -> StorageError {
 pub(super) fn error(error: super::pool::DriverError) -> StorageError {
     match error {
         super::pool::DriverError::Pg(error) => {
+            #[cfg(test)]
+            eprintln!(
+                "PG_DIAGNOSTIC sqlstate={}",
+                error.code().map_or("none", |code| code.code())
+            );
             classify(error.code().map(|code| code.code()), false)
         }
         super::pool::DriverError::Interrupted => StorageError::Busy,
