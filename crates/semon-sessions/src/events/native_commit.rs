@@ -118,11 +118,17 @@ pub(crate) fn advance_relocation(
     append: bool,
 ) -> serde_json::Result<Option<String>> {
     let proof = encoded.and_then(|value| serde_json::from_str::<CatalogRelocation>(value).ok());
-    let Some(mut proof) =
-        proof.filter(|proof| proof.version == 1 && append && Some(&proof.after) == expected)
+    let Some(mut proof) = proof.filter(|proof| proof.version == 1 && Some(&proof.after) == expected)
     else {
         return Ok(None);
     };
+    if !append {
+        return Ok(if next == &proof.after {
+            encoded.map(str::to_owned)
+        } else {
+            None
+        });
+    }
     proof.after = next.clone();
     serde_json::to_string(&proof).map(Some)
 }
@@ -190,4 +196,83 @@ pub(crate) fn relocation_namespace(path: &str) -> Option<(&str, bool)> {
             path.rsplit_once("/sessions/")
                 .map(|(root, _)| (root, false))
         })
+}
+
+#[cfg(test)]
+mod relocation_tests {
+    use super::{CatalogRelocation, Ledger, advance_relocation};
+    use crate::events::Stat;
+
+    fn ledger(n: u8) -> Ledger {
+        Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 3 + u64::from(n),
+                modified_ns: 10 + u128::from(n),
+                changed_ns: Some(20 + i128::from(n)),
+            },
+            offset: 3 + u64::from(n),
+            prefix: [n; 32],
+            tail: [n.wrapping_add(1); 32],
+        }
+    }
+
+    fn encoded(after: Ledger) -> String {
+        serde_json::to_string(&CatalogRelocation {
+            version: 1,
+            new_path: "archived/session.jsonl".into(),
+            native_id: "session".into(),
+            prior: ledger(0),
+            catalog_before: None,
+            after,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn unchanged_relocation_replay_retains_the_qualified_witness() {
+        let after = ledger(1);
+        let encoded = encoded(after.clone());
+
+        let retained = advance_relocation(Some(&encoded), Some(&after), &after, false).unwrap();
+
+        assert_eq!(retained.as_deref(), Some(encoded.as_str()));
+    }
+
+    #[test]
+    fn relocation_witness_mismatches_clear_and_valid_appends_advance() {
+        let after = ledger(1);
+        let changed = ledger(2);
+        let encoded = encoded(after.clone());
+
+        assert!(
+            advance_relocation(Some(&encoded), None, &after, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            advance_relocation(Some(&encoded), Some(&changed), &after, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            advance_relocation(Some(&encoded), Some(&after), &changed, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            advance_relocation(Some(&encoded), Some(&changed), &changed, true)
+                .unwrap()
+                .is_none()
+        );
+
+        let advanced = advance_relocation(Some(&encoded), Some(&after), &changed, true)
+            .unwrap()
+            .unwrap();
+        let advanced: CatalogRelocation = serde_json::from_str(&advanced).unwrap();
+        assert_eq!(advanced.after, changed);
+        assert_eq!(advanced.new_path, "archived/session.jsonl");
+        assert_eq!(advanced.native_id, "session");
+    }
 }
