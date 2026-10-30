@@ -48,8 +48,10 @@ Captured runtime observations distinguish the owner, exact source generation and
 canonical typed dependency set, including source-CWD repository dependencies.
 Final Query rows and queryless family endpoints can share an owner and sources
 while retaining distinct observations. Replay derives the same identity from
-the row and captured source-cohort CWDs, independently of saved Query runtime
-strings. Conflicting observations for one identity or CWDs for one source cohort
+the row and a captured source-cohort CWD-set fingerprint, independently of saved
+Query runtime strings. Sorted CWDs are hashed incrementally with length prefixes;
+only the fixed-size fingerprint enters the capture, even for a long native CWD.
+Conflicting observations for one identity or CWDs for one source cohort
 refuse capture; the existing 260-observation bound still applies.
 The PostgreSQL producer prepares identity-and-activity-addressed dependency
 digests with its existing current Facts head, so ordinary reads use point keys
