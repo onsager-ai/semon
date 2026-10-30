@@ -1056,14 +1056,10 @@ fn read_page(
     transaction.commit()?;
     if reply.status == 200
         && let (Some(on_search), Some(admission)) = (on_search, admission)
-        && !on_search(admission)
     {
-        return Ok(error(
-            503,
-            "catalog_search_busy",
-            "The pending native search queue is full. Retry this Catalog query.",
-            true,
-        ));
+        // Producer priority is advisory; a full queue cannot invalidate the
+        // Catalog page already read from a qualified publication.
+        let _ = on_search(admission);
     }
     Ok(reply)
 }
@@ -1275,7 +1271,7 @@ fn read_page_snapshot(
                     transaction,
                     options,
                     crate::events::CatalogSearchInterest { query, harness },
-                    64,
+                    crate::events::CATALOG_SEARCH_LIMIT,
                 )
                 .map_err(|_| ()),
             });

@@ -272,8 +272,8 @@ declared fulfilled. Complete Catalog reads perform no hint lookup.
 Only qualified pending paths enter the 64-ticket scheduling queue. Healthy
 nonmatching, published-only and rejected-harness searches occupy no ticket, in
 either order relative to another tab's live search. Lookup failures remain
-explicit retry interests. A full queue of admitted or unknown interests returns
-retryable `catalog_search_busy`, rather than silently dropping a new search.
+explicit retry interests. A full queue skips the new advisory scheduling hint;
+the qualified Catalog read retains its successful response and page contents.
 Repeated positive admission refreshes the ticket ID while preserving its waiting
 paths, so an older acknowledgement cannot erase renewed demand for the same path.
 
@@ -295,9 +295,18 @@ Bounded related components are remembered before derivation, so an unqualified
 parent and its pending child cannot poison an unrelated ordinary cohort. This
 additive registration follows renewed demand for the same attempted seed while
 old acknowledgements and resolution remain fenced by ticket ID and epoch.
+If renewed advisory waiting paths and the attempted bounded component together
+exceed the ticket's 64-path capacity, the ticket retains the entire attempted
+component under its current ID. Other advisory interests resume through FIFO or
+a later read; their durable claims remain pending. Scheduling capacity never
+starts a semantic epoch.
 Components exceeding 64 sources enter the existing semantic epoch; ordinary
 publication does not interleave into an active epoch, and the reservation
 survives until that pipeline permits ordinary scheduling again.
+
+Before the first readable generation, the newest native cohort still resolves
+actual pending whole JSON inputs first. This replays sidecar and PID dependency
+intents without mapping unrelated pending native paths into that cohort.
 
 After successful publication and concurrent-source requeue, completed source
 claims acknowledge demand even when an empty, invalid, deleted or folded source

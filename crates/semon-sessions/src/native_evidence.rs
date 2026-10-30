@@ -34,7 +34,7 @@ pub(crate) struct NativeEvidence {
 // Reuse the existing bounded cohort size as scheduling capacity, not a
 // performance budget. Only qualified pending paths and failed probes are
 // admitted; ordinary metadata queries never occupy a scheduling ticket.
-const CATALOG_SEARCH_CAPACITY: usize = 64;
+const CATALOG_SEARCH_CAPACITY: usize = crate::events::CATALOG_SEARCH_LIMIT;
 
 #[derive(Clone)]
 struct CatalogSearchTicket {
@@ -139,7 +139,7 @@ impl CatalogSearchQueue {
         ticket: &CatalogSearchTicket,
         seeds: &[String],
         paths: impl Iterator<Item = String>,
-    ) -> bool {
+    ) {
         let Some(current) = self.tickets.iter_mut().find(|current| {
             current.epoch == ticket.epoch
                 && current.query == ticket.query
@@ -147,14 +147,18 @@ impl CatalogSearchQueue {
                 && (current.id == ticket.id
                     || seeds.iter().any(|path| current.waiting.contains(path)))
         }) else {
-            return true;
+            return;
         };
-        let waiting: BTreeSet<_> = current.waiting.iter().cloned().chain(paths).collect();
-        if waiting.len() > CATALOG_SEARCH_CAPACITY {
-            return false;
-        }
-        current.waiting = waiting;
-        true
+        let paths: BTreeSet<_> = paths.collect();
+        let waiting: BTreeSet<_> = current.waiting.union(&paths).cloned().collect();
+        // Retain the entire bounded attempted component for ordinary exclusion.
+        // Extra renewed advisory interests can wait for FIFO or another read;
+        // scheduling capacity never changes semantic component qualification.
+        current.waiting = if waiting.len() > CATALOG_SEARCH_CAPACITY {
+            paths
+        } else {
+            waiting
+        };
     }
 
     fn acknowledge(&mut self, epoch: u64, tickets: &BTreeSet<u64>, published: &[String]) {
@@ -715,6 +719,17 @@ impl NativeEvidence {
             cache.session_catalog_generation().is_none() && !discovery.newest.is_empty();
         let mut attempted_ticket = None;
         let inputs = if use_newest {
+            // Whole JSON intents replay their dependencies before the first
+            // native publication. Inspect raw pending paths without mapping
+            // unrelated FIFO sources into this newest native cohort.
+            if let Some(path) = cache
+                .pending_catalog_sources(crate::events::CATALOG_SEARCH_LIMIT)?
+                .iter()
+                .find(|path| path.ends_with(".json"))
+            {
+                cache.resolve_catalog_input(&self.options, path)?;
+                return Ok(CatalogPreparation::Pending);
+            }
             std::mem::take(&mut discovery.newest)
                 .into_iter()
                 .map(|(_, input)| input)
@@ -751,7 +766,10 @@ impl NativeEvidence {
             let retry = interest
                 .as_ref()
                 .filter(|_| paths.is_empty())
-                .map(|interest| EventCache::catalog_search_lookup(interest, &ranges));
+                .map(|interest| crate::events::CatalogSearchLookup {
+                    query: interest.query,
+                    ranges: &ranges,
+                });
             let preferred =
                 (ticket.is_some() || ordinary_due).then_some(crate::events::CatalogPendingSearch {
                     paths: &paths,
@@ -759,7 +777,10 @@ impl NativeEvidence {
                     yield_to_fifo: ordinary_due,
                     excluded: &excluded,
                 });
-            let batch = match cache.prioritized_catalog_sources(64, preferred.as_ref()) {
+            let batch = match cache.prioritized_catalog_sources(
+                crate::events::CATALOG_SEARCH_LIMIT,
+                preferred.as_ref(),
+            ) {
                 Ok(batch) => batch,
                 Err(error) => {
                     if ticket.is_some() {
@@ -786,13 +807,11 @@ impl NativeEvidence {
                     queue.ordinary_due = false;
                 }
             }
-            if batch.tier == crate::events::CatalogPendingTier::SearchHint {
-                attempted_ticket = ticket.clone();
-            }
-            if batch.search_checked
-                && batch.tier == crate::events::CatalogPendingTier::Fifo
-                && let Some(ticket) = &ticket
-            {
+            let resolved_empty =
+                batch.search_checked && batch.tier == crate::events::CatalogPendingTier::Fifo;
+            if resolved_empty && let Some(ticket) = &ticket {
+                // This probe is already conclusive even if unrelated FIFO
+                // sidecar resolution or source mapping subsequently fails.
                 lock(&self.catalog_search).resolve(ticket, &[]);
             }
             if let Some(path) = batch.paths.iter().find(|path| path.ends_with(".json")) {
@@ -802,9 +821,12 @@ impl NativeEvidence {
             // Remembered closures can cross harness boundaries. Their pending
             // paths were already admitted through the native source facade.
             let interest = if paths.is_empty() { interest } else { None };
-            let (_, pending, checked) =
+            let (tier, pending, checked) =
                 EventCache::catalog_pending_inputs(&self.options, batch, interest)?;
-            if let (Some(ticket), Some(checked)) = (&ticket, checked) {
+            if tier == crate::events::CatalogPendingTier::SearchHint {
+                attempted_ticket = ticket.clone();
+            }
+            if !resolved_empty && let (Some(ticket), Some(checked)) = (&ticket, checked) {
                 lock(&self.catalog_search).resolve(ticket, &checked);
             }
             pending
@@ -1155,8 +1177,8 @@ impl NativeEvidence {
             if inputs.len() > 64 {
                 break None;
             }
-            if let Some(ticket) = ticket
-                && !lock(&self.catalog_search).remember_component(
+            if let Some(ticket) = ticket {
+                lock(&self.catalog_search).remember_component(
                     ticket,
                     &seeds,
                     inputs.iter().map(|input| {
@@ -1165,11 +1187,7 @@ impl NativeEvidence {
                             .to_string_lossy()
                             .into_owned()
                     }),
-                )
-            {
-                // A renewed ticket plus this closure exceeds the bounded
-                // component contract. The existing semantic epoch owns it.
-                break None;
+                );
             }
             let selected: Vec<_> = inputs.iter().cloned().collect();
             let started = measurements.start();
@@ -2535,7 +2553,7 @@ mod catalog_owner_tests {
     }
 
     #[test]
-    fn cold_catalog_search_real_capacity_refuses_with_retryable_page_error() {
+    fn cold_catalog_search_real_capacity_preserves_readable_http_page() {
         let (root, evidence, core, db) = cold_search_reader();
         let work = lock(&evidence.work);
         for index in 0..=CATALOG_SEARCH_CAPACITY {
@@ -2547,18 +2565,37 @@ mod catalog_owner_tests {
                 &format!("q={id}&harness=codex"),
                 None,
             );
-            if index < CATALOG_SEARCH_CAPACITY {
-                assert_eq!(reply.status, 200);
-            } else {
-                assert_eq!(reply.status, 503);
+            assert_eq!(reply.status, 200);
+            if index == CATALOG_SEARCH_CAPACITY {
                 let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-                assert_eq!(body["error"]["code"], "catalog_search_busy");
-                assert_eq!(body["error"]["retryable"], true);
+                assert!(body["items"].as_array().unwrap().is_empty());
+                assert_eq!(body["search"]["index_complete"], false);
             }
         }
+        pending_search_source(&evidence, &db, "audit");
+        let reply = core.respond("GET", "/api/sessions", "q=audit&harness=codex", None);
+        assert_eq!(reply.status, 200);
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["items"][0]["key"], "audit");
         assert_eq!(
             lock(&evidence.catalog_search).tickets.len(),
             CATALOG_SEARCH_CAPACITY
+        );
+        assert!(
+            !lock(&evidence.catalog_search)
+                .tickets
+                .iter()
+                .any(|ticket| ticket.query == "audit")
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM session_catalog_invalidations",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            CATALOG_SEARCH_CAPACITY as i64 + 2,
+            "skipping advisory hints must preserve every durable source claim"
         );
         drop(work);
         core.close();
@@ -2896,16 +2933,126 @@ mod catalog_owner_tests {
     }
 
     #[test]
+    fn cold_catalog_search_ticket_capacity_keeps_small_component_out_of_semantic_stage() {
+        let (root, evidence, core, db) = cold_search_reader();
+        let parent = pending_search_source(&evidence, &db, "selected-parent");
+        let child = pending_search_source(&evidence, &db, "related-child");
+        fs::write(&child, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"related-child","parent_thread_id":"selected-parent","thread_source":"subagent","agent_path":"selected-parent/child"}}).to_string()+"\n").unwrap();
+        let mut work = lock(&evidence.work);
+        evidence
+            .prepare_catalog(&mut work, model::now_ms())
+            .unwrap();
+        for path in [&parent, &child] {
+            db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
+        }
+        let ordinary = pending_search_source(&evidence, &db, "ordinary-independent");
+        let mut renewed_paths = vec![parent.clone()];
+        for index in 0..63 {
+            renewed_paths.push(pending_search_source(
+                &evidence,
+                &db,
+                &format!("renewed-{index:03}"),
+            ));
+        }
+        assert_eq!(
+            core.respond(
+                "GET",
+                "/api/sessions",
+                "q=selected-parent&harness=codex",
+                None
+            )
+            .status,
+            200
+        );
+        let attempted = lock(&evidence.catalog_search).tickets[0].clone();
+        assert_eq!(attempted.waiting, BTreeSet::from([parent.clone()]));
+        // Reproduce positive readmission between producer selection and closure
+        // registration without changing the publication or source-read seams.
+        let renewed_id = {
+            let mut queue = lock(&evidence.catalog_search);
+            assert!(queue.note(Some(("selected-parent", Some("codex"))), Ok(renewed_paths)));
+            assert_eq!(queue.tickets[0].waiting.len(), 64);
+            queue.tickets[0].id
+        };
+        assert_ne!(renewed_id, attempted.id);
+        let input = catalog_input(Path::new(&parent), &evidence.options).unwrap();
+        let prepared = evidence
+            .prepare_catalog_component_mode(
+                work.events.as_mut().unwrap(),
+                vec![input],
+                true,
+                model::now_ms(),
+                Some(&attempted),
+            )
+            .unwrap();
+        assert!(
+            prepared.is_some(),
+            "advisory queue pressure cannot signal semantic component overflow"
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        assert_eq!(lock(&evidence.catalog_search).tickets[0].id, renewed_id);
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([parent.clone(), child.clone()])
+        );
+        fs::write(&parent, "{invalid}\n").unwrap();
+        let error = match evidence.prepare_catalog(&mut work, model::now_ms()) {
+            Err(error) => error,
+            Ok(_) => panic!("the bounded component must retain its qualification refusal"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        evidence
+            .prepare_catalog(&mut work, model::now_ms())
+            .unwrap();
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [&ordinary],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_sources WHERE native_id='ordinary-independent')", [], |row| row.get::<_, bool>(0)).unwrap());
+        for path in [&parent, &child] {
+            assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [path], |row| row.get::<_, bool>(0)).unwrap());
+        }
+        assert_eq!(
+            lock(&evidence.catalog_search).tickets[0].waiting,
+            BTreeSet::from([parent, child])
+        );
+        assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage)",
+                [],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        drop(work);
+        core.close();
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn cold_catalog_search_renewed_ticket_remembers_attempted_closure_without_stale_ack() {
         let mut queue = CatalogSearchQueue::default();
         queue.note(Some(("selected", None)), Ok(vec!["/selected".into()]));
         let old = queue.next().unwrap();
         queue.note(Some(("selected", None)), Ok(vec!["/selected".into()]));
-        assert!(queue.remember_component(
+        queue.remember_component(
             &old,
             &["/selected".into()],
-            ["/selected".into(), "/related".into()].into_iter()
-        ));
+            ["/selected".into(), "/related".into()].into_iter(),
+        );
         queue.resolve(&old, &[]);
         queue.acknowledge(
             old.epoch,
@@ -2922,11 +3069,7 @@ mod catalog_owner_tests {
         queue.close();
         queue.open();
         queue.note(Some(("selected", None)), Ok(vec!["/selected".into()]));
-        assert!(queue.remember_component(
-            &old,
-            &["/selected".into()],
-            ["/related".into()].into_iter()
-        ));
+        queue.remember_component(&old, &["/selected".into()], ["/related".into()].into_iter());
         assert_eq!(
             queue.tickets[0].waiting,
             BTreeSet::from(["/selected".into()])
@@ -3062,6 +3205,96 @@ mod catalog_owner_tests {
             drop(db);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn cold_catalog_search_first_generation_resolves_pending_sidecar_before_newest() {
+        let (root, options, _) = audit_fixture();
+        let child = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/parent/subagents/agent-child.jsonl".into(),
+        };
+        let child_path = child.full_path(&options);
+        fs::create_dir_all(child_path.parent().unwrap()).unwrap();
+        fs::write(&child_path, serde_json::json!({"type":"user","uuid":"child-message","sessionId":"parent","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"child"}}).to_string()+"\n").unwrap();
+        let sidecar = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/parent/subagents/agent-child.meta.json".into(),
+        };
+        let sidecar_path = sidecar.full_path(&options);
+        let intent = crate::SessionSourceWrite::begin(&options, &sidecar, None, 0).unwrap();
+        fs::write(
+            &sidecar_path,
+            r#"{"description":"first-sidecar-label","toolUseId":"first-launch"}"#,
+        )
+        .unwrap();
+        intent
+            .complete(fs::metadata(&sidecar_path).unwrap().len())
+            .unwrap();
+        let evidence = NativeEvidence::new(options.clone());
+        let mut work = lock(&evidence.work);
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let sidecar_pending = || {
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [sidecar_path.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap()
+        };
+        assert!(sidecar_pending());
+        let mut resolved_before_publication = false;
+        for _ in 0..16 {
+            evidence
+                .prepare_catalog(&mut work, model::now_ms())
+                .unwrap();
+            let generation = work.events.as_ref().unwrap().session_catalog_generation();
+            if generation.is_some() {
+                assert!(resolved_before_publication);
+                assert!(!sidecar_pending());
+                break;
+            }
+            if !sidecar_pending() {
+                resolved_before_publication = true;
+                assert!(
+                    work.cold_catalog
+                        .as_ref()
+                        .unwrap()
+                        .newest
+                        .iter()
+                        .any(|(_, input)| input == &child)
+                );
+                assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [child_path.to_string_lossy().as_ref()], |row| row.get::<_, bool>(0)).unwrap(), "sidecar replay must preserve its native dependency until publication");
+            }
+        }
+        assert!(crate::session_catalog_page_ready(&options).unwrap());
+        let metadata: String = db.query_row("SELECT c.metadata FROM session_catalog c JOIN session_catalog_sources s ON s.session_key=c.session_key WHERE s.source_path=?1", [child_path.to_string_lossy().as_ref()], |row| row.get(0)).unwrap();
+        let row: model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let source = row
+            .sources
+            .iter()
+            .find(|source| source.path == child_path)
+            .unwrap();
+        assert_eq!(
+            source.native_role.as_ref().unwrap()["Agent"]["label"],
+            "first-sidecar-label"
+        );
+        assert_eq!(
+            source.native_role.as_ref().unwrap()["Agent"]["tool_use_id"],
+            "first-launch"
+        );
+        assert!(
+            !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [child_path.to_string_lossy().as_ref()],
+                |row| row.get::<_, bool>(0)
+            )
+            .unwrap()
+        );
+        drop(work);
+        drop(evidence);
+        drop(db);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

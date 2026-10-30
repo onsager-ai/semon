@@ -535,7 +535,7 @@ pub(super) fn catalog_search_paths(
             params![
                 search.query,
                 format!("{}.jsonl", search.query),
-                limit.min(64) as i64,
+                limit.min(super::CATALOG_SEARCH_LIMIT) as i64,
                 ranges[0].0,
                 ranges[0].1,
                 ranges[1].0,
@@ -2418,7 +2418,7 @@ impl IndexStore for SqliteStore {
                 let encoded = serde_json::to_string(search.paths)
                     .map_err(|error| StoreError::Failed(error.to_string()))?;
                 transaction.prepare("SELECT i.source_path FROM json_each(?1) p JOIN session_catalog_invalidations i ON i.source_path=p.value ORDER BY i.source_path LIMIT ?2").map_err(failure)?
-                    .query_map(params![encoded, limit.min(64) as i64], |row| row.get(0)).map_err(failure)?
+                    .query_map(params![encoded, limit.min(super::CATALOG_SEARCH_LIMIT) as i64], |row| row.get(0)).map_err(failure)?
                     .collect::<Result<Vec<String>, _>>().map_err(failure)?
             }
         } else {
