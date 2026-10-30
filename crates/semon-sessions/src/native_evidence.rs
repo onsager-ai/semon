@@ -1208,8 +1208,8 @@ impl NativeEvidence {
         }
         if batch.phase == Phase::Publication {
             work.observed_catalog_generation = generation;
-            crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
-            self.acknowledge_catalog_search(cache, &prepared);
+            crate::events::store::requeue_concurrent_sources(&self.options, prepared)?;
+            self.acknowledge_catalog_search(cache, prepared);
             cache.publish_session_descriptions();
         }
         cache.end_scan();
