@@ -6619,8 +6619,8 @@ fn qualified_read_interest_resumes_a_durable_revision_after_owner_loss() {
 #[test]
 fn native_relocation_history_witness_survives_failed_publication_and_an_append() {
     use crate::{Input, InputRoot, SessionFactsWrite, SessionSourceWrite};
-    use std::{collections::BTreeSet, io::Write};
     use sha2::Digest;
+    use std::{collections::BTreeSet, io::Write};
     let fixture = Fixture::new();
     let active = "sessions/2026/10/01/rollout-replay.jsonl";
     let archived = "archived_sessions/2026/10/01/rollout-replay.jsonl";
@@ -6649,10 +6649,8 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
     assert_eq!(original["entries"].as_array().unwrap().len(), 1);
     assert_eq!(original["entries"][0]["text"], "first");
     let original_identity = original["identity"].clone();
-    let original_source: crate::SessionSourceRef = serde_json::from_value(
-        original_identity["source_refs"][0]["source"].clone(),
-    )
-    .unwrap();
+    let original_source: crate::SessionSourceRef =
+        serde_json::from_value(original_identity["source_refs"][0]["source"].clone()).unwrap();
     assert_eq!(original_source.path, active);
     assert_eq!(original_source.native_id, "move-replay");
     assert_eq!(original_source.offset, original_bytes.len() as u64);
@@ -6750,8 +6748,7 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
     let retained_unavailable =
         crate::session_transcript_range(&fixture.options, "local", retained_query, None);
     assert_eq!(retained_unavailable.status, 200);
-    let retained_unavailable: Value =
-        serde_json::from_slice(&retained_unavailable.body).unwrap();
+    let retained_unavailable: Value = serde_json::from_slice(&retained_unavailable.body).unwrap();
     assert_eq!(retained_unavailable["entries"].as_array().unwrap().len(), 1);
     assert_eq!(retained_unavailable["entries"][0]["text"], "");
     assert_eq!(
@@ -6824,8 +6821,7 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
             let original_prefix = &actual[..consumed];
             let prefix_sha256: [u8; 32] = sha2::Sha256::digest(original_prefix).into();
             let tail_start = consumed.saturating_sub(4096);
-            let tail_sha256: [u8; 32] =
-                sha2::Sha256::digest(&original_prefix[tail_start..]).into();
+            let tail_sha256: [u8; 32] = sha2::Sha256::digest(&original_prefix[tail_start..]).into();
             if original_prefix != self.original_bytes.as_slice()
                 || prefix_sha256 != self.original_prefix_sha256
                 || prefix_sha256 != source.prefix_sha256
@@ -6899,13 +6895,21 @@ fn native_relocation_history_witness_survives_failed_publication_and_an_append()
         "native_ids",
         "owner_qualification",
     ] {
-        assert_eq!(retained["identity"][field], original_identity[field], "{field}");
+        assert_eq!(
+            retained["identity"][field], original_identity[field],
+            "{field}"
+        );
     }
     assert_eq!(
         retained["identity"]["source_refs"][0]["source"],
         original_identity["source_refs"][0]["source"]
     );
-    assert!(archive_reader.calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert!(
+        archive_reader
+            .calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+    );
     assert_eq!(
         db.query_row(
             "SELECT count(*) FROM meta WHERE key LIKE 'native_catalog_relocation:%'",
