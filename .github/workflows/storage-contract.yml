@@ -67,13 +67,26 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
       - name: Selected recovery owner proof and rollback contracts
+        id: recovery_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
-          cargo test --locked -p semon-sessions --lib recovery_history_helper_contract_ -- --nocapture
-          cargo test --locked -p semon-sessions --lib recovery_stage_only_preimage_authenticates_before_inserting_current_grant -- --nocapture
-          cargo test --locked -p semon-sessions --lib recovery_query_row_and_grant_roll_back_when_grant_update_fails -- --nocapture
-          cargo test --locked -p semon-sessions --lib recovery_tampered_preimage_refuses_before_producer_reads_or_writes -- --nocapture
-          cargo test --locked -p semon-sessions --lib recovery_selected_repair_cancellation_rolls_back_publication -- --nocapture
+          result=0
+          for test in recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key recovery_stage_only_preimage_authenticates_before_inserting_current_grant recovery_query_row_and_grant_roll_back_when_grant_update_fails recovery_tampered_preimage_refuses_before_producer_reads_or_writes recovery_selected_repair_cancellation_rolls_back_publication; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "query::tests::recovery_tests::$test" -- --exact --nocapture > "$RUNNER_TEMP/recovery-owner-case.log" 2>&1 || case_result=$?
+            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/recovery-owner-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/recovery-owner-case.log" >> "$RUNNER_TEMP/recovery-owner-tests.log"
+            echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/recovery-owner-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/recovery-owner-tests.log"
+          exit "$result"
+      - name: Retain selected recovery owner results
+        if: ${{ !cancelled() && steps.recovery_owner.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: recovery-owner-tests
+          path: ${{ runner.temp }}/recovery-owner-tests.log
       - name: Current SQLite transfer inbox restart and atomic checkpoint
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture
