@@ -62,11 +62,40 @@ jobs:
 
       # Diagnostic only: leave both normal isolated and full-parallel gates
       # below unchanged, and retain counters even if this diagnostic fails.
-      - name: Cold Index writer diagnostic (not qualification)
+      - name: Cold Catalog page diagnostic (not qualification)
         continue-on-error: true
         env:
           SEMON_BUILD_TIMING: "1"
-        run: cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+        run: |
+          set -o pipefail
+          cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture 2>&1 | tee "$RUNNER_TEMP/cold-catalog-page.log"
+
+      - name: Summarize early cold Catalog diagnostics
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          source = root / 'cold-catalog-page.log'
+          wanted = ('catalog_page_stage=', 'production-first-page', 'cold_lifecycle=', 'phase=cold_total',
+                    'phase=worker_tick', 'initial_catalog_page_precedes_global_native_observation',
+                    'bounded initial page took', 'test result:', 'error[', 'error:', 'panicked at')
+          rows = [f"head={os.environ['GITHUB_SHA']} timing=1 diagnostic_only=true"]
+          if source.exists():
+              clean = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', source.read_text(errors='replace'))
+              rows.extend(line for line in clean.splitlines() if any(key in line for key in wanted))
+          else:
+              rows.append('diagnostic output unavailable')
+          (root / 'cold-catalog-page-summary.log').write_text('\n'.join(rows) + '\n')
+          PY
+
+      - name: Retain early cold Catalog diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cold-catalog-page-diagnostic
+          path: ${{ runner.temp }}/cold-catalog-page-summary.log
+          if-no-files-found: error
 
       - name: Session URL shared vectors (ordinary PR gate)
         run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture

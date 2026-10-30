@@ -6910,7 +6910,17 @@ mod tests {
             let (release, released) = mpsc::channel::<()>();
             let released = Mutex::new(released);
             *lock(&view.hooks.building) = Some(Arc::new(move || {
+                let page_started = Instant::now();
                 let page = crate::session_catalog_page(&options, "fixture", "limit=60");
+                if crate::native_timing::enabled() {
+                    let producer = crate::native_timing::id(&EventCache::path(&options.cache));
+                    eprintln!(
+                        "production-first-page-phases producer={producer} unrelated={unrelated} test_start_to_page_entry_us={} page_call_us={} test_start_to_page_return_us={}",
+                        page_started.duration_since(start).as_micros(),
+                        page_started.elapsed().as_micros(),
+                        start.elapsed().as_micros(),
+                    );
+                }
                 assert_eq!(page.status, 200);
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
                 assert_eq!(body["completeness"]["state"], "partial");
