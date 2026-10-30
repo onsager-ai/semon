@@ -3,6 +3,9 @@
 The real-session follow-up uses [REAL_PROTOCOL.md](REAL_PROTOCOL.md) and the
 `real_*.py` tools. Its corpus and individual outputs are strictly local under
 gitignored `private/`; the fixture benchmark described below is separate.
+The completed [real-session report](REAL_REPORT.md) links the aggregate quality,
+operations and scoped Sol usage results. No candidate met the frozen acceptance
+criteria; the report recommends an optional async shadow experiment only.
 
 ## Private real-session reproduction
 
