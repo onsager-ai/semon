@@ -958,7 +958,12 @@ mod tests {
         let listed = forward_ordinary.0["sessions"].as_array().unwrap();
         assert_eq!(listed.len(), 2);
         for key in [&initial[0].key, &expected[0].key] {
-            assert!(listed.iter().any(|row| row["id"].as_str() == Some(key.as_str())), "all-time Query must retain both original and current owners: {key}");
+            assert!(
+                listed
+                    .iter()
+                    .any(|row| row["id"].as_str() == Some(key.as_str())),
+                "all-time Query must retain both original and current owners: {key}"
+            );
         }
         {
             let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
@@ -1162,13 +1167,15 @@ mod tests {
                 let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
                     Ok(Box::new(originals.clone()))
                 };
-                query.call_catalog_at(
-                    "list_sessions",
-                    &serde_json::json!({"limit":60}),
-                    Some(&readers),
-                    crate::SessionSourceReadMode::ProviderOnly,
-                    1_790_812_860_001,
-                ).unwrap()
+                query
+                    .call_catalog_at(
+                        "list_sessions",
+                        &serde_json::json!({"limit":60}),
+                        Some(&readers),
+                        crate::SessionSourceReadMode::ProviderOnly,
+                        1_790_812_860_001,
+                    )
+                    .unwrap()
             };
             let forward = {
                 let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
