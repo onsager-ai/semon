@@ -685,7 +685,11 @@ mod tests {
         let expected_launch =
             serde_json::to_value(expected_native.handoff_index.as_ref().unwrap()).unwrap();
         drop(sqlite_reader);
-        let (pool, _) = super::super::tests::fixture(|_| {});
+        // SQLite snapshot capture can outlive the fixture server's ten-second
+        // idle-session cap. Retire its idle connection before the next PG use.
+        let (pool, _) = super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
         let control = PgCancellation::default();
         let config = StoreConfig {
             backend: StoreBackend::Postgres {
