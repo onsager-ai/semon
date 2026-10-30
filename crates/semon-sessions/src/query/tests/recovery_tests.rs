@@ -89,6 +89,24 @@ fn recovery_stage_observation_grants(db: &rusqlite::Connection) -> Vec<(String, 
     grants
 }
 
+fn recovery_publication_snapshot(
+    db: &rusqlite::Connection,
+    key: &str,
+) -> Vec<(String, String)> {
+    let mut statement = db
+        .prepare(
+            "SELECT 'overview',summary FROM main.session_overview WHERE session_key=?1 UNION ALL SELECT 'header',metadata FROM main.session_trace_headers WHERE session_key=?1 UNION ALL SELECT 'turn',metadata FROM main.session_trace_turns WHERE session_key=?1 UNION ALL SELECT 'edge',metadata FROM main.session_trace_edges WHERE session_key=?1 ORDER BY 1,2",
+        )
+        .unwrap();
+    statement
+        .query_map([key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
 fn publish(home: &Home) {
     crate::model::observe_catalog(
         &home.options,
@@ -1005,7 +1023,11 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         .unwrap()
         .into_test_connection();
         if !ready {
-            db.execute("UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'", []).unwrap();
+            db.execute(
+                "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
+                [],
+            )
+            .unwrap();
         }
         db.execute(
             "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
@@ -1019,17 +1041,7 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
                 |row| row.get(0),
             )
             .unwrap();
-        let publication = || {
-            let mut statement = db.prepare("SELECT 'overview',summary FROM session_overview WHERE session_key='first' UNION ALL SELECT 'header',metadata FROM session_trace_headers WHERE session_key='first' UNION ALL SELECT 'turn',metadata FROM session_trace_turns WHERE session_key='first' UNION ALL SELECT 'edge',metadata FROM session_trace_edges WHERE session_key='first' ORDER BY 1,2").unwrap();
-            statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        let original_publication = publication();
+        let original_publication = recovery_publication_snapshot(&db, "first");
         let generation = catalog_generation(&home);
         let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let control =
@@ -1048,7 +1060,10 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::Interrupted);
         assert_eq!(catalog_generation(&home), generation);
-        assert_eq!(publication(), original_publication);
+        assert_eq!(
+            recovery_publication_snapshot(&db, "first"),
+            original_publication
+        );
         assert_eq!(
             db.query_row(
                 "SELECT metadata FROM session_catalog WHERE session_key='first'",
@@ -1075,6 +1090,91 @@ fn recovery_selected_repair_cancellation_rolls_back_publication() {
         )
         .unwrap();
     }
+}
+
+#[test]
+fn recovery_tampered_preimage_refuses_before_producer_reads_or_writes() {
+    let home = Home::new("recovery-tampered-preimage");
+    home.top(
+        "first",
+        &[human("first", ts(1, 0), "tampered preimage refusal")],
+    );
+    publish_semantic(&home);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    db.execute(
+        "UPDATE main.session_catalog SET metadata=json_remove(metadata,'$.query') WHERE namespace=semon_namespace() AND session_key='first'",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
+        [],
+    )
+    .unwrap();
+
+    let metadata_before = recovery_catalog_metadata(&db, "session_catalog", "first");
+    let grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    let stage_grants_before = recovery_stage_observation_grants(&db);
+    let publication_before = recovery_publication_snapshot(&db, "first");
+    let generation_before = catalog_generation(&home);
+    let file_reads_before = crate::events::FILE_READS.with(std::cell::Cell::get);
+    let source_read_bytes_before = crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get);
+    let direct_source_reads_before =
+        crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get);
+
+    let error = crate::repair_session_overview(
+        &home.options,
+        "local",
+        "first",
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(
+        error.to_string(),
+        crate::storage::StorageError::Unavailable.to_string()
+    );
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        metadata_before
+    );
+    assert_eq!(
+        recovery_observation_grant(&db, "first", "catalog"),
+        Some(grant_before)
+    );
+    assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
+    assert_eq!(
+        recovery_publication_snapshot(&db, "first"),
+        publication_before
+    );
+    assert_eq!(catalog_generation(&home), generation_before);
+    assert!(db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='overview_needed:first' AND value='1')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap());
+    assert_eq!(
+        crate::events::FILE_READS.with(std::cell::Cell::get),
+        file_reads_before
+    );
+    assert_eq!(
+        crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get),
+        source_read_bytes_before
+    );
+    assert_eq!(
+        crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get),
+        direct_source_reads_before
+    );
 }
 
 #[test]
@@ -1115,12 +1215,17 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
 #[test]
 fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key() {
     let home = Home::new("recovery-history-owner");
-    let source = home.top(
+    home.top(
         "reused",
         &[human("reused", ts(1, 0), "original native prompt")],
     );
     publish_semantic(&home);
-    std::fs::remove_file(&source).unwrap();
+    std::fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/reused.jsonl"),
+    )
+    .unwrap();
     publish_semantic(&home);
     home.top(
         "reused",
