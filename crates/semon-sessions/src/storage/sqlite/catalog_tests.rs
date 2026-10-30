@@ -3236,8 +3236,17 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
             200
         );
         let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
-        assert_eq!(fresh.status, 200);
-        let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+        let fresh_body: Value = serde_json::from_slice(&fresh.body).unwrap();
+        assert_eq!(
+            fresh.status,
+            200,
+            "fresh transcript refused: code={} fence={} stage={} local_revision={}",
+            fresh_body["error"]["code"],
+            fresh_body["fence_reason"],
+            fresh_body["stage"],
+            fresh_body["local_revision_reason"]
+        );
+        let fresh = fresh_body;
         assert_ne!(fresh["identity"]["generation"], before.generation);
         assert_eq!(fresh["projection"]["total"], 2);
         assert_eq!(fresh["entries"][1]["text"], "new native answer");
@@ -6148,6 +6157,65 @@ fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
 fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
     use crate::{Input, InputRoot, SessionFactsWrite};
     use std::collections::BTreeSet;
+
+    fn assert_retained_chunk_generation(
+        db: &Connection,
+        database: &std::path::Path,
+        path: &str,
+        ledger: &crate::events::Ledger,
+        bytes: &[u8],
+    ) {
+        use rusqlite::OptionalExtension;
+
+        let source_hash = crate::source_carrier::source_hash(path);
+        let retained_key = format!(
+            "native_published_chunks:{source_hash}:{}:header",
+            crate::source_carrier::ledger_digest(ledger)
+        );
+        let retained: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key=?1)",
+                [&retained_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(retained, "retained chunk header missing for {path}");
+
+        let live_key = format!("native_source_chunks:{source_hash}:header");
+        let live: Option<String> = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
+                [&live_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        // Force the reader through the retained copy so this checks both its
+        // header and pages, even when the stale live generation still exists.
+        if live.is_some() {
+            db.execute(
+                "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
+                [&live_key],
+            )
+            .unwrap();
+        }
+        let prefix_len = usize::try_from(ledger.offset.min(crate::source_chunks::SIZE as u64))
+            .unwrap();
+        assert!(prefix_len > 0 && prefix_len <= bytes.len());
+        let read = crate::events::store::chunk_proofs::Focused::open(database, path, ledger)
+            .and_then(|proof| proof.verify(0, &bytes[..prefix_len]));
+        if let Some(live) = live {
+            db.execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+                rusqlite::params![live_key, live],
+            )
+            .unwrap();
+        }
+        read.unwrap_or_else(|error| {
+            panic!("retained chunk generation unreadable for {path}: {error}")
+        });
+    }
+
     for unrelated in [0, 256, 2048] {
         let fixture = Fixture::new();
         let active = "sessions/2026/10/01/rollout-native-session.jsonl";
@@ -6164,6 +6232,22 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
         }
         fixture.publish_existing();
         let db = fixture.db();
+        let database: PathBuf = db
+            .query_row(
+                "SELECT file FROM pragma_database_list WHERE name='main'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap()
+            .into();
+        let original_bytes = fs::read(&path).unwrap();
+        let (_, original_ledger) = crate::events::store::ledger_row(
+            &db,
+            path.to_string_lossy().as_ref(),
+        )
+        .unwrap()
+        .unwrap();
+        let mut archived_ledger = None;
         let original: i64 = db
             .query_row(
                 "SELECT file_id FROM files WHERE path=?1",
@@ -6192,6 +6276,71 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 }],
             )
             .unwrap();
+            if unrelated == 0 && !append {
+                let old_path_text = old.to_string_lossy();
+                let old_path = old_path_text.replace('\'', "''");
+                let source_hash = crate::source_carrier::source_hash(&old_path_text);
+                let retained_prefix = format!("native_published_chunks:{source_hash}:");
+                let retained_upper = format!("{retained_prefix}~");
+                let manifest_key = format!("native_published_chunks_manifest:{source_hash}");
+                let usage_before: (i64, String) = db
+                    .query_row(
+                        "SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1",
+                        [old_path_text.as_ref()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                let before: i64 = db
+                    .query_row(
+                        "SELECT count(*) FROM main.meta WHERE namespace=semon_namespace() AND ((key>=?1 AND key<?2) OR key=?3)",
+                        [&retained_prefix, &retained_upper, &manifest_key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(before, 0, "fixture starts without a retained proof");
+                db.execute_batch(&format!(
+                    "CREATE TRIGGER reject_native_relocation BEFORE UPDATE ON files WHEN OLD.path='{old_path}' BEGIN SELECT RAISE(ABORT,'injected relocation failure'); END;"
+                ))
+                .unwrap();
+                {
+                    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+                    let mut work = crate::viewer::lock(&evidence.work);
+                    assert!(evidence
+                        .refresh_catalog(&mut work, crate::model::now_ms())
+                        .is_err());
+                }
+                db.execute_batch("DROP TRIGGER reject_native_relocation;")
+                    .unwrap();
+                assert_eq!(
+                    db.query_row(
+                        "SELECT path FROM files WHERE file_id=?1",
+                        [original],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                    old.to_string_lossy(),
+                    "failed relocation changed the indexed path"
+                );
+                let usage_after: (i64, String) = db
+                    .query_row(
+                        "SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1",
+                        [old_path_text.as_ref()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    usage_after, usage_before,
+                    "failed relocation changed the current usage owner"
+                );
+                let after: i64 = db
+                    .query_row(
+                        "SELECT count(*) FROM main.meta WHERE namespace=semon_namespace() AND ((key>=?1 AND key<?2) OR key=?3)",
+                        [&retained_prefix, &retained_upper, &manifest_key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(after, before, "failed relocation retained a proof");
+            }
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
             let records = crate::events::PARSED.with(std::cell::Cell::get);
             let started = std::time::Instant::now();
@@ -6254,6 +6403,45 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             assert_eq!(rows, 1);
             let selected: String=db.query_row("SELECT source_path FROM session_catalog_sources WHERE session_key='native-session' AND lifecycle='current'",[],|row|row.get(0)).unwrap();
             assert_eq!(selected, new.to_string_lossy());
+            if !append {
+                let (_, ledger) = crate::events::store::ledger_row(
+                    &db,
+                    new.to_string_lossy().as_ref(),
+                )
+                .unwrap()
+                .unwrap();
+                archived_ledger = Some(ledger);
+                assert_retained_chunk_generation(
+                    &db,
+                    &database,
+                    path.to_string_lossy().as_ref(),
+                    &original_ledger,
+                    &original_bytes,
+                );
+            }
+            if append {
+                assert_retained_chunk_generation(
+                    &db,
+                    &database,
+                    path.to_string_lossy().as_ref(),
+                    &original_ledger,
+                    &original_bytes,
+                );
+                assert_retained_chunk_generation(
+                    &db,
+                    &database,
+                    fixture
+                        .options
+                        .codex_home
+                        .join(archived)
+                        .to_string_lossy()
+                        .as_ref(),
+                    archived_ledger
+                        .as_ref()
+                        .expect("archived generation captured after first move"),
+                    &original_bytes,
+                );
+            }
             eprintln!(
                 "native-move unrelated={unrelated} appended={append} loads=1 records={} elapsed_us={}",
                 u64::from(append),

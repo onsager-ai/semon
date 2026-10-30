@@ -2938,13 +2938,13 @@ mod tests {
             db.execute("INSERT INTO session_source_mutations VALUES('configured-events',?1,'retire this evidence')", [path.as_ref()]).unwrap();
             db.execute("INSERT INTO catalog_relocation_candidates VALUES('foreign','/foreign-old',?1,'native-session')", [path.as_ref()]).unwrap();
             db.execute(
-                "INSERT INTO meta VALUES('native_catalog_relocation:/foreign-old','foreign proof')",
+                "INSERT INTO meta(namespace,key,value) VALUES('foreign','native_catalog_relocation:/foreign-old','foreign proof')",
                 [],
             )
             .unwrap();
         });
         let foreign = |db: &Connection| -> Vec<(String, String)> {
-            db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+            db.prepare("SELECT harness,native_id FROM catalog_native_dependencies WHERE namespace='foreign' UNION ALL SELECT 'mutation',evidence FROM session_source_mutations WHERE namespace='foreign' UNION ALL SELECT 'relocation',old_path FROM catalog_relocation_candidates WHERE namespace='foreign' UNION ALL SELECT key,value FROM meta WHERE namespace='foreign' AND key='native_catalog_relocation:/foreign-old' ORDER BY 1,2").unwrap().query_map([], |r| Ok((r.get(0)?,r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap()
         };
         let before = foreign(&f.db());
         assert_eq!(before.len(), 4);
@@ -5834,6 +5834,8 @@ mod tests {
             removed_sources: Default::default(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
+            #[cfg(feature = "postgres")]
+            withdrawal_fence: None,
         }
     }
 
@@ -10423,7 +10425,7 @@ mod tests {
             use crate::model::relation_stage::Selector;
             for copies in [1, 2] {
                 let (f, _, options, _) = model_sources();
-                let options = &options[1];
+                let options = &options[0];
                 let inputs = claude_inputs(options, copies, 1);
                 let mut admitted = open(&f.config);
                 let (batch, model) = claude_ready(&mut admitted, options, &inputs);
@@ -10631,7 +10633,7 @@ mod tests {
         fn configured_semantic_domain72_claude_copied_events_qualify_after_reduce_in_pages() {
             use crate::model::relation_stage::Selector;
             let (f, _, options, _) = model_sources();
-            let options = &options[1];
+            let options = &options[0];
             let inputs = claude_inputs(options, 2, 65);
             let old = inputs[0].full_path(options);
             let mut raw = fs::read_to_string(&old).unwrap();

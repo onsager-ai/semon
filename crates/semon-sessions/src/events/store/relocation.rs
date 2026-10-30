@@ -312,6 +312,7 @@ pub(super) fn reuse(
     let Some(chunks) = chunk_proofs::read(&tx, old, &prior).map_err(failure)? else {
         return Ok(None);
     };
+    chunk_proofs::preserve(&tx, old).map_err(failure)?;
     tx.execute(
         "UPDATE main.files SET path=?1,dev=?2,ino=?3,size=?4,mtime_ns=?5,ctime_ns=?6 WHERE namespace=semon_namespace() AND path=?7",
         params![
