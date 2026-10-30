@@ -1,0 +1,126 @@
+name: PostgreSQL foundation
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - task/479-pg-foundation-20261025
+
+permissions:
+  contents: read
+
+env:
+  SEMON_PRICING_REFRESH: "off"
+  SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+  SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ephemeral-ci-admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-f1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: pg-f1-${{ runner.os }}-
+      - name: Create ephemeral restricted application role
+        env:
+          PGPASSWORD: ephemeral-ci-admin
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          SQL
+      - name: Ephemeral verified TLS PostgreSQL service
+        run: |
+          mkdir -p "$RUNNER_TEMP/pg-tls"
+          cd "$RUNNER_TEMP/pg-tls"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ephemeral-test-CA -keyout ca.key -out ca.crt
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=wrong-test-CA -keyout wrong.key -out wrong.crt
+          openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout server.key -out server.csr
+          echo 'subjectAltName=DNS:localhost,IP:127.0.0.1' > server.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 -extfile server.ext -out server.crt
+          # Official postgres runs as uid 999. Only this ephemeral container
+          # receives this ephemeral server key; production credentials are absent.
+          sudo chown 999:999 server.key
+          sudo chmod 600 server.key
+          docker run -d --name semon-pg-tls -e POSTGRES_PASSWORD=ephemeral-ci-admin -p 55432:5432 \
+            -v "$RUNNER_TEMP/pg-tls:/tls:ro" postgres:16 \
+            -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key
+          for attempt in $(seq 1 40); do
+            if PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -c 'SELECT 1' >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          SQL
+          echo "SEMON_PG_TLS_CA=$RUNNER_TEMP/pg-tls/ca.crt" >> "$GITHUB_ENV"
+          echo "SEMON_PG_TLS_WRONG_CA=$RUNNER_TEMP/pg-tls/wrong.crt" >> "$GITHUB_ENV"
+      - name: Resolve optional driver lock in CI
+        id: resolve
+        run: cargo metadata --format-version 1 > "$RUNNER_TEMP/pg-metadata.json"
+      - name: Prepare exact lock and formatting artifacts early
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/pg-foundation-review"
+          cp Cargo.lock "$RUNNER_TEMP/pg-foundation-review/Cargo.lock"
+          cargo fmt --all
+          git -c gc.auto=0 -c maintenance.auto=false diff --binary -- '*.rs' > "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"
+          if test -s "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"; then
+            git -c gc.auto=0 -c maintenance.auto=false apply --reverse "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"
+          fi
+          git -c gc.auto=0 -c maintenance.auto=false rev-parse HEAD > "$RUNNER_TEMP/pg-foundation-review/source-sha.txt"
+      - name: Retain early review artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-foundation-review-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-foundation-review/
+          if-no-files-found: error
+      - name: Focused actual PG proxy and TLS qualification first
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture
+      - name: Default build excludes PostgreSQL driver dependencies
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: |
+          cargo tree --locked -p semon-sessions -e normal --prefix none --format '{p}' > "$RUNNER_TEMP/default-tree.txt"
+          if grep -E '^(postgres|tokio-postgres) v' "$RUNNER_TEMP/default-tree.txt"; then
+            echo 'Default build unexpectedly requires PostgreSQL' >&2
+            exit 1
+          fi
+          # Tokio already belongs to the baseline reqwest HTTPS dependency.
+          # No PostgreSQL runtime/driver may be activated by the default feature set.
+      - name: Formatting gate
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo fmt --all --check
+      - name: PostgreSQL strict Clippy
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings
+      - name: Real PostgreSQL and existing session regressions
+        if: ${{ !cancelled() && steps.resolve.outcome == 'success' }}
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls
+      - name: TLS service diagnostics
+        if: failure()
+        run: docker logs semon-pg-tls

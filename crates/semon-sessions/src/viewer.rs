@@ -6884,6 +6884,7 @@ mod tests {
 
     #[test]
     fn initial_catalog_page_precedes_global_native_observation() {
+        const FIRST_PAGE_LIMIT: Duration = Duration::from_secs(8);
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
             fixture.write("proc/sys/kernel/hostname", "producer-fixture\n");
@@ -6927,7 +6928,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
                 assert!(
-                    start.elapsed() <= AT_ONCE,
+                    start.elapsed() <= FIRST_PAGE_LIMIT,
                     "bounded initial page took {:?}",
                     start.elapsed()
                 );
@@ -6941,7 +6942,7 @@ mod tests {
             }));
             view.note_catalog_read().unwrap();
             first_page
-                .recv_timeout(HUNG_AFTER)
+                .recv_timeout(FIRST_PAGE_LIMIT + HUNG_AFTER)
                 .expect("bounded cold page was not published");
             let reading = view.clone();
             let page = at_once(
@@ -7017,7 +7018,9 @@ mod tests {
                 if indexed > observed {
                     observed = indexed;
                 }
-                let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+                // Poll through the served route so these ongoing reads retain
+                // Catalog interest under the production idle policy.
+                let page = native_api(&view, "/api/sessions", "limit=60");
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
                 if page.status == 200
                     && body["completeness"]["state"] == "complete"

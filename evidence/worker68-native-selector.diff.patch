@@ -1,0 +1,699 @@
+diff --git a/crates/semon-sessions/src/events/store/configured.rs b/crates/semon-sessions/src/events/store/configured.rs
+index 0be51f77..6253df7b 100644
+--- a/crates/semon-sessions/src/events/store/configured.rs
++++ b/crates/semon-sessions/src/events/store/configured.rs
+@@ -7384,5 +7384,180 @@ mod tests {
+                 "a genuine ledger/claim conflict has zero effects"
+             );
+         }
++
++        fn selector_inputs(options: &crate::Options, duplicate: bool) -> Vec<crate::Input> {
++            (0..3).map(|i| {
++                let input = crate::Input { root: crate::InputRoot::Codex, path: format!("sessions/selector-{i}.jsonl").into() };
++                let mut meta = serde_json::json!({"id":format!("selector-{i}"),"cwd":"/sanitized"});
++                if i != 0 {
++                    meta["parent_thread_id"] = serde_json::json!("selector-0");
++                    meta["thread_source"] = serde_json::json!("subagent");
++                    meta["agent_path"] = serde_json::json!(if duplicate { "root/shared".into() } else { format!("root/child-{i}") });
++                    meta["agent_nickname"] = serde_json::json!(if duplicate { "shared".into() } else { format!("child-{i}") });
++                }
++                let mut raw = format!("{}\n{}\n",
++                    serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":meta}),
++                    serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"selector work"}]}}));
++                if i == 0 && !duplicate {
++                    raw.push_str(&format!("{}\n", serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:02:00Z","payload":{"type":"function_call","name":"collaboration.send_message","call_id":"selector-relay","arguments":"{\"target\":\"child-1\",\"message\":\"native relay\"}"}})));
++                }
++                fs::write(input.full_path(options), raw).unwrap();
++                input
++            }).collect()
++        }
++
++        fn selector_ready(
++            cache: &mut EventCache,
++            options: &crate::Options,
++            inputs: &[crate::Input],
++        ) -> (Batch, crate::model::SemanticModelBatch) {
++            for (i, input) in inputs.iter().enumerate() {
++                cache.ingest(&format!("{:064x}", 6800 + i), &input.full_path(options), "codex").unwrap();
++            }
++            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
++            for _ in 0..128 {
++                let batch = cache.semantic_batch(64).unwrap().unwrap();
++                if batch.paths.is_empty() { continue; }
++                let selected = inputs.iter().filter(|i| batch.paths.contains(&i.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
++                assert_eq!(selected.len(), batch.paths.len());
++                let model = cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
++                if batch.phase == Phase::Publication { return (batch, model); }
++            }
++            panic!("selector producer failed to reach publication")
++        }
++
++        fn selector_value(selection: crate::model::relation_stage::Selection) -> serde_json::Value {
++            let mut endpoint = selection.endpoint.map(|e| serde_json::to_value(e).unwrap());
++            if let Some(query) = endpoint.as_mut().and_then(|e| e.get_mut("row")).and_then(|r| r.get_mut("query")).and_then(serde_json::Value::as_object_mut) {
++                // Source-bound and ordinary runtime addresses differ; native
++                // identity, provenance, locations and every other field agree.
++                query.remove("runtime");
++            }
++            serde_json::json!({"count":selection.count,"key":selection.key,"endpoint":endpoint,"location":selection.location})
++        }
++
++        #[test]
++        fn configured_semantic_domain67_codex_sibling_relay_wait_real_producer_oracle() {
++            use crate::model::relation_stage::Selector;
++            for duplicate in [false, true] {
++                let (f, _, options, _) = model_sources();
++                let options = &options[0];
++                let inputs = selector_inputs(options, duplicate);
++                let mut admitted = open(&f.config);
++                let (batch, model) = selector_ready(&mut admitted, options, &inputs);
++                let mut ordinary = EventCache::open_scoped(&options.cache).unwrap();
++                let (reference, _) = selector_ready(&mut ordinary, options, &inputs);
++                let task = if duplicate { "shared" } else { "child-1" };
++                let target = if duplicate { "root/shared" } else { "root/child-1" };
++                let selectors = [
++                    Selector::CodexSibling { parent: "selector-0".into(), task: task.into() },
++                    Selector::CodexRelay { root: "selector-0".into(), target: task.into() },
++                    Selector::CodexRelay { root: "selector-0".into(), target: target.into() },
++                    Selector::CodexWait { root: "selector-0".into(), target: target.into(), exclude: "selector-0".into() },
++                    Selector::CodexWait { root: "selector-0".into(), target: target.into(), exclude: "selector-1".into() },
++                ];
++                for (i, selector) in selectors.iter().enumerate() {
++                    let actual = admitted.semantic_select(batch.epoch, selector).unwrap();
++                    let expected = ordinary.semantic_select(reference.epoch, selector).unwrap();
++                    let count = if i == 4 { usize::from(duplicate) } else if duplicate { 2 } else { 1 };
++                    assert_eq!(actual.count, count, "{selector:?}");
++                    assert_eq!(selector_value(actual), selector_value(expected), "{selector:?}");
++                }
++                oracle(&admitted, options, &inputs, model.prepared());
++                publish(&mut admitted, &f, &batch, &model);
++            }
++        }
++
++        #[test]
++        fn configured_semantic_domain67_foreign_native_ids_and_paths_are_isolated() {
++            use crate::model::relation_stage::Selector;
++            let (f, b, options, _) = model_sources();
++            let options = &options[0];
++            let inputs = selector_inputs(options, false);
++            let mut a_cache = open(&f.config);
++            let mut b_cache = open(&b);
++            let (a_batch, a_model) = selector_ready(&mut a_cache, options, &inputs);
++            let (b_batch, b_model) = selector_ready(&mut b_cache, options, &inputs);
++            b_cache.publish_semantic_catalog(&b_batch, b_model.prepared()).unwrap();
++            let foreign = namespace_state(&f, "source-b");
++            let before = shared_state(&f);
++            for selector in [
++                Selector::CodexSibling { parent: "selector-0".into(), task: "child-1".into() },
++                Selector::CodexRelay { root: "selector-0".into(), target: "root/child-1".into() },
++                Selector::CodexWait { root: "selector-0".into(), target: "root/child-1".into(), exclude: "selector-0".into() },
++            ] {
++                assert_eq!(a_cache.semantic_select(a_batch.epoch, &selector).unwrap().count, 1);
++            }
++            assert_eq!(shared_state(&f), before, "selector reads have zero whole-DB effects");
++            a_cache.publish_semantic_catalog(&a_batch, a_model.prepared()).unwrap();
++            assert_eq!(namespace_state(&f, "source-b"), foreign);
++        }
++
++        #[test]
++        fn configured_semantic_domain67_stale_epoch_source_collision_has_zero_effects() {
++            use crate::model::relation_stage::Selector;
++            let (f, _, options, _) = model_sources();
++            let options = &options[0];
++            let inputs = selector_inputs(options, false);
++            let mut old = open(&f.config);
++            let (batch, model) = selector_ready(&mut old, options, &inputs);
++            crate::facts::write_facts(options.facts.as_ref().unwrap(), &crate::Facts {
++                version: 2, hostname: "selector-new-authority".into(), ..Default::default()
++            }).unwrap();
++            let mut replacement = open(&f.config);
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            let paths = inputs.iter().map(|i| i.full_path(options).to_string_lossy().into_owned()).collect::<Vec<_>>();
++            assert_eq!(replacement.begin_semantic_stage_with_journal(&paths, &runtime, false).unwrap(), Outcome::Written);
++            let before = shared_state(&f);
++            assert!(old.semantic_select(batch.epoch, &Selector::CodexRelay { root: "selector-0".into(), target: "child-1".into() }).is_err());
++            assert_eq!(shared_state(&f), before);
++            assert_eq!(old.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
++            assert_eq!(shared_state(&f), before);
++        }
++
++        #[test]
++        fn configured_semantic_domain67_claude_event_producer_remains_explicitly_closed() {
++            let (f, _, options, inputs) = model_sources();
++            let options = &options[1];
++            let input = &inputs[1];
++            let mut raw = fs::read_to_string(input.full_path(options)).unwrap();
++            raw.push_str(&format!("{}\n",serde_json::json!({"type":"assistant","sessionId":"model-1","uuid":"native-call","timestamp":"2026-10-01T00:02:00Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"selector-call","name":"Agent","input":{"prompt":"sanitized work"}}]}})));
++            fs::write(input.full_path(options), raw).unwrap();
++            let mut cache = open(&f.config);
++            cache.ingest(&format!("{:064x}", 6899), &input.full_path(options), "claude").unwrap();
++            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
++            cache.begin_semantic_stage_with_journal(&[input.full_path(options).to_string_lossy().into_owned()], &runtime, true).unwrap();
++            let mut reached = false;
++            for _ in 0..128 {
++                let before = shared_state(&f);
++                match cache.semantic_batch(64) {
++                    Err(error) => {
++                        assert!(error.to_string().contains("semantic_nonprimitive_event_harness"), "{error}");
++                        assert_eq!(shared_state(&f), before, "producer refusal rolls back whole transaction");
++                        reached = true;
++                        break;
++                    }
++                    Ok(Some(batch)) if !batch.paths.is_empty() => {
++                        assert_ne!(batch.phase, Phase::Publication, "incident inputs must not publish without their event producer");
++                        for selector in [
++                            crate::model::relation_stage::Selector::ClaudeCall { id: "selector-call".into() },
++                            crate::model::relation_stage::Selector::ClaudeReceipt { id: "selector-message".into() },
++                        ] {
++                            let before_select = shared_state(&f);
++                            let error = cache.semantic_select(batch.epoch, &selector).unwrap_err();
++                            assert!(error.to_string().contains("semantic_claude_event_projection_pending"), "{error}");
++                            assert_eq!(shared_state(&f), before_select);
++                        }
++                        cache.prepare_semantic_model_batch(options, std::slice::from_ref(input), &batch, 1_790_000_000_000).unwrap();
++                    }
++                    Ok(Some(_)) => {}
++                    Ok(None) => panic!("stage disappeared before producer refusal"),
++                }
++            }
++            assert!(reached, "real Agent input must reach the actual producer refusal");
++            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
++        }
+     }
+ }
+diff --git a/crates/semon-sessions/src/events/store/semantic_stage.rs b/crates/semon-sessions/src/events/store/semantic_stage.rs
+index b7bac9a1..0cfbba18 100644
+--- a/crates/semon-sessions/src/events/store/semantic_stage.rs
++++ b/crates/semon-sessions/src/events/store/semantic_stage.rs
+@@ -493,13 +493,9 @@ fn root_alive(c: &Connection, key: &str) -> rusqlite::Result<bool> {
+     c.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|r.get(0)).optional().map(|v|v.unwrap_or(false))
+ }
+ fn normalized_endpoint(c: &Connection, key: &str, used: &mut usize) -> rusqlite::Result<Endpoint> {
+-    let(text,parent,root):(Option<String>,Option<String>,Option<String>)=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+-    let mut endpoint: Endpoint = bounded(text, used)?;
+-    endpoint.parent = parent.clone();
+-    endpoint.row.parent = parent;
+-    endpoint.root = root.unwrap_or_else(|| key.to_owned());
+-    endpoint.root_alive = root_alive(c, &endpoint.root)?;
+-    Ok(endpoint)
++    crate::model::relation_stage::selector_endpoint(
++        &OrdinaryLookup { db: c, replay: Vec::new() }, key, used, false,
++    )
+ }
+ fn native_key(c: &Connection, native: &str, harness: &str) -> rusqlite::Result<String> {
+     let ready: bool = c.query_row(
+@@ -1008,13 +1004,9 @@ fn decode_event(
+     text: Option<String>,
+     used: &mut usize,
+ ) -> rusqlite::Result<crate::model::relation_stage::NativeEvent> {
+-    let mut native: crate::model::relation_stage::NativeEvent = bounded(text, used)?;
+-    native.owner = c.query_row(
+-        "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
+-        [native.at.source.path.to_string_lossy().as_ref()],
+-        |r| r.get(0),
+-    )?;
+-    Ok(native)
++    crate::model::relation_stage::selector_event(
++        &OrdinaryLookup { db: c, replay: Vec::new() }, text, used,
++    )
+ }
+ /// Read candidates one row at a time. Both the persistent cursor and accepted
+ /// encoded page stay within the existing 64-row / 1MiB metadata budgets.
+@@ -1285,14 +1277,8 @@ pub(super) fn batch_rejection(c: &Connection, b: &Batch) -> rusqlite::Result<Opt
+     witness_rejection(c)
+ }
+ fn bounded<T: DeserializeOwned>(text: Option<String>, used: &mut usize) -> rusqlite::Result<T> {
+-    let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
+-    *used = used
+-        .checked_add(text.len())
+-        .ok_or(rusqlite::Error::InvalidQuery)?;
+-    if *used > MAX_CONTEXT {
+-        return Err(rusqlite::Error::InvalidQuery);
+-    }
+-    serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)
++    crate::model::relation_stage::selector_metadata(text, used)
++        .map_err(|_| rusqlite::Error::InvalidQuery)
+ }
+ /// Advance at most one existing 64-record metadata page. Parent, root and
+ /// descendant-cost reductions survive replacement of the producer owner.
+@@ -2814,167 +2800,85 @@ impl SqliteStore {
+     pub(super) fn semantic_selection(
+         &mut self,
+         epoch: i64,
+-        s: &Selector,
++        selector: &Selector,
+     ) -> Result<Selection, StoreError> {
+-        let actual: Option<i64> = self
+-            .connection
+-            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0))
+-            .optional()
+-            .map_err(failure)?;
++        let actual: Option<i64> = self.connection.query_row(
++            "SELECT epoch FROM catalog_semantic_stage", [], |r| r.get(0),
++        ).optional().map_err(failure)?;
+         if actual != Some(epoch) {
+             return Err(StoreError::Data("stale semantic selector".into()));
+         }
+-        if let Selector::NativeKey { native, harness } = s {
+-            return Ok(Selection {
+-                count: 1,
+-                key: Some(native_key(&self.connection, native, harness).map_err(failure)?),
+-                ..Selection::default()
+-            });
+-        }
+-        if let Selector::ClaudeReceipt { id } = s {
+-            let text: Option<Option<String>> = self.connection.query_row(
+-                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",
+-                [id], |r| r.get(0),
+-            ).optional().map_err(failure)?;
+-            let Some(text) = text else {
+-                return Ok(Selection::default());
+-            };
+-            let native = decode_event(&self.connection, text, &mut 0).map_err(failure)?;
+-            return Ok(Selection {
+-                count: 1,
+-                location: Some(native.at),
+-                ..Selection::default()
+-            });
+-        }
+-        if let Selector::ClaudeCall { id } = s {
+-            let keys=self.connection.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2").map_err(failure)?.query_map([id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
+-            if keys.len() != 1 {
+-                return Ok(Selection {
+-                    count: keys.len(),
+-                    ..Selection::default()
+-                });
+-            }
+-            let text:Option<String>=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE source_path=?1 AND event_key=?2",params![keys[0].0,keys[0].1],|r|r.get(0)).map_err(failure)?;
+-            let mut used = 0usize;
+-            let native = decode_event(&self.connection, text, &mut used).map_err(failure)?;
+-            let endpoint =
+-                normalized_endpoint(&self.connection, &native.owner, &mut used).map_err(failure)?;
+-            return Ok(Selection {
+-                count: 1,
+-                endpoint: Some(endpoint),
+-                location: Some(native.at),
+-                ..Selection::default()
+-            });
+-        }
+-        if let Selector::ClaudeName { name } = s {
+-            // Old description caches can identify a still-unseen native name
+-            // companion. They are discovery hints, never endpoint authority.
+-            let external=self.connection.prepare("SELECT d.session_key FROM session_descriptions d JOIN session_catalog owner USING(session_key) WHERE owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?1) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints stage WHERE stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64").map_err(failure)?.query_map([name],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
+-            if !external.is_empty() {
+-                let tx = self
+-                    .connection
+-                    .transaction_with_behavior(TransactionBehavior::Immediate)
+-                    .map_err(failure)?;
+-                let runtime: String = tx
+-                    .query_row(
+-                        "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1",
+-                        [epoch],
+-                        |r| r.get(0),
+-                    )
+-                    .map_err(failure)?;
+-                for key in external {
+-                    queue(&tx, "members", &key, "").map_err(failure)?;
+-                }
+-                // Keep the newly requested memberships as durable source seeds;
+-                // resetting clears derived work only after this bounded page.
+-                frontier_page(&tx).map_err(failure)?;
+-                reset(&tx, &runtime).map_err(failure)?;
+-                tx.commit().map_err(failure)?;
+-                return Err(StoreError::Data(
+-                    "native name companion requires semantic replay".into(),
+-                ));
+-            }
+-            let keys=self.connection.prepare("SELECT session_key FROM (SELECT n.session_key FROM catalog_semantic_names n JOIN catalog_semantic_endpoints e USING(session_key) WHERE n.name=?1 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM catalog_semantic_events sent JOIN catalog_semantic_events receipt ON receipt.msg_id=sent.msg_id JOIN catalog_semantic_endpoints e ON e.session_key=sent.owner JOIN catalog_semantic_endpoints root ON root.session_key=e.root_key WHERE sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?1 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM catalog_semantic_events first WHERE first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2").map_err(failure)?.query_map([name],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
+-            if keys.len() != 1 {
+-                return Ok(Selection {
+-                    count: keys.len(),
+-                    ..Selection::default()
+-                });
+-            }
+-            let (text,parent,root):(Option<String>,Option<String>,String)=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[&keys[0]],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failure)?;
+-            let mut endpoint: Endpoint = bounded(text, &mut 0).map_err(failure)?;
+-            endpoint.parent = parent.clone();
+-            endpoint.row.parent = parent;
+-            endpoint.root = root;
+-            endpoint.root_alive = root_alive(&self.connection, &endpoint.root).map_err(failure)?;
+-            return Ok(Selection {
+-                count: 1,
+-                endpoint: Some(endpoint),
+-                location: None,
+-                ..Selection::default()
+-            });
++        let mut lookup = OrdinaryLookup { db: &self.connection, replay: Vec::new() };
++        let result = crate::model::relation_stage::select_with(&mut lookup, selector);
++        let replay = lookup.replay;
++        if !replay.is_empty() {
++            let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(failure)?;
++            let runtime: String = tx.query_row(
++                "SELECT runtime FROM catalog_semantic_stage WHERE epoch=?1", [epoch], |r| r.get(0),
++            ).map_err(failure)?;
++            for key in replay {
++                queue(&tx, "members", &key, "").map_err(failure)?;
++            }
++            frontier_page(&tx).map_err(failure)?;
++            reset(&tx, &runtime).map_err(failure)?;
++            tx.commit().map_err(failure)?;
++            return Err(StoreError::Data("native name companion requires semantic replay".into()));
+         }
+-        let (sql, first, target, endpoint) = match s {
+-            Selector::NativeKey { .. }
+-            | Selector::ClaudeName { .. }
+-            | Selector::ClaudeCall { .. }
+-            | Selector::ClaudeReceipt { .. } => {
+-                unreachable!("Claude selectors returned above")
+-            }
+-            Selector::CodexSibling { parent, task } => (
+-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND parent_native=?1 AND task=?2 LIMIT 2",
+-                parent,
+-                task,
+-                false,
+-            ),
+-            Selector::CodexRelay { root, target } => (
+-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND (nickname=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2",
+-                root,
+-                target,
+-                true,
+-            ),
+-            Selector::CodexWait { root, target, .. } => (
+-                "SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND session_key<>?3 AND (session_key=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2",
+-                root,
+-                target,
+-                true,
+-            ),
+-        };
+-        let mut q = self.connection.prepare(sql).map_err(failure)?;
+-        let exclude = match s {
+-            Selector::CodexWait { exclude, .. } => Some(exclude),
+-            _ => None,
+-        };
+-        let keys = if let Some(exclude) = exclude {
+-            q.query_map(params![first, target, exclude], |r| r.get::<_, String>(0))
+-                .map_err(failure)?
+-                .collect::<Result<Vec<_>, _>>()
+-                .map_err(failure)?
+-        } else {
+-            q.query_map(params![first, target], |r| r.get::<_, String>(0))
+-                .map_err(failure)?
+-                .collect::<Result<Vec<_>, _>>()
+-                .map_err(failure)?
+-        };
++        result.map_err(failure)
++    }
++}
++struct OrdinaryLookup<'a> {
++    db: &'a Connection,
++    replay: Vec<String>,
++}
+ 
+-        let mut found = None;
+-        if endpoint && keys.len() == 1 {
+-            let (text,parent,root):(Option<String>,Option<String>,String)=self.connection.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[&keys[0]],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failure)?;
+-            let mut e: Endpoint = bounded(text, &mut 0).map_err(failure)?;
+-            e.parent = parent.clone();
+-            e.row.parent = parent;
+-            e.root = root;
+-            e.root_alive = root_alive(&self.connection, &e.root).map_err(failure)?;
+-            found = Some(e);
+-        }
+-        Ok(Selection {
+-            count: keys.len(),
+-            endpoint: found,
+-            location: None,
+-            ..Selection::default()
+-        })
++impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
++    type Error = rusqlite::Error;
++    fn invalid(&self, message: &'static str) -> Self::Error {
++        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
++    }
++    fn native_key(&self, native: &str, harness: &str) -> rusqlite::Result<crate::model::relation_stage::Selection> {
++        Ok(Selection { count: 1, key: Some(native_key(self.db, native, harness)?), ..Default::default() })
++    }
++    fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE msg_id=?1 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![id], |r| r.get(0)).optional()
++    }
++    fn call_owners(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
++        self.db.prepare("SELECT source_path,event_key FROM catalog_semantic_events WHERE kind='call' AND tool_id=?1 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2")?.query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
++    }
++    fn event_metadata(&self, path: &str, key: &str) -> rusqlite::Result<Option<String>> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM catalog_semantic_events WHERE source_path=?1 AND event_key=?2", params![path, key], |r| r.get(0))
++    }
++    fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
++        self.db.query_row("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1", params![path], |r| r.get(0))
++    }
++    fn endpoint_row(&self, key: &str) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1", params![key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
++    }
++    fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
++        self.db.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM catalog_semantic_endpoints WHERE session_key=?1", params![key], |r| r.get(0)).optional().map(|v| v.unwrap_or(false))
++    }
++    fn name_candidates(&self, name: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM catalog_semantic_names n JOIN catalog_semantic_endpoints e USING(session_key) WHERE n.name=?1 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM catalog_semantic_events sent JOIN catalog_semantic_events receipt ON receipt.msg_id=sent.msg_id JOIN catalog_semantic_endpoints e ON e.session_key=sent.owner JOIN catalog_semantic_endpoints root ON root.session_key=e.root_key WHERE sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?1 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM catalog_semantic_events first WHERE first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![name], |r| r.get(0))?.collect()
++    }
++    fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT d.session_key FROM session_descriptions d JOIN session_catalog owner USING(session_key) WHERE owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?1) AND NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints stage WHERE stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64")?.query_map(params![name], |r| r.get(0))?.collect()
++    }
++    fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND parent_native=?1 AND task=?2 LIMIT 2")?.query_map(params![parent, task], |r| r.get(0))?.collect()
++    }
++    fn codex_relay(&self, root: &str, target: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND (nickname=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2")?.query_map(params![root, target], |r| r.get(0))?.collect()
++    }
++    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE harness='codex' AND root_key=?1 AND session_key<>?3 AND (session_key=?2 OR EXISTS(SELECT 1 FROM catalog_semantic_paths p WHERE p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?1 AND p.path=?2)) LIMIT 2")?.query_map(params![root, target, exclude], |r| r.get(0))?.collect()
++    }
++    fn request_members_replay(&mut self, keys: Vec<String>) -> rusqlite::Result<()> {
++        self.replay = keys;
++        Ok(())
+     }
+ }
++
+ /// Each owner's complete incident projection is certified before this source
+ /// acknowledgement. Later announced changes remain fenced by the retained
+ /// normalized ledger/claim witness across all previously acknowledged pages.
+diff --git a/crates/semon-sessions/src/model/relation_stage.rs b/crates/semon-sessions/src/model/relation_stage.rs
+index 445236c2..3b6c1b6d 100644
+--- a/crates/semon-sessions/src/model/relation_stage.rs
++++ b/crates/semon-sessions/src/model/relation_stage.rs
+@@ -231,6 +231,115 @@ pub(crate) struct Selection {
+     pub(crate) key: Option<String>,
+ }
+ 
++/// Bounded physical lookups only. Native matching and selection assembly live
++/// in `select_with`, shared by ordinary and admitted stores.
++pub(crate) trait SelectorLookup {
++    type Error;
++    fn invalid(&self, message: &'static str) -> Self::Error;
++    fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
++    fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
++    fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
++    fn event_metadata(&self, path: &str, key: &str) -> Result<Option<String>, Self::Error>;
++    fn event_owner(&self, path: &str) -> Result<String, Self::Error>;
++    fn endpoint_row(&self, key: &str) -> Result<SelectorEndpointRow, Self::Error>;
++    fn root_alive(&self, key: &str) -> Result<bool, Self::Error>;
++    fn name_candidates(&self, name: &str) -> Result<Vec<String>, Self::Error>;
++    fn name_hints(&self, name: &str) -> Result<Vec<String>, Self::Error>;
++    fn request_members_replay(&mut self, keys: Vec<String>) -> Result<(), Self::Error>;
++    fn codex_sibling(&self, parent: &str, task: &str) -> Result<Vec<String>, Self::Error>;
++    fn codex_relay(&self, root: &str, target: &str) -> Result<Vec<String>, Self::Error>;
++    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> Result<Vec<String>, Self::Error>;
++}
++
++pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
++
++pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
++    text: Option<String>,
++    used: &mut usize,
++) -> io::Result<T> {
++    let text = text.ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
++    *used = used.checked_add(text.len())
++        .ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
++    if *used > 1048576 {
++        return Err(io::Error::other("semantic_selector_metadata_budget"));
++    }
++    serde_json::from_str(&text).map_err(io::Error::other)
++}
++
++pub(crate) fn selector_event<P: SelectorLookup>(
++    port: &P,
++    text: Option<String>,
++    used: &mut usize,
++) -> Result<NativeEvent, P::Error> {
++    let mut native: NativeEvent = selector_metadata(text, used)
++        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
++    native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
++    Ok(native)
++}
++
++pub(crate) fn selector_endpoint<P: SelectorLookup>(
++    port: &P,
++    key: &str,
++    used: &mut usize,
++    require_root: bool,
++) -> Result<Endpoint, P::Error> {
++    let (text, parent, root) = port.endpoint_row(key)?;
++    if require_root && root.is_none() {
++        return Err(port.invalid("semantic_selector_root_missing"));
++    }
++    let mut endpoint: Endpoint = selector_metadata(text, used)
++        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
++    endpoint.parent = parent.clone();
++    endpoint.row.parent = parent;
++    endpoint.root = root.unwrap_or_else(|| key.to_owned());
++    endpoint.root_alive = port.root_alive(&endpoint.root)?;
++    Ok(endpoint)
++}
++
++pub(crate) fn select_with<P: SelectorLookup>(
++    port: &mut P,
++    selector: &Selector,
++) -> Result<Selection, P::Error> {
++    let (keys, endpoint) = match selector {
++        Selector::NativeKey { native, harness } => return port.native_key(native, harness),
++        Selector::ClaudeReceipt { id } => {
++            let Some(text) = port.receipt_first(id)? else {
++                return Ok(Selection::default());
++            };
++            let native = selector_event(port, text, &mut 0)?;
++            return Ok(Selection { count: 1, location: Some(native.at), ..Default::default() });
++        }
++        Selector::ClaudeCall { id } => {
++            let keys = port.call_owners(id)?;
++            if keys.len() != 1 {
++                return Ok(Selection { count: keys.len(), ..Default::default() });
++            }
++            let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
++            let mut used = 0;
++            let native = selector_event(port, text, &mut used)?;
++            let endpoint = selector_endpoint(port, &native.owner, &mut used, false)?;
++            return Ok(Selection { count: 1, endpoint: Some(endpoint), location: Some(native.at), ..Default::default() });
++        }
++        Selector::ClaudeName { name } => {
++            let hints = port.name_hints(name)?;
++            if !hints.is_empty() {
++                port.request_members_replay(hints)?;
++                return Err(port.invalid("native name companion requires semantic replay"));
++            }
++            (port.name_candidates(name)?, true)
++        }
++        Selector::CodexSibling { parent, task } => (port.codex_sibling(parent, task)?, false),
++        Selector::CodexRelay { root, target } => (port.codex_relay(root, target)?, true),
++        Selector::CodexWait { root, target, exclude } => (port.codex_wait(root, target, exclude)?, true),
++    };
++    let found = if endpoint && keys.len() == 1 {
++        Some(selector_endpoint(port, &keys[0], &mut 0, true)?)
++    } else {
++        None
++    };
++    Ok(Selection { count: keys.len(), endpoint: found, ..Default::default() })
++}
++
+ #[derive(Clone, Debug, Serialize, Deserialize)]
+ #[serde(deny_unknown_fields)]
+ pub(crate) struct Endpoint {
+diff --git a/crates/semon-sessions/src/storage/sqlite/semantic.rs b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+index 80556d1a..c3515f6d 100644
+--- a/crates/semon-sessions/src/storage/sqlite/semantic.rs
++++ b/crates/semon-sessions/src/storage/sqlite/semantic.rs
+@@ -535,6 +535,60 @@ fn frontier_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
+     c.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0)).map_err(error)
+ }
+ 
++struct AdmittedLookup<'a> {
++    db: &'a Connection,
++    ns: &'a str,
++    replay: Vec<String>,
++}
++
++impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
++    type Error = rusqlite::Error;
++    fn invalid(&self, message: &'static str) -> Self::Error {
++        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
++    }
++    fn native_key(&self, native: &str, harness: &str) -> rusqlite::Result<crate::model::relation_stage::Selection> {
++        let key: Option<String> = self.db.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3", params![self.ns,harness,native], |r| r.get(0)).optional()?;
++        Ok(crate::model::relation_stage::Selection { count: usize::from(key.is_some()), key, ..Default::default() })
++    }
++    fn receipt_first(&self, id: &str) -> rusqlite::Result<Option<Option<String>>> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind='xsm' AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1", params![self.ns, id], |r| r.get(0)).optional()
++    }
++    fn call_owners(&self, id: &str) -> rusqlite::Result<Vec<(String, String)>> {
++        self.db.prepare("SELECT source_path,event_key FROM main.catalog_semantic_events WHERE namespace=?1 AND kind='call' AND tool_id=?2 AND copied=0 AND qualified=1 ORDER BY source_path,event_key LIMIT 2")?.query_map(params![self.ns, id], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
++    }
++    fn event_metadata(&self, path: &str, key: &str) -> rusqlite::Result<Option<String>> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key=?3", params![self.ns, path, key], |r| r.get(0))
++    }
++    fn event_owner(&self, path: &str) -> rusqlite::Result<String> {
++        self.db.query_row("SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2", params![self.ns, path], |r| r.get(0))
++    }
++    fn endpoint_row(&self, key: &str) -> rusqlite::Result<crate::model::relation_stage::SelectorEndpointRow> {
++        self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns, key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
++    }
++    fn root_alive(&self, key: &str) -> rusqlite::Result<bool> {
++        self.db.query_row("SELECT COALESCE(json_extract(metadata,'$.alive'),0) FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns, key], |r| r.get(0)).optional().map(|v| v.unwrap_or(false))
++    }
++    fn name_candidates(&self, name: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM (SELECT n.session_key FROM main.catalog_semantic_names n JOIN main.catalog_semantic_endpoints e ON e.namespace=n.namespace AND e.session_key=n.session_key WHERE n.namespace=?1 AND e.namespace=?1 AND n.name=?2 AND e.harness='claude' AND json_extract(e.metadata,'$.row.kind')='session' UNION SELECT e.root_key FROM main.catalog_semantic_events sent JOIN main.catalog_semantic_events receipt ON receipt.namespace=sent.namespace AND receipt.msg_id=sent.msg_id JOIN main.catalog_semantic_endpoints e ON e.namespace=sent.namespace AND e.session_key=sent.owner JOIN main.catalog_semantic_endpoints root ON root.namespace=e.namespace AND root.session_key=e.root_key WHERE sent.namespace=?1 AND receipt.namespace=?1 AND e.namespace=?1 AND root.namespace=?1 AND sent.kind='send' AND receipt.kind='xsm' AND sent.copied=0 AND receipt.copied=0 AND sent.qualified=1 AND receipt.qualified=1 AND receipt.name=?2 AND (receipt.source_path,receipt.native_seq)=(SELECT first.source_path,first.native_seq FROM main.catalog_semantic_events first WHERE first.namespace=?1 AND first.kind='xsm' AND first.msg_id=sent.msg_id AND first.copied=0 AND first.qualified=1 ORDER BY first.source_path,first.native_seq LIMIT 1) AND json_extract(root.metadata,'$.row.kind')='session') ORDER BY session_key LIMIT 2")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
++    }
++    fn name_hints(&self, name: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT d.session_key FROM main.session_descriptions d JOIN main.session_catalog owner ON owner.namespace=d.namespace AND owner.session_key=d.session_key WHERE d.namespace=?1 AND owner.namespace=?1 AND owner.lifecycle='current' AND owner.harness='claude' AND json_valid(d.description) AND EXISTS(SELECT 1 FROM json_each(d.description,'$.names') WHERE value=?2) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints stage WHERE stage.namespace=?1 AND stage.session_key=d.session_key) ORDER BY d.session_key LIMIT 64")?.query_map(params![self.ns, name], |r| r.get(0))?.collect()
++    }
++    fn codex_sibling(&self, parent: &str, task: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND parent_native=?2 AND task=?3 LIMIT 2")?.query_map(params![self.ns, parent, task], |r| r.get(0))?.collect()
++    }
++    fn codex_relay(&self, root: &str, target: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND root_key=?2 AND (nickname=?3 OR EXISTS(SELECT 1 FROM main.catalog_semantic_paths p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?2 AND p.path=?3)) LIMIT 2")?.query_map(params![self.ns, root, target], |r| r.get(0))?.collect()
++    }
++    fn codex_wait(&self, root: &str, target: &str, exclude: &str) -> rusqlite::Result<Vec<String>> {
++        self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND harness='codex' AND root_key=?2 AND session_key<>?4 AND (session_key=?3 OR EXISTS(SELECT 1 FROM main.catalog_semantic_paths p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.session_key AND p.root_key=?2 AND p.path=?3)) LIMIT 2")?.query_map(params![self.ns, root, target, exclude], |r| r.get(0))?.collect()
++    }
++    fn request_members_replay(&mut self, keys: Vec<String>) -> rusqlite::Result<()> {
++        self.replay = keys;
++        Ok(())
++    }
++}
++
+ struct ScopedReduction<'a> {
+     db: &'a Connection,
+     ns: &'a str,
+@@ -1187,17 +1241,23 @@ impl Stage {
+         if !valid {
+             return Err(refuse("stale semantic selector"));
+         }
+-        match selector {
+-            crate::model::relation_stage::Selector::NativeKey { native, harness } => {
+-                let key:Option<String>=tx.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3",params![ns,harness,native],|r|r.get(0)).optional().map_err(error)?;
+-                Ok(crate::model::relation_stage::Selection {
+-                    count: usize::from(key.is_some()),
+-                    key,
+-                    ..Default::default()
+-                })
+-            }
+-            _ => Err(refuse("semantic_nonprimitive_selector_pending")),
+-        }
++        // The real admitted event producer still refuses Claude incident
++        // candidates. Until it exists, an empty staging event table cannot
++        // certify a negative Receipt/Call result, even during indexing.
++        if matches!(selector,
++            crate::model::relation_stage::Selector::ClaudeReceipt { .. }
++                | crate::model::relation_stage::Selector::ClaudeCall { .. }
++        ) {
++            return Err(refuse("semantic_claude_event_projection_pending"));
++        }
++        let mut lookup = AdmittedLookup { db: &tx, ns, replay: Vec::new() };
++        let result = crate::model::relation_stage::select_with(&mut lookup, selector);
++        // Hints cannot become authoritative negative matches. The admitted
++        // durable members replay is deliberately still closed in this slice.
++        if !lookup.replay.is_empty() {
++            return Err(refuse("semantic_claude_name_members_pending"));
++        }
++        result.map_err(error)
+     }
+ 
+     pub(crate) fn replay(

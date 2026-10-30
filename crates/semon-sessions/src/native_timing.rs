@@ -624,6 +624,71 @@ pub(crate) fn id(index: &Path) -> String {
     format!("{:x}", Sha256::digest(index.as_os_str().as_encoded_bytes()))
 }
 
+/// Authored discovery work counters. Rows count bounded source inputs/materialized
+/// results, not an estimate of SQLite's physical page or index visits.
+#[derive(Clone, Copy, Default, Debug)]
+pub(crate) struct DiscoveryCounts {
+    pub(crate) statements: usize,
+    pub(crate) schema_probes: usize,
+    pub(crate) rows: usize,
+    pub(crate) source_fullscan_steps: usize,
+    pub(crate) committed_changes: u64,
+    pub(crate) factory_opens: usize,
+    pub(crate) skipped: usize,
+}
+thread_local! {
+    static DISCOVERY_COUNTS: std::cell::Cell<Option<DiscoveryCounts>> = const { std::cell::Cell::new(None) };
+    #[cfg(test)]
+    static DISCOVERY_RECORDS: std::cell::RefCell<Vec<(&'static str,DiscoveryCounts)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+pub(crate) fn discovery_count(update: impl FnOnce(&mut DiscoveryCounts)) {
+    DISCOVERY_COUNTS.with(|cell| {
+        if let Some(mut counts) = cell.get() {
+            update(&mut counts);
+            cell.set(Some(counts));
+        }
+    });
+}
+pub(crate) struct DiscoveryProbe(Option<(String, &'static str, Instant)>);
+impl DiscoveryProbe {
+    pub(crate) fn new(index: &Path, phase: &'static str) -> Self {
+        let state = enabled().then(|| {
+            DISCOVERY_COUNTS.with(|cell| {
+                assert!(cell.replace(Some(DiscoveryCounts::default())).is_none());
+            });
+            (id(index), phase, Instant::now())
+        });
+        Self(state)
+    }
+}
+impl Drop for DiscoveryProbe {
+    fn drop(&mut self) {
+        if let Some((producer, phase, start)) = &self.0 {
+            let counts = DISCOVERY_COUNTS
+                .with(|cell| cell.take())
+                .unwrap_or_default();
+            eprintln!(
+                "semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",
+                start.elapsed().as_micros(),
+                counts.statements,
+                counts.schema_probes,
+                counts.rows,
+                counts.source_fullscan_steps,
+                counts.committed_changes,
+                counts.committed_changes > 0,
+                counts.factory_opens,
+                counts.skipped
+            );
+            #[cfg(test)]
+            DISCOVERY_RECORDS.with(|records| records.borrow_mut().push((phase, counts)));
+        }
+    }
+}
+#[cfg(test)]
+pub(crate) fn take_discovery_records() -> Vec<(&'static str, DiscoveryCounts)> {
+    DISCOVERY_RECORDS.with(|records| std::mem::take(&mut *records.borrow_mut()))
+}
+
 /// Bounded operation aggregates: `(microseconds, workload units)`. Call sites
 /// count source observations, rows, postings or scope groups, never physical I/O.
 /// Disabled measurements retain no entries and start no clocks.
@@ -732,13 +797,18 @@ impl Measurements {
         pages: impl FnOnce() -> usize,
         labels: &CleanupLabels,
     ) -> rusqlite::Result<usize> {
+        let cleanup_sql = crate::events::store::configured::metadata_sql(
+            transaction,
+            CLEANUP_SQL,
+            "DELETE FROM meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')",
+        )?;
         #[cfg(test)]
         if self.uncached_cleanup_reference {
             let pages = pages();
             // Exact pre-cache acquisition and six ordered bindings, available
             // only through an explicitly scoped real-parent test publication.
             return transaction.execute(
-                CLEANUP_SQL,
+                cleanup_sql,
                 rusqlite::params![
                     prefix,
                     format!("{prefix}~"),
@@ -751,7 +821,7 @@ impl Measurements {
         }
         if !self.is_enabled() {
             let pages = pages();
-            let mut statement = transaction.prepare_cached(CLEANUP_SQL)?;
+            let mut statement = transaction.prepare_cached(cleanup_sql)?;
             return statement.execute(rusqlite::params![
                 prefix,
                 format!("{prefix}~"),
@@ -770,7 +840,7 @@ impl Measurements {
         let suffix = (prefix.len() + 1) as i64;
         let args_us = started.elapsed().as_micros();
         let started = Instant::now();
-        let prepared = transaction.prepare_cached(CLEANUP_SQL);
+        let prepared = transaction.prepare_cached(cleanup_sql);
         let prepare_us = started.elapsed().as_micros();
         let mut statement = match prepared {
             Ok(statement) => statement,
@@ -1015,6 +1085,56 @@ pub(crate) mod cleanup_tests {
     }
 }
 
+/// Disjoint candidate-page and between-page intervals. Between-page time also
+/// includes producer wrapper work; it must never be called scheduler idle time.
+#[derive(Default)]
+pub(crate) struct ColdDiscoveryProgress {
+    pages: usize,
+    examined: usize,
+    candidates: usize,
+    active_us: u128,
+    between_pages_us: u128,
+    previous_end: Option<Instant>,
+}
+
+impl ColdDiscoveryProgress {
+    fn record(&mut self, start: Instant, end: Instant, examined: usize, candidates: usize) {
+        if let Some(previous_end) = self.previous_end {
+            self.between_pages_us += start.saturating_duration_since(previous_end).as_micros();
+        }
+        self.active_us += end.saturating_duration_since(start).as_micros();
+        self.pages += 1;
+        self.examined += examined;
+        self.candidates += candidates;
+        self.previous_end = Some(end);
+    }
+
+    pub(crate) fn page(
+        &mut self,
+        cache: &Path,
+        start: Option<Instant>,
+        examined: usize,
+        candidates: usize,
+        complete: (bool, bool),
+    ) {
+        let Some(start) = start else {
+            return;
+        };
+        self.record(start, Instant::now(), examined, candidates);
+        let producer = id(&crate::events::EventCache::path(cache));
+        eprintln!(
+            "semon sessions native: producer={producer} cold_discovery_progress pages={} examined={} candidates={} active_us={} between_pages_us={} paths_complete={} recovery_complete={}",
+            self.pages,
+            self.examined,
+            self.candidates,
+            self.active_us,
+            self.between_pages_us,
+            complete.0,
+            complete.1,
+        );
+    }
+}
+
 pub(crate) struct Phase(Option<(String, &'static str, Instant)>);
 
 impl Phase {
@@ -1045,6 +1165,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cold_discovery_progress_separates_active_pages_from_continuation_gaps() {
+        use std::time::Duration;
+
+        let start = Instant::now();
+        let mut progress = ColdDiscoveryProgress::default();
+        progress.record(start, start + Duration::from_micros(10), 64, 64);
+        progress.record(
+            start + Duration::from_micros(13),
+            start + Duration::from_micros(20),
+            512,
+            0,
+        );
+        progress.record(
+            start + Duration::from_micros(25),
+            start + Duration::from_micros(30),
+            60,
+            60,
+        );
+        assert_eq!(progress.pages, 3);
+        assert_eq!(progress.examined, 636);
+        assert_eq!(progress.candidates, 124);
+        assert_eq!(progress.active_us, 22);
+        assert_eq!(progress.between_pages_us, 8);
+        assert_eq!(progress.active_us + progress.between_pages_us, 30);
+    }
+
+    #[test]
     fn cleanup_vm_work_distinguishes_unavailable_from_valid_zero() {
         assert_eq!(vm_steps(0, 0), Some(0));
         assert_eq!(vm_steps(7, 19), Some(12));
@@ -1056,6 +1203,22 @@ mod tests {
     #[test]
     fn cleanup_prepare_failure_preserves_error_without_zero_vm_work_or_record() {
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL) STRICT;")
+            .unwrap();
+        // A valid selector reaches the actual DELETE prepare. Deny that same
+        // operation for both callers, while allowing metadata introspection.
+        let authorizer = |context: rusqlite::hooks::AuthContext<'_>| {
+            if matches!(
+                context.action,
+                rusqlite::hooks::AuthAction::Delete { table_name: "meta" }
+            ) {
+                rusqlite::hooks::Authorization::Deny
+            } else {
+                rusqlite::hooks::Authorization::Allow
+            }
+        };
+        connection.authorizer(Some(authorizer)).unwrap();
         let _recording = cleanup_tests::recording();
         let transaction = connection.transaction().unwrap();
         let ordinary = transaction.execute("DELETE FROM meta WHERE key>=?1 AND key<?2 AND key!=?3 AND (key>=?4 OR length(key)!=?5 OR substr(key,?6) GLOB '*[^0-9]*')", rusqlite::params!["p:", "p:~", "p:header", "p:0000000000", 12i64, 3i64]).unwrap_err();

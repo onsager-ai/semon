@@ -1261,6 +1261,11 @@ fn modified_ms(path: &Path) -> Option<i64> {
 /// `cutoff` isn't read at all: its cached index is kept (it counts as seen)
 /// for builds that read every file. Also returns the ids of the top-level
 /// Claude files so skipped.
+enum ScanSelection<'a> {
+    Current(Option<&'a [crate::inputs::Input]>),
+    Semantic(&'a [crate::inputs::Input]),
+}
+
 fn scan(
     options: &Options,
     cache: &mut EventCache,
@@ -1270,6 +1275,30 @@ fn scan(
     machine: &MachineFacts,
     selected: Option<&[crate::inputs::Input]>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
+    scan_selected(
+        options,
+        cache,
+        dirty,
+        texts,
+        cutoff,
+        machine,
+        ScanSelection::Current(selected),
+    )
+}
+
+fn scan_selected(
+    options: &Options,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    texts: &mut Texts,
+    cutoff: Option<i64>,
+    machine: &MachineFacts,
+    selection: ScanSelection<'_>,
+) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
+    let (selected, retire_missing) = match selection {
+        ScanSelection::Current(selected) => (selected, true),
+        ScanSelection::Semantic(selected) => (Some(selected), false),
+    };
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
             !crate::is_input_path(input.root.as_str(), &input.path)
@@ -1481,10 +1510,12 @@ fn scan(
         });
     }
     cache.flush_cold_writes()?;
-    if let Some(selected) = selected {
-        cache.retire_scoped_sources(options, selected, &seen, machine)?;
-    } else {
-        cache.retain(&seen, dirty);
+    if retire_missing {
+        if let Some(selected) = selected {
+            cache.retire_scoped_sources(options, selected, &seen, machine)?;
+        } else {
+            cache.retain(&seen, dirty)?;
+        }
     }
     cache.end_scan();
     texts
@@ -4055,15 +4086,13 @@ impl<'a> Builder<'a> {
         let mut orphans: Vec<(String, Ref)> = received
             .iter()
             .filter(|(id, _)| !joined.contains(*id))
-            .filter_map(|(id, found)| found.first().map(|at| (format!("relay:{id}"), *at)))
+            .filter_map(|(_, found)| found.first().map(|at| (self.orphan_relay_source(*at), *at)))
             .collect();
-        orphans.extend(unkeyed.into_iter().map(|at| {
-            let file = &self.files[at.0];
-            (
-                format!("relay:recv:{}:{}", file.id, event(self.files, at).o),
-                at,
-            )
-        }));
+        orphans.extend(
+            unkeyed
+                .into_iter()
+                .map(|at| (self.orphan_relay_source(at), at)),
+        );
         orphans.sort_by(|a, b| a.0.cmp(&b.0));
         for (source, at) in orphans {
             let to = self.of_file[at.0];
@@ -4144,6 +4173,20 @@ impl<'a> Builder<'a> {
             )]));
         }
         Ok(())
+    }
+
+    /// Native receipt order, before hashing its handoff identity. Both ordinary
+    /// assembly and staged replay must keep this key, including keyed receipts
+    /// and agent messages whose id names the sender rather than the message.
+    fn orphan_relay_source(&self, at: Ref) -> String {
+        let found = event(self.files, at);
+        if found.k == Kind::Xsm
+            && let Some(id) = &found.id
+        {
+            format!("relay:{id}")
+        } else {
+            format!("relay:recv:{}:{}", self.files[at.0].id, found.o)
+        }
     }
 
     /// A subagent's send addressed to [`PARENT_ADDRESS`] goes to the
@@ -7286,6 +7329,52 @@ pub(crate) struct PreparedSources {
 }
 
 impl PreparedSources {
+    pub(crate) fn presentation_observations(
+        &self,
+    ) -> Option<&crate::storage::selected::PresentationObservations> {
+        self.relationships.presentation.as_ref()
+    }
+
+    /// Bind private model inputs separately from the ordinary row/projection
+    /// oracle. Record and publish compare this exact durable witness.
+    pub(crate) fn staged_model_witness(&self) -> io::Result<String> {
+        serde_json::to_string(&(
+            self.staged_projection_witness()?,
+            self.presentation_observations(),
+        ))
+        .map_err(io::Error::other)
+    }
+
+    /// Exact content-free publication witness shared by staging and publish.
+    pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
+        serde_json::to_string(&(
+            self.transcripts
+                .iter()
+                .map(|p| (&p.key, &p.slots, p.repair))
+                .collect::<Vec<_>>(),
+            self.rows
+                .iter()
+                .map(|row| {
+                    (
+                        &row.key,
+                        row.trace
+                            .as_ref()
+                            .map(|trace| trace.publication_witness(row)),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            &self.pids,
+            &self.lineage_dependencies,
+            &self.indexed_native_parents,
+            &self.withdrawals,
+            &self.relationships.endpoints,
+            &self.relationships.relations,
+            &self.message_dependencies,
+            &self.relationships.retired_owners,
+            &self.relationships.lifecycle_authority,
+        ))
+        .map_err(io::Error::other)
+    }
     /// Header/path parent references exist before a selected cohort can resolve
     /// them. Keep them as native identities rather than dropping an absent end.
     pub(crate) fn native_parents(&self) -> Vec<(String, String)> {
@@ -7318,6 +7407,161 @@ impl PreparedSources {
             .into_iter()
             .collect()
     }
+}
+
+/// Typed producer port: only the native model constructs the prepared payload.
+/// The runtime keeps the batch witnesses alongside it through record/publish.
+pub(crate) struct SemanticModelBatch {
+    prepared: PreparedSources,
+}
+
+impl SemanticModelBatch {
+    pub(crate) fn prepared(&self) -> &PreparedSources {
+        &self.prepared
+    }
+}
+
+pub(crate) fn prepare_semantic_batch(
+    options: &Options,
+    cache: &mut EventCache,
+    inputs: &[crate::Input],
+    batch: &relation_stage::Batch,
+    now: i64,
+) -> io::Result<SemanticModelBatch> {
+    let paths: BTreeSet<_> = inputs
+        .iter()
+        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+        .collect();
+    if paths.len() != inputs.len()
+        || paths.len() != batch.paths.len()
+        || paths != batch.paths.iter().cloned().collect()
+    {
+        return Err(io::Error::other(
+            "semantic model inputs differ from staged batch",
+        ));
+    }
+    let mut prepared = match batch.phase {
+        relation_stage::Phase::Indexing => {
+            prepare_semantic_index_sources(options, cache, inputs, now)?
+        }
+        relation_stage::Phase::Identity => {
+            prepare_semantic_identity_sources(options, cache, inputs, &batch.context, now)?
+        }
+        relation_stage::Phase::Relations => {
+            prepare_staged_sources(options, cache, inputs, &batch.context, true, now)?
+        }
+        relation_stage::Phase::Publication => {
+            prepare_staged_sources(options, cache, inputs, &batch.context, false, now)?
+        }
+    };
+    if batch.phase != relation_stage::Phase::Indexing {
+        prepared.withdrawals = semantic_withdrawals(options, inputs)?;
+    }
+    // Preserve the shared parser's input order. Only the typed claim witness
+    // follows the storage batch order; claim values and membership stay exact.
+    let claim_paths = prepared
+        .claims
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    if prepared.claims.len() != paths.len() || claim_paths != paths {
+        return Err(io::Error::other("semantic model claim membership changed"));
+    }
+    let ranks = batch
+        .paths
+        .iter()
+        .enumerate()
+        .map(|(rank, path)| (path.clone(), rank))
+        .collect::<BTreeMap<_, _>>();
+    prepared.claims.sort_by_key(|(path, _)| ranks[path]);
+    if prepared.base_generation != batch.base_generation {
+        return Err(io::Error::other("semantic model generation changed"));
+    }
+    if batch.phase == relation_stage::Phase::Publication {
+        if !batch.context.prior_owners.is_empty() {
+            prepared.relationships.lifecycle_authority =
+                Some(relation_stage::LifecycleAuthority::capture(options)?);
+        }
+        prepared.relationships.retired_owners = batch
+            .context
+            .prior_owners
+            .values()
+            .filter(|old| !prepared.rows.iter().any(|row| row.key == old.key))
+            .cloned()
+            .collect();
+    }
+    if batch.phase == relation_stage::Phase::Publication && !prepared.rows.is_empty() {
+        let binding = cache.query_runtime_binding()?;
+        prepared.relationships.presentation =
+            Some(crate::storage::selected::PresentationObservations::capture(
+                options,
+                binding.as_ref(),
+                prepared.rows.iter().chain(
+                    batch
+                        .context
+                        .endpoints
+                        .values()
+                        .map(|endpoint| &endpoint.row),
+                ),
+            ));
+    }
+    Ok(SemanticModelBatch { prepared })
+}
+
+fn semantic_withdrawals(
+    options: &Options,
+    inputs: &[crate::Input],
+) -> io::Result<Vec<relation_stage::Withdrawal>> {
+    let facts = MachineFacts::of(options);
+    let runtime = crate::native_evidence::query_runtime_generation(options)?;
+    let mut withdrawals = Vec::new();
+    if let Some(facts_path) = &options.facts
+        && inputs.iter().any(|input| {
+            input.root == crate::InputRoot::Codex
+                && !facts.codex_rollout_is_current(options, &input.full_path(options))
+        })
+    {
+        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
+        let facts_identity =
+            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
+        authority.validate()?;
+        for input in inputs
+            .iter()
+            .filter(|input| input.root == crate::InputRoot::Codex)
+        {
+            if authority.codex_current(&input.path)? != Some(false) {
+                continue;
+            }
+            let path = input.full_path(options);
+            let stat = match crate::events::Stat::of(&path) {
+                Ok(stat) => stat,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            withdrawals.push(relation_stage::Withdrawal {
+                path: path.to_string_lossy().into_owned(),
+                relative: input.path.clone(),
+                stat,
+                facts_path: facts_path.clone(),
+                facts_identity: facts_identity.clone(),
+                runtime: runtime.clone(),
+            });
+        }
+        authority.validate()?;
+    }
+    for withdrawal in &withdrawals {
+        if !withdrawal.current()? {
+            return Err(io::Error::other(
+                "native source admission withdrawal changed",
+            ));
+        }
+    }
+    if !withdrawals.is_empty()
+        && crate::native_evidence::query_runtime_generation(options)? != runtime
+    {
+        return Err(io::Error::other("native source admission runtime changed"));
+    }
+    Ok(withdrawals)
 }
 
 /// Primitive source observations precede owner identity closure. No partial
@@ -7357,49 +7601,15 @@ pub(crate) fn prepare_semantic_index_sources(
     let base_generation = cache.session_catalog_generation();
     let facts = MachineFacts::of(options);
     let runtime = crate::native_evidence::query_runtime_generation(options)?;
-    let mut withdrawals = Vec::new();
-    if let Some(facts_path) = &options.facts
-        && inputs.iter().any(|input| {
-            input.root == crate::InputRoot::Codex
-                && !facts.codex_rollout_is_current(options, &input.full_path(options))
-        })
-    {
-        let authority = crate::facts::source_authority::CurrentSources::open(facts_path)?;
-        let facts_identity =
-            crate::facts::source_authority::Identity::of(&fs::symlink_metadata(facts_path)?)?;
-        authority.validate()?;
-        for input in inputs
-            .iter()
-            .filter(|input| input.root == crate::InputRoot::Codex)
-        {
-            if authority.codex_current(&input.path)? != Some(false) {
-                continue;
-            }
-            let path = input.full_path(options);
-            let stat = match crate::events::Stat::of(&path) {
-                Ok(stat) => stat,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
-            };
-            withdrawals.push(relation_stage::Withdrawal {
-                path: path.to_string_lossy().into_owned(),
-                relative: input.path.clone(),
-                stat,
-                facts_path: facts_path.clone(),
-                facts_identity: facts_identity.clone(),
-                runtime: runtime.clone(),
-            });
-        }
-        authority.validate()?;
-    }
-    let (mut files, _, _) = scan(
+    let withdrawals = semantic_withdrawals(options, inputs)?;
+    let (mut files, _, _) = scan_selected(
         options,
         cache,
         &mut false,
         &mut Texts::default(),
         scan_cutoff(options, now),
         &facts,
-        Some(inputs),
+        ScanSelection::Semantic(inputs),
     )?;
     verify_sidecars(&files)?;
     let claims = cache.catalog_claims(&paths)?;
@@ -7876,7 +8086,10 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
+        if let Some(binding) = cache.query_runtime_binding()? {
+            crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
+                .into_scoped()
+        } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
             crate::native_evidence::RuntimeObservations::for_publication_measured(
                 options,
                 &query_runtime,
@@ -7933,14 +8146,14 @@ fn build_sources_inner(
         | BuildSelection::Matching { inputs, .. } => {
             let (files, skipped, duration) = timed!(
                 "scan",
-                scan(
+                scan_selected(
                     options,
                     cache,
                     dirty,
                     texts,
                     window_start,
                     &facts,
-                    Some(inputs)
+                    ScanSelection::Semantic(inputs)
                 )?
             );
             (Some(inputs), None, files, skipped, duration)

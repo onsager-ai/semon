@@ -291,6 +291,36 @@ impl Sources {
         Self::capture_inner(options, proofs.into_iter(), false)
     }
 
+    /// Private owned generation binding. Coordinates come exclusively from
+    /// the admitted store; Options retains only existing Raw-root authority.
+    pub(crate) fn capture_bound_snapshot(
+        options: &Options,
+        sources: &[CatalogSource],
+        db: rusqlite::Connection,
+        owner: &crate::events::store::configured::NativeOwnership,
+    ) -> io::Result<Self> {
+        if sources.is_empty() || sources.len() > 64 {
+            return Err(unavailable());
+        }
+        owner.validate_ready(&db).map_err(io::Error::other)?;
+        let config = owner.config();
+        let crate::storage::StoreBackend::Sqlite { database } = &config.backend;
+        let db = crate::events::store::chunk_proofs::Snapshot::owned(db, owner.clone());
+        let mut proofs = Vec::with_capacity(sources.len());
+        for source in sources {
+            let proof = crate::events::store::chunk_proofs::Focused::with_db(
+                db.clone(),
+                database,
+                source.path.to_str().ok_or_else(unavailable)?,
+                &crate::source_carrier::ledger(source),
+            )?;
+            proofs.push((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))));
+        }
+        let mut captured = Self::capture_inner(options, proofs.into_iter(), false)?;
+        captured.diagnostic_scope = database.clone();
+        Ok(captured)
+    }
+
     pub(crate) fn reader(&self) -> Records<'_> {
         self.reader_with(None)
     }
