@@ -1264,6 +1264,7 @@ fn modified_ms(path: &Path) -> Option<i64> {
 enum ScanSelection<'a> {
     Current(Option<&'a [crate::inputs::Input]>),
     Semantic(&'a [crate::inputs::Input]),
+    Committed(&'a [crate::inputs::Input]),
 }
 
 fn scan(
@@ -1295,9 +1296,15 @@ fn scan_selected(
     machine: &MachineFacts,
     selection: ScanSelection<'_>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
-    let (selected, retire_missing) = match selection {
-        ScanSelection::Current(selected) => (selected, true),
-        ScanSelection::Semantic(selected) => (Some(selected), false),
+    let (selected, retire_missing, committed_only) = match selection {
+        ScanSelection::Current(selected) => (selected, true, false),
+        ScanSelection::Semantic(selected) => (Some(selected), false, false),
+        ScanSelection::Committed(selected) => (Some(selected), false, true),
+    };
+    let scan_file = if committed_only {
+        events::scan_committed_file
+    } else {
+        events::scan_file
     };
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
@@ -1376,7 +1383,7 @@ fn scan_selected(
         // Stamped before it is read, so a line that lands during the read
         // counts toward the next version, not this one.
         let stamp = stamp_of(&path);
-        let summary = match events::scan_file(&path, "claude", cache, dirty) {
+        let summary = match scan_file(&path, "claude", cache, dirty) {
             Ok(summary) => summary,
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
@@ -1435,7 +1442,7 @@ fn scan_selected(
             continue;
         }
         let stamp = stamp_of(&path);
-        let summary = match events::scan_file(&path, "codex", cache, dirty) {
+        let summary = match scan_file(&path, "codex", cache, dirty) {
             Ok(summary) => summary,
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
@@ -1490,7 +1497,7 @@ fn scan_selected(
             continue;
         };
         let stamp = stamp_of(&path);
-        let summary = events::scan_file(&path, "copilot", cache, dirty)?;
+        let summary = scan_file(&path, "copilot", cache, dirty)?;
         let stamp = indexed_stamp(cache, &path, stamp);
         if cache.replaced(&path) {
             texts.invalidate(&path);
@@ -8203,7 +8210,7 @@ fn build_sources_inner(
                     texts,
                     window_start,
                     &facts,
-                    ScanSelection::Semantic(inputs)
+                    ScanSelection::Committed(inputs)
                 )?
             );
             (Some(inputs), None, files, skipped, duration)

@@ -3269,12 +3269,36 @@ pub(crate) fn scan_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
+    scan_file_with_mode(path, harness, cache, dirty, false)
+}
+
+/// Semantic derivation consumes a committed Index generation even when its
+/// cache also owns ordinary host ingestion. It never creates an ingest intent.
+pub(crate) fn scan_committed_file(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+) -> io::Result<Arc<FileIndex>> {
+    scan_file_with_mode(path, harness, cache, dirty, true)
+}
+
+fn scan_file_with_mode(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    committed_only: bool,
+) -> io::Result<Arc<FileIndex>> {
     cache.require_current_store()?;
     // Host-owned ordinary producers capture their own request identity. The
     // configured writer persists it with the observed ledger and Source claim
     // in prepare_file before any Raw parsing or publication decision. Explicit
     // ingest retains its caller's identity; staged model readers remain reads.
-    let host_operation = if cache.host_source.is_some() && cache.event_operation.is_none() {
+    let host_operation = if !committed_only
+        && cache.host_source.is_some()
+        && cache.event_operation.is_none()
+    {
         Some(
             crate::storage::source_observations::SourceOperation::capture(
                 &cache.observation_namespace,
@@ -3303,7 +3327,7 @@ pub(crate) fn scan_file(
     // has no ingestion operation ID and must neither create an intent nor
     // reparse changed Raw behind the staged claim. load_file validates the
     // configured current schema, admission and namespace in its read snapshot.
-    if cache.event_operation.is_none() && host_operation.is_none() {
+    if committed_only || (cache.event_operation.is_none() && host_operation.is_none()) {
         let (ledger, index) = cache
             .store
             .as_ref()
