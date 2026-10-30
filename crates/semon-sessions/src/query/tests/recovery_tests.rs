@@ -89,6 +89,19 @@ fn recovery_stage_observation_grants(db: &rusqlite::Connection) -> Vec<(String, 
     grants
 }
 
+fn recovery_stage_provenance(db: &rusqlite::Connection, key: &str) -> Vec<String> {
+    let mut statement = db
+        .prepare(
+            "SELECT json_array(g.id,g.publication,g.proof,g.admission,g.stream,g.metadata,g.slots,g.prefix,r.base,r.manifest,r.digest,v.metadata,p.epoch,p.base_generation,p.source_revision,p.claims,p.metadata) FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE g.namespace=semon_namespace() AND g.session_key=?1 ORDER BY g.id,p.epoch",
+        )
+        .unwrap();
+    statement
+        .query_map([key], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
 fn recovery_publication_snapshot(db: &rusqlite::Connection, key: &str) -> Vec<(String, String)> {
     let mut statement = db
         .prepare(
@@ -132,6 +145,51 @@ fn publish_semantic(home: &Home) {
     assert!(complete, "the semantic producer fixture must converge");
     drop(work);
     evidence.retire();
+}
+
+fn publish_semantic_stage(home: &Home, input: &crate::Input) {
+    use crate::model::relation_stage::Phase;
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut cache = crate::events::EventCache::open_semantic(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    let paths = vec![input.full_path(&home.options).to_string_lossy().into_owned()];
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut published = false;
+    for _ in 0..128 {
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        if batch.paths.is_empty() {
+            if batch.phase == Phase::Publication {
+                assert!(published, "the real model must publish before Stage cleanup");
+                assert_eq!(
+                    cache.finish_semantic_stage(batch.epoch).unwrap(),
+                    crate::events::Outcome::Written
+                );
+                return;
+            }
+            continue;
+        }
+        let model = cache
+            .prepare_semantic_model_batch(&home.options, std::slice::from_ref(input), &batch, NOW)
+            .unwrap();
+        if batch.phase == Phase::Publication {
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                crate::events::Outcome::Written
+            );
+            published = true;
+        }
+        cache.end_scan();
+    }
+    panic!("the real semantic Stage fixture must converge");
 }
 
 fn shared_home(prefix: usize, leading_user: bool) -> (Home, String) {
@@ -1315,6 +1373,16 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
         &[human("first", ts(1, 0), "stage-only query repair")],
     );
     publish_semantic(&home);
+    // A closed single-source component normally takes the direct publisher.
+    // Explicitly drive the admitted Stage with the producer's real indexed
+    // Claude input so its immutable receipt, presentation and grant exist.
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
     let config = home.options.source.config(&home.options.cache).unwrap();
     let mut db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -1327,6 +1395,8 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
         !proof_snapshot.is_empty(),
         "fixture must have immutable Stage proof"
     );
+    let provenance_before = recovery_stage_provenance(&db, "first");
+    assert!(!provenance_before.is_empty());
     let stage_grants_before = recovery_stage_observation_grants(&db);
     let preimage_stage_digest = crate::storage::proof_codec::digest(
         recovery_catalog_metadata(&db, "session_catalog", "first").as_bytes(),
@@ -1337,11 +1407,14 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
             .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest))
     );
     let direct_grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
-    db.execute(
-        "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
-        [],
-    )
-    .unwrap();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
     db.execute(
         "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
         [],
@@ -1349,12 +1422,23 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     .unwrap();
     home.process(31, 778);
     home.pid_file(31, "first", "busy", 778);
+    assert_eq!(recovery_observation_grant(&db, "first", "catalog"), None);
+    assert_eq!(recovery_observation_grant(&db, "first", "history"), None);
 
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    assert_eq!(current_binding.namespace, config.namespace);
+    assert!(stage_grants_before.iter().any(|(key, value)| {
+        key == &format!("catalog_native_observation:{preimage_stage_digest}")
+            && value
+                == &format!(
+                    "{}:{}",
+                    current_binding.admission, current_binding.stream_epoch
+                )
+    }));
     assert_eq!(
         crate::storage::sqlite::proof_generations::observation_binding(
             &tx,
@@ -1382,7 +1466,8 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 
     let repaired = recovery_catalog_row(&db, "session_catalog", "first");
     assert_ne!(
-        repaired.query, selected.query,
+        repaired.query.as_ref().unwrap()["runtime"],
+        selected.query.as_ref().unwrap()["runtime"],
         "runtime evidence changed in the real producer"
     );
     assert_eq!(
@@ -1399,6 +1484,7 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     assert_eq!(direct_grant_after.1, direct_grant_before.1);
     assert_eq!(direct_grant_after.2, direct_grant_before.2);
     assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(recovery_stage_provenance(&db, "first"), provenance_before);
     assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
