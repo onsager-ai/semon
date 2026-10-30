@@ -3,6 +3,7 @@
 use crate::{
     Options,
     model::{Handoff, Session, Turn},
+    storage::catalog::CatalogSnapshot,
     viewer::ViewerReply,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -542,22 +543,39 @@ pub(crate) fn session_causal_trace_with_gate(
         return reply;
     }
     let read = || -> Result<Value, u16> {
-        let identity = crate::session_catalog_history_identity(options, source_key, &key)
-            .map_err(|_| 503u16)?
-            .ok_or(404u16)?;
-        // One bounded status capture for every peer, using the Catalog owner's
-        // source/facts/PID/runtime qualification. These are observations only.
-        let runtime_generation = crate::native_evidence::query_runtime_generation(options).ok();
-        let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
-        let recorded = options
-            .facts
-            .as_ref()
-            .and_then(|path| crate::storage::facts_authority(options, path).ok());
-        let mut db = crate::events::store::local_reader(options).map_err(|_| 503u16)?;
+        let binding = crate::storage::local_navigation_binding(options, source_key)
+            .map_err(|_| 503u16)?;
+        let mut db = binding.connection().map_err(|_| 503u16)?;
         db.busy_timeout(std::time::Duration::from_secs(1))
             .map_err(|_| 503u16)?;
         let tx = db.transaction().map_err(|_| 503u16)?;
-        crate::events::store::require_current(&tx).map_err(|_| 503u16)?;
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx)
+            .map_err(|_| 503u16)?;
+        snapshot.require_current().map_err(|_| 503u16)?;
+        let runtime_generation = snapshot.runtime_generation(options).ok();
+        let runtime_binding = snapshot.runtime_binding();
+        let runtime_observations = match (runtime_binding.as_ref(), runtime_generation.as_deref()) {
+            (Some(binding), Some(runtime)) => {
+                crate::native_evidence::RuntimeObservations::bound(binding, runtime).ok()
+            }
+            (Some(_), None) => None,
+            (None, _) => Some(crate::native_evidence::RuntimeObservations::new(options)),
+        };
+        let recorded = options
+            .facts
+            .as_ref()
+            .and_then(|path| snapshot.facts_authority(path).ok());
+        let selected = crate::catalog::catalog_selection_in_snapshot(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            &snapshot,
+        )
+        .map_err(|_| 503u16)?;
+        let Some((identity, _)) = selected else {
+            return Err(404);
+        };
         let generation: String = tx
             .query_row(
                 "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
@@ -740,14 +758,32 @@ pub(crate) fn session_causal_trace_with_gate(
             }
             versions.push(json!([sid, version]));
             if relay_peers.contains(&sid) {
-                let status = crate::catalog::relative_status(
-                    options,
-                    &runtime_observations,
-                    recorded.as_ref().map(|source| {
-                        source as &dyn crate::facts::source_authority::SourceAuthority
+                let status = match snapshot.row_runtime_binding(&row) {
+                    Ok(Some(binding)) => runtime_generation
+                        .as_deref()
+                        .and_then(|runtime| {
+                            crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
+                                .ok()
+                        })
+                        .map(|observations| {
+                            crate::catalog::relative_status(
+                                options,
+                                &observations,
+                                recorded.as_deref(),
+                                &row,
+                            )
+                        }),
+                    Ok(None) => runtime_observations.as_ref().map(|observations| {
+                        crate::catalog::relative_status(
+                            options,
+                            observations,
+                            recorded.as_deref(),
+                            &row,
+                        )
                     }),
-                    &row,
-                );
+                    Err(_) => None,
+                }
+                .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
                 missing.other |= status["observation"] == "unavailable";
                 let mut summary = trace_participant_summary(&row, status);
                 if summary.observed_extent.status["observation"] != "unavailable" {
@@ -803,7 +839,8 @@ pub(crate) fn session_causal_trace_with_gate(
         // A changed runtime cannot advertise a current observation from the
         // earlier capture. Custody drift rejects the response, as in Catalog.
         if runtime_generation.as_ref().is_none_or(|before| {
-            crate::native_evidence::query_runtime_generation(options)
+            snapshot
+                .runtime_generation(options)
                 .ok()
                 .as_ref()
                 != Some(before)
@@ -830,6 +867,8 @@ pub(crate) fn session_causal_trace_with_gate(
             "{:x}",
             Sha256::digest(json!([generation, versions]).to_string().as_bytes())
         );
+        drop(recorded);
+        drop(snapshot);
         tx.commit().map_err(|_| 503u16)?;
         Ok(
             json!({"api":1,"source_key":source_key,"catalog_key":key,"root":root,"generation":version,"identity":identity,"sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,"turns":turns,"handoffs":edges.into_values().collect::<Vec<_>>(),"previews":previews,"frontier":frontier,"incomplete":missing.incomplete(),"incomplete_only_missing_receiving_turns":incomplete_only_missing_receiving_turns,"previews_incomplete":previews_incomplete}),
