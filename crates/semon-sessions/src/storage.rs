@@ -45,6 +45,13 @@ pub(crate) fn read_local_catalog_page(
 }
 
 pub(crate) fn catalog_page_ready(options: &crate::Options) -> std::io::Result<bool> {
+    catalog_page_ready_with_deadline(options, None)
+}
+
+pub(crate) fn catalog_page_ready_with_deadline(
+    options: &crate::Options,
+    _deadline: Option<std::time::Instant>,
+) -> std::io::Result<bool> {
     let config = options
         .source
         .config(&options.cache)
@@ -75,7 +82,8 @@ pub(crate) fn catalog_page_ready(options: &crate::Options) -> std::io::Result<bo
         }
         #[cfg(feature = "postgres")]
         StoreBackend::Postgres { pool, control } => {
-            postgres::catalog_page_ready(&config, pool, control).map_err(std::io::Error::other)
+            postgres::catalog_page_ready(&config, pool, control, _deadline)
+                .map_err(std::io::Error::other)
         }
     }
 }

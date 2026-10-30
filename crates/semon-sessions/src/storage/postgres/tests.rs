@@ -124,6 +124,88 @@ fn pg_vertical140_captured_request_refuses_before_metadata_connection() {
     }
 }
 
+#[test]
+fn pg_catalog_readiness_uses_deadline_and_view_lifecycle() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("catalog-readiness");
+    let epoch = "c".repeat(64);
+    let config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Postgres {
+            pool,
+            control: PgCancellation::default(),
+        },
+        namespace: namespace.clone(),
+        expected_stream_epoch: Some(epoch.clone()),
+    };
+    config.create_native_store().unwrap();
+    let cache = std::env::temp_dir().join(format!(
+        "semon-pg-catalog-wait-{}-{}",
+        std::process::id(),
+        NEXT_SCHEMA.fetch_add(1, Ordering::Relaxed)
+    ));
+    let options = crate::Options {
+        source: crate::storage::HostSource::new(namespace, epoch)
+            .unwrap()
+            .with_store(config)
+            .unwrap(),
+        cache: cache.clone(),
+        ..crate::Options::default()
+    };
+    assert!(
+        crate::storage::catalog_page_ready_with_deadline(&options, Some(Instant::now())).is_err()
+    );
+
+    let view = crate::viewer::MachineView::new(options);
+    let expired = view
+        .wait_until_initial_catalog(Instant::now())
+        .unwrap_err();
+    assert_eq!(expired.kind(), std::io::ErrorKind::TimedOut);
+    assert!(!view
+        .evidence
+        .catalog_demand
+        .load(std::sync::atomic::Ordering::Relaxed));
+
+    let cold = view
+        .wait_until_initial_catalog(Instant::now() + Duration::from_secs(5))
+        .unwrap_err();
+    assert_eq!(cold.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(!view
+        .evidence
+        .catalog_demand
+        .load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!crate::events::EventCache::path(&cache).exists());
+
+    view.retire();
+    let closed = view
+        .wait_until_initial_catalog(Instant::now() + Duration::from_secs(1))
+        .unwrap_err();
+    assert_eq!(closed.kind(), std::io::ErrorKind::BrokenPipe);
+    assert!(!view
+        .evidence
+        .catalog_demand
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[test]
+fn pg_catalog_deadline_keeps_selected_read_cancellation() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let request = crate::SelectedReadControl::new(
+        Instant::now() + Duration::from_secs(30),
+        cancelled.clone(),
+    );
+    let outer_deadline = Instant::now() + Duration::from_secs(1);
+    let result = request.scope(|| {
+        let control = PgCancellation::default()
+            .for_selected_read()
+            .bounded(outer_deadline);
+        assert!(control.deadline(Instant::now() + Duration::from_secs(30)) <= outer_deadline);
+        cancelled.store(true, Ordering::Release);
+        assert!(control.is_cancelled());
+        Ok(())
+    });
+    assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+}
+
 pub(super) struct Factory {
     pub(super) dsn: String,
     pub(super) schema: String,

@@ -78,9 +78,8 @@ fn wait_for_catalog_read(
     allow_wait: bool,
 ) -> Result<Option<io::Error>, ViewerReply> {
     if crate::storage::is_postgres_selected(view.options()) {
-        if !matches!(crate::session_catalog_page_ready(view.options()), Ok(true)) {
-            return Err(catalog_unavailable());
-        }
+        view.wait_until_initial_catalog(deadline)
+            .map_err(|_| catalog_unavailable())?;
         return Ok(None);
     }
     if allow_wait {

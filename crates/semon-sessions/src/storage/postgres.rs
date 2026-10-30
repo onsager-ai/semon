@@ -203,11 +203,17 @@ pub(crate) fn catalog_page_ready(
     config: &super::StoreConfig,
     pool: &PgPool,
     control: &PgCancellation,
+    deadline: Option<std::time::Instant>,
 ) -> Result<bool, super::StorageError> {
+    let selected_control = control.for_selected_read();
+    let selected_control = match deadline {
+        Some(deadline) => selected_control.bounded(deadline),
+        None => selected_control,
+    };
     pool.transaction(
         &config.namespace,
         txn::TxnKind::ReadSnapshot,
-        &control.for_selected_read(),
+        &selected_control,
         |tx| {
             let binding = model_cache::binding(tx)?;
             if config.expected_stream_epoch.as_deref() != Some(binding.stream_epoch.as_str()) {

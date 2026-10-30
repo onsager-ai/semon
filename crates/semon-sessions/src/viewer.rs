@@ -1137,7 +1137,6 @@ impl MachineView {
                     "session catalog source is closed",
                 ));
             }
-            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
             let now = Instant::now();
             if now >= deadline {
                 return Err(io::Error::new(
@@ -1145,8 +1144,28 @@ impl MachineView {
                     "initial session catalog was not published before the deadline",
                 ));
             }
+            let readiness = crate::storage::catalog_page_ready_with_deadline(
+                &self.evidence.options,
+                Some(deadline),
+            );
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "initial session catalog was not published before the deadline",
+                ));
+            }
+            let ready = readiness?;
             if ready {
                 return Ok(());
+            }
+            if crate::storage::is_postgres_selected(&self.evidence.options) {
+                // A configured PostgreSQL producer is host-owned; never queue
+                // the local SQLite observer for its unpublished Catalog.
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "configured PostgreSQL Catalog is not published",
+                ));
             }
             let at = Kind::Catalog as usize;
             let stalled = match state.slot {

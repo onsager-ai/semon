@@ -143,10 +143,6 @@ pub(crate) fn apply_observation(
     Ok(())
 }
 
-pub(crate) fn page(options: &Options, key: &str, query: &str) -> ViewerReply {
-    page_with_gate(options, key, query, || Ok(()))
-}
-
 pub(crate) fn page_with_gate(
     options: &Options,
     key: &str,
