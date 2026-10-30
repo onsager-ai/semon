@@ -132,18 +132,57 @@ try {
     throw Error('Fixture navigation failed');
   }
   await page.locator('[data-session-row="list"]').first().waitFor({ timeout: 60000 });
-  const coldMs = performance.now() - started,
+  // Navigation to the first visible catalog row includes fixture import/readiness;
+  // it is not a browser Paint Timing entry or a production latency sample.
+  const firstVisibleCatalogRowMs = performance.now() - started,
     cold = await sample();
+  const paintTiming = await page.evaluate(async () => {
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const entries = performance.getEntriesByType('paint'),
+      expected = ['first-paint', 'first-contentful-paint'],
+      supported = PerformanceObserver.supportedEntryTypes.includes('paint');
+    return {
+      timeOrigin: performance.timeOrigin,
+      navigationType: performance.getEntriesByType('navigation')[0]?.type ?? null,
+      entries: entries.map(({ name, startTime }) => ({ name, startTimeMs: startTime })),
+      unavailable: expected
+        .filter((name) => !entries.some((entry) => entry.name === name))
+        .map((name) => ({
+          name,
+          reason: supported
+            ? 'No entry reported after two animation frames following the first visible catalog row'
+            : 'Paint Timing entries are unsupported in this browser',
+        })),
+    };
+  });
   if (fixture.harness) {
     started = performance.now();
-    const response = page.waitForResponse(
-      (response) =>
-        new URL(response.url()).pathname === '/api/sessions' &&
-        new URL(response.url()).searchParams.get('harness') === fixture.harness,
+    await page.getByRole('button', { name: 'Filter', exact: true }).click();
+    const sheet = page.getByRole('dialog', { name: 'Filter', exact: true }),
+      harness = sheet.locator('.sh-select[data-label="Harness"]');
+    await harness.locator('.sh-select-trigger').click();
+    await harness.locator(`[role="option"][data-value="${fixture.harness}"]`).click();
+    // The shared sheet commits its selected facets together when Done closes it.
+    const [response] = await Promise.all([
+      page.waitForResponse((response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === '/api/sessions' &&
+          url.searchParams.get('harness') === fixture.harness &&
+          url.searchParams.get('machine') === fixture.source_key
+        );
+      }),
+      sheet.getByRole('button', { name: 'Done', exact: true }).click(),
+    ]);
+    assert.equal(response.status(), 200);
+    const filteredPage = await response.json();
+    assert.ok(filteredPage.items.length > 0);
+    assert.ok(filteredPage.items.every((item) => item.harness === fixture.harness));
+    await sheet.waitFor({ state: 'hidden' });
+    await page.waitForFunction(
+      (harness) => new URL(location.href).searchParams.get('harness') === harness,
+      fixture.harness,
     );
-    await page.getByRole('textbox', { name: 'Harness', exact: true }).fill(fixture.harness);
-    await page.getByRole('button', { name: 'Apply filters', exact: true }).click();
-    await response;
     await page.locator(`[data-session-row="list"][data-id="${fixture.catalog_key}"]`).waitFor();
   }
   const filterMs = fixture.harness ? performance.now() - started : null,
@@ -154,20 +193,22 @@ try {
   const selectedMs = performance.now() - started,
     selected = await sample();
   const entry = await page.locator('[data-entry-key]').first().elementHandle();
-  let earlierMs = null;
-  if (await page.getByRole('button', { name: 'Load earlier records' }).count()) {
-    started = performance.now();
-    const response = page.waitForResponse(
+  const earlierButton = page.getByRole('button', { name: 'Load earlier records', exact: true });
+  await earlierButton.first().waitFor();
+  started = performance.now();
+  const [earlierResponse] = await Promise.all([
+    page.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === '/api/session-transcript' &&
         new URL(response.url()).searchParams.has('after'),
-    );
-    await page.getByRole('button', { name: 'Load earlier records' }).first().click();
-    await response;
-    await page.waitForFunction(() => document.querySelectorAll('[aria-busy="true"]').length === 0);
-    earlierMs = performance.now() - started;
-  }
+    ),
+    earlierButton.first().click(),
+  ]);
+  assert.equal(earlierResponse.status(), 200);
+  await page.waitForFunction(() => document.querySelectorAll('[aria-busy="true"]').length === 0);
+  const earlierMs = performance.now() - started;
   const earlier = await sample();
+  assert.ok(earlier.entries > selected.entries, 'Earlier paging must add native records');
   let fieldMs = null;
   if (fixture.scalar) {
     started = performance.now();
@@ -201,11 +242,13 @@ try {
   assert.deepEqual(errors, []);
   const evidence = {
     source_revision: fixture.source_revision ?? null,
+    binary_sha256: fixture.binary_sha256 ?? null,
     bundle,
     source_key: fixture.source_key,
     catalog_key: fixture.catalog_key,
     phase: fixture.phase ?? null,
-    coldMs,
+    firstVisibleCatalogRowMs,
+    paintTiming,
     filterMs,
     selectedMs,
     earlierMs,
@@ -224,7 +267,16 @@ try {
   await writeFile(evidencePath, JSON.stringify(evidence, null, 2));
   await writeFile(evidencePath + '.result', JSON.stringify({ ok: true }));
   console.log(
-    JSON.stringify({ coldMs, filterMs, selectedMs, earlierMs, fieldMs, warmMs, bundle, errors }),
+    JSON.stringify({
+      firstVisibleCatalogRowMs,
+      filterMs,
+      selectedMs,
+      earlierMs,
+      fieldMs,
+      warmMs,
+      bundle,
+      errors,
+    }),
   );
 } catch (error) {
   await writeFile(
