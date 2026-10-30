@@ -1872,7 +1872,7 @@ mod tests {
                 .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1)))
                 .unwrap();
         }
-        for index in 0..128 {
+        for index in 0..192 {
             fixture.source(&format!("unrelated-{index:04}"));
         }
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
@@ -1909,11 +1909,41 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        assert_eq!(
+            db.execute(
+                "UPDATE session_catalog_invalidations SET revision=999999 WHERE source_path=?1",
+                [claude.to_string_lossy().as_ref()]
+            )
+            .unwrap(),
+            1
+        );
         let request = Request::parse("q=IDENTITY-HINT&harness=claude").unwrap();
         evidence.note_catalog_search(request.search_interest());
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
         evidence
             .refresh_catalog(&mut work, crate::model::now_ms())
             .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            64,
+            "the completed Codex hint reserves an ordinary cohort"
+        );
+        assert!(
+            fixture.body("q=identity-hint&harness=claude").1["items"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let before = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        assert_eq!(
+            crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get) - before,
+            1,
+            "the mixed-case Claude hint precedes the remaining older FIFO cohort"
+        );
         assert_eq!(
             fixture.body("q=identity-hint&harness=claude").1["items"][0]["key"],
             "Identity-Hint"
