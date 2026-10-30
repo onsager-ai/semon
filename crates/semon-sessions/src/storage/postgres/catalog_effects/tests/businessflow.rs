@@ -4269,7 +4269,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // A retained-only owner remains readable from its publication proof when
     // the configured current Facts file has moved on. The same change refuses
     // Current selected rows above, where live runtime qualification applies.
-    fs::write(&facts_path, b"changed current Facts after retained publication").unwrap();
+    fs::write(
+        &facts_path,
+        b"changed current Facts after retained publication",
+    )
+    .unwrap();
     let retained_key = removed.iter().next().unwrap();
     for all in [true, false] {
         let mut retained_options = facts_options.clone();
@@ -4297,7 +4301,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert!(retained_fields["session"].is_object());
         assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
         assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
-        assert_eq!(retained_fields["session"]["open_question"], serde_json::Value::Null);
+        assert_eq!(
+            retained_fields["session"]["open_question"],
+            serde_json::Value::Null
+        );
         let body = query
             .call_bound_selected_at(
                 "read_transcript",
