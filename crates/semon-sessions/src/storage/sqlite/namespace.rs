@@ -337,7 +337,10 @@ mod tests {
                 let owner_guard = [
                     ("storage_owned_guard_", "private native ownership refused"),
                     ("storage_semantic_guard_", "semantic Source refused"),
-                    ("storage_source_guard_", "source operation namespace refused"),
+                    (
+                        "storage_source_guard_",
+                        "source operation namespace refused",
+                    ),
                     ("storage_event_guard_", "configured event writer refused"),
                     ("storage_event_scope_", "event operation namespace refused"),
                     ("storage_catalog_guard_", "namespace writer refused"),

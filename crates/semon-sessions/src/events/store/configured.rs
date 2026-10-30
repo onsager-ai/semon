@@ -5654,7 +5654,7 @@ mod tests {
     }
 
     fn semantic_fixture(namespace: &str) -> Fixture {
-        let f = Fixture::with_named_setup(namespace, |_, _| {});
+        let f = Fixture::current(namespace);
         f.config
             .native_events()
             .unwrap()

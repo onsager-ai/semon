@@ -275,11 +275,7 @@ impl CurrentSources {
                             #[cfg(test)]
                             eprintln!("transfer_query_stage facts_head_load_refused");
                         })?
-                        .ok_or_else(|| {
-                            #[cfg(test)]
-                            eprintln!("transfer_query_stage facts_head_missing");
-                            StorageError::ScopeChanged
-                        })?,
+                        .ok_or(StorageError::ScopeChanged)?,
                     model_cache::binding(tx)?,
                 ))
             })?;

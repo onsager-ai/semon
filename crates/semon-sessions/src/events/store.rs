@@ -627,6 +627,16 @@ pub(super) fn open_scoped(
     open_admitted(path, source).map_err(|error| error.to_string())
 }
 
+/// Test mutations use the EventCache's admitted writer connection, including
+/// its namespace and private event ownership qualification.
+#[cfg(test)]
+pub(crate) fn qualified_event_writer_connection_for_test(
+    path: &Path,
+    source: &crate::storage::HostSource,
+) -> Result<Connection, StorageError> {
+    configured::connection(&source.config(path)?)
+}
+
 /// Restart/read interest can resume durable work without opening Event payloads.
 /// An absent store alone does not ask a qualified-read observer to cold-index.
 pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool> {
@@ -9109,6 +9119,23 @@ mod tests {
         let root = scratch("tree-snapshot");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
+        // Direct store reads return lazy checkpoints; bind them to the same
+        // admitted Source used by the writer fixture before exercising them.
+        let source_config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.clone(),
+            },
+            namespace: fixture_namespace(),
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        let bind_checkpoint = |metadata: &mut crate::native_tree::Metadata| {
+            metadata
+                .summary
+                .stored
+                .as_mut()
+                .unwrap()
+                .bind_configured(source_config.clone());
+        };
         let index = |model: &str| FileIndex {
             tree_summary: Some(crate::native_tree::Summary {
                 models: [model.to_owned()].into_iter().collect(),
@@ -9135,6 +9162,7 @@ mod tests {
             Outcome::Written
         );
         let (_, mut initial) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        bind_checkpoint(&mut initial);
         assert_eq!(
             initial.summary.tool_name("tree-tool").unwrap().as_deref(),
             Some("Bash")
@@ -9157,6 +9185,7 @@ mod tests {
         });
         let reads = super::super::FILE_READS.with(std::cell::Cell::get);
         let (observed, mut metadata) = store.read_tree("a.jsonl", &old.stat).unwrap().unwrap();
+        bind_checkpoint(&mut metadata);
         assert_eq!(observed, old);
         assert_eq!(
             metadata.summary.models,
@@ -9168,7 +9197,8 @@ mod tests {
             "the checkpoint reader retains its ledger refusal after a concurrent commit"
         );
         assert!(store.read_tree("a.jsonl", &old.stat).unwrap().is_none());
-        let (observed, metadata) = store.read_tree("a.jsonl", &new.stat).unwrap().unwrap();
+        let (observed, mut metadata) = store.read_tree("a.jsonl", &new.stat).unwrap().unwrap();
+        bind_checkpoint(&mut metadata);
         assert_eq!(observed, new);
         assert_eq!(
             metadata.summary.models,

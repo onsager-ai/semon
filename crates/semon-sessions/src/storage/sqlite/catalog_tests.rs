@@ -1255,17 +1255,22 @@ fn archived_event_index_requires_decodable_rows_and_supported_parser() {
         .unwrap()
         .unwrap();
     let connection = fixture.db();
-    connection
+    let event_writer = crate::events::store::qualified_event_writer_connection_for_test(
+        &fixture.options.cache,
+        &fixture.options.source,
+    )
+    .unwrap();
+    event_writer
         .execute("UPDATE files SET pending='malformed'", [])
         .unwrap();
     assert_eq!(
         crate::retain_source_event_index(&fixture.options, &proof, &ready),
         Err(CatalogIdentityError::Unavailable)
     );
-    connection
+    event_writer
         .execute("UPDATE files SET pending='{}'", [])
         .unwrap();
-    connection
+    event_writer
         .execute("UPDATE meta SET value='0' WHERE key='cache_version'", [])
         .unwrap();
     let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
@@ -3285,7 +3290,7 @@ fn selected_slot_ranges_are_native_bounded_and_stable_across_unrelated_history()
         )
         .unwrap();
     assert!(
-        plan.contains("SEARCH session_slots USING PRIMARY KEY"),
+        plan.contains("SEARCH main.session_slots USING PRIMARY KEY"),
         "{plan}"
     );
 }
@@ -4459,8 +4464,14 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
                     )
                     .unwrap();
                 let mut row: CatalogRow = serde_json::from_str(&text).unwrap();
+                let event_writer =
+                    crate::events::store::qualified_event_writer_connection_for_test(
+                        &fixture.options.cache,
+                        &fixture.options.source,
+                    )
+                    .unwrap();
                 crate::events::store::chunk_proofs::legacy_change_token_for_test(
-                    &EventCache::path(&fixture.options.cache),
+                    &event_writer,
                     path.to_str().unwrap(),
                     &crate::source_carrier::ledger(&row.sources[0]),
                 );

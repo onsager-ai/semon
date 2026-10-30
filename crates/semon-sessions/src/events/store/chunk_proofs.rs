@@ -187,8 +187,7 @@ pub(crate) fn log_header_rejection(
 }
 
 #[cfg(test)]
-pub(crate) fn legacy_change_token_for_test(cache: &Path, path: &str, ledger: &Ledger) {
-    let db = Connection::open(cache).unwrap();
+pub(crate) fn legacy_change_token_for_test(db: &Connection, path: &str, ledger: &Ledger) {
     let key = format!("{}header", prefix(path));
     let encoded: String = db
         .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
