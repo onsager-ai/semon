@@ -679,4 +679,5 @@ pub(crate) fn capture(
 pub(crate) struct Publication<'a> {
     pub(crate) rows: &'a [crate::model::summary::CatalogRow],
     pub(crate) transcripts: Option<&'a [Projection]>,
+    pub(crate) observations: Option<&'a crate::storage::selected::PresentationObservations>,
 }

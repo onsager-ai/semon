@@ -498,7 +498,9 @@ pub(super) fn publish(
         let runtime = model_cache::binding(tx)?
             .witness(&batch.runtime)
             .map_err(|_| StorageError::ScopeChanged)?;
-        if observations.runtime.as_deref() != Some(runtime.as_str()) {
+        if observations.source_runtime.as_deref() != Some(batch.runtime.as_str())
+            || observations.runtime.as_deref() != Some(runtime.as_str())
+        {
             return Err(StorageError::ScopeChanged);
         }
         for row in &prepared.rows {
@@ -522,6 +524,7 @@ pub(super) fn publish(
         &crate::slot_projection::Publication {
             rows: &prepared.rows,
             transcripts: Some(&prepared.transcripts),
+            observations: prepared.presentation_observations(),
         },
         batch.base_generation.as_deref(),
         &prepared.claims,
