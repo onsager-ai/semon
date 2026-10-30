@@ -309,18 +309,14 @@ pub(in crate::storage::postgres) fn publish(
         .map(String::from_utf8)
         .transpose()
         .map_err(|_| StorageError::ScopeChanged)?;
-    // Semantic lifecycle authority survives even when there are no row Query
-    // summaries. Generic publications retain their existing row/head binding.
+    // Semantic staging checks each row against its captured runtime scope.
+    // Owner state keeps the global lifecycle runtime, including zero-row
+    // withdrawals. Generic publications retain their row/head binding.
     let bound = if let Some(semantic) = &semantic {
         let binding = super::super::model_cache::binding(tx)?;
         let witnessed = binding
             .witness(semantic.runtime)
             .map_err(|_| StorageError::ScopeChanged)?;
-        if !publication.rows.is_empty()
-            && (runtime.len() != 1 || runtime.first().copied() != Some(witnessed.as_str()))
-        {
-            return Err(StorageError::ScopeChanged);
-        }
         semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, &witnessed)?
     } else {
         match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
