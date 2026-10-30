@@ -19,6 +19,14 @@ pub(in crate::storage::postgres) struct QueryCatalog {
     pub(in crate::storage::postgres) captured: bool,
 }
 
+fn cohort_scope_changed(reason: &'static str) -> StorageError {
+    #[cfg(test)]
+    eprintln!("pg_query_cohort_refused reason={reason}");
+    #[cfg(not(test))]
+    let _ = reason;
+    StorageError::ScopeChanged
+}
+
 /// Query includes retained-only owners without changing the Current Catalog
 /// pager. Preserve each Current header for window/runtime membership before
 /// choosing its proof-owned history, as the SQLite Query reader does.
@@ -29,7 +37,7 @@ fn cohort_page(
 ) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, StorageError> {
     snapshot
         .require_current()
-        .map_err(|_| StorageError::ScopeChanged)?;
+        .map_err(|_| cohort_scope_changed("snapshot_not_current"))?;
     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
     tx.check()?;
     let namespace = tx.namespace.as_str().as_bytes();
@@ -75,12 +83,13 @@ fn cohort_page(
         let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
         crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
         let metadata: crate::model::summary::CatalogRow =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+            serde_json::from_slice(&bytes)
+                .map_err(|_| cohort_scope_changed("page_metadata_invalid"))?;
         if metadata.key.as_bytes() != row.get::<_, Vec<u8>>(0)
             || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)
             || metadata.sources.len() > 64
         {
-            return Err(StorageError::ScopeChanged);
+            return Err(cohort_scope_changed("page_metadata_witness_mismatch"));
         }
         output.push((metadata, row.get::<_, bool>(3)));
     }
@@ -382,17 +391,18 @@ impl QueryCatalogStore for QueryCatalog {
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
             let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
-                if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
-                let binding = snapshot.row_runtime_binding(&row).map_err(|_| StorageError::ScopeChanged)?.ok_or(StorageError::ScopeChanged)?;
-                let expected = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(|_| StorageError::ScopeChanged)?.expected(&row);
-                let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-                if !crate::model::summary::query_observation_matches(saved, &row.sources, current, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
+                if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
+                let binding = snapshot.row_runtime_binding(&row).map_err(|_| cohort_scope_changed("query_runtime_binding_refused"))?.ok_or_else(|| cohort_scope_changed("query_runtime_binding_missing"))?;
+                let expected = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?.expected(&row);
+                let saved = row.query.as_ref().ok_or_else(|| cohort_scope_changed("query_observation_missing"))?;
+                let matches = crate::model::summary::query_observation_matches(saved, &row.sources, current, expected.as_deref()).map_err(|_| cohort_scope_changed("query_observation_invalid"))?;
+                if !matches { return Err(cohort_scope_changed("query_observation_mismatch")); }
                 let witness = saved.to_string();
                 *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
-                let summaries = saved["rows"].as_object().ok_or(StorageError::ScopeChanged)?;
-                if !summaries.contains_key(&row.key) { return Err(StorageError::ScopeChanged); }
+                let summaries = saved["rows"].as_object().ok_or_else(|| cohort_scope_changed("query_summaries_missing"))?;
+                if !summaries.contains_key(&row.key) { return Err(cohort_scope_changed("query_owner_summary_missing")); }
                 for (id, value) in summaries.iter().filter(|(id, _)| keep.is_none_or(|keep| keep.contains(*id))) {
-                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(StorageError::ScopeChanged); }
+                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
                     rows.insert(id.clone(), value.clone());
                     owners.entry(id.clone()).or_insert_with(|| row.key.clone());
                 }
@@ -407,8 +417,8 @@ impl QueryCatalogStore for QueryCatalog {
             let chosen = |row: crate::model::summary::CatalogRow| -> Result<(crate::model::summary::CatalogRow, bool), StorageError> {
                 Ok(match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
                     Some(text) => {
-                        let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
-                        if history.key != row.key { return Err(StorageError::ScopeChanged); }
+                        let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| cohort_scope_changed("history_metadata_invalid"))?;
+                        if history.key != row.key { return Err(cohort_scope_changed("history_identity_mismatch")); }
                         (history, true)
                     }
                     None => (row, false),
@@ -441,7 +451,7 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                 }
                 if !more { break; }
-                after = Some(next.ok_or(StorageError::ScopeChanged)?);
+                after = Some(next.ok_or_else(|| cohort_scope_changed("catalog_page_cursor_missing"))?);
             }
             let Some(c) = cutoff else {
                 // An immutable owner's relationship summaries may still name
@@ -468,8 +478,8 @@ impl QueryCatalogStore for QueryCatalog {
                                 if column == "edge_id" {
                                     let bytes = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?;
                                     *bytes_left = bytes_left.checked_sub(bytes.len()).ok_or(StorageError::Busy)?;
-                                    let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-                                    let from = metadata["from"].as_str().ok_or(StorageError::ScopeChanged)?;
+                                    let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| cohort_scope_changed("all_time_edge_metadata_invalid"))?;
+                                    let from = metadata["from"].as_str().ok_or_else(|| cohort_scope_changed("all_time_edge_source_missing"))?;
                                     keep.insert(from.to_owned());
                                     if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") { keep.insert(to.to_owned()); }
                                 }
@@ -492,10 +502,11 @@ impl QueryCatalogStore for QueryCatalog {
             let mut edges = BTreeSet::new();
             let mut turns = BTreeSet::new();
             let json = |bytes: Option<Vec<u8>>| -> Result<serde_json::Value, StorageError> {
-                serde_json::from_slice(&bytes.ok_or(StorageError::Busy)?).map_err(|_| StorageError::ScopeChanged)
+                serde_json::from_slice(&bytes.ok_or(StorageError::Busy)?)
+                    .map_err(|_| cohort_scope_changed("recent_relationship_metadata_invalid"))
             };
             let endpoint = |metadata: &serde_json::Value| -> Result<(String, Option<String>), StorageError> {
-                let from = metadata["from"].as_str().ok_or(StorageError::ScopeChanged)?.to_owned();
+                let from = metadata["from"].as_str().ok_or_else(|| cohort_scope_changed("recent_relationship_source_missing"))?.to_owned();
                 Ok((from, metadata["to"].as_str().filter(|to| *to != "you").map(str::to_owned)))
             };
             {
@@ -552,7 +563,9 @@ impl QueryCatalogStore for QueryCatalog {
                     if edges.insert(id.clone())
                         && let Some(metadata) = snapshot.edge(&owner, &id).map_err(|_| StorageError::Unavailable)?
                     {
-                        let (from, to) = endpoint(&serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?)?;
+                        let metadata = serde_json::from_str(&metadata)
+                            .map_err(|_| cohort_scope_changed("recent_turn_edge_metadata_invalid"))?;
+                        let (from, to) = endpoint(&metadata)?;
                         keep.insert(from);
                         keep.extend(to);
                     }
@@ -562,12 +575,18 @@ impl QueryCatalogStore for QueryCatalog {
             for key in &needed {
                 let (row,current) = match loaded.remove(key) {
                     Some(row) => row,
-                    None => match snapshot.catalog(key, false)? {
+                    None => match snapshot.catalog(key, false).map_err(|error| match error {
+                        StorageError::ScopeChanged => cohort_scope_changed("recent_current_catalog_refused"),
+                        other => other,
+                    })? {
                         Some(row) => {
                             let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
                             (chosen(row)?.0,current)
                         },
-                        None => match snapshot.catalog(key, true)? {
+                        None => match snapshot.catalog(key, true).map_err(|error| match error {
+                            StorageError::ScopeChanged => cohort_scope_changed("recent_history_catalog_refused"),
+                            other => other,
+                        })? {
                             Some(row) => (row,false),
                             None => continue,
                         },
@@ -576,7 +595,7 @@ impl QueryCatalogStore for QueryCatalog {
                 emit(row, current, Some(&keep), bytes_left)?;
             }
             if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
-                return Err(StorageError::ScopeChanged);
+                return Err(cohort_scope_changed("recent_relationship_owner_missing"));
             }
             Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns })
         }).map_err(unavailable)
