@@ -81,7 +81,9 @@ fn withdrawal_preflight(
     assert!(
         matches!(
             refused.record_semantic_batch(batch, &prepared),
-            Err(crate::events::StoreError::Configured(StorageError::Conflict))
+            Err(crate::events::StoreError::Configured(
+                StorageError::Conflict
+            ))
         ),
         "changed physical witness refuses before cancelled SQL admission"
     );
@@ -89,7 +91,9 @@ fn withdrawal_preflight(
     assert!(
         matches!(
             refused.record_semantic_batch(batch, &prepared),
-            Err(crate::events::StoreError::Configured(StorageError::Conflict))
+            Err(crate::events::StoreError::Configured(
+                StorageError::Conflict
+            ))
         ),
         "missing physical witness refuses before cancelled SQL admission"
     );
@@ -128,10 +132,11 @@ fn withdrawal_commit_hook(
 
 #[cfg(unix)]
 fn withdrawal_guard_released(options: &Options, prepared: &crate::model::PreparedSources) {
-    for path in std::iter::once("facts")
-        .chain(prepared.withdrawals.iter().map(|w| w.path.as_str()))
+    for path in std::iter::once("facts").chain(prepared.withdrawals.iter().map(|w| w.path.as_str()))
     {
-        assert!(crate::source_change::SourceLock::try_exclusive_cache(&options.cache, path).is_ok());
+        assert!(
+            crate::source_change::SourceLock::try_exclusive_cache(&options.cache, path).is_ok()
+        );
     }
 }
 
@@ -3298,7 +3303,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     fs::rename(path, &moved).unwrap();
                     let replay = cache.publish_semantic_catalog(&batch, model.prepared());
                     fs::rename(&moved, path).unwrap();
-                    assert_eq!(replay.unwrap(), ack, "completed replay uses its original ACK");
+                    assert_eq!(
+                        replay.unwrap(),
+                        ack,
+                        "completed replay uses its original ACK"
+                    );
                 }
                 cache.finish_semantic_stage(batch.epoch).unwrap();
                 break (ack.1.unwrap(), batch, model, deferred);
@@ -4113,7 +4122,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }];
     let (retired, retired_batch, retired_model, _) =
         stage_publish(&mut reopened, &rollout, 1790812810000);
-    assert!(withdrawal_fence_checked.get(), "withdrawal fence regression ran");
+    assert!(
+        withdrawal_fence_checked.get(),
+        "withdrawal fence regression ran"
+    );
     assert!(retired_model.prepared().rows.is_empty(), "zero-row batch");
     assert_eq!(
         retired_batch.runtime,

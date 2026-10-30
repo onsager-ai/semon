@@ -162,7 +162,10 @@ impl PgPool {
             let value = operation(&mut tx)?;
             tx.check()?;
             #[cfg(test)]
-            if matches!(kind, TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer) {
+            if matches!(
+                kind,
+                TxnKind::Write | TxnKind::StoreWrite | TxnKind::Transfer
+            ) {
                 BEFORE_WRITE_COMMIT.with(|hook| {
                     if let Some(hook) = hook.borrow_mut().take() {
                         hook();
