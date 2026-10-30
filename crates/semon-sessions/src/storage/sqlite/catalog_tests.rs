@@ -4498,6 +4498,71 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
 }
 
 #[test]
+fn index_leading_catalog_list_keeps_qualified_current_row_readable() {
+    use std::io::Write;
+    let (fixture, path) = local_only_codex_fixture();
+    fixture.publish_existing();
+    assert_eq!(
+        session_catalog_identity(&fixture.options, "source", "local-proof")
+            .unwrap()
+            .unwrap()
+            .owner_qualification,
+        CatalogOwnerQualification::Qualified
+    );
+
+    let before = session_catalog_page(&fixture.options, "source", "sid=local-proof");
+    assert_eq!(
+        before.status,
+        200,
+        "initial selected Catalog list: {}",
+        String::from_utf8_lossy(&before.body)
+    );
+    let before: Value = serde_json::from_slice(&before.body).unwrap();
+    assert_eq!(before["items"].as_array().unwrap().len(), 1);
+    assert_eq!(before["items"][0]["key"], "local-proof");
+
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let catalog_generation = cache.session_catalog_generation().unwrap().unwrap();
+    assert_eq!(before["generation"].as_str(), Some(catalog_generation.as_str()));
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{}",
+        json!({"type":"synthetic_append","iteration":0})
+    )
+    .unwrap();
+    crate::model::prepare_sources(
+        &fixture.options,
+        &mut cache,
+        &[crate::Input {
+            root: crate::InputRoot::Codex,
+            path: path
+                .strip_prefix(&fixture.options.codex_home)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into(),
+        }],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let catalog_after = cache.session_catalog_generation().unwrap();
+    assert_eq!(catalog_after.as_deref(), Some(catalog_generation.as_str()));
+    drop(cache);
+
+    let after = session_catalog_page(&fixture.options, "source", "sid=local-proof");
+    assert_eq!(
+        after.status,
+        200,
+        "index-leading Catalog list: {}",
+        String::from_utf8_lossy(&after.body)
+    );
+    let after: Value = serde_json::from_slice(&after.body).unwrap();
+    assert_eq!(after["generation"].as_str(), Some(catalog_generation.as_str()));
+    assert_eq!(after["items"].as_array().unwrap().len(), 1);
+    assert_eq!(after["items"][0]["key"], "local-proof");
+}
+
+#[test]
 fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
     use std::io::Write;
     for mutation in ["append", "copy", "touch", "legacy"] {
