@@ -126,7 +126,13 @@ fn pg_source_queue_bound_capture_order_and_foreign_zero_effects() {
             .unwrap()
             .is_empty()
     );
-    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
+    assert!(
+        store
+            .pending_catalog_sources(256, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     intents[0].apply(&mut store).unwrap();
     store.acknowledge_intent(intents[0].operation()).unwrap();
     let last = discover("queue", &["after-slot".into()], true);
@@ -873,7 +879,13 @@ fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() 
     drop(store);
     let mut store = journal(&pool, namespace);
     assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
+    assert!(
+        store
+            .pending_catalog_sources(256, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     assert_eq!(
         store.claims(&["first".into(), "fault".into()]).unwrap(),
         vec![("first".into(), None), ("fault".into(), None)]

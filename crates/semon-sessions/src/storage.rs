@@ -583,13 +583,11 @@ impl StoreConfig {
             false,
             &mut None,
         )
-        .map_err(
-            |error| {
-                error
-                    .downcast::<StorageError>()
-                    .map_or(StorageError::Unavailable, |error| *error)
-            },
-        )
+        .map_err(|error| {
+            error
+                .downcast::<StorageError>()
+                .map_or(StorageError::Unavailable, |error| *error)
+        })
     }
 
     /// Resolve metadata-only native navigation under this admitted namespace.
