@@ -1257,6 +1257,7 @@ fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
             "sid=parent&scope=retained_history&limit=100",
             None,
             crate::SessionSourceReadMode::ProviderOnly,
+            || Ok(()),
         )
         .unwrap_or_else(|error| panic!("source-shaped selected parent failed: {error}"));
         assert_eq!(
