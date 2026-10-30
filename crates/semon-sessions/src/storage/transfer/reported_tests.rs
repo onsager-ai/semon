@@ -570,13 +570,11 @@ pub(crate) fn finish_catalog(
                 );
                 cache.publish_session_descriptions();
                 assert_eq!(
-                    cache.session_descriptions(&[
-                        crate::events::SessionDescriptionRequest {
-                            key: row.key.clone(),
-                            version: 1,
-                            inputs: "transfer-inputs".into(),
-                        },
-                    ]),
+                    cache.session_descriptions(&[crate::events::SessionDescriptionRequest {
+                        key: row.key.clone(),
+                        version: 1,
+                        inputs: "transfer-inputs".into(),
+                    },]),
                     vec![Some("sanitized transfer description".into())]
                 );
             }
@@ -607,13 +605,11 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     std::fs::remove_dir_all(&options.claude_home).unwrap();
     apply(&target, &manifest);
     assert_eq!(
-        cache(&target).session_descriptions(&[
-            crate::events::SessionDescriptionRequest {
-                key: expected[0].key.clone(),
-                version: 1,
-                inputs: "transfer-inputs".into(),
-            },
-        ]),
+        cache(&target).session_descriptions(&[crate::events::SessionDescriptionRequest {
+            key: expected[0].key.clone(),
+            version: 1,
+            inputs: "transfer-inputs".into(),
+        },]),
         vec![Some("sanitized transfer description".into())]
     );
     let owner =
@@ -661,13 +657,11 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
     }
     apply(&reverse, &backwards);
     assert_eq!(
-        cache(&reverse).session_descriptions(&[
-            crate::events::SessionDescriptionRequest {
-                key: expected[0].key.clone(),
-                version: 1,
-                inputs: "transfer-inputs".into(),
-            },
-        ]),
+        cache(&reverse).session_descriptions(&[crate::events::SessionDescriptionRequest {
+            key: expected[0].key.clone(),
+            version: 1,
+            inputs: "transfer-inputs".into(),
+        },]),
         vec![Some("sanitized transfer description".into())]
     );
     std::fs::remove_dir_all(root).unwrap();
