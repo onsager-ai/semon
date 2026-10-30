@@ -19,6 +19,7 @@
 //     shows the same in View all. Neither says "Cut short in this copy of the logs". Screenshots at 390 and 1280, light and dark.
 //   - spawn cards: the name and the state share one row (phone and desktop, light and dark, also with a long name, and never sideways), a
 //     card names its kind once (in its meta line, after the harness mark, #146) and never uses the person icon or a delegation glyph, and the top bar names the kind as a plain label.
+//   - a held selected read from the old document fails on reload, while the new document's transcript read settles.
 //   - no page errors.
 import path from 'node:path';
 import {
@@ -575,6 +576,82 @@ export default async function (browser) {
     ])
       R.stepTitle.screenshots.push(await captureTitleShot(spec));
     await page.context().close();
+  }
+
+  // A selected read from the old document must settle after navigation while the new read completes.
+  {
+    const lifecycle = await served(browser, { extras: true, path: '/session/local/harbor' });
+    const childRequestsSettled = trackChildRequests(lifecycle);
+    let releaseHeldRoute;
+    const heldRoute = new Promise((resolve) => (releaseHeldRoute = resolve));
+    let notifyHeldRequest;
+    const heldRequestStarted = new Promise((resolve, reject) => {
+      const deadline = setTimeout(
+        () => reject(new Error('Selected transcript request did not reach the held route')),
+        5000,
+      );
+      notifyHeldRequest = (request) => {
+        clearTimeout(deadline);
+        resolve(request);
+      };
+    });
+    let oldRequest = null,
+      oldOutcome = null,
+      reloading = false,
+      newDocument = false,
+      newRequest = null,
+      newRequestFinished = false;
+    const selected = (request) => new URL(request.url()).pathname === '/api/session-transcript';
+    lifecycle.on('request', (request) => {
+      if (newDocument && selected(request) && !newRequest) newRequest = request;
+    });
+    lifecycle.on('requestfailed', (request) => {
+      if (request === oldRequest) oldOutcome = 'failed';
+    });
+    lifecycle.on('requestfinished', (request) => {
+      if (request === oldRequest) oldOutcome = 'finished';
+      if (request === newRequest) newRequestFinished = true;
+    });
+    lifecycle.on('framenavigated', (frame) => {
+      if (frame === lifecycle.mainFrame() && reloading) newDocument = true;
+    });
+    await lifecycle.route('**/api/session-transcript?**', async (route) => {
+      const request = route.request();
+      if (!oldRequest) {
+        oldRequest = request;
+        notifyHeldRequest(request);
+        await heldRoute;
+        if (!oldOutcome) await route.continue();
+        return;
+      }
+      await route.continue();
+    });
+    try {
+      await lifecycle.evaluate(() => {
+        void fetch(
+          '/api/session-transcript?machine=local&scope=retained_history&sid=harbor&limit=60',
+        ).catch(() => {});
+      });
+      await heldRequestStarted;
+      reloading = true;
+      await lifecycle.reload({ waitUntil: 'load' });
+      releaseHeldRoute();
+      await lifecycle.locator('[aria-label="Transcript"] [data-entry-key]').first().waitFor();
+      await childRequestsSettled();
+      const evidence = { oldOutcome, newRequestFinished };
+      R.transcriptLifecycle = evidence;
+      r.expect(
+        oldOutcome === 'failed',
+        'old-document selected request naturally failed during reload: ' + JSON.stringify(evidence),
+      );
+      r.expect(
+        newRequestFinished,
+        'new-document selected transcript request finished: ' + JSON.stringify(evidence),
+      );
+    } finally {
+      releaseHeldRoute();
+      await lifecycle.context().close();
+    }
   }
 
   // ---- Embedding server account menu and Machines destination -----------------------------------------------------
