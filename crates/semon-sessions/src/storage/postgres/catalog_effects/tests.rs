@@ -669,6 +669,7 @@ fn bind_custody_fixture(
                 None,
                 &[],
                 false,
+                None,
             )
         })
         .unwrap();

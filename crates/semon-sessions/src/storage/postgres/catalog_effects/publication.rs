@@ -3,6 +3,14 @@
 use super::*;
 use crate::{events::Outcome, storage::semantic_owner};
 
+/// The ordinary semantic stage owns this lifecycle observation independently
+/// of its surviving rows, including a publication containing only withdrawals.
+#[derive(serde::Serialize)]
+pub(in crate::storage::postgres) struct Semantic<'a> {
+    pub(in crate::storage::postgres) runtime: &'a str,
+    pub(in crate::storage::postgres) withdrawals: &'a [crate::model::relation_stage::Withdrawal],
+}
+
 /// A new destination operation over an already applied, source-authorized
 /// snapshot. Original producer receipts remain immutable; no claims are ACKed
 /// and no live source lease or unfinished producer stage is synthesized.
@@ -56,6 +64,7 @@ pub(super) fn request(
     expected: Option<&str>,
     claims: &[(String, Option<i64>)],
     closed: bool,
+    semantic: Option<&Semantic<'_>>,
 ) -> Result<(Vec<u8>, Vec<u8>), StorageError> {
     if publication.rows.len() > 64 || claims.len() > 64 {
         return Err(StorageError::Busy);
@@ -86,6 +95,7 @@ pub(super) fn request(
         expected,
         claims,
         closed,
+        semantic,
     ))?;
     Ok((digest(&payload), payload))
 }
@@ -96,28 +106,9 @@ pub(in crate::storage::postgres) fn publish(
     expected: Option<&str>,
     claims: &[(String, Option<i64>)],
     closed: bool,
+    semantic: Option<Semantic<'_>>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
-    let (operation, payload) = request(publication, expected, claims, closed)?;
-    publish_operation(
-        tx,
-        publication,
-        expected,
-        claims,
-        closed,
-        &operation,
-        &payload,
-    )
-}
-
-fn publish_operation(
-    tx: &mut PgTxn<'_>,
-    publication: &crate::slot_projection::Publication<'_>,
-    expected: Option<&str>,
-    claims: &[(String, Option<i64>)],
-    closed: bool,
-    operation: &[u8],
-    payload: &[u8],
-) -> Result<(Outcome, Option<String>), StorageError> {
+    let (operation, payload) = request(publication, expected, claims, closed, semantic.as_ref())?;
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     // Serialize against native advancement and other publishers, including
@@ -153,6 +144,22 @@ fn publish_operation(
             return Ok((Outcome::Conflict, None));
         }
     }
+    let mut withdrawals = std::collections::BTreeSet::new();
+    if let Some(semantic) = &semantic {
+        if semantic.withdrawals.len() > 64 {
+            return Err(StorageError::Busy);
+        }
+        for withdrawal in semantic.withdrawals {
+            if !withdrawals.insert(withdrawal.path.as_str())
+                || withdrawal.runtime != semantic.runtime
+                || !claims.iter().any(|(path, _)| path == &withdrawal.path)
+                || paths.contains(&withdrawal.path)
+                || !super::super::current_sources::withdrawal_recorded(tx, withdrawal)?
+            {
+                return Err(StorageError::Conflict);
+            }
+        }
+    }
     if closed {
         let outstanding: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
         if outstanding
@@ -182,17 +189,27 @@ fn publish_operation(
         .map(String::from_utf8)
         .transpose()
         .map_err(|_| StorageError::ScopeChanged)?;
-    // A withdrawal-only request has no rows; it keeps the bound runtime of
-    // the head it replaces rather than inventing one.
-    let bound = match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
-        (Some(runtime), 1, _) => {
-            let binding = super::super::model_cache::binding(tx)?;
-            semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?
+    // Semantic lifecycle authority survives even when there are no row Query
+    // summaries. Generic publications retain their existing row/head binding.
+    let bound = if let Some(semantic) = &semantic {
+        if !publication.rows.is_empty()
+            && (runtime.len() != 1 || runtime.first() != Some(&semantic.runtime))
+        {
+            return Err(StorageError::ScopeChanged);
         }
-        (None, 0, true) if expected.is_some() => {
-            old_runtime.clone().ok_or(StorageError::ScopeChanged)?
+        let binding = super::super::model_cache::binding(tx)?;
+        semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, semantic.runtime)?
+    } else {
+        match (runtime.first(), runtime.len(), publication.rows.is_empty()) {
+            (Some(runtime), 1, _) => {
+                let binding = super::super::model_cache::binding(tx)?;
+                semantic_owner::bound_runtime(tx.namespace.as_str(), &binding.admission, runtime)?
+            }
+            (None, 0, true) if expected.is_some() => {
+                old_runtime.clone().ok_or(StorageError::ScopeChanged)?
+            }
+            _ => return Err(StorageError::ScopeChanged),
         }
-        _ => return Err(StorageError::ScopeChanged),
     };
     semantic_owner::begin(
         semantic_owner::Observed {
@@ -211,7 +228,7 @@ fn publish_operation(
         .unwrap_or(0)
         .checked_add(1)
         .ok_or(StorageError::ScopeChanged)?;
-    let generation = format!("{:x}", Sha256::digest(operation));
+    let generation = format!("{:x}", Sha256::digest(&operation));
     // A partial request keeps every unmentioned Current owner. Owners connected
     // to a republished or claimed Source must be republished by the producer.
     let mut leaving = Vec::new();
@@ -222,18 +239,20 @@ fn publish_operation(
             .iter()
             .map(|row| digest(row.key.as_bytes()))
             .collect::<Vec<_>>();
-        // A claimed Source that no row reads and that is retired is withdrawn:
+        // A claimed Source that no row reads and has durable removal or exact
+        // semantic Facts withdrawal authority is withdrawn:
         // owners reading only withdrawn Sources leave Current, exactly as the
         // isolated withdrawal does; mixed owners must be republished above.
         let mut retired = Vec::new();
         for (path, _) in claims {
             if !paths.contains(path)
-                && super::super::native_keys::read_meta(
-                    tx,
-                    format!("source-retired:{path}").as_bytes(),
-                    16384,
-                )?
-                .is_some()
+                && (withdrawals.contains(path.as_str())
+                    || super::super::native_keys::read_meta(
+                        tx,
+                        format!("source-retired:{path}").as_bytes(),
+                        16384,
+                    )?
+                    .is_some())
             {
                 retired.push(path.as_bytes().to_vec());
             }
@@ -302,7 +321,10 @@ fn publish_operation(
     let binding = super::super::model_cache::binding(tx)?;
     let native = encoded(&(binding.admission, &binding.stream_epoch, &generation))?;
     for row in publication.rows {
-        let key = format!("catalog-native-observation:{:x}", Sha256::digest(encoded(row)?));
+        let key = format!(
+            "catalog-native-observation:{:x}",
+            Sha256::digest(encoded(row)?)
+        );
         super::super::native_keys::put_meta(tx, key.as_bytes(), &native)?;
     }
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_changes(namespace,generation,previous,stage_epoch) VALUES($1,$2,$3,$4)", &[&ns, &generation.as_bytes(), &expected.map(str::as_bytes), &epoch]).map_err(sqlstate::error)?;

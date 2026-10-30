@@ -409,6 +409,10 @@ pub(super) fn publish(
         batch.base_generation.as_deref(),
         &prepared.claims,
         false,
+        Some(publication::Semantic {
+            runtime: &batch.runtime,
+            withdrawals: &prepared.withdrawals,
+        }),
     )?;
     if result.0 == Outcome::Written {
         stage.active = false;

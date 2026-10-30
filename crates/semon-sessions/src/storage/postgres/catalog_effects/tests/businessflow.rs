@@ -2865,6 +2865,34 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 // Each bounded custody advance commits as a Deferred checkpoint;
                 // the qualified head is unchanged until the final CAS publishes.
                 let head = cache.session_catalog_generation().unwrap();
+                if !model.prepared().withdrawals.is_empty() {
+                    let stale_runtime = format!("{}:stale", batch.runtime);
+                    let mut stale_withdrawals = model.prepared().withdrawals.clone();
+                    for withdrawal in &mut stale_withdrawals {
+                        withdrawal.runtime.clone_from(&stale_runtime);
+                    }
+                    assert_eq!(
+                        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                            super::super::publication::publish(
+                                tx,
+                                &crate::slot_projection::Publication {
+                                    rows: &model.prepared().rows,
+                                    transcripts: Some(&model.prepared().transcripts),
+                                },
+                                batch.base_generation.as_deref(),
+                                &model.prepared().claims,
+                                false,
+                                Some(super::super::publication::Semantic {
+                                    runtime: &stale_runtime,
+                                    withdrawals: &stale_withdrawals,
+                                }),
+                            )
+                        }),
+                        Err(StorageError::Conflict),
+                        "coherent stale lifecycle runtime cannot replace persisted Facts authority"
+                    );
+                    assert_eq!(cache.session_catalog_generation().unwrap(), head);
+                }
                 let mut deferred = 0;
                 let ack = loop {
                     let ack = cache
@@ -3273,7 +3301,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    catchup.begin_semantic_stage(&paths, &runtime).unwrap();
+    let catchup_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    catchup
+        .begin_semantic_stage(&paths, &catchup_runtime)
+        .unwrap();
     let (batch, model) = loop {
         let batch = catchup.semantic_batch(64).unwrap().unwrap();
         let model = catchup

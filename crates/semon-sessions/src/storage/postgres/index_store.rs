@@ -573,7 +573,14 @@ impl IndexStore for NativeIndex {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                super::catalog_effects::publication::publish(tx, publication, expected, &[], false)
+                super::catalog_effects::publication::publish(
+                    tx,
+                    publication,
+                    expected,
+                    &[],
+                    false,
+                    None,
+                )
             })
             .map_err(err)
     }
@@ -591,6 +598,7 @@ impl IndexStore for NativeIndex {
                     expected,
                     claims,
                     false,
+                    None,
                 )
             })
             .map_err(err)
@@ -609,6 +617,7 @@ impl IndexStore for NativeIndex {
                     expected,
                     claims,
                     true,
+                    None,
                 )
                 .map(Some)
             })

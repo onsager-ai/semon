@@ -343,19 +343,30 @@ impl CurrentSources {
     }
 }
 
-/// Durable withdrawal replay uses the caller's existing namespace transaction,
-/// never another connection or a Raw read under the publication row locks.
-pub(super) fn withdrawal_current(
+/// SQL-only persisted Facts authority check. Physical Source qualification
+/// remains separate; this predicate alone is not a publication grant.
+pub(super) fn withdrawal_recorded(
     tx: &mut PgTxn<'_>,
     withdrawal: &crate::model::relation_stage::Withdrawal,
 ) -> Result<bool, StorageError> {
     let Some(head) = load(tx)? else {
         return Ok(false);
     };
-    if head.path != withdrawal.facts_path
-        || head.source != withdrawal.facts_identity
-        || identity(&head.path)? != head.source
-        || selected(tx, &head, &withdrawal.relative)? != Some(false)
+    Ok(head.path == withdrawal.facts_path
+        && head.source == withdrawal.facts_identity
+        && head.runtime == withdrawal.runtime
+        && selected(tx, &head, &withdrawal.relative)? == Some(false))
+}
+
+/// Physical metadata qualification currently runs inside semantic claim
+/// validation's transaction. It reads no body bytes, but still performs
+/// filesystem I/O; moving it needs a retained host/Source fence.
+pub(super) fn withdrawal_current(
+    tx: &mut PgTxn<'_>,
+    withdrawal: &crate::model::relation_stage::Withdrawal,
+) -> Result<bool, StorageError> {
+    if !withdrawal_recorded(tx, withdrawal)?
+        || identity(&withdrawal.facts_path)? != withdrawal.facts_identity
     {
         return Ok(false);
     }
@@ -371,7 +382,7 @@ pub(super) fn withdrawal_current(
         && withdrawal.relative.ends_with(".jsonl")
         && before == withdrawal.stat
         && after == before
-        && identity(&head.path)? == head.source)
+        && identity(&withdrawal.facts_path)? == withdrawal.facts_identity)
 }
 
 /// One request's recorded runtime witness. Rechecks inside a leased read use

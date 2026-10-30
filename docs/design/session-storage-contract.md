@@ -7,8 +7,9 @@ restart flow. Its existence and component results do not enable a public PG
 factory or establish complete backend parity. Hub #313 and the full current-format
 migration/cutover/rollback qualification remain required.
 
-The #380 candidate has scoped independent acceptance and green CI. Its authorized
-MAIN merge and exact-MAIN qualification remain a prerequisite to #477 MAIN.
+#380 closed on 2026-10-29 with final Source `f1a6c2ab` and Hub `ade4a935`;
+its unmeasured performance follow-up is #510. This integration includes later
+Source main through `893dd56f`. #477 still requires independent acceptance.
 This work grants no MAIN, deployment, publication or real-data migration authority.
 
 The WIP PG captured-body port is `StoreConfig::call_captured_query_at`.
@@ -111,6 +112,13 @@ order is admission/fence, source claims in stable logical order, Index ledger an
 proofs, Catalog/retained references, then outbox/checkpoint. SQL commit does not
 prove Raw durability. Uncertain effects are reconciled by the same durable OpID;
 a later cursor or peer result cannot manufacture the original ACK.
+
+PostgreSQL semantic withdrawal still opens descriptors and checks Facts/Source
+metadata while holding its Source SQL write lock. These checks read no body bytes
+but violate the transaction boundary above. Moving them requires physical
+preflight protected through commit by a host/Source fence plus SQL-only durable
+revalidation; this remains an acceptance blocker. The publisher's additional
+withdrawal recheck uses only persisted SQL authority.
 
 Busy, conflict, refusal and uncertain commit remain distinct outcomes. Diagnostics
 are closed and exclude credentials, paths and native contents. Engine errors
