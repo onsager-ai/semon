@@ -3624,10 +3624,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
          INSERT INTO session_history_slots SELECT namespace,session_key,slot,metadata FROM session_slots WHERE session_key='live-history';",
     )
     .unwrap();
-    let mut query = crate::Query::with_machines(vec![(
-        "source".into(),
-        fixture.options.clone(),
-    )]);
+    let mut query = crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
     let live_fields = query
         .call_selected(
             "source",
@@ -3639,7 +3636,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         )
         .unwrap();
     assert_eq!(live_fields["session"]["alive"], true);
-    assert_eq!(live_fields["session"]["run"]["OSTROM_RUN_ID"], "retained-run");
+    assert_eq!(
+        live_fields["session"]["run"]["OSTROM_RUN_ID"],
+        "retained-run"
+    );
     assert_eq!(live_fields["session"]["state"], "waiting-question");
     assert!(live_fields["session"]["open_question"].is_object());
     let read = || {
