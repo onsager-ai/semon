@@ -118,7 +118,8 @@ pub(crate) fn advance_relocation(
     append: bool,
 ) -> serde_json::Result<Option<String>> {
     let proof = encoded.and_then(|value| serde_json::from_str::<CatalogRelocation>(value).ok());
-    let Some(mut proof) = proof.filter(|proof| proof.version == 1 && Some(&proof.after) == expected)
+    let Some(mut proof) =
+        proof.filter(|proof| proof.version == 1 && Some(&proof.after) == expected)
     else {
         return Ok(None);
     };

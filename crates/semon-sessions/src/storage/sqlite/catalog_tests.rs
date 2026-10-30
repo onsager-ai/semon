@@ -4568,7 +4568,8 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
         let strict = get(query, crate::SessionSourceReadMode::LocalThenProvider);
         let strict_body: Value = serde_json::from_slice(&strict.body).unwrap();
         assert_eq!(
-            strict.status, 409,
+            strict.status,
+            409,
             "regression must reject at deployed strict path: {mutation}; code={} fence={} stage={} local_revision={}",
             strict_body["error"]["code"],
             strict_body["fence_reason"],
