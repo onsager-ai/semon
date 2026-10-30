@@ -10220,22 +10220,26 @@ mod tests {
                 if batch.paths.is_empty() {
                     continue;
                 }
-                let mut selected = batch
-                    .paths
+                let mut selected = inputs
                     .iter()
-                    .cloned()
-                    .collect::<std::collections::BTreeSet<_>>();
-                if batch.phase == Phase::Relations {
-                    selected.extend(batch.context.parent_paths(&batch.paths));
-                    selected.extend(batch.context.companions.iter().cloned());
-                }
-                assert!(selected.len() <= 64);
-                let selected = selected
-                    .iter()
-                    .map(|path| {
-                        crate::native_evidence::catalog_input(Path::new(path), options).unwrap()
+                    .filter(|input| {
+                        batch.paths.contains(
+                            &input.full_path(options).to_string_lossy().into_owned(),
+                        )
                     })
+                    .cloned()
                     .collect::<Vec<_>>();
+                selected.sort_by_key(|input| input.full_path(options));
+                assert!(selected.len() <= 64);
+                assert_eq!(selected.len(), batch.paths.len());
+                assert_eq!(
+                    selected
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    batch.paths.iter().cloned().collect(),
+                    "ordinary semantic preparation uses exactly the staged batch paths"
+                );
                 let prepared = match batch.phase {
                     Phase::Indexing => crate::model::prepare_semantic_index_sources(
                         options,
