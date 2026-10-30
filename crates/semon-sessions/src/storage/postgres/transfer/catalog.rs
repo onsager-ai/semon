@@ -622,10 +622,12 @@ mod tests {
         writer.save_session_description("existing", 1, "inputs", "owned destination");
         writer.publish_session_descriptions();
         assert_eq!(
-            writer
-                .session_description("existing", 1, "inputs")
-                .as_deref(),
-            Some("owned destination")
+            writer.session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: "existing".into(),
+                version: 1,
+                inputs: "inputs".into(),
+            }]),
+            vec![Some("owned destination".into())]
         );
         drop(writer);
         let manifest = stage(&source, &config, &[123; 32]);
@@ -849,10 +851,14 @@ mod tests {
             "real publisher must contribute original selected proof authority"
         );
         assert_eq!(
-            crate::storage::transfer::reported::tests::cache(&config)
-                .session_description(&expected[0].key, 1, "transfer-inputs")
-                .as_deref(),
-            Some("sanitized transfer description")
+            crate::storage::transfer::reported::tests::cache(&config).session_descriptions(&[
+                crate::events::SessionDescriptionRequest {
+                    key: expected[0].key.clone(),
+                    version: 1,
+                    inputs: "transfer-inputs".into(),
+                },
+            ]),
+            vec![Some("sanitized transfer description".into())]
         );
         pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
             let ns = config.namespace.as_str().as_bytes();
@@ -1197,10 +1203,14 @@ mod tests {
             "formal current/retained reader must use exact original receipts after reverse with Raw absent"
         );
         assert_eq!(
-            crate::storage::transfer::reported::tests::cache(&reverse)
-                .session_description(&expected[0].key, 1, "transfer-inputs")
-                .as_deref(),
-            Some("sanitized transfer description")
+            crate::storage::transfer::reported::tests::cache(&reverse).session_descriptions(&[
+                crate::events::SessionDescriptionRequest {
+                    key: expected[0].key.clone(),
+                    version: 1,
+                    inputs: "transfer-inputs".into(),
+                },
+            ]),
+            vec![Some("sanitized transfer description".into())]
         );
         // A real unrelated local publication carries imported observations
         // under a new head. Producer and destination admissions both equal one;

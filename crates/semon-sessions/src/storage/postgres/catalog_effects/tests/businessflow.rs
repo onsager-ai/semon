@@ -2140,22 +2140,33 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     assert_eq!(
         cache
-            .session_description(&key, 1, "inputs")
-            .unwrap()
-            .as_deref(),
-        Some("metadata")
+            .session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: key.clone(),
+                version: 1,
+                inputs: "inputs".into(),
+            }])
+            .unwrap(),
+        vec![Some("metadata".into())]
     );
-    assert!(
+    assert_eq!(
         cache
-            .session_description(&key, 2, "inputs")
-            .unwrap()
-            .is_none()
+            .session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: key.clone(),
+                version: 2,
+                inputs: "inputs".into(),
+            }])
+            .unwrap(),
+        vec![None]
     );
-    assert!(
+    assert_eq!(
         cache
-            .session_description(&key, 1, "other")
-            .unwrap()
-            .is_none()
+            .session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: key.clone(),
+                version: 1,
+                inputs: "other".into(),
+            }])
+            .unwrap(),
+        vec![None]
     );
     assert!(
         cache
@@ -2169,10 +2180,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         cache
-            .session_description(&key, 1, "inputs")
-            .unwrap()
-            .as_deref(),
-        Some("metadata")
+            .session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: key.clone(),
+                version: 1,
+                inputs: "inputs".into(),
+            }])
+            .unwrap(),
+        vec![Some("metadata".into())]
     );
     // Disappearance withdraws Current membership, without consuming the host's
     // independently retained bytes or any older Catalog/native proof.
@@ -2625,11 +2639,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         control.clone(),
     )
     .unwrap();
-    assert!(
+    assert_eq!(
         other
-            .session_description(&key, 1, "inputs")
-            .unwrap()
-            .is_none()
+            .session_descriptions(&[crate::events::SessionDescriptionRequest {
+                key: key.clone(),
+                version: 1,
+                inputs: "inputs".into(),
+            }])
+            .unwrap(),
+        vec![None]
     );
     let other_binding = other.query_runtime_binding().unwrap().unwrap();
     assert_ne!(binding.stream_epoch, other_binding.stream_epoch);
