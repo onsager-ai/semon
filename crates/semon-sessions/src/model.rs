@@ -41,6 +41,26 @@ use crate::{
     field, file_list, handoff,
 };
 
+#[cfg(test)]
+macro_rules! archive_read_diagnostic {
+    ($stage:literal, $result:expr) => {
+        $result.inspect_err(|error| {
+            eprintln!(
+                "native_archive_read_error stage={} kind={:?} no_rows={}",
+                $stage,
+                error.kind(),
+                error.to_string() == "Query returned no rows"
+            );
+        })
+    };
+}
+#[cfg(not(test))]
+macro_rules! archive_read_diagnostic {
+    ($stage:literal, $result:expr) => {
+        $result
+    };
+}
+
 /// Briefs and results are capped as in the mockup data.
 pub(crate) const MSG_MAX: usize = 4096;
 const TRUNCATED: &str = "\n…(truncated)";
@@ -1321,7 +1341,11 @@ fn scan_selected(
             .iter()
             .map(|input| input.full_path(options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        cache.host_scan_ledger_batch(&paths)?.map(|ledgers| {
+        archive_read_diagnostic!(
+            "host_scan_ledger_batch",
+            cache.host_scan_ledger_batch(&paths)
+        )?
+        .map(|ledgers| {
             inputs
                 .iter()
                 .zip(ledgers)
@@ -1485,7 +1509,10 @@ fn scan_selected(
             continue;
         }
         let stamp = stamp_of(&path);
-        let summary = match scan_file(&path, "codex", cache, dirty) {
+        let summary = match archive_read_diagnostic!(
+            "codex_scan_file",
+            scan_file(&path, "codex", cache, dirty)
+        ) {
             Ok(summary) => summary,
             Err(error) if selected.is_some() && error.kind() == io::ErrorKind::WouldBlock => {
                 return Err(error);
@@ -8202,7 +8229,10 @@ fn build_sources_inner(
     let runtime_observations = measured!(
         "runtime_observations",
         1,
-        if let Some(binding) = cache.query_runtime_binding()? {
+        if let Some(binding) = archive_read_diagnostic!(
+            "query_runtime_binding",
+            cache.query_runtime_binding()
+        )? {
             crate::native_evidence::RuntimeObservations::bound(&binding, &query_runtime)?
                 .into_scoped()
         } else if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
@@ -8253,7 +8283,10 @@ fn build_sources_inner(
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
                 "scan",
-                scan(options, cache, dirty, texts, window_start, &facts, selected)?
+                archive_read_diagnostic!(
+                    "source_scan",
+                    scan(options, cache, dirty, texts, window_start, &facts, selected)
+                )?
             );
             (selected, None, files, skipped, duration)
         }
@@ -8303,20 +8336,23 @@ fn build_sources_inner(
     }
     let started = measurements.start();
     let claims = if target == BuildTarget::Sources && history_records.is_none() {
-        cache.catalog_claims(
-            &selected
-                .map(|inputs| {
-                    inputs
-                        .iter()
-                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(|| {
-                    files
-                        .iter()
-                        .map(|file| file.path.to_string_lossy().into_owned())
-                        .collect()
-                }),
+        archive_read_diagnostic!(
+            "catalog_claims",
+            cache.catalog_claims(
+                &selected
+                    .map(|inputs| {
+                        inputs
+                            .iter()
+                            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| {
+                        files
+                            .iter()
+                            .map(|file| file.path.to_string_lossy().into_owned())
+                            .collect()
+                    }),
+            )
         )?
     } else {
         Vec::new()
@@ -8350,7 +8386,7 @@ fn build_sources_inner(
         measured!(
             "reported_runs_select",
             ids.len(),
-            cache.select_reported_runs(&ids)?
+            archive_read_diagnostic!("reported_runs_select", cache.select_reported_runs(&ids))?
         );
     }
     let started = measurements.start();
@@ -8365,11 +8401,18 @@ fn build_sources_inner(
     let source_proofs = measured!(
         "source_capture",
         files.len(),
-        crate::query_source::Sources::capture(options, sources)?
+        archive_read_diagnostic!(
+            "source_capture",
+            crate::query_source::Sources::capture(options, sources)
+        )?
     );
     let source_records = source_proofs.reader();
     if history_records.is_none() {
-        measured!("source_verify", files.len(), source_records.verify_all()?);
+        measured!(
+            "source_verify",
+            files.len(),
+            archive_read_diagnostic!("source_verify", source_records.verify_all())?
+        );
         let started = measurements.start();
         for file in &mut files {
             if file.summary.handoff_index.is_none() {
