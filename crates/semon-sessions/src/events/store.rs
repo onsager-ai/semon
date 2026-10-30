@@ -964,7 +964,7 @@ pub(crate) fn pending_catalog_identity_sources(
     for kind in ["nativeall", "claudeid", "copilotid", "headerid"] {
         let value = if kind == "claudeid" { &basename } else { id };
         let mut statement = tx
-            .prepare(semantic_stage::identity_path_query(kind))
+            .prepare(semantic_stage::catalog_identity_path_query(kind))
             .map_err(io::Error::other)?;
         let candidates = statement
             .query_map(params![value, "", 64], |row| row.get::<_, String>(0))
