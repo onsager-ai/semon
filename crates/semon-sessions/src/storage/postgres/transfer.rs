@@ -652,7 +652,7 @@ mod tests {
     #[test]
     fn pg_current_transfer225_native_authoritative_rows_and_postwrite_reverse() {
         use transfer::reported::tests::{
-            apply, root, seed_codex_usage, seed_native, seed_native_usage, sqlite, sqlite_core,
+            apply, cache, root, seed_codex_usage, seed_native, seed_native_usage, sqlite, sqlite_core,
             stage,
         };
         let root = root();
@@ -660,6 +660,13 @@ mod tests {
         let reverse = sqlite(&root, "native-reverse");
         let path = root.join("old.jsonl");
         seed_native_usage(&source, &path, 130);
+        let header_path = root.join("source-codex.jsonl");
+        let body = format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"TrAnSfEr-HeAdEr","cwd":"/sanitized"}}));
+        std::fs::write(&header_path, body).unwrap();
+        let mut source_cache = cache(&source);
+        source_cache.ingest(&"6".repeat(64), &header_path, "codex").unwrap();
+        source_cache.flush_cold_writes().unwrap();
+        drop(source_cache);
         let expected = sqlite_core(&source, &path);
         let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&source).unwrap();
         let sqlite_reader = crate::storage::sqlite::configured_index::open_semantic(cap).unwrap();
@@ -689,7 +696,37 @@ mod tests {
             .checkpoint(&manifest)
             .unwrap()
             .sequence;
+        let header_key = format!("native_codex_header:{}", header_path.to_str().unwrap());
+        let header_record = (1..=pages)
+            .flat_map(|sequence| {
+                source
+                    .transfer_inbox()
+                    .staged_page(&manifest, sequence)
+                    .unwrap()
+                    .records
+            })
+            .find(|record| matches!(record, transfer::TransferRecord::NativeMetadata { key, .. } if key == &header_key))
+            .expect("ordinary Codex header must be captured as authoritative NativeMetadata");
+        // Exercise the actual import dispatcher in a borrowed transaction:
+        // authoritative bytes and derived search keys must roll back together.
+        let rolled_back: Result<(), StorageError> = transaction(&config, &pool, &control, |tx| {
+            pages::apply(tx, &header_record)?;
+            let count: i64 = tx.0.driver.query_one(
+                "SELECT count(*) FROM semon_pg_native_catalog_search_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND folded_id=$3",
+                &[&config.namespace.as_str().as_bytes(), &header_path.to_str().unwrap().as_bytes(), &b"transfer-header".as_slice()],
+            ).map_err(sqlstate::error)?.get(0);
+            assert_eq!(count, 1);
+            Err(StorageError::Conflict)
+        });
+        assert_eq!(rolled_back, Err(StorageError::Conflict));
+        pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            assert!(super::super::native_keys::read_meta(tx, header_key.as_bytes(), transfer::MAX_PAGE_BYTES)?.is_none());
+            let count: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_search_headers", &[]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(count, 0);
+            Ok(())
+        }).unwrap();
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(&header_path).unwrap();
         apply(&config, &manifest);
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             // The actual production native reader verifies immutable page roots,
@@ -741,6 +778,11 @@ mod tests {
                             let extra=values[0].as_bool().unwrap();let seq=values[1].as_i64().unwrap();
                             let rows=transfer_rows(tx,"events",EVENT,"namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=(SELECT file_id FROM semon_pg_native_files WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND path_digest=sha256($2::bytea) AND path=$2) AND extra=$3 AND seq=$4",&[&ns,&path.as_bytes(),&extra,&seq])?;
                             assert_eq!(rows.len(),1);assert_eq!(&rows[0].0,values);
+                        }
+                        transfer::TransferRecord::NativeMetadata{path,key,value} if key == &header_key=>{
+                            let row=tx.driver.query_one("SELECT m.value,h.folded_id FROM semon_pg_native_meta m JOIN semon_pg_native_catalog_search_headers h USING(namespace_digest,namespace) WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.key=$2 AND h.source_path=$3", &[&ns,&key.as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
+                            assert_eq!(row.get::<_,Vec<u8>>(0),value.as_bytes());
+                            assert_eq!(row.get::<_,Vec<u8>>(1),b"transfer-header");
                         }
                         _=>{}
                     }
@@ -814,6 +856,17 @@ mod tests {
         assert_eq!(
             serde_json::to_value(restored_usage.codex_usage()).unwrap(),
             accepted_usage
+        );
+        let (_, restored_header) = reader
+            .load_file(header_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            restored_header
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.id.as_deref()),
+            Some("TrAnSfEr-HeAdEr")
         );
         drop(reader);
         assert_eq!(
