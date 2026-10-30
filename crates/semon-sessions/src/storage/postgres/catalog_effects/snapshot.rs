@@ -100,8 +100,6 @@ pub(in crate::storage::postgres) fn catalog_search_paths(
         .bytes()
         .map(|byte| byte.to_ascii_lowercase())
         .collect::<Vec<_>>();
-    let query_json =
-        serde_json::to_string(lookup.query).map_err(|_| StorageError::InvalidArguments)?;
     let roots = lookup
         .ranges
         .iter()
@@ -116,8 +114,8 @@ pub(in crate::storage::postgres) fn catalog_search_paths(
          JOIN semon_pg_native_catalog_operations o ON o.namespace_digest=s.namespace_digest AND o.namespace=s.namespace AND o.generation=s.generation
          JOIN semon_pg_source_invalidations i ON i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.source_path=s.source_path
          WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2
-           AND s.search_native_digest=semon_pg_native_digest($1,convert_to(translate(($3::jsonb)::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'UTF8'),'catalog.search.native'::text)
-           AND translate((convert_from(s.metadata,'UTF8')::jsonb->'native_id')::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')=translate(($3::jsonb)::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz')
+           AND s.search_native_digest=semon_pg_native_digest($1,$3,'catalog.search.native'::text)
+           AND s.folded_native_id=$3
            AND ((i.source_path >= $7 AND i.source_path < $8) OR (i.source_path >= $9 AND i.source_path < $10) OR (i.source_path >= $11 AND i.source_path < $12))
          ORDER BY i.source_path LIMIT $13)
         UNION
@@ -146,7 +144,7 @@ pub(in crate::storage::postgres) fn catalog_search_paths(
     let parameters: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
         &namespace,
         &generation.as_bytes(),
-        &query_json,
+        &folded_query,
         &folded_query,
         &folded_filename,
         &folded_query,

@@ -17,20 +17,22 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("cwd_digest", "sha256(cwd)", true),
         ],
         "meta" => &[("key_digest", "sha256(key)", false)],
+        // Encoding conversions are STABLE in PostgreSQL and cannot appear in
+        // a generated column. The typed writer supplies the folded byte witness.
         "catalog_sources" => &[(
             "search_native_digest",
-            "semon_pg_native_digest(namespace,convert_to(translate((convert_from(metadata,'UTF8')::jsonb->'native_id')::text,'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'UTF8'),'catalog.search.native'::text)",
-            true,
+            "semon_pg_native_digest(namespace, folded_native_id, 'catalog.search.native'::text)",
+            false,
         )],
         "catalog_search_headers" => &[
             (
                 "source_path_digest",
-                "semon_pg_native_digest(namespace,source_path,'catalog.search.path'::text)",
+                "semon_pg_native_digest(namespace, source_path, 'catalog.search.path'::text)",
                 false,
             ),
             (
                 "folded_id_digest",
-                "semon_pg_native_digest(namespace,folded_id,'catalog.search.header'::text)",
+                "semon_pg_native_digest(namespace, folded_id, 'catalog.search.header'::text)",
                 false,
             ),
         ],
@@ -38,12 +40,12 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
             ("search_path_digest", "sha256(source_path)", false),
             (
                 "search_filename_digest",
-                "sha256(decode(translate(substring(encode(source_path,'escape') from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))",
+                "sha256(decode(translate(regexp_replace(encode(source_path, 'escape'::text), '^.*/'::text, ''::text), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text), 'escape'::text))",
                 false,
             ),
             (
                 "search_copilot_digest",
-                "sha256(decode(translate(substring(CASE WHEN length(encode(source_path,'escape')) >= 13 THEN substring(encode(source_path,'escape') from 1 for length(encode(source_path,'escape'))-13) ELSE '' END from '[^/]*$'),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'escape'))",
+                "sha256(decode(translate(regexp_replace(regexp_replace(encode(source_path, 'escape'::text), '/events[.]jsonl$'::text, ''::text), '^.*/'::text, ''::text), 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'::text, 'abcdefghijklmnopqrstuvwxyz'::text), 'escape'::text))",
                 false,
             ),
         ],
@@ -144,7 +146,7 @@ pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, b
 
 const CODEX_HEADER_PREFIX: &[u8] = b"native_codex_header:";
 
-fn ascii_fold(value: &str) -> Vec<u8> {
+pub(super) fn ascii_fold(value: &str) -> Vec<u8> {
     value
         .bytes()
         .map(|byte| {

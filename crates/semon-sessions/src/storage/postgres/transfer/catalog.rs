@@ -384,7 +384,26 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         for source in &row.sources {
             let path = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
             let metadata = serde_json::to_vec(source).map_err(|_| StorageError::ScopeChanged)?;
-            tx.0.driver.execute(&format!("INSERT INTO semon_pg_native_{table}(namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea))"), &[&ns,&generation.as_bytes(),&key,&path.as_bytes(),&metadata,&source.native_id.as_bytes()]).map_err(sqlstate::error)?;
+            let mut columns = "namespace,generation,key_digest,session_key,path_digest,source_path,metadata,native_digest".to_owned();
+            let mut slots =
+                "$1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5,sha256($6::bytea)".to_owned();
+            let folded_id = super::super::native_keys::ascii_fold(&source.native_id);
+            let generation = generation.as_bytes();
+            let path = path.as_bytes();
+            let native_id = source.native_id.as_bytes();
+            let mut binds: Vec<&(dyn ToSql + Sync)> =
+                vec![&ns, &generation, &key, &path, &metadata, &native_id];
+            if *kind == Current {
+                columns.push_str(",folded_native_id");
+                slots.push_str(",$7");
+                binds.push(&folded_id);
+            }
+            tx.0.driver
+                .execute(
+                    &format!("INSERT INTO semon_pg_native_{table}({columns}) VALUES({slots})"),
+                    &binds,
+                )
+                .map_err(sqlstate::error)?;
         }
         return Ok(());
     }
