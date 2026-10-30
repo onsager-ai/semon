@@ -944,6 +944,64 @@ pub(crate) fn complete_relocation(
     tx.commit().map_err(io::Error::other)
 }
 
+/// Reuse semantic discovery's exact native identity hints to schedule pending
+/// cold sources. Hints never establish an identity or a searchable Catalog row:
+/// the ordinary producer still qualifies the complete source component.
+pub(crate) fn pending_catalog_identity_sources(
+    options: &crate::Options,
+    id: &str,
+    harness: Option<&str>,
+) -> io::Result<Vec<crate::Input>> {
+    let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
+        .map_err(|error| io::Error::other(error.to_string()))?;
+    let tx = store
+        .connection
+        .unchecked_transaction()
+        .map_err(io::Error::other)?;
+    require_current_sql(&tx).map_err(io::Error::other)?;
+    let mut paths = std::collections::BTreeSet::new();
+    let basename = format!("{id}.jsonl");
+    for kind in ["nativeall", "claudeid", "copilotid", "headerid"] {
+        let value = if kind == "claudeid" { &basename } else { id };
+        let mut statement = tx
+            .prepare(semantic_stage::identity_path_query(kind))
+            .map_err(io::Error::other)?;
+        let candidates = statement
+            .query_map(params![value, "", 64], |row| row.get::<_, String>(0))
+            .map_err(io::Error::other)?;
+        for candidate in candidates {
+            let candidate = candidate.map_err(io::Error::other)?;
+            let path = if kind == "headerid" {
+                candidate
+                    .strip_prefix("native_codex_header:")
+                    .expect("header identity selector")
+            } else {
+                &candidate
+            };
+            let Some(input) = crate::native_evidence::catalog_input(Path::new(path), options)
+            else {
+                continue;
+            };
+            if harness.is_some_and(|harness| input.root.as_str() != harness) {
+                continue;
+            }
+            let pending: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                [path],
+                |row| row.get(0),
+            ).map_err(io::Error::other)?;
+            if pending {
+                paths.insert(input);
+                if paths.len() == 64 {
+                    return Ok(paths.into_iter().collect());
+                }
+            }
+        }
+    }
+    tx.commit().map_err(io::Error::other)?;
+    Ok(paths.into_iter().collect())
+}
+
 /// Selected upgrade demand shares the producer's durable invalidation queue.
 /// Existing revisions stay intact, including an in-flight producer's claim.
 pub(crate) fn prioritize_projection_sources(

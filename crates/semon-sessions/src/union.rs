@@ -1428,6 +1428,9 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
+        if let Some(request) = &request {
+            view.evidence.note_catalog_search(request.search_interest());
+        }
         let mut refresh_error = None;
         let mut reply = match path {
             "/api/session-locate" => {

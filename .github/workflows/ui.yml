@@ -558,6 +558,17 @@ jobs:
             -- --ignored --nocapture --test-threads=1 \
             2>&1 | tee "$MEASUREMENT_OUT/source-tail-scope.log"
 
+      - name: Qualify exact cold search interest scheduling
+        if: ${{ inputs.selected_readiness_measurement }}
+        env:
+          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
+        run: |
+          mkdir -p "$MEASUREMENT_OUT"
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib cold_catalog_search_ \
+            -- --nocapture --test-threads=1 \
+            2>&1 | tee "$MEASUREMENT_OUT/selected-readiness-regressions.log"
+
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -623,6 +634,7 @@ jobs:
             ${{ runner.temp }}/native-foundation-measurement/focused-read-comparison.json
             ${{ runner.temp }}/native-foundation-measurement/source-multi-machine.log
             ${{ runner.temp }}/native-foundation-measurement/source-tail-scope.log
+            ${{ runner.temp }}/native-foundation-measurement/selected-readiness-regressions.log
             ${{ runner.temp }}/native-foundation-browser/server-results.json
             ${{ runner.temp }}/native-foundation-browser/*-first-import.json
             ${{ runner.temp }}/native-foundation-browser/*-first-import.json.result

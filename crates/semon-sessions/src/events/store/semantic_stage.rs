@@ -236,6 +236,24 @@ fn enqueue(c: &Connection, path: &str) -> rusqlite::Result<()> {
 }
 /// Filename matches only enqueue bounded discovery. Native role and ID come
 /// exclusively from the subsequent verified shared native preparation.
+pub(super) fn identity_path_query(kind: &str) -> &'static str {
+    match kind {
+        "nativeall" => {
+            "SELECT source_path,'' FROM session_catalog_sources WHERE native_id=?1 AND lifecycle='current' AND source_path>?2 GROUP BY source_path ORDER BY source_path LIMIT ?3"
+        }
+        "claudeid" => {
+            "SELECT source_path,'' FROM (SELECT path source_path FROM files WHERE substr(path,length(rtrim(path,replace(path,'/','')))+1)=?1 UNION SELECT source_path FROM session_catalog_invalidations WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?1) WHERE source_path>?2 ORDER BY source_path LIMIT ?3"
+        }
+        "copilotid" => {
+            "SELECT source_path,'' FROM (SELECT path source_path FROM files WHERE path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?1 UNION SELECT source_path FROM session_catalog_invalidations WHERE source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1) WHERE source_path>?2 ORDER BY source_path LIMIT ?3"
+        }
+        "headerid" => {
+            "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3"
+        }
+        _ => unreachable!("exact native identity selector"),
+    }
+}
+
 fn filename_hint(c: &Connection, id: &str) -> rusqlite::Result<bool> {
     let basename = format!("{id}.jsonl");
     let unseen:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM files f WHERE substr(path,length(rtrim(path,replace(path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=f.path) UNION ALL SELECT 1 FROM session_catalog_invalidations i WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?1 AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.source_path=i.source_path))",[&basename],|r|r.get(0))?;
@@ -421,26 +439,14 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
                 "SELECT source_path,'' FROM session_catalog_sources WHERE native_id=?1 AND harness=?4 AND lifecycle='current' AND source_path>?2 GROUP BY source_path ORDER BY source_path LIMIT ?3",
                 false,
             ),
-            "nativeall" => (
-                "SELECT source_path,'' FROM session_catalog_sources WHERE native_id=?1 AND lifecycle='current' AND source_path>?2 GROUP BY source_path ORDER BY source_path LIMIT ?3",
-                false,
-            ),
-            "claudeid" => (
-                "SELECT source_path,'' FROM (SELECT path source_path FROM files WHERE substr(path,length(rtrim(path,replace(path,'/','')))+1)=?1 UNION SELECT source_path FROM session_catalog_invalidations WHERE substr(source_path,length(rtrim(source_path,replace(source_path,'/','')))+1)=?1) WHERE source_path>?2 ORDER BY source_path LIMIT ?3",
-                false,
-            ),
-            "copilotid" => (
-                "SELECT source_path,'' FROM (SELECT path source_path FROM files WHERE path GLOB '*/session-state/*/events.jsonl' AND substr(substr(path,1,length(path)-13),length(rtrim(substr(path,1,length(path)-13),replace(substr(path,1,length(path)-13),'/','')))+1)=?1 UNION SELECT source_path FROM session_catalog_invalidations WHERE source_path GLOB '*/session-state/*/events.jsonl' AND substr(substr(source_path,1,length(source_path)-13),length(rtrim(substr(source_path,1,length(source_path)-13),replace(substr(source_path,1,length(source_path)-13),'/','')))+1)=?1) WHERE source_path>?2 ORDER BY source_path LIMIT ?3",
-                false,
-            ),
+            "nativeall" => (identity_path_query("nativeall"), false),
+            "claudeid" => (identity_path_query("claudeid"), false),
+            "copilotid" => (identity_path_query("copilotid"), false),
             "dependency" => (
                 "SELECT source_path,'' FROM catalog_native_dependencies WHERE native_id=?1 AND harness=?4 AND source_path>?2 ORDER BY source_path LIMIT ?3",
                 false,
             ),
-            "headerid" => (
-                "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.id')=?1 AND key>?2 ORDER BY key LIMIT ?3",
-                false,
-            ),
+            "headerid" => (identity_path_query("headerid"), false),
             "headerparent" => (
                 "SELECT key,'' FROM meta WHERE key GLOB 'native_codex_header:*' AND json_valid(value) AND json_extract(value,'$.header.metadata.parent_thread')=?1 AND key>?2 ORDER BY key LIMIT ?3",
                 false,
