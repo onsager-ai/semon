@@ -26,6 +26,7 @@ jobs:
           python3 -m unittest discover -s experiments/asi-jev -p 'test_*.py' -v
           python3 experiments/asi-jev/load_probe.py --help
           python3 experiments/asi-jev/projection_probe.py --help
+          python3 experiments/asi-jev/real_matrix.py --help
           python3 experiments/asi-jev/benchmark.py --strategy rules --context prefix --out "$RUNNER_TEMP/asi-jev-reproduced" --run-id ci
           python3 experiments/asi-jev/benchmark.py --strategy rules --context offline --out "$RUNNER_TEMP/asi-jev-reproduced" --run-id ci
           python3 experiments/asi-jev/analyze.py

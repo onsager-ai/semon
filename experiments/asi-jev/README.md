@@ -82,6 +82,11 @@ and summary files, both independent annotations, `--adjudication-status frozen`,
 2,000 draws and seed 20261030. Its public output schema permits numeric metrics
 and fixed taxonomy labels only. Inspect that export before committing it.
 Private examples and the 50-event user review packet must remain local.
+After both freezes, `ASI_API_BASE=https://magpie.onsager.ai python3
+experiments/asi-jev/real_matrix.py --all` runs the nine conditions sequentially,
+checks measured CPU temperature around every HTTP call, and prints counts only.
+It stores progress and completed run paths privately. An interrupted matrix
+requires inspection of those records; it never retries or resumes automatically.
 After the reference freeze, `python3 experiments/asi-jev/real_sample.py`
 creates the local 50-event packet, readable `spot-check/REVIEW.md`, and a blank
 return template. It never treats that template as a submitted user review.
