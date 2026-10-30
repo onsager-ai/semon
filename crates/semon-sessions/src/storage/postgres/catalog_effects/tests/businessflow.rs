@@ -59,6 +59,68 @@ fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::Prepare
     }
 }
 
+type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
+#[derive(Clone)]
+struct BodyHost(BodySources);
+impl crate::SessionSourceReader for BodyHost {
+    fn read_range(
+        &self,
+        reference: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        let (saved, bytes) = self
+            .0
+            .iter()
+            .find(|(saved, _)| saved == reference)
+            .ok_or_else(|| std::io::Error::other("host denied"))?;
+        if saved != reference
+            || expected.is_some_and(|pin| pin != "body-fixture")
+            || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
+        {
+            return Err(std::io::Error::other("host denied"));
+        }
+        let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+        let end = bytes.len().min(start.saturating_add(max));
+        Ok(crate::SessionSourceRange {
+            generation: "body-fixture".into(),
+            length: bytes.len() as u64,
+            offset,
+            bytes: std::sync::Arc::from(
+                bytes
+                    .get(start..end)
+                    .ok_or_else(|| std::io::Error::other("host range"))?,
+            ),
+            cached: false,
+        })
+    }
+}
+fn body_host(options: &Options, rows: &[CatalogRow]) -> BodyHost {
+    BodyHost(
+        rows.iter()
+            .flat_map(|row| {
+                row.sources.iter().map(|source| {
+                    let path =
+                        crate::catalog::source_relative(options, &row.harness, source).unwrap();
+                    let reference = crate::SessionSourceRef {
+                        root: row.harness.clone(),
+                        path: path.clone(),
+                        native_id: source.native_id.clone(),
+                        offset: source.offset,
+                        prefix_sha256: source.prefix_sha256,
+                        tail_sha256: source.tail_sha256,
+                    };
+                    (
+                        reference,
+                        std::sync::Arc::from(fs::read(&source.path).unwrap()),
+                    )
+                })
+            })
+            .collect(),
+    )
+}
+
 // Exercise the generic physical publisher with the real PG model capture. Each
 // successful case is rolled back so the staged businessflow below keeps its
 // original initial head and source claims.
@@ -218,6 +280,7 @@ fn generic_runtime_publication_facades(
     control: &PgCancellation,
     options: &Options,
     inputs: &[crate::Input],
+    expected_bodies: &std::collections::BTreeMap<String, serde_json::Value>,
 ) {
     for mode in ["full", "partial", "closed"] {
         let namespace = ns(&format!("generic-runtime-{mode}"));
@@ -282,6 +345,55 @@ fn generic_runtime_publication_facades(
         };
         let generation = publish(&mut cache).expect("ordinary generic facade publication");
         assert_eq!(publish(&mut cache).as_deref(), Some(generation.as_str()));
+        if mode == "partial" {
+            // This generic publication has operation authority and native
+            // proofs, without a semantic selected-presentation manifest.
+            let store = super::super::snapshot::query::QueryCatalog {
+                captured: false,
+                pool: pool.clone(),
+                namespace: namespace.clone(),
+                control: control.clone(),
+                generation: generation.clone(),
+                options: options.clone(),
+            };
+            let host = body_host(&options, &prepared.rows);
+            let mut query = crate::Query::from_sources(std::sync::Arc::new(
+                crate::SessionSources::with_machines(vec![(
+                    namespace.as_str().into(),
+                    options.clone(),
+                )]),
+            ));
+            let row = prepared
+                .rows
+                .iter()
+                .find(|row| row.native_ids.iter().any(|id| id == "one"))
+                .unwrap();
+            let body = query
+                .call_bound_selected_at(
+                    "read_transcript",
+                    &serde_json::json!({"id":row.key,"limit":100}),
+                    1790812802000,
+                    &store,
+                    &host,
+                    None,
+                )
+                .expect("generic publication selected transcript through authorized native proofs");
+            let mut fields = query
+                .call_bound_selected_at(
+                    "get_session",
+                    &serde_json::json!({"id":row.key}),
+                    1790812802000,
+                    &store,
+                    &host,
+                    None,
+                )
+                .expect("generic publication selected fields without semantic manifest");
+            assert_eq!(fields["session"]["machine"], namespace.as_str());
+            fields["session"]["machine"] =
+                expected_bodies[&row.key]["fields"]["session"]["machine"].clone();
+            assert_eq!(body, expected_bodies[&row.key]["body"]);
+            assert_eq!(fields, expected_bodies[&row.key]["fields"]);
+        }
         pool.transaction(&namespace, TxnKind::ReadSnapshot, control, |tx| {
             let binding = super::super::super::model_cache::binding(tx)?;
             let global = binding
@@ -1195,7 +1307,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     }
     generic_runtime_publication_preflight(&pool, &namespace, &control, &prepared);
-    generic_runtime_publication_facades(&pool, &control, &options, &inputs);
+    generic_runtime_publication_facades(&pool, &control, &options, &inputs, &expected_bodies);
     // Drive the SAME ordinary queued producer against durable PG staging.
     let paths = inputs
         .iter()
@@ -1960,67 +2072,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .map(|row| row["key"].as_str().unwrap())
             .collect::<Vec<_>>()
     );
-    type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
-    #[derive(Clone)]
-    struct BodyHost(BodySources);
-    impl crate::SessionSourceReader for BodyHost {
-        fn read_range(
-            &self,
-            reference: &crate::SessionSourceRef,
-            expected: Option<&str>,
-            offset: u64,
-            max: usize,
-        ) -> std::io::Result<crate::SessionSourceRange> {
-            let (saved, bytes) = self
-                .0
-                .iter()
-                .find(|(saved, _)| saved == reference)
-                .ok_or_else(|| std::io::Error::other("host denied"))?;
-            if saved != reference
-                || expected.is_some_and(|pin| pin != "body-fixture")
-                || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
-            {
-                return Err(std::io::Error::other("host denied"));
-            }
-            let start = usize::try_from(offset).map_err(std::io::Error::other)?;
-            let end = bytes.len().min(start.saturating_add(max));
-            Ok(crate::SessionSourceRange {
-                generation: "body-fixture".into(),
-                length: bytes.len() as u64,
-                offset,
-                bytes: std::sync::Arc::from(
-                    bytes
-                        .get(start..end)
-                        .ok_or_else(|| std::io::Error::other("host range"))?,
-                ),
-                cached: false,
-            })
-        }
-    }
-    fn body_host(options: &Options, rows: &[CatalogRow]) -> BodyHost {
-        BodyHost(
-            rows.iter()
-                .flat_map(|row| {
-                    row.sources.iter().map(|source| {
-                        let path =
-                            crate::catalog::source_relative(options, &row.harness, source).unwrap();
-                        let reference = crate::SessionSourceRef {
-                            root: row.harness.clone(),
-                            path: path.clone(),
-                            native_id: source.native_id.clone(),
-                            offset: source.offset,
-                            prefix_sha256: source.prefix_sha256,
-                            tail_sha256: source.tail_sha256,
-                        };
-                        (
-                            reference,
-                            std::sync::Arc::from(fs::read(&source.path).unwrap()),
-                        )
-                    })
-                })
-                .collect(),
-        )
-    }
     let retained_host = body_host(&options, &prepared.rows);
     for since in recent_windows {
         let mut recent_options = options.clone();
