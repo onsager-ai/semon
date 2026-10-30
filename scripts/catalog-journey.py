@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -34,6 +35,18 @@ def process_sample(pid):
 
 def timestamp(milliseconds):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(milliseconds / 1000))
+
+
+def fixture_digest(home):
+    digest = hashlib.sha256()
+    for path in sorted(path for path in home.rglob("*") if path.is_file()):
+        digest.update(path.relative_to(home).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(str(path.stat().st_mtime_ns).encode())
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def seed(home, public_root, additional, scalar):
@@ -69,7 +82,7 @@ def seed(home, public_root, additional, scalar):
     return now
 
 
-def start_server(binary, home, now):
+def start_server(binary, home, now, stage_log=None):
     env = {**os.environ, "SEMON_TEST_NOW": str(now)}
     command = [binary, "sessions", "--serve", "--listen", "127.0.0.1:0"]
     for option, path in (
@@ -78,16 +91,23 @@ def start_server(binary, home, now):
         ("proc-root", home / "proc"), ("cache", home / "index.json"),
     ):
         command.extend([f"--{option}", str(path)])
+    started = time.monotonic()
     server = subprocess.Popen(
         command, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
     auth = {}
 
     def capture_url():
-        for line in server.stdout:
-            match = re.search(r"(http://127.0.0.1:\d+)/\?t=([a-f0-9]+)", line)
-            if match:
-                auth.update(base=match[1], token=match[2])
+        with stage_log.open("w") if stage_log else open(os.devnull, "w") as stages:
+            for line in server.stdout:
+                # Existing native diagnostics contain fixed labels, bounded
+                # counters and an opaque producer ID. Never retain auth URLs.
+                if line.startswith("semon sessions native:"):
+                    stages.write(f"elapsed_ms={(time.monotonic() - started) * 1000:.3f} {line}")
+                    stages.flush()
+                match = re.search(r"(http://127.0.0.1:\d+)/\?t=([a-f0-9]+)", line)
+                if match:
+                    auth.update(base=match[1], token=match[2])
 
     threading.Thread(target=capture_url, daemon=True).start()
     deadline = time.monotonic() + 10
@@ -101,7 +121,7 @@ def start_server(binary, home, now):
 
 
 def journey(args, root, home, now, additional, phase, scalar, binary_sha):
-    server, auth = start_server(args.binary, home, now)
+    server, auth = start_server(args.binary, home, now, root / f"{additional}-{phase}-stages.log")
     evidence = root / f"{additional}-{phase}.json"
     manifest = root / f"{additional}-{phase}-auth.json"
     browser = None
@@ -152,11 +172,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", required=True)
     parser.add_argument("--source-revision", required=True)
+    parser.add_argument("--baseline-binary")
+    parser.add_argument("--baseline-revision")
     parser.add_argument("--public-root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--driver")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--counts", default="0,256,2048")
     args = parser.parse_args()
+    if bool(args.baseline_binary) != bool(args.baseline_revision):
+        parser.error("--baseline-binary and --baseline-revision must be provided together")
     args.driver = args.driver or str(args.public_root / "ui/tests/catalog-journey.mjs")
     root = args.output or Path(tempfile.mkdtemp(prefix="semon-catalog-journeys-"))
     root.mkdir(parents=True, exist_ok=True)
@@ -171,12 +195,34 @@ def main():
             raise RuntimeError("Use a fresh output directory; first import needs an empty projection")
         home.mkdir()
         now = seed(home, args.public_root, additional, scalar)
-        for phase in ("first-import", "persisted-restart"):
-            result = journey(args, root, home, now, additional, phase, scalar, binary_sha)
-            results.append(result)
-            (root / "server-results.json").write_text(json.dumps(results, indent=2))
-            if result["browser_exit"]:
-                raise RuntimeError("Browser journey failed; inspect the local browser log")
+        native_fixture_sha = fixture_digest(home)
+        variants = [("candidate", args.binary, args.source_revision)]
+        if args.baseline_binary:
+            fixture = root / f"fixture-{additional}"
+            shutil.copytree(home, fixture)
+            variants.insert(0, ("baseline", args.baseline_binary, args.baseline_revision))
+        for label, binary, revision in variants:
+            if args.baseline_binary:
+                # Restore at the same absolute path: native fixture metadata
+                # contains home paths, and copy2 preserves first-page mtimes.
+                shutil.rmtree(home)
+                shutil.copytree(fixture, home)
+                if fixture_digest(home) != native_fixture_sha:
+                    raise RuntimeError("Restored native fixture bytes or mtimes differ")
+            variant_args = argparse.Namespace(**vars(args))
+            variant_args.binary = binary
+            variant_args.source_revision = revision
+            variant_root = root / label if args.baseline_binary else root
+            variant_root.mkdir(exist_ok=True)
+            variant_sha = hashlib.sha256(Path(binary).read_bytes()).hexdigest() if args.baseline_binary else binary_sha
+            for phase in ("first-import", "persisted-restart"):
+                result = journey(variant_args, variant_root, home, now, additional, phase, scalar, variant_sha)
+                result["variant"] = label
+                result["native_fixture_sha256"] = native_fixture_sha
+                results.append(result)
+                (root / "server-results.json").write_text(json.dumps(results, indent=2))
+                if result["browser_exit"]:
+                    raise RuntimeError("Browser journey failed; inspect the local browser log")
     print(json.dumps({"output": str(root), "results": results}, indent=2))
 
 
