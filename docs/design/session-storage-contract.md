@@ -139,19 +139,15 @@ repair before beginning native ingestion. The projection worker owns no ingest
 OpID or receipt. It must not leave an unexecuted ingest intent behind to block
 the semantic publication recovery fence.
 
-The user allowed the original two-second first-page target to be relaxed. The
-eight-second threshold for 0/256/2048-history fixtures was adopted during
-implementation; it is not an explicit user requirement. That test measures wall
-time including scheduling, filesystem and database work. A single CI result
-does not distinguish environmental variation from a performance regression.
-Keep its failures visible while assessing performance separately from the
-deterministic first-page contracts: 60 correctly ordered selected sessions,
+Current acceptance preserves the existing two-second cold first-page gate,
+five-second publication wait and sixty-second background completion gate.
+Historical relaxed thresholds do not authorize weakening these checks. Wall
+time includes scheduling, filesystem and database work; investigate failures
+with stage measurements while preserving 60 correctly ordered selected sessions,
 partial publication before global observation, bounded native observation,
-isolation and cancellation. Do not add caches or scheduling frameworks merely
-to satisfy one wall-time sample. Foreground Catalog/Query remains two seconds
-and full background completion remains sixty seconds. Discovery barriers,
-provisional authority, ownership, archive eviction and source/VM/byte/security
-bounds remain unchanged.
+isolation and cancellation. Foreground Catalog/Query remains two seconds.
+Discovery barriers, provisional authority, ownership, archive eviction and
+source/VM/byte/security bounds remain unchanged.
 
 ## Proof generations, leases and recovery
 
