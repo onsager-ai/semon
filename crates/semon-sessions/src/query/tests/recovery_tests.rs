@@ -504,17 +504,21 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
                 .as_ref()
                 .map(|value| format!("&generation={value}"))
                 .unwrap_or_default();
+            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
             let reply = crate::session_transcript_range(
                 &home.options,
                 "local",
                 &format!("sid=long&after={after}&limit=17{pin}"),
                 None,
             );
+            let stage = crate::transcript_range::last_selected_read_stage();
+            let local_stage = crate::transcript_range::LAST_LOCAL_FAILURE
+                .with(|stage| stage.get().map(|stage| stage.name()))
+                .unwrap_or("none");
             assert_eq!(
                 reply.status,
                 200,
-                "{}",
-                String::from_utf8_lossy(&reply.body)
+                "selected range refused at closed stage {stage:?}; local source stage {local_stage}"
             );
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             let current = page["projection"]["generation"]
