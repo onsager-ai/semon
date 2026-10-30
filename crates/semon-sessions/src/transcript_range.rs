@@ -993,11 +993,24 @@ fn read_inner(
         )?,
     };
     selected_read_stage(SelectedReadStage::CatalogRowAuthorization);
-    let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text).inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: selected_row_authority_refused boundary=row_decode");
+        }
+    })?;
     // Query observations are optional metadata. Authenticate the selected row
     // even without one before its recipes can admit any native/provider bytes.
-    let current = binding.runtime_binding_at(&transaction)?;
-    crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)?;
+    let current = binding.runtime_binding_at(&transaction).inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: selected_row_authority_refused boundary=runtime_binding");
+        }
+    })?;
+    crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)
+        .inspect_err(|_| {
+            if crate::native_timing::enabled() {
+                eprintln!("semon sessions native: selected_row_authority_refused boundary=observation_binding");
+            }
+        })?;
     selected_read_stage(SelectedReadStage::RangeContext);
     let context = crate::storage::selected::range_context(
         &crate::storage::sqlite::selected::Context::owned(&transaction),
