@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <title>ASI / Jev · local evaluation viewer</title>
+    <link rel="stylesheet" href="./style.css">
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <a class="wordmark" href="#top" aria-label="ASI Jev evaluation home">
+        <span class="wordmark-mark" aria-hidden="true">A<span>·</span>J</span>
+        <span>ASI <span class="wordmark-slash">/</span> Jev</span>
+      </a>
+      <div class="header-meta">
+        <span class="local-badge"><span class="status-dot"></span>Local evaluation</span>
+        <span class="header-date">30 Oct 2026</span>
+      </div>
+    </header>
+
+    <main id="top" class="shell">
+      <section class="intro">
+        <p class="eyebrow">REAL SESSION STUDY <span>·</span> REVIEW BEFORE RESULTS</p>
+        <h1>Read the evidence<br><em>in the right order.</em></h1>
+        <p class="intro-copy">A local, blind spot-check followed by a clear view of classifier quality, operating cost and limits.</p>
+      </section>
+
+      <section id="load-error" class="notice notice-error" role="alert" hidden>
+        <strong>Review packet could not be loaded.</strong>
+        <span id="load-error-message">Serve this folder locally with review.json beside index.html.</span>
+      </section>
+
+      <section id="review-panel" class="review-panel" aria-labelledby="review-title" hidden>
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">01 <span>·</span> BLIND SPOT-CHECK</p>
+            <h2 id="review-title">Make your call first.</h2>
+          </div>
+          <p class="section-aside">Classifier results stay locked until the review is complete and you choose to reveal them.</p>
+        </div>
+
+        <div id="spotcheck-workspace" class="review-workspace">
+          <article class="review-card" aria-live="polite">
+            <div class="review-card-top">
+              <div>
+                <p class="eyebrow">SANITIZED CAUSAL CONTEXT</p>
+                <h3 id="spot-event-title">Review event</h3>
+              </div>
+              <span id="spot-harness" class="tag"></span>
+            </div>
+            <div class="context-frame">
+              <div class="frame-label"><span>Context</span><span id="spot-context-count"></span></div>
+              <pre id="spot-context" class="context-text"></pre>
+            </div>
+            <div class="reference-frame">
+              <div class="frame-label"><span>Frozen causal reference</span><span class="reference-lock">LOCKED</span></div>
+              <dl id="spot-reference" class="reference-list"></dl>
+            </div>
+            <div class="decision-block">
+              <div class="decision-heading">
+                <span>Does this reference fit the context?</span>
+                <span class="quiet">Choose one</span>
+              </div>
+              <div id="decision-options" class="decision-options" role="group" aria-label="Your spot-check decision"></div>
+            </div>
+            <label class="note-field" for="spot-note">
+              <span>Optional note <span class="quiet">· kept in your local review file</span></span>
+              <textarea id="spot-note" rows="3" maxlength="2000" placeholder="Add a short note if you want to remember why…"></textarea>
+            </label>
+            <div class="review-card-footer">
+              <button id="previous-event" class="button button-quiet" type="button">← Previous</button>
+              <span id="spot-position" class="position-label"></span>
+              <button id="next-event" class="button button-quiet" type="button">Next →</button>
+            </div>
+          </article>
+
+          <aside class="review-rail">
+            <div class="rail-card progress-card">
+              <div class="rail-title-row">
+                <h3>Your review</h3>
+                <span id="review-count" class="count-chip"></span>
+              </div>
+              <progress id="review-progress" max="50" value="0">0%</progress>
+              <p id="review-progress-copy" class="small-copy"></p>
+              <div class="storage-line"><span class="storage-icon" aria-hidden="true">▣</span><span id="cache-status">Draft not saved yet</span></div>
+              <p class="micro-copy">Browser cache is a working draft. It is not a saved file.</p>
+            </div>
+
+            <div class="rail-card export-card">
+              <p class="eyebrow">PORTABLE COPY</p>
+              <h3>Keep a file you control.</h3>
+              <p class="small-copy">Download JSONL to save or move your choices. Import it later to resume. The browser cannot confirm where a download was saved.</p>
+              <div class="file-actions">
+                <button id="download-review" class="button button-dark" type="button">↓ Download JSONL</button>
+                <label for="import-review" class="button button-outline">↑ Import JSONL</label>
+                <input id="import-review" type="file" accept=".jsonl,.txt,application/jsonl,text/plain" hidden>
+              </div>
+              <p id="export-status" class="micro-copy" aria-live="polite">No review file generated in this tab.</p>
+              <label id="saved-file-confirm-wrap" class="check-row" hidden>
+                <input id="saved-file-confirm" type="checkbox">
+                <span>I saved the downloaded JSONL file somewhere I can find it.</span>
+              </label>
+            </div>
+
+            <div class="rail-card reveal-card">
+              <p class="eyebrow">THEN, IF YOU CHOOSE</p>
+              <label id="reveal-ack-wrap" class="check-row">
+                <input id="reveal-ack" type="checkbox">
+                <span>I understand that revealing the results ends the blind review in this browser.</span>
+              </label>
+              <button id="reveal-results" class="button button-reveal" type="button" disabled>I've finished the spot-check — reveal results</button>
+              <p id="reveal-requirements" class="micro-copy">Complete all 50 choices and save your review file first.</p>
+              <p id="review-status" class="live-status" role="status" aria-live="polite"></p>
+            </div>
+          </aside>
+        </div>
+
+        <div id="aggregate-review" class="aggregate-card" hidden>
+          <div class="aggregate-symbol" aria-hidden="true">◎</div>
+          <div>
+            <p class="eyebrow">AGGREGATE-ONLY BUILD</p>
+            <h3>There is no spot-check packet in this build.</h3>
+            <p>The result file stays locked until you acknowledge the reveal. No review export is available because this build contains no review events.</p>
+            <label class="check-row aggregate-ack"><input id="aggregate-reveal-ack" type="checkbox"><span>I understand that revealing the results ends the blind view in this browser.</span></label>
+            <button id="aggregate-reveal" class="button button-reveal" type="button" disabled>Reveal evaluation</button>
+            <p id="aggregate-status" class="live-status" role="status" aria-live="polite"></p>
+          </div>
+        </div>
+      </section>
+
+      <section id="results-app" class="results-app" hidden aria-label="Evaluation results">
+        <div id="blindness-banner" class="notice notice-revealed">
+          <span class="notice-mark" aria-hidden="true">!</span>
+          <div><strong>Review is no longer blind in this browser.</strong><span id="blindness-copy">Your exported review file remains separate from this results view.</span></div>
+        </div>
+        <div id="incomplete-banner" class="notice notice-warning" hidden>
+          <span class="notice-mark" aria-hidden="true">↗</span>
+          <div><strong>This results build is incomplete.</strong><span>Some aggregate fields may be missing. Treat shown values as partial.</span></div>
+        </div>
+        <div class="results-heading">
+          <div><p class="eyebrow">02 <span>·</span> AGGREGATE RESULTS</p><h2>What the study shows.</h2></div>
+          <p id="result-counts" class="results-counts"></p>
+        </div>
+        <nav id="results-nav" class="results-nav" aria-label="Result views"></nav>
+        <div id="results-content" class="results-content">
+          <section id="view-criteria" class="result-view" aria-labelledby="title-criteria"></section>
+          <section id="view-tradeoff" class="result-view" aria-labelledby="title-tradeoff" hidden></section>
+          <section id="view-classes" class="result-view" aria-labelledby="title-classes" hidden></section>
+          <section id="view-sessions" class="result-view" aria-labelledby="title-sessions" hidden></section>
+          <section id="view-failures" class="result-view" aria-labelledby="title-failures" hidden></section>
+          <section id="view-methodology" class="result-view" aria-labelledby="title-methodology" hidden></section>
+          <section id="view-caveats" class="result-view" aria-labelledby="title-caveats" hidden></section>
+        </div>
+      </section>
+
+      <section id="loading-state" class="loading-state" aria-live="polite">
+        <span class="loading-ring" aria-hidden="true"></span>
+        <span>Opening the review packet…</span>
+      </section>
+    </main>
+
+    <dialog id="event-dialog" class="event-dialog">
+      <div class="dialog-heading"><div><p class="eyebrow">SELECTED EVENT</p><h2 id="dialog-title"></h2></div><button id="dialog-close" class="icon-button" type="button" aria-label="Close event details">×</button></div>
+      <div id="dialog-body" class="dialog-body"></div>
+    </dialog>
+
+    <footer class="site-footer"><span>Local data stays in this browser or in a file you download.</span><span>ASI / JEV <span aria-hidden="true">·</span> Evaluation viewer</span></footer>
+  </body>
+</html>
