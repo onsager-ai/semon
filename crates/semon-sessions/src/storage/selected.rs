@@ -673,6 +673,15 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         Ok(self.witness.catalog.get(key).cloned())
     }
+    fn catalog_search_paths(
+        &self,
+        _: &crate::events::CatalogSearchLookup<'_>,
+        _: usize,
+    ) -> io::Result<Vec<String>> {
+        Err(io::Error::other(
+            "immutable selected snapshot has no pending search authority",
+        ))
+    }
     fn rows(
         &self,
         request: &crate::catalog::Request,

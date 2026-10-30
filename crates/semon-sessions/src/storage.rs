@@ -281,8 +281,17 @@ impl NativeReaderBinding {
         };
         #[cfg(feature = "postgres")]
         if let StoreBackend::Postgres { pool, control } = &self.config().backend {
-            return postgres::catalog_page(self.config(), pool, control, options, source, &request)
-                .unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true));
+            return postgres::catalog_page(
+                self.config(),
+                pool,
+                control,
+                options,
+                source,
+                &request,
+                false,
+                &mut None,
+            )
+            .unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true));
         }
         sqlite::catalog::read_page(self, options, source, &request).unwrap_or_else(|_| crate::catalog::error(503, "catalog_unavailable", "The session catalog is unavailable. Retry after the background observation completes.", true))
     }
@@ -549,6 +558,8 @@ impl StoreConfig {
                 options,
                 self.namespace.as_str(),
                 &request,
+                false,
+                &mut None,
             );
         }
         let binding = NativeReaderBinding::Admitted(self.clone());

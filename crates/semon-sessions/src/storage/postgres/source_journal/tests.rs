@@ -1,6 +1,7 @@
 use super::*;
 use crate::events::EventCache;
 use crate::storage::postgres::tests::{LOSE_ACK, fixture, ns};
+use crate::storage::source_observations::CatalogSearchLookup;
 use crate::storage::source_observations::conformance::shared_source_observation_conformance;
 
 fn journal(pool: &PgPool, namespace: &str) -> PgSourceJournal {
@@ -125,7 +126,7 @@ fn pg_source_queue_bound_capture_order_and_foreign_zero_effects() {
             .unwrap()
             .is_empty()
     );
-    assert!(store.pending(256).unwrap().is_empty());
+    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
     intents[0].apply(&mut store).unwrap();
     store.acknowledge_intent(intents[0].operation()).unwrap();
     let last = discover("queue", &["after-slot".into()], true);
@@ -141,8 +142,20 @@ fn pg_source_forced_rls_namespace_token_injection_and_no_unscoped_rows() {
     let a = "A\0'; RESET ROLE; --";
     let intent = discover(a, &["path\0bytes".into()], true);
     intent.apply(&mut journal(&pool, a)).unwrap();
-    assert_eq!(journal(&pool, a).pending(1).unwrap(), vec!["path\0bytes"]);
-    assert!(journal(&pool, "B").pending(1).unwrap().is_empty());
+    assert_eq!(
+        journal(&pool, a)
+            .pending_catalog_sources(1, None)
+            .unwrap()
+            .paths,
+        vec!["path\0bytes"]
+    );
+    assert!(
+        journal(&pool, "B")
+            .pending_catalog_sources(1, None)
+            .unwrap()
+            .paths
+            .is_empty()
+    );
     for table in [
         "semon_pg_source_state",
         "semon_pg_source_members",
@@ -317,9 +330,6 @@ impl SourceObservationStore for LoseEffectAck {
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
         self.inner.claims(paths)
     }
-    fn pending(&self, limit: usize) -> Result<Vec<String>, StorageError> {
-        self.inner.pending(limit)
-    }
     fn pending_catalog_sources(
         &self,
         limit: usize,
@@ -369,7 +379,10 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
     let mut selected = journal(&pool, "selector-selected");
     discover(
         "selector-selected",
-        &["selected.jsonl".into(), "search.jsonl".into()],
+        &[
+            "/codex/selected.jsonl".into(),
+            "/claude/search.jsonl".into(),
+        ],
         false,
     )
     .apply(&mut selected)
@@ -382,7 +395,7 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
             super::super::native_keys::put_meta(
                 tx,
                 SELECTED_PROJECTION_KEY.as_bytes(),
-                &serde_json::to_vec(&vec!["selected.jsonl"]).unwrap(),
+                &serde_json::to_vec(&vec!["/codex/selected.jsonl"]).unwrap(),
             )
         },
     )
@@ -398,11 +411,39 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
         yield_to_fifo: false,
         excluded: &[],
     };
+    assert!(matches!(
+        selected.pending_catalog_sources(0, None),
+        Err(StorageError::InvalidArguments)
+    ));
+    assert!(matches!(
+        selected.pending_catalog_sources(257, None),
+        Err(StorageError::InvalidArguments)
+    ));
+    let before_drain = selected
+        .pending_catalog_sources(1, Some(&selected_search))
+        .unwrap();
+    assert_eq!(before_drain.tier, CatalogPendingTier::SearchHint);
+    assert_eq!(before_drain.paths, vec!["/claude/search.jsonl"]);
+    assert_eq!(before_drain.fallback, vec!["/codex/selected.jsonl"]);
+
+    pool.transaction(
+        &ns("selector-selected"),
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            tx.driver.execute(
+                "UPDATE semon_pg_source_state SET backfill_state='draining' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                &[&tx.namespace.as_str().as_bytes()],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        },
+    )
+    .unwrap();
     let batch = selected
         .pending_catalog_sources(1, Some(&selected_search))
         .unwrap();
     assert_eq!(batch.tier, CatalogPendingTier::SelectedUpgrade);
-    assert_eq!(batch.paths, vec!["selected.jsonl"]);
+    assert_eq!(batch.paths, vec!["/codex/selected.jsonl"]);
     assert!(!batch.search_checked);
 
     let mut fifo = journal(&pool, "selector-fifo");
@@ -818,7 +859,7 @@ fn pg_source_effect_fault_rolls_back_receipt_membership_and_revision_together() 
     drop(store);
     let mut store = journal(&pool, namespace);
     assert_eq!(store.pending_intents().unwrap(), vec![intent.clone()]);
-    assert!(store.pending(256).unwrap().is_empty());
+    assert!(store.pending_catalog_sources(256, None).unwrap().paths.is_empty());
     assert_eq!(
         store.claims(&["first".into(), "fault".into()]).unwrap(),
         vec![("first".into(), None), ("fault".into(), None)]
