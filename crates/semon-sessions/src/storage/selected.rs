@@ -522,7 +522,9 @@ impl PresentationObservations {
             return if saved == &runtime {
                 Ok(())
             } else {
-                Err(io::Error::other("presentation runtime observation conflicts"))
+                Err(io::Error::other(
+                    "presentation runtime observation conflicts",
+                ))
             };
         }
         // Bound exact dependency observations, including distinct final rows
