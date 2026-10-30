@@ -23,13 +23,25 @@ impl TransferInbox {
         manifest: &SnapshotManifest,
         options: &crate::Options,
     ) -> Result<String, StorageError> {
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=manifest_bind");
         manifest.bind(&self.0)?;
         // Facts are host-authorized Raw, independent of the SQL placement.
         // Validate the host's logical identity before any destination effect.
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=host_source_validation");
         options.source.clone().with_store(self.0.clone())?;
-        if source.capture(&manifest.snapshot_id)? != CaptureProgress::Ready(manifest.clone()) {
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=frozen_source_capture");
+        let capture = source.capture(&manifest.snapshot_id)?;
+        let capture_ready = capture == CaptureProgress::Ready(manifest.clone());
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=frozen_source_capture ready={capture_ready}");
+        if !capture_ready {
             return Err(StorageError::Conflict);
         }
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=source_catalog_head");
         let import = CatalogImport {
             manifest: manifest.clone(),
             generation: source.0.catalog_generation()?,

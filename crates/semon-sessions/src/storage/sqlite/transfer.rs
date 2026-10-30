@@ -97,10 +97,14 @@ pub(crate) fn admit_catalog(
     import: &transfer::reported::CatalogImport,
 ) -> Result<String, StorageError> {
     use crate::storage::catalog::CatalogPublicationHead;
+    #[cfg(test)]
+    eprintln!("transfer_catalog_admission stage=destination_owner");
     let owner = crate::events::store::configured::NativeOwnership::restore_transfer(config)?;
     let admission = owner.admission();
     let source = super::semantic::AdmittedSource::native(owner);
     transaction(config, |tx| {
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=applied_checkpoint");
         import.require_applied(tx)?;
         let payload = import.payload(admission)?;
         let receipt = "native_transfer_v1:catalog-admission";
@@ -119,6 +123,8 @@ pub(crate) fn admit_catalog(
         // journal revision is not comparable after a physical backend change.
         let admitted: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications p JOIN main.meta m ON m.namespace=p.namespace AND m.key='native_transfer_v1:publication:'||p.generation WHERE p.namespace=?1 AND p.generation=?2 AND m.value=?2)", params![tx.1,import.generation()], |row| row.get(0)).map_err(failed)?;
         let missing: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=c.namespace AND r.session_key=c.session_key AND r.kind='current')) OR EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=h.namespace AND r.session_key=h.session_key AND r.kind='history'))", [tx.1], |row| row.get(0)).map_err(failed)?;
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=receipt_references receipt_present={admitted} missing_refs={missing}");
         if !admitted || missing {
             return Err(StorageError::ScopeChanged);
         }
@@ -135,7 +141,10 @@ pub(crate) fn admit_catalog(
         // Imported receipt coordinates remain immutable. Reserve subsequent
         // local producer epochs above them without manufacturing a stage/ACK.
         let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-        if tx.0.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,(SELECT coalesce(max(epoch),0) FROM storage_semantic_publications WHERE namespace=?1)) WHERE namespace=?1 AND admission=?2", params![tx.1,sql_admission]).map_err(failed)? != 1 {
+        let affected_rows = tx.0.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,(SELECT coalesce(max(epoch),0) FROM storage_semantic_publications WHERE namespace=?1)) WHERE namespace=?1 AND admission=?2", params![tx.1,sql_admission]).map_err(failed)?;
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission stage=destination_profile affected_rows={affected_rows}");
+        if affected_rows != 1 {
             return Err(StorageError::ScopeChanged);
         }
         head.publish_generation(

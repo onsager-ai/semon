@@ -1965,7 +1965,11 @@ impl Writer {
 mod tests {
     use super::*;
     use crate::events::EventCache;
-    use crate::storage::{LogicalSourceNamespace, StoreBackend, source_observations::SourceClaims};
+    use crate::storage::{
+        LogicalSourceNamespace, StoreBackend,
+        native_events::NativeEventStore,
+        source_observations::{SourceClaims, SourceObservationStore},
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
@@ -2351,7 +2355,12 @@ mod tests {
     #[test]
     fn composite_core_schema_and_qualification_are_physical() {
         let f = Fixture::new();
-        drop(f.config.native_events().unwrap());
+        // Restore validates the actual owned guards and scoped profile; no
+        // public writer qualification is inferred from these physical keys.
+        NativeOwnership::restore(&f.config).unwrap();
+        let before = f.state();
+        assert!(f.config.native_events().is_err());
+        assert_eq!(f.state(), before);
         let db = f.db();
         for table in CORE_TABLES
             .iter()
@@ -2414,11 +2423,7 @@ mod tests {
         }
         for table in TABLES {
             let qualification: i64 = db.query_row("SELECT qualification FROM storage_event_tables WHERE namespace=?1 AND table_name=?2", params![f.config.namespace.as_str(),table], |r| r.get(0)).unwrap();
-            assert_eq!(
-                qualification,
-                i64::from(CORE_TABLES.contains(table)),
-                "{table}"
-            );
+            assert_eq!(qualification, 0, "{table}");
             if !CORE_TABLES.contains(table) {
                 let namespace_pk: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='namespace' AND pk=1)", [table], |r| r.get(0)).unwrap();
                 assert!(
@@ -2650,17 +2655,18 @@ mod tests {
 
     #[test]
     fn prepared_old_connection_cannot_write_after_event_guard_installation() {
-        let f = Fixture::new();
+        let f = Fixture::unbound("configured-events");
         let old = f.db();
-        // Prepare against the admission fences before the configured writer
-        // installs its new guards. SQLite must requalify this warm statement.
+        // Prepare against the admission fences before the native owner
+        // installs its owned guards. SQLite must requalify this warm statement.
         let mut old_write = old
             .prepare("UPDATE files SET title='old-writer' WHERE path=?1")
             .unwrap();
         let mut old_metadata = old
             .prepare("UPDATE meta SET value='old-writer' WHERE key GLOB 'native_tree_summary:*'")
             .unwrap();
-        let mut writer = f.config.native_events().unwrap();
+        NativeOwnership::admit(&f.config).unwrap();
+        let mut writer = f.native_cache();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
         let summaries: i64 = f
@@ -2797,6 +2803,14 @@ mod tests {
                 "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"sanitized fixture\"}]}}\n"
             )).unwrap();
             Self { root, config, raw }
+        }
+        fn native_cache(&self) -> EventCache {
+            // For an admitted current fixture, admit restores the existing
+            // capability in a read snapshot; it does not enroll another owner.
+            EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&self.config).unwrap(),
+            )
+            .unwrap()
         }
         fn db(&self) -> Connection {
             let database = self.config.backend.sqlite_database().unwrap();
@@ -3037,7 +3051,6 @@ mod tests {
         );
         assert_eq!(f.state(), before);
         let singleton = Fixture::new();
-        drop(singleton.config.native_events().unwrap());
         let before = singleton.state();
         assert!(
             crate::storage::sqlite::semantic::SemanticStaging::validate(&singleton.config).is_err()
@@ -3047,7 +3060,7 @@ mod tests {
             before,
             "capability validation must not convert schema"
         );
-        assert!(!singleton.state().contains_key("storage_semantic_profiles"));
+        assert!(singleton.state().contains_key("storage_semantic_profiles"));
         assert_eq!(
             crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
             0
@@ -5825,11 +5838,12 @@ mod tests {
             "session_source_mutations",
         ] {
             let f = Fixture::new();
-            drop(f.config.native_events().unwrap());
             f.db()
-                .execute_batch(&format!("DROP TRIGGER storage_event_guard_{table}_UPDATE;"))
+                .execute_batch(&format!("DROP TRIGGER storage_owned_guard_{table}_UPDATE;"))
                 .unwrap();
             let before = f.state();
+            assert!(NativeOwnership::restore(&f.config).is_err(), "{table}");
+            assert!(NativeOwnership::admit(&f.config).is_err(), "{table}");
             assert!(f.config.native_events().is_err(), "{table}");
             assert_eq!(f.state(), before);
         }
@@ -5899,7 +5913,7 @@ mod tests {
     #[test]
     fn configured_ingest_restart_uncertain_reply_and_operation_identity() {
         let f = Fixture::new();
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         FAIL_EFFECT.with(|failure| failure.set(Some("commit_reply")));
         assert_eq!(
             writer.ingest(&"a".repeat(64), &f.raw, "codex"),
@@ -5913,7 +5927,7 @@ mod tests {
         drop(writer);
         // Reconciliation does no Raw I/O and applies no effects a second time.
         fs::remove_file(&f.raw).unwrap();
-        let mut restarted = f.config.native_events().unwrap();
+        let mut restarted = f.native_cache();
         let receipt = restarted.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(receipt.consumed_bytes > 0);
         assert!(receipt.replayed);
@@ -5975,7 +5989,7 @@ mod tests {
             .unwrap();
         assert_eq!(custody, "preserve-verbatim");
         // Already-open configured writers also reject a replaced epoch.
-        f.db().execute_batch("DROP TRIGGER storage_event_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE key='catalog_changes_epoch';").unwrap();
+        connection(&f.config).unwrap().execute_batch("DROP TRIGGER storage_owned_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE namespace='' AND key='catalog_changes_epoch';").unwrap();
         assert_eq!(
             restarted.ingest(&"a".repeat(64), &f.raw, "codex"),
             Err(StorageError::ScopeChanged)
@@ -5985,14 +5999,14 @@ mod tests {
     #[test]
     fn configured_replay_after_append_returns_original_receipt_and_fresh_id_advances() {
         let f = Fixture::new();
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(!first.replayed);
         let before = f.state();
         use std::io::Write;
         fs::OpenOptions::new().append(true).open(&f.raw).unwrap().write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"new work\"}]}}\n").unwrap();
         drop(writer);
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         let replay = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.consumed_bytes, first.consumed_bytes);
@@ -6015,7 +6029,7 @@ mod tests {
     #[test]
     fn fresh_operation_on_unchanged_core_has_its_own_durable_completion() {
         let f = Fixture::new();
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let before = f.state();
         let audit = f.db();
@@ -6050,7 +6064,7 @@ mod tests {
         );
         drop(writer);
         fs::remove_file(&f.raw).unwrap();
-        let mut restarted = f.config.native_events().unwrap();
+        let mut restarted = f.native_cache();
         let replay = restarted.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.operation_id, second.operation_id);
@@ -6129,7 +6143,7 @@ mod tests {
             "UPDATE files SET codex_pricing_fingerprint='changed-interpretation'",
         ] {
             let f = Fixture::new();
-            let mut writer = f.config.native_events().unwrap();
+            let mut writer = f.native_cache();
             let first = writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
             let before = f.state();
             let generation: i64 = f
@@ -6141,7 +6155,7 @@ mod tests {
             // Fixture-owned corruption, never a recovery API or real store edit.
             connection(&f.config).unwrap().execute(damage, []).unwrap();
             drop(writer);
-            let mut writer = f.config.native_events().unwrap();
+            let mut writer = f.native_cache();
             let repaired = writer.ingest(&"b".repeat(64), &f.raw, "codex").unwrap();
             assert_eq!(repaired.consumed_bytes, first.consumed_bytes);
             let db = connection(&f.config).unwrap();
@@ -6173,8 +6187,7 @@ mod tests {
     fn configured_same_handle_recovers_busy_and_other_operation_refusals() {
         use crate::storage::native_events::NativeEventStore;
         let f = Fixture::new();
-        drop(f.config.native_events().unwrap());
-        let mut cache = EventCache::open_configured(&f.config).unwrap();
+        let mut cache = f.native_cache();
         let lock = f.db();
         lock.execute_batch("BEGIN IMMEDIATE").unwrap();
         assert_eq!(
@@ -6186,7 +6199,9 @@ mod tests {
         let receipt = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(!receipt.replayed);
         assert!(cache.event_operation.is_none());
-        let error = cache
+        let mut unowned = EventCache::open_configured(&f.config).unwrap();
+        let before = f.state();
+        let error = unowned
             .retain(&std::collections::BTreeSet::new(), &mut false)
             .unwrap_err();
         assert_eq!(
@@ -6195,6 +6210,7 @@ mod tests {
                 .and_then(|error| error.downcast_ref::<StorageError>()),
             Some(&StorageError::NamespaceUpgradePending)
         );
+        assert_eq!(f.state(), before);
         let replay = cache.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.consumed_bytes, receipt.consumed_bytes);
@@ -6204,13 +6220,15 @@ mod tests {
             size: 0,
             modified_ns: 0,
         };
-        let error = cache.save_runs(&[], &stamp).unwrap_err();
+        let before = f.state();
+        let error = unowned.save_runs(&[], &stamp).unwrap_err();
         assert_eq!(
             error
                 .get_ref()
                 .and_then(|error| error.downcast_ref::<StorageError>()),
             Some(&StorageError::NamespaceUpgradePending)
         );
+        assert_eq!(f.state(), before);
         assert!(
             cache
                 .ingest(&"a".repeat(64), &f.raw, "codex")
@@ -6222,7 +6240,7 @@ mod tests {
     #[test]
     fn configured_each_effect_rolls_back_rows_proofs_revision_and_completion() {
         let f = Fixture::new();
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         use std::io::Write;
         fs::OpenOptions::new().append(true).open(&f.raw).unwrap().write_all(b"{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"sanitized reply\"}]}}\n").unwrap();
@@ -6281,11 +6299,11 @@ mod tests {
     #[test]
     fn configured_ledger_and_observation_cas_are_distinct_and_busy_is_typed() {
         let f = Fixture::new();
-        drop(f.config.native_events().unwrap());
-        let mut writer = Writer::new(&f.config).unwrap();
+        let owner = NativeOwnership::restore(&f.config).unwrap();
+        let mut writer = Writer::owned(owner.clone()).unwrap();
         let path = f.raw.to_string_lossy().into_owned();
         writer.begin(&path, None, &"a".repeat(64), "codex").unwrap();
-        let mut observations = f.config.source_observations().unwrap();
+        let mut observations = SourceJournal::owned(owner);
         let observation_payload = serde_json::to_vec(&(std::slice::from_ref(&path), true)).unwrap();
         let observation = crate::storage::source_observations::SourceOperation::capture(
             f.config.namespace.as_str(),
@@ -6326,8 +6344,10 @@ mod tests {
     #[test]
     fn configured_initial_batch_is_one_transaction_and_replay_is_idempotent() {
         let f = Fixture::new();
-        drop(f.config.native_events().unwrap());
-        let mut index = crate::storage::sqlite::open_configured_index(&f.config).unwrap();
+        let mut index = crate::storage::sqlite::configured_index::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        )
+        .unwrap();
         let files = ["first", "second"]
             .into_iter()
             .enumerate()
