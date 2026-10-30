@@ -4266,6 +4266,36 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
     assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
+    // A retained-only owner remains readable from its publication proof when
+    // the configured current Facts file has moved on. The same change refuses
+    // Current selected rows above, where live runtime qualification applies.
+    fs::write(&facts_path, b"changed current Facts after retained publication").unwrap();
+    let mut retained_options = facts_options.clone();
+    retained_options.all = false;
+    retained_options.since = Duration::from_secs(86400 * 365 * 100);
+    let retained_runtime_store = super::super::snapshot::query::QueryCatalog {
+        captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: retained_options,
+    };
+    let retained_key = removed.iter().next().unwrap();
+    let retained_fields = query
+        .call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":retained_key}),
+            1790812802000,
+            &retained_runtime_store,
+            &withdrawal_host,
+            None,
+        )
+        .unwrap();
+    assert!(retained_fields["session"].is_object());
+    assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
+    assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
+    assert_eq!(retained_fields["session"]["open_question"], serde_json::Value::Null);
     assert!(
         !options.cache.exists(),
         "PG public request cannot create a SQLite cache"

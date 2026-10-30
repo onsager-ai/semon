@@ -976,6 +976,7 @@ fn read_inner(
         let mut summary = render_session(
             options,
             key,
+            current,
             &context,
             &records,
             now,
@@ -1213,6 +1214,7 @@ fn read_inner(
 pub(crate) fn render_session(
     options: &Options,
     key: &str,
+    current: bool,
     context: &[CatalogRow],
     records: &dyn QueryRecords,
     now: i64,
@@ -1231,6 +1233,17 @@ pub(crate) fn render_session(
         .ok_or_else(|| unavailable("Selected Query unavailable"))?;
     let selected = &saved["selected"];
     let mut summary = saved["rows"][key]["summary"].clone();
+    if !current {
+        summary["alive"] = Value::Null;
+        summary["run"] = Value::Null;
+        if matches!(
+            summary["state"].as_str(),
+            Some("working" | "waiting-question")
+        ) {
+            summary["state"] = json!("unknown");
+            summary["open_question"] = Value::Null;
+        }
+    }
     if !summary.is_object() || !selected["session"]["busy"].is_array() {
         return Err(unavailable("Selected Query recipe unavailable"));
     }

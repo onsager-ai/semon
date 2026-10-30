@@ -3592,7 +3592,28 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
 #[test]
 fn mcp_history_selection_keeps_current_runtime_qualification() {
     let fixture = Fixture::new();
-    fixture.source("live-history");
+    use std::io::Write;
+    let source = fixture.source("live-history");
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&source).unwrap(),
+        "{}",
+        json!({"type":"assistant","sessionId":"live-history","uuid":"question","parentUuid":"live-history","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"ask-1","name":"AskUserQuestion","input":{"questions":[{"question":"Retain this question?","header":"Retain","multiSelect":false,"options":[{"label":"Yes","description":"d"},{"label":"No","description":"d"}]}]}}]}})
+    )
+    .unwrap();
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.proc_starts.insert(314, 1234);
+    facts.runs.insert(
+        314,
+        std::collections::BTreeMap::from([("OSTROM_RUN_ID".into(), "retained-run".into())]),
+    );
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
+    fs::write(
+        fixture.options.claude_home.join("sessions/314.json"),
+        json!({"sessionId":"live-history","procStart":1234,"status":"busy"}).to_string(),
+    )
+    .unwrap();
     fixture.publish_existing();
     let db = fixture.db();
     // Preserve an exact original recipe beside its still-Current owner. This
@@ -3603,6 +3624,24 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
          INSERT INTO session_history_slots SELECT namespace,session_key,slot,metadata FROM session_slots WHERE session_key='live-history';",
     )
     .unwrap();
+    let mut query = crate::Query::with_machines(vec![(
+        "source".into(),
+        fixture.options.clone(),
+    )]);
+    let live_fields = query
+        .call_selected(
+            "source",
+            "live-history",
+            "get_session",
+            &json!({"id":"live-history"}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap();
+    assert_eq!(live_fields["session"]["alive"], true);
+    assert_eq!(live_fields["session"]["run"]["OSTROM_RUN_ID"], "retained-run");
+    assert_eq!(live_fields["session"]["state"], "waiting-question");
+    assert!(live_fields["session"]["open_question"].is_object());
     let read = || {
         crate::query::transcript::read(
             &fixture.options,
@@ -3625,6 +3664,38 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         read().unwrap().is_none(),
         "history selection must not bypass a live Current runtime refusal"
     );
+
+    fs::remove_file(
+        fixture
+            .options
+            .claude_home
+            .join("projects/project/live-history.jsonl"),
+    )
+    .unwrap();
+    fixture.publish_existing();
+    let connection = fixture.db();
+    let current: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key='live-history' AND lifecycle='current')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!current, "the selected owner is physically Retained");
+    let fields = query
+        .call_selected(
+            "source",
+            "live-history",
+            "get_session",
+            &json!({"id":"live-history"}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap();
+    assert_eq!(fields["session"]["alive"], Value::Null);
+    assert_eq!(fields["session"]["run"], Value::Null);
+    assert_eq!(fields["session"]["state"], "unknown");
+    assert_eq!(fields["session"]["open_question"], Value::Null);
 }
 
 #[test]
