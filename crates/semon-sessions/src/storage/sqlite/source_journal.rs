@@ -2309,15 +2309,15 @@ mod tests {
         let db = f.db();
         let absent_receipt: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND recovery_done IS NOT NULL)",
-                params!["A", absent_cursor.id],
+                "SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND payload_digest=?2 AND recovery_done IS NOT NULL)",
+                params!["A", absent_cursor.payload_digest],
                 |row| row.get(0),
             )
             .unwrap();
         let absent_intent: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2)",
-                params!["A", absent_cursor.id],
+                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND payload_digest=?2)",
+                params!["A", absent_cursor.payload_digest],
                 |row| row.get(0),
             )
             .unwrap();
@@ -2330,15 +2330,15 @@ mod tests {
 
         let present_done: i64 = db
             .query_row(
-                "SELECT recovery_done FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3",
-                params!["A", present_cursor.id, present_cursor.payload_digest],
+                "SELECT recovery_done FROM source_observation_receipts WHERE namespace=?1 AND payload_digest=?2",
+                params!["A", present_cursor.payload_digest],
                 |row| row.get(0),
             )
             .unwrap();
         let present_intent: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2)",
-                params!["A", present_cursor.id],
+                "SELECT EXISTS(SELECT 1 FROM source_observation_intents WHERE namespace=?1 AND payload_digest=?2)",
+                params!["A", present_cursor.payload_digest],
                 |row| row.get(0),
             )
             .unwrap();
