@@ -944,6 +944,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .unwrap(),
                 ack
             );
+            assert!(
+                pg.publish_semantic_catalog(&mismatched, model.prepared())
+                    .is_err(),
+                "completed replay still binds the full batch context"
+            );
             break (ack, batch, model);
         }
     };
@@ -994,6 +999,62 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .1
             .as_deref(),
         Some(generation.as_str())
+    );
+    let saved = semantic_model.prepared();
+    let mut altered = crate::model::PreparedSources {
+        base_generation: saved.base_generation.clone(),
+        claims: saved.claims.clone(),
+        rows: saved.rows.clone(),
+        transcripts: saved
+            .transcripts
+            .iter()
+            .map(|projection| crate::slot_projection::Projection {
+                key: projection.key.clone(),
+                slots: projection.slots.clone(),
+                repair: projection.repair,
+            })
+            .collect(),
+        pids: saved.pids.clone(),
+        lineage_dependencies: saved.lineage_dependencies.clone(),
+        message_dependencies: saved.message_dependencies.clone(),
+        relationships: saved.relationships.clone(),
+        indexed_sources: saved.indexed_sources.clone(),
+        removed_sources: saved.removed_sources.clone(),
+        indexed_native_parents: saved.indexed_native_parents.clone(),
+        withdrawals: saved.withdrawals.clone(),
+    };
+    let claim = &mut altered.claims.first_mut().unwrap().1;
+    *claim = Some(claim.unwrap_or(0) + 1);
+    assert_eq!(
+        altered.staged_model_witness().unwrap(),
+        saved.staged_model_witness().unwrap(),
+        "claims are independent of the recorded model witness"
+    );
+    assert!(
+        pg.publish_semantic_catalog(&semantic_batch, &altered)
+            .is_err(),
+        "completed replay rejects a changed claim revision"
+    );
+    altered.claims.clone_from(&saved.claims);
+    altered.base_generation = Some("altered replay base".into());
+    assert!(
+        pg.publish_semantic_catalog(&semantic_batch, &altered)
+            .is_err(),
+        "completed replay binds the prepared base generation"
+    );
+    let mut altered_batch = semantic_batch.clone();
+    altered_batch.base_generation = Some("altered replay base".into());
+    assert!(
+        pg.publish_semantic_catalog(&altered_batch, saved).is_err(),
+        "completed replay binds the batch base generation"
+    );
+    assert_eq!(
+        pg.publish_semantic_catalog(&semantic_batch, saved)
+            .unwrap()
+            .1
+            .as_deref(),
+        Some(generation.as_str()),
+        "refused replays preserve the original acknowledgement"
     );
     let mut competing = prepared.rows.clone();
     competing[0].name.push_str(" competing publisher");

@@ -451,7 +451,20 @@ pub(super) fn publish(
         && !stage.active
         && stage.epoch == batch.epoch
     {
-        if stage.model.as_deref() != Some(&witness) {
+        // Replay qualifies the captured request, not today's acknowledged
+        // journal/head. The model witness excludes claims and base generation.
+        if stage.model.as_deref() != Some(&witness)
+            || stage.acknowledgement.is_none()
+            || stage.claims != prepared.claims
+            || stage.generation != prepared.base_generation
+            || stage.phase != batch.phase
+            || stage.paths != batch.paths
+            || stage.runtime != batch.runtime
+            || stage.generation != batch.base_generation
+            || stage.revision != batch.source_revision
+            || serde_json::to_vec(&stage.context).map_err(|_| StorageError::ScopeChanged)?
+                != serde_json::to_vec(&batch.context).map_err(|_| StorageError::ScopeChanged)?
+        {
             return Err(StorageError::Conflict);
         }
         return Ok((Outcome::Written, stage.acknowledgement));

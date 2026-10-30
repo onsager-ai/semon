@@ -9,10 +9,10 @@ use crate::{events::Outcome, storage::semantic_owner};
 pub(in crate::storage::postgres) struct Semantic<'a> {
     pub(in crate::storage::postgres) runtime: &'a str,
     pub(in crate::storage::postgres) withdrawals: &'a [crate::model::relation_stage::Withdrawal],
-    pub(in crate::storage::postgres) prior_owners: &'a std::collections::BTreeMap<String, CatalogRow>,
+    pub(in crate::storage::postgres) prior_owners:
+        &'a std::collections::BTreeMap<String, CatalogRow>,
     pub(in crate::storage::postgres) retired_owners: &'a [CatalogRow],
-    pub(in crate::storage::postgres) lifecycle_authority:
-        Option<ValidatedLifecycle<'a>>,
+    pub(in crate::storage::postgres) lifecycle_authority: Option<ValidatedLifecycle<'a>>,
 }
 
 /// Physical qualification is performed before opening the publication writer.

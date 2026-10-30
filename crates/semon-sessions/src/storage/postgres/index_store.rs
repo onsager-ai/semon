@@ -140,12 +140,9 @@ impl IndexStore for NativeIndex {
     ) -> Result<Option<crate::model::relation_stage::Batch>, StoreError> {
         let batch = self
             .pool
-            .transaction(
-                &self.namespace,
-                TxnKind::Write,
-                &self.control,
-                |tx| super::semantic_stage::next(tx, limit),
-            )
+            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
+                super::semantic_stage::next(tx, limit)
+            })
             .map_err(err)?;
         if let Some(batch) = &batch {
             self.semantic_epoch = Some(batch.epoch);
