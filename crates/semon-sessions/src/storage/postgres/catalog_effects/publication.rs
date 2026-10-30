@@ -263,16 +263,17 @@ pub(in crate::storage::postgres) fn publish(
         if observations.runtime.as_deref() != Some(runtime.as_str()) {
             return Err(StorageError::ScopeChanged);
         }
+        if !publication.rows.iter().any(|row| row.query.is_some()) {
+            return Err(StorageError::ScopeChanged);
+        }
         for row in publication.rows {
+            let Some(query) = &row.query else {
+                continue;
+            };
             let observed = observations
                 .runtime_for(row)
                 .ok_or(StorageError::ScopeChanged)?;
-            if row
-                .query
-                .as_ref()
-                .and_then(|query| query["runtime"].as_str())
-                != Some(observed.as_str())
-            {
+            if query["runtime"].as_str() != Some(observed.as_str()) {
                 return Err(StorageError::ScopeChanged);
             }
         }
