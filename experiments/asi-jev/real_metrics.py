@@ -45,6 +45,7 @@ import argparse
 import json
 import math
 import random
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -1303,12 +1304,17 @@ def score_records(
     }
 
 
-def _thermal_checkpoint() -> Callable[[], Any]:
+def _thermal_checkpoint(pause_ms: int = 0) -> Callable[[], Any]:
     try:
         from real_pipeline import thermal_checkpoint
     except ImportError as exc:
         raise MetricsError("thermal checkpoint is unavailable") from exc
-    return thermal_checkpoint
+    def checkpoint() -> None:
+        thermal_checkpoint()
+        if pause_ms:
+            time.sleep(pause_ms / 1000)
+            thermal_checkpoint()
+    return checkpoint
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1358,12 +1364,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True, help="Aggregate JSON output path outside private/")
     parser.add_argument("--draws", type=int, default=DEFAULT_DRAWS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--checkpoint-pause-ms", type=int, default=0,
+                        help="Idle after each thermal checkpoint to pace CPU work; statistics unchanged")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.checkpoint_pause_ms < 0:
+        parser.error("checkpoint pause must be nonnegative")
     inputs = [args.references, *args.predictions, *args.summaries]
     if args.operations is not None:
         inputs.append(args.operations)
@@ -1374,7 +1384,7 @@ def main(argv: list[str] | None = None) -> int:
     if (args.annotation_a is None) != (args.annotation_b is None):
         parser.error("both independent annotation files are required")
     try:
-        checkpoint = _thermal_checkpoint()
+        checkpoint = _thermal_checkpoint(args.checkpoint_pause_ms)
         checkpoint()
         references = _read_jsonl(args.references)
         checkpoint()
