@@ -1054,6 +1054,17 @@ pub fn repair_session_overview_with_control(
             return Err(publication_changed());
         }
     }
+    let trace_store = if repaired.iter().any(|row| row.trace.is_some()) {
+        Some(
+            crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner)
+                .map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                })
+                .map_err(failure)?,
+        )
+    } else {
+        None
+    };
     for row in &repaired {
         crate::selected_read::check()?;
         if let Some(summary) = &row.overview {
@@ -1061,7 +1072,11 @@ pub fn repair_session_overview_with_control(
                 .map_err(failure)?;
         }
         if let Some(trace) = &row.trace {
-            crate::causal_trace::publish_owned(&tx, &owner, row, trace).map_err(failure)?;
+            let trace_store = trace_store
+                .as_ref()
+                .ok_or(rusqlite::Error::InvalidQuery)
+                .map_err(failure)?;
+            crate::causal_trace::publish_owned(&tx, trace_store, row, trace).map_err(failure)?;
         }
         if let Some(query) = &row.query {
             let table = if crate::history_projection::catalog(&tx, &row.key)

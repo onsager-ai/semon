@@ -236,12 +236,10 @@ fn generation_bytes(session: &Value, projection: &Projection) -> Vec<u8> {
 
 pub(crate) fn publish_owned(
     tx: &Transaction<'_>,
-    owner: &crate::events::store::configured::NativeOwnership,
+    trace_store: &crate::storage::sqlite::trace::TraceWriter<'_>,
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> rusqlite::Result<()> {
-    let store = crate::storage::sqlite::trace::TraceWriter::owned(tx, owner)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let mut measurements = crate::native_timing::Measurements::default();
     let record = publication_record(row, projection, &mut measurements)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -250,7 +248,7 @@ pub(crate) fn publish_owned(
     {
         query.publish(tx, row, &record.0)?;
     }
-    publish_record(&store, row, projection, record, &mut measurements)
+    publish_record(trace_store, row, projection, record, &mut measurements)
 }
 
 fn publication_record(

@@ -145,7 +145,7 @@ pub(crate) fn publish_current_owned(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
     measurements: &mut crate::native_timing::Measurements,
-    owner: &crate::events::store::configured::NativeOwnership,
+    trace_store: Option<&crate::storage::sqlite::trace::TraceWriter<'_>>,
 ) -> rusqlite::Result<()> {
     let started = measurements.start();
     let history = crate::history_projection::catalog(tx, &row.key)?
@@ -206,7 +206,8 @@ pub(crate) fn publish_current_owned(
     }
     if let Some(trace) = &row.trace {
         let started = measurements.start();
-        crate::causal_trace::publish_owned(tx, owner, row, trace)?;
+        let trace_store = trace_store.ok_or(rusqlite::Error::InvalidQuery)?;
+        crate::causal_trace::publish_owned(tx, trace_store, row, trace)?;
         measurements.record("trace_publish_inclusive", started, 1);
     }
     if let Some(summary) = &row.overview {
