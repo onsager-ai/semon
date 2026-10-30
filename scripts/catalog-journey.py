@@ -196,33 +196,39 @@ def main():
         home.mkdir()
         now = seed(home, args.public_root, additional, scalar)
         native_fixture_sha = fixture_digest(home)
-        variants = [("candidate", args.binary, args.source_revision)]
-        if args.baseline_binary:
-            fixture = root / f"fixture-{additional}"
-            shutil.copytree(home, fixture)
-            variants.insert(0, ("baseline", args.baseline_binary, args.baseline_revision))
-        for label, binary, revision in variants:
+        temporary_fixture = None
+        try:
+            variants = [("candidate", args.binary, args.source_revision)]
             if args.baseline_binary:
-                # Restore at the same absolute path: native fixture metadata
-                # contains home paths, and copy2 preserves first-page mtimes.
-                shutil.rmtree(home)
-                shutil.copytree(fixture, home)
-                if fixture_digest(home) != native_fixture_sha:
-                    raise RuntimeError("Restored native fixture bytes or mtimes differ")
-            variant_args = argparse.Namespace(**vars(args))
-            variant_args.binary = binary
-            variant_args.source_revision = revision
-            variant_root = root / label if args.baseline_binary else root
-            variant_root.mkdir(exist_ok=True)
-            variant_sha = hashlib.sha256(Path(binary).read_bytes()).hexdigest() if args.baseline_binary else binary_sha
-            for phase in ("first-import", "persisted-restart"):
-                result = journey(variant_args, variant_root, home, now, additional, phase, scalar, variant_sha)
-                result["variant"] = label
-                result["native_fixture_sha256"] = native_fixture_sha
-                results.append(result)
-                (root / "server-results.json").write_text(json.dumps(results, indent=2))
-                if result["browser_exit"]:
-                    raise RuntimeError("Browser journey failed; inspect the local browser log")
+                temporary_fixture = tempfile.TemporaryDirectory(prefix="semon-catalog-journey-fixture-")
+                fixture = Path(temporary_fixture.name) / f"fixture-{additional}"
+                shutil.copytree(home, fixture)
+                variants.insert(0, ("baseline", args.baseline_binary, args.baseline_revision))
+            for label, binary, revision in variants:
+                if args.baseline_binary:
+                    # Restore at the same absolute path: native fixture metadata
+                    # contains home paths, and copy2 preserves first-page mtimes.
+                    shutil.rmtree(home)
+                    shutil.copytree(fixture, home)
+                    if fixture_digest(home) != native_fixture_sha:
+                        raise RuntimeError("Restored native fixture bytes or mtimes differ")
+                variant_args = argparse.Namespace(**vars(args))
+                variant_args.binary = binary
+                variant_args.source_revision = revision
+                variant_root = root / label if args.baseline_binary else root
+                variant_root.mkdir(exist_ok=True)
+                variant_sha = hashlib.sha256(Path(binary).read_bytes()).hexdigest() if args.baseline_binary else binary_sha
+                for phase in ("first-import", "persisted-restart"):
+                    result = journey(variant_args, variant_root, home, now, additional, phase, scalar, variant_sha)
+                    result["variant"] = label
+                    result["native_fixture_sha256"] = native_fixture_sha
+                    results.append(result)
+                    (root / "server-results.json").write_text(json.dumps(results, indent=2))
+                    if result["browser_exit"]:
+                        raise RuntimeError("Browser journey failed; inspect the local browser log")
+        finally:
+            if temporary_fixture is not None:
+                temporary_fixture.cleanup()
     print(json.dumps({"output": str(root), "results": results}, indent=2))
 
 

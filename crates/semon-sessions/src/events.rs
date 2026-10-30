@@ -1014,6 +1014,18 @@ pub(crate) struct CatalogSearchInterest<'a> {
     pub(crate) harness: Option<&'a str>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogPendingTier {
+    SelectedUpgrade,
+    SearchHint,
+    Fifo,
+}
+
+pub(crate) struct CatalogPendingBatch {
+    pub(crate) tier: CatalogPendingTier,
+    pub(crate) paths: Vec<String>,
+}
+
 /// Where the event index persists between runs: the narrow interface the
 /// cache needs, so the storage behind it (SQLite today) stays in one place.
 ///
@@ -1096,11 +1108,13 @@ pub(crate) trait IndexStore: Send {
         &self,
         path: &str,
     ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
-    fn pending_catalog_sources(&self, limit: usize) -> Result<Vec<String>, StoreError>;
-    /// Read at most 64 candidates from each of four identity selectors. Return
-    /// pending, deduplicated paths only; defer to selected projection upgrades.
-    /// This read neither changes invalidation revisions nor qualifies sources.
-    fn pending_catalog_identity_paths(&self, query: &str) -> Result<Vec<String>, StoreError>;
+    /// Selected upgrades, then indexed pending identity hints, then FIFO.
+    /// Search does not mutate revisions or semantic-frontier membership.
+    fn pending_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&str>,
+    ) -> Result<CatalogPendingBatch, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
     fn catalog_component_paths(
@@ -1645,35 +1659,65 @@ impl EventCache {
     }
 
     pub(crate) fn pending_catalog_sources(&self, limit: usize) -> io::Result<Vec<String>> {
+        self.prioritized_catalog_sources(limit, None)
+            .map(|batch| batch.paths)
+    }
+
+    pub(crate) fn prioritized_catalog_sources(
+        &self,
+        limit: usize,
+        search: Option<&str>,
+    ) -> io::Result<CatalogPendingBatch> {
         self.store
             .as_ref()
             .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .pending_catalog_sources(limit)
+            .pending_catalog_sources(limit, search)
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
-    pub(crate) fn pending_catalog_identity_sources(
+    pub(crate) fn prioritized_catalog_inputs(
         &self,
         options: &crate::Options,
-        interest: CatalogSearchInterest<'_>,
-    ) -> io::Result<Vec<crate::Input>> {
-        let paths = self
-            .store
-            .as_ref()
-            .ok_or_else(|| io::Error::other("native producer unavailable"))?
-            .pending_catalog_identity_paths(interest.query)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-        Ok(paths
+        limit: usize,
+        interest: Option<CatalogSearchInterest<'_>>,
+    ) -> io::Result<(CatalogPendingTier, Vec<crate::Input>)> {
+        let mut batch = self
+            .prioritized_catalog_sources(limit, interest.as_ref().map(|interest| interest.query))?;
+        if batch.tier == CatalogPendingTier::SearchHint {
+            let inputs: Vec<_> = batch
+                .paths
+                .iter()
+                .filter_map(|path| {
+                    crate::native_evidence::catalog_input(Path::new(path), options).filter(
+                        |input| {
+                            interest.as_ref().is_none_or(|interest| {
+                                interest
+                                    .harness
+                                    .is_none_or(|harness| input.root.as_str() == harness)
+                            })
+                        },
+                    )
+                })
+                .collect();
+            if !inputs.is_empty() {
+                return Ok((batch.tier, inputs));
+            }
+            // A physical identity match does not grant source authority. A
+            // rejected hint must still allow the ordinary producer to drain.
+            batch = self.prioritized_catalog_sources(limit, None)?;
+        }
+        let inputs = batch
+            .paths
             .into_iter()
-            .filter_map(|path| crate::native_evidence::catalog_input(Path::new(&path), options))
-            .filter(|input| {
-                interest
-                    .harness
-                    .is_none_or(|harness| input.root.as_str() == harness)
+            .map(|path| {
+                crate::native_evidence::catalog_input(Path::new(&path), options).ok_or_else(|| {
+                    io::Error::other("Catalog source is outside the native allowlist")
+                })
             })
-            .take(64)
-            .collect())
+            .collect::<io::Result<Vec<_>>>()?;
+        Ok((batch.tier, inputs))
     }
+
     pub(crate) fn qualified_catalog(&self) -> io::Result<bool> {
         self.store
             .as_ref()

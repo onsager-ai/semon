@@ -505,6 +505,12 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Reject conflicting measurement selections
+        if: ${{ inputs.native_foundation_measurement && inputs.selected_readiness_measurement }}
+        run: |
+          echo "::error::Choose only one measurement mode for this workflow run."
+          exit 1
+
       - name: Check out candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
