@@ -3007,7 +3007,7 @@ mod tests {
         };
         let before = foreign(&f.db());
         assert_eq!(before.len(), 4);
-        let mut writer = f.config.native_events().unwrap();
+        let mut writer = f.native_cache();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
         let db = f.db();
         assert_eq!(foreign(&db), before);
@@ -3034,7 +3034,7 @@ mod tests {
         assert_eq!(f.state(), committed);
         assert_eq!(foreign(&f.db()), before);
         drop(writer);
-        let mut reopened = f.config.native_events().unwrap();
+        let mut reopened = f.native_cache();
         assert!(
             !reopened
                 .ingest(&"b".repeat(64), &f.raw, "codex")
