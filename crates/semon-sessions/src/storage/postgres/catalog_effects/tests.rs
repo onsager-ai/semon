@@ -671,7 +671,7 @@ fn bind_custody_fixture(
     options: &Options,
     rows: &[CatalogRow],
     projections: &[crate::slot_projection::Projection],
-) -> String {
+) -> (String, Vec<CatalogRow>) {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
     let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
@@ -723,7 +723,10 @@ fn bind_custody_fixture(
     }
     let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
-    generation.expect("ordinary custody fixture publication")
+    (
+        generation.expect("ordinary custody fixture publication"),
+        prepared.rows,
+    )
 }
 
 fn snapshot(tx: &mut PgTxn<'_>) -> Result<Vec<Vec<String>>, StorageError> {
@@ -738,7 +741,9 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let mut generations = Vec::new();
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections));
+            generations.push(
+                bind_custody_fixture(&pool, &ns(name), options, rows, projections).0,
+            );
         }
     });
     let mut missing = data.rows.clone();
@@ -827,7 +832,7 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         generation = Some(bind_custody_fixture(&pool, &namespace, options, rows, projections));
     });
-    let generation = generation.expect("ordinary custody fixture publication");
+    let (generation, native_rows) = generation.expect("ordinary custody fixture publication");
     let preserve = |tx: &mut PgTxn<'_>| {
         let store = history::History {
             effects: Effects {
@@ -836,7 +841,7 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
             },
             previous: &generation,
         };
-        for row in &data.rows {
+        for row in &native_rows {
             assert!(catalog::preserve_original(&store, row)?);
         }
         Ok(())
