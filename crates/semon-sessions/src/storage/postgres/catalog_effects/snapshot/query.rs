@@ -18,6 +18,66 @@ pub(in crate::storage::postgres) struct QueryCatalog {
     pub(in crate::storage::postgres) options: Options,
     pub(in crate::storage::postgres) captured: bool,
 }
+
+/// Query includes retained-only owners without changing the Current Catalog
+/// pager. Preserve each Current header for window/runtime membership before
+/// choosing its proof-owned history, as the SQLite Query reader does.
+fn cohort_page(
+    snapshot: &Snapshot<'_, '_>,
+    after: Option<&(i64, Vec<u8>)>,
+) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, StorageError> {
+    snapshot.require_current().map_err(|_| StorageError::ScopeChanged)?;
+    let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+    tx.check()?;
+    let namespace = tx.namespace.as_str().as_bytes();
+    let after_last = after.map(|cursor| cursor.0);
+    let after_key = after.map(|cursor| cursor.1.as_slice());
+    let page = tx.driver.query(
+        "WITH visible AS (
+            SELECT session_key,metadata,last_ms,true AS is_current
+            FROM semon_pg_native_catalog_rows r
+            WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
+            UNION ALL
+            SELECT o.session_key,h.metadata,o.last_ms,false
+            FROM semon_pg_native_catalog_history_owners o
+            LEFT JOIN semon_pg_native_catalog_history_headers h
+              ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
+             AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
+             AND h.session_key=o.session_key
+            WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+              AND NOT EXISTS (
+                SELECT 1 FROM semon_pg_native_catalog_rows r
+                WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
+                  AND r.generation=o.generation AND r.key_digest=o.key_digest
+                  AND r.session_key=o.session_key)
+        ), page AS MATERIALIZED (
+            SELECT session_key,metadata,last_ms,is_current FROM visible
+            WHERE $3::bigint IS NULL OR last_ms<$3 OR (last_ms=$3 AND session_key>$4)
+            ORDER BY last_ms DESC,session_key LIMIT 65
+        ) SELECT session_key,
+            CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
+            last_ms,is_current FROM page ORDER BY last_ms DESC,session_key",
+        &[&namespace,&snapshot.generation.as_bytes(),&after_last,&after_key],
+    ).map_err(sqlstate::error)?;
+    let mut output = Vec::new();
+    for row in page {
+        let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
+        let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        if metadata.key.as_bytes() != row.get::<_, Vec<u8>>(0)
+            || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)
+            || metadata.sources.len() > 64
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let current = row.get::<_, bool>(3)
+            && metadata.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+        output.push((metadata,current));
+    }
+    tx.check()?;
+    Ok(output)
+}
+
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
@@ -307,21 +367,15 @@ impl QueryCatalogStore for QueryCatalog {
             .generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
-            let mut request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
-            // Query includes every Catalog owner, including retained-only
-            // owners represented by retained headers in SQLite's Catalog.
-            // The public Current pager keeps its separate membership rule.
-            request.scope = crate::CatalogReadScope::RetainedHistory;
             let mut rows = BTreeMap::new();
             let mut owners = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
-            let mut emit = |row: crate::model::summary::CatalogRow, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
                 let binding = snapshot.row_runtime_binding(&row).map_err(|_| StorageError::ScopeChanged)?.ok_or(StorageError::ScopeChanged)?;
                 let expected = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(|_| StorageError::ScopeChanged)?.expected(&row);
                 let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-                let current = snapshot.catalog(&row.key, false)?.is_some_and(|header| header.lifecycle == crate::model::summary::CatalogLifecycle::Current);
                 if !crate::model::summary::query_observation_matches(saved, &row.sources, current, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
                 let witness = saved.to_string();
                 *bytes_left = bytes_left.checked_sub(witness.len()).ok_or(StorageError::Busy)?;
@@ -352,38 +406,30 @@ impl QueryCatalogStore for QueryCatalog {
             };
             let query_last = |row: &crate::model::summary::CatalogRow| row.query.as_ref().and_then(|query| query["last"].as_i64());
             let mut loaded = BTreeMap::new();
+            let mut after = None;
             loop {
-                let mut catalog = snapshot.rows(&request).map_err(|_| StorageError::Unavailable)?;
-                let more = catalog.len() > request.limit;
-                catalog.truncate(request.limit);
-                let next = catalog.last().map(|row| crate::catalog::Cursor {
-                    inclusive: false,
-                    scope: request.scope,
-                    version: crate::model::summary::CATALOG_VERSION,
-                    generation: self.generation.clone(),
-                    machine: String::new(), harness: None, repo: None, model: None, q: None,
-                    last: row.last.unwrap_or(0), key: row.key.clone(),
-                });
-                for row in catalog {
+                let mut catalog = cohort_page(snapshot, after.as_ref())?;
+                let more = catalog.len() > 64;
+                catalog.truncate(64);
+                let next = catalog.last().map(|(row,_)| (row.last.unwrap_or(0),row.key.as_bytes().to_vec()));
+                for (row,current) in catalog {
                     let Some(c) = cutoff else {
-                        loaded.insert(row.key.clone(), chosen(row)?.0);
+                        loaded.insert(row.key.clone(), (chosen(row)?.0,current));
                         continue;
                     };
                     // The chosen history may have older timestamps than its
                     // Current header. Window membership follows that header,
                     // while retained-only owners cannot become live by an old
                     // saved work/wait observation.
-                    let current = snapshot.catalog(&row.key, false)?;
-                    let header = current.as_ref().unwrap_or(&row);
-                    let state = header.lifecycle == crate::model::summary::CatalogLifecycle::Current && header.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
-                    let current_recent = header.last.is_some_and(|last| last >= c) || query_last(header).is_some_and(|last| last >= c) || state;
+                    let state = current && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
+                    let current_recent = row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state;
                     let (row, history) = chosen(row)?;
                     if current_recent || (history && query_last(&row).is_some_and(|last| last >= c)) {
-                        loaded.insert(row.key.clone(), row);
+                        loaded.insert(row.key.clone(), (row,current));
                     }
                 }
                 if !more { break; }
-                request.cursor = Some(next.ok_or(StorageError::ScopeChanged)?);
+                after = Some(next.ok_or(StorageError::ScopeChanged)?);
             }
             let Some(c) = cutoff else {
                 // An immutable owner's relationship summaries may still name
@@ -424,7 +470,7 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                     (sets.remove(0), sets.remove(0))
                 };
-                for row in loaded.into_values() { emit(row, Some(&keep), bytes_left)?; }
+                for (row,current) in loaded.into_values() { emit(row, current, Some(&keep), bytes_left)?; }
                 return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns });
             };
             // Recent window: edges active or touched since the cutoff, then the
@@ -502,17 +548,20 @@ impl QueryCatalogStore for QueryCatalog {
             }
             needed.extend(keep.iter().cloned());
             for key in &needed {
-                let row = match loaded.remove(key) {
+                let (row,current) = match loaded.remove(key) {
                     Some(row) => row,
                     None => match snapshot.catalog(key, false)? {
-                        Some(row) => chosen(row)?.0,
+                        Some(row) => {
+                            let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                            (chosen(row)?.0,current)
+                        },
                         None => match snapshot.catalog(key, true)? {
-                            Some(row) => row,
+                            Some(row) => (row,false),
                             None => continue,
                         },
                     },
                 };
-                emit(row, Some(&keep), bytes_left)?;
+                emit(row, current, Some(&keep), bytes_left)?;
             }
             if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
                 return Err(StorageError::ScopeChanged);
