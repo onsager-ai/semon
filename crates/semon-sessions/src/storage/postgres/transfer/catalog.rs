@@ -699,6 +699,7 @@ mod tests {
         prior.expected_stream_epoch = Some("b".repeat(64));
         prior.create_native_store().unwrap();
         let retired = prior.admit_namespace().unwrap();
+        let stale_target = pool.bind_source(&prior.namespace, prior.expected_stream_epoch.as_deref(), &control).unwrap();
         prior.unenroll_namespace(&retired).unwrap();
         let target_admission = config.admit_namespace().unwrap();
         let manifest = stage(&source, &config, &[120; 32]);
@@ -837,6 +838,8 @@ mod tests {
             let proofs:i64 = tx.driver.query_one("SELECT count(DISTINCT p.page_generation) FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation AND g.source_path=p.source_path WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1", &[&ns]).map_err(sqlstate::error)?.get(0);
             assert!(proofs>=2,"current and retained publications must reach distinct original Native page generations");
             assert!(super::super::super::model_cache::generation(tx)?.is_none(),"content transfer must not fabricate a publication ACK");
+            let native_grants:i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND convert_from(key,'UTF8') LIKE 'catalog-native-observation:%'", &[&ns]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(native_grants, 0, "transport must not mint local publisher authority");
             Ok(())
         }).unwrap();
         let admitted = config
@@ -851,6 +854,7 @@ mod tests {
             admitted
         );
         assert_eq!(config.catalog_generation().unwrap(), admitted);
+        assert!(stale_target.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |_| Ok(())).is_err());
         super::super::super::catalog_effects::snapshot::with_admitted_generation(
             &pool,
             &config.namespace,
@@ -868,7 +872,7 @@ mod tests {
             },
         )
         .unwrap();
-        let ordinary = |config: &StoreConfig| {
+        let ordinary = |config: &StoreConfig| -> Result<_, crate::QueryError> {
             let mut options = options.clone();
             options.source = crate::storage::HostSource::new(
                 config.namespace.clone(),
@@ -892,8 +896,7 @@ mod tests {
                     Some(&readers),
                     crate::SessionSourceReadMode::ProviderOnly,
                     1_790_000_000_000,
-                )
-                .unwrap();
+                )?;
             assert!(!listed["sessions"].as_array().unwrap().is_empty());
             let fields = query
                 .call_selected_at(
@@ -904,8 +907,7 @@ mod tests {
                     Some(&host),
                     crate::SessionSourceReadMode::ProviderOnly,
                     1_790_000_000_000,
-                )
-                .unwrap();
+                )?;
             let body = query
                 .call_selected_at(
                     "local",
@@ -915,16 +917,70 @@ mod tests {
                     Some(&host),
                     crate::SessionSourceReadMode::ProviderOnly,
                     1_790_000_000_000,
-                )
-                .unwrap();
+                )?;
             assert!(body.to_string().contains("sanitized 0"));
-            (listed, fields, body)
+            Ok((listed, fields, body))
         };
         let forward_ordinary = {
             let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
             eprintln!("transfer_query_direction forward_pg");
-            ordinary(&config)
+            ordinary(&config).unwrap()
         };
+        {
+            let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+            let grant_key = format!("native_transfer_v1:catalog-owner:{admitted}");
+            let grant = format!("{}:{}", target_admission.generation, manifest.stream_epoch);
+            for value in [None, Some(format!("{}:{}", retired.generation, manifest.stream_epoch))] {
+                pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                    let ns = config.namespace.as_str().as_bytes();
+                    tx.driver.execute("DELETE FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key=$2", &[&ns,&grant_key.as_bytes()]).map_err(sqlstate::error)?;
+                    if let Some(value) = &value {
+                        tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3)", &[&ns,&grant_key.as_bytes(),&value.as_bytes()]).map_err(sqlstate::error)?;
+                    }
+                    Ok(())
+                }).unwrap();
+                assert!(ordinary(&config).is_err(), "missing or stale destination admission must not authorize original observations");
+                pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                    super::super::super::native_keys::put_meta(tx, grant_key.as_bytes(), grant.as_bytes())
+                }).unwrap();
+            }
+            let references = pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                let ns = config.namespace.as_str().as_bytes();
+                let rows = tx.driver.query("SELECT kind,id FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
+                let references = rows.iter().map(|row| (row.get::<_,Vec<u8>>(0),row.get::<_,Vec<u8>>(1))).collect::<Vec<_>>();
+                assert!(!references.is_empty());
+                tx.driver.execute("DELETE FROM semon_pg_native_selected_refs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
+                Ok(references)
+            }).unwrap();
+            assert!(ordinary(&config).is_err(), "missing original proof references must refuse");
+            pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                let ns = config.namespace.as_str().as_bytes();
+                for (kind,id) in &references {
+                    tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,session_key,kind,id) VALUES($1,$2,$3,$4)", &[&ns,&expected[0].key.as_bytes(),kind,id]).map_err(sqlstate::error)?;
+                }
+                tx.driver.execute("UPDATE semon_pg_native_selected_generations SET admission=admission+1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
+                Ok(())
+            }).unwrap();
+            assert!(ordinary(&config).is_err(), "forged producer admission must not become current authority");
+            pool.transaction(&config.namespace, TxnKind::Write, &control, |tx| {
+                tx.driver.execute("UPDATE semon_pg_native_selected_generations SET admission=admission-1 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2", &[&config.namespace.as_str().as_bytes(),&expected[0].key.as_bytes()]).map_err(sqlstate::error)?;
+                Ok(())
+            }).unwrap();
+            let facts_path = options.facts.as_ref().unwrap();
+            let facts_bytes = std::fs::read(facts_path).unwrap();
+            let mut changed = original_facts.clone();
+            changed.hostname = "changed-transfer-runtime".into();
+            std::fs::write(facts_path, serde_json::to_vec(&changed).unwrap()).unwrap();
+            super::super::super::current_sources::prepare(&pool, &config.namespace, &control, &options).unwrap();
+            assert!(ordinary(&config).is_err(), "new authoritative runtime must not rebind old Query observations");
+            std::fs::write(facts_path, facts_bytes).unwrap();
+            super::super::super::current_sources::prepare(&pool, &config.namespace, &control, &options).unwrap();
+            assert_eq!(ordinary(&config).unwrap(), forward_ordinary);
+            let mut bound_options = options.clone();
+            bound_options.source = crate::storage::HostSource::new(config.namespace.clone(), manifest.stream_epoch.clone()).unwrap().with_store(config.clone()).unwrap();
+            let query = crate::storage::configured_query_catalog(&bound_options, config.clone()).unwrap();
+            assert!(query.read_cohort(&crate::storage::LogicalSourceNamespace::new("unrelated-transfer-source").unwrap(), 1_790_000_000_000, &mut (8 * 1024 * 1024)).is_err());
+        }
         pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             let ns = config.namespace.as_str().as_bytes();
             let empty = b"".as_slice();
@@ -988,8 +1044,13 @@ mod tests {
             admitted
         );
         assert_eq!(reverse.catalog_generation().unwrap(), admitted);
+        let reverse_reader = crate::storage::NativeReaderBinding::Admitted(reverse.clone());
+        let reverse_db = reverse_reader.connection().unwrap();
+        assert_eq!(reverse_db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_completeness'", [], |row| row.get::<_,String>(0)).unwrap(), "partial");
+        assert_eq!(reverse_db.query_row("SELECT count(*) FROM meta WHERE namespace=semon_namespace() AND (key GLOB 'catalog_native_publication:*' OR key GLOB 'catalog_native_observation:*')", [], |row|row.get::<_,i64>(0)).unwrap(), 0, "local publisher grants must never be transported");
+        drop(reverse_db);
         eprintln!("transfer_query_direction reverse_sqlite");
-        assert_eq!(ordinary(&reverse), forward_ordinary);
+        assert_eq!(ordinary(&reverse).unwrap(), forward_ordinary);
         assert_eq!(
             crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),
             original_facts
@@ -1005,6 +1066,57 @@ mod tests {
                 .as_deref(),
             Some("sanitized transfer description")
         );
+        // A real unrelated local publication carries imported observations
+        // under a new head. Producer and destination admissions both equal one;
+        // that numerical equality must never replace the import grant.
+        let mut native_options = options.clone();
+        native_options.source = crate::storage::HostSource::new(reverse.namespace.clone(), reverse.expected_stream_epoch.clone().unwrap()).unwrap().with_store(reverse.clone()).unwrap();
+        let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/sanitized/local-native.jsonl".into() };
+        let path = input.full_path(&native_options);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = (0..130).map(|i| format!("{}\n",serde_json::json!({"type":"user","sessionId":"local-native","uuid":format!("n{i}"),"parentUuid":if i==0 {None} else {Some(format!("n{}",i-1))},"timestamp":"2026-10-01T00:02:00Z","cwd":"/sanitized","message":{"role":"user","content":format!("native {i}")}}))).collect::<String>();
+        std::fs::write(&path, body).unwrap();
+        let mut native_cache = crate::storage::transfer::reported::tests::cache(&reverse);
+        native_cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
+        native_cache.flush_cold_writes().unwrap();
+        let native_runtime = crate::native_evidence::query_runtime_generation(&native_options).unwrap();
+        assert_eq!(native_cache.begin_semantic_stage_with_journal(&[path.to_str().unwrap().to_owned()], &native_runtime, true).unwrap(), crate::events::Outcome::Written);
+        let native_rows = crate::storage::transfer::reported::tests::finish_catalog(&mut native_cache, &native_options, std::slice::from_ref(&input));
+        assert_eq!(native_rows.len(), 1);
+        assert_ne!(native_rows[0].key, expected[0].key);
+        assert_ne!(reverse.catalog_generation().unwrap(), admitted);
+        let carried = ordinary(&reverse).unwrap();
+        assert_eq!(carried.1, forward_ordinary.1);
+        assert_eq!(carried.2, forward_ordinary.2);
+        let owner = crate::events::store::configured::NativeOwnership::restore_transfer(&reverse).unwrap();
+        let binding = crate::storage::NativeReaderBinding::Semantic(owner.clone());
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner).connection().unwrap();
+        let runtime_binding = binding.runtime_binding_at(&db).unwrap();
+        assert_eq!(runtime_binding.admission, 1);
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(&db, &runtime_binding, &native_rows[0]).is_ok());
+        let mappings = db.prepare("SELECT key,value FROM main.meta WHERE namespace=semon_namespace() AND key GLOB 'native_transfer_v1:publication:*' ORDER BY key LIMIT 65").unwrap().query_map([], |row|Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(!mappings.is_empty() && mappings.len()<=64);
+        // Corruption injection removes and restores genuine imported mappings;
+        // it never synthesizes a positive publication grant.
+        db.create_scalar_function("semon_transfer_writer",0,rusqlite::functions::FunctionFlags::SQLITE_UTF8 | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS, |_|Ok(1_i64)).unwrap();
+        db.execute("DELETE FROM main.meta WHERE namespace=semon_namespace() AND key GLOB 'native_transfer_v1:publication:*'",[]).unwrap();
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(&db, &runtime_binding, &native_rows[0]).is_ok(), "native authority is independent of carried import mappings");
+        assert!(ordinary(&reverse).is_err(), "same-number admission and later local head must not authorize carried imported observations");
+        for (key,value) in mappings {
+            db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",rusqlite::params![key,value]).unwrap();
+        }
+        assert_eq!(ordinary(&reverse).unwrap(), carried);
+        assert_eq!(db.query_row("SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_completeness'", [], |row|row.get::<_,String>(0)).unwrap(), "partial");
+        drop(db);
+        let mut changed_facts = original_facts.clone();
+        changed_facts.hostname = "changed-native-runtime".into();
+        crate::write_facts(native_options.facts.as_ref().unwrap(), &changed_facts, &native_options.source).unwrap();
+        let page = crate::session_catalog_page(&native_options, "local", "limit=60");
+        assert_eq!(page.status, 200, "runtime churn must preserve Catalog stale-status responses");
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        let native = page["items"].as_array().unwrap().iter().find(|row|row["key"]==native_rows[0].key).unwrap();
+        assert_eq!(native["facts_observation"]["state"], "stale");
+        crate::write_facts(native_options.facts.as_ref().unwrap(), &original_facts, &native_options.source).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

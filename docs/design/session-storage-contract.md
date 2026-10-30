@@ -205,6 +205,36 @@ and imported publication bindings authorize local leases while their original
 producer coordinates and proof IDs remain immutable. Namespace/stream and the
 fully applied frozen-source checkpoint are still checked. This operation's
 reader path still requires qualification; copied content alone is not an ACK.
+Imported Query observations retain their original admission-bound fingerprint.
+Each read qualifies the exact row against its immutable selected proof and
+original publication receipt, verifies the presentation entry/root, and requires
+the import grant to name the destination's current admission and stream. Only
+the retained-view lifecycle display tag may differ from the original row.
+The original observation binding then checks the current authoritative runtime;
+no copied witness is rewritten into destination runtime authority. Missing or
+forged provenance, changed runtime, foreign namespace and replaced destination
+admission refuse. The per-row lookup uses the namespace/session proof references
+and selects one exact metadata match before decoding bounded proof cells.
+SQLite's imported Catalog/query closure may be listed under its qualified
+generation marker while `catalog_completeness` remains `partial`; this does not
+claim complete source migration. A real native component publication preserves
+that listing eligibility only from the exact qualified base after its affected
+query/projection closure and claim acknowledgements complete with no remaining
+invalidations. Its locally minted generation grant names the current admission.
+Actual SQLite publishers also mint exact-row observation grants; PostgreSQL
+publishers mint pointers verified against their bounded original native operation.
+These local authority records are never transported and carried imported rows
+receive no new observation grants. Imported immutable receipt epochs reserve the
+SQLite producer's next epoch above those receipts without fabricating a stage or
+ACK. Runtime changes preserve Catalog stale-status responses independently of
+provenance validation. Exact-revision CI qualification is pending.
+Native authority-record reclamation remains unqualified. Stage grants currently
+share the lifetime of immutable semantic receipts, and PostgreSQL observation
+pointers share retained native operation receipts. Direct SQLite publications
+have no equivalent receipt or cleanup boundary: their per-version observation
+and generation grants accumulate in `meta`. A retention policy covering Current,
+retained metadata and active readers is still required before storage-size or GC
+qualification can pass. These grants do not authorize rows absent from Catalog.
 Source quiesce,
 unknown Raw-intent reconciliation before freezing, reader drain, full catch-up,
 final qualification and qualified reverse transfer remain undelivered. The

@@ -506,6 +506,14 @@ pub(crate) trait CatalogSnapshot {
     fn runtime_binding(&self) -> Option<super::QueryRuntimeBinding> {
         None
     }
+    /// Imported observations retain their producer's exact binding. Adapters
+    /// must qualify that provenance under the current destination admission.
+    fn row_runtime_binding(
+        &self,
+        _row: &CatalogRow,
+    ) -> io::Result<Option<super::QueryRuntimeBinding>> {
+        Ok(self.runtime_binding())
+    }
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;
     fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>>;

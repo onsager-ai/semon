@@ -169,6 +169,8 @@ pub(crate) fn validate_statement_layout(db: &Connection) -> rusqlite::Result<()>
 // New globals must be classified deliberately before composite meta is exposed.
 const STORE_METADATA_NAMESPACE: &str = "";
 const SOURCE_METADATA_PREFIXES: &[&str] = &[
+    "catalog_native_publication:",
+    "catalog_native_observation:",
     "native_transfer_v1:",
     "archive_event_index:",
     "native_catalog_relocation:",
@@ -983,7 +985,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*')))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
             } else {
                 String::new()
             };

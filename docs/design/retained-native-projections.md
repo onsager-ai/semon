@@ -24,6 +24,21 @@ nor creates reader leases or acknowledges pending claims. This Catalog-scoped
 effect reports partial completeness; full inventory, catchup, fenced ownership
 cutover and qualified rollback remain separate unqualified obligations.
 
+Ordinary imported Catalog/Query reads preserve the producer's runtime fingerprint
+and validate its per-row selected proof, original receipt and presentation root
+under the destination's current admission grant. They compare that original
+binding with the current authoritative runtime instead of changing stored
+observations. Re-enrollment cannot revive the old import grant. SQLite records
+eligibility for the applied Catalog/query closure separately from full-source
+completeness, which remains partial. A real native component publication may
+inherit an exact qualified imported listing base after affected query/projection
+work and claim acknowledgements leave no invalidations. Local publishers mint
+separate exact-row observation authority only for their actual outputs; transport
+and carry never mint it. Later local heads therefore cannot replace the original
+import grants for carried observations, even when admission counters coincide.
+Forward and reverse reads with authorized
+originals and absent local Raw remain subject to exact-revision CI qualification.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when

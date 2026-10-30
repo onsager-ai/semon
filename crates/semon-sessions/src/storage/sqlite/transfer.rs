@@ -122,6 +122,15 @@ pub(crate) fn admit_catalog(
         if !admitted || missing {
             return Err(StorageError::ScopeChanged);
         }
+        let staged: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=?1)", [tx.1], |row|row.get(0)).map_err(failed)?;
+        if staged {
+            return Err(StorageError::Conflict);
+        }
+        // Imported receipt coordinates remain immutable. Reserve subsequent
+        // local producer epochs above them without manufacturing a stage/ACK.
+        if tx.0.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,(SELECT coalesce(max(epoch),0) FROM storage_semantic_publications WHERE namespace=?1)) WHERE namespace=?1 AND admission=?2", params![tx.1,admission]).map_err(failed)? != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
         head.publish_generation(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),
@@ -144,6 +153,9 @@ pub(crate) fn admit_catalog(
             )?;
         }
         tx.put("catalog_completeness", b"partial")?;
+        // The applied manifest qualifies this Catalog/query closure. It does
+        // not establish full-source completeness or ownership cutover.
+        tx.put("semantic_listing_generation", import.generation().as_bytes())?;
         tx.put(receipt, &payload)?;
         Ok(import.generation().to_owned())
     })

@@ -136,6 +136,52 @@ pub(crate) fn decode_generation(
     Ok((record, row))
 }
 
+/// The adapter has checked the original receipt/presentation and the current
+/// destination's import grant. A row cannot select an arbitrary old admission.
+pub(crate) fn observation_binding(
+    record: GenerationRecord,
+    current: &super::QueryRuntimeBinding,
+    selected: &CatalogRow,
+) -> Result<super::QueryRuntimeBinding, StorageError> {
+    let id = record.id.clone();
+    let admission = record.admission;
+    let proof = record.proof.clone();
+    let publication = record.publication.clone();
+    let prefix = record.prefix.clone();
+    let (record, original) = decode_generation(
+        record,
+        ExpectedGeneration {
+            namespace: current.namespace.as_str(),
+            id: &id,
+            admission,
+            stream: &current.stream_epoch,
+            proof: &proof,
+            publication: &publication,
+            prefix: &prefix,
+        },
+    )?;
+    let mut selected = selected.clone();
+    // Catalog's retained view may retag the immutable original row.
+    if selected.lifecycle != original.lifecycle
+        && !(original.lifecycle == crate::model::summary::CatalogLifecycle::Current
+            && selected.lifecycle == crate::model::summary::CatalogLifecycle::Retained)
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    selected.lifecycle = original.lifecycle;
+    if record.admission == 0
+        || serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
+            != serde_json::to_value(original).map_err(|_| StorageError::Unavailable)?
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(super::QueryRuntimeBinding {
+        namespace: current.namespace.clone(),
+        admission: record.admission,
+        stream_epoch: current.stream_epoch.clone(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,6 +222,28 @@ mod tests {
             slots: "[]".into(),
             prefix: crate::retention::source_generation(&row.sources).unwrap(),
         }
+    }
+
+    #[test]
+    fn codec89_observation_binding_keeps_original_coordinates_and_exact_row() {
+        let record = fixture();
+        let row: CatalogRow = serde_json::from_str(&record.metadata).unwrap();
+        let current = super::super::QueryRuntimeBinding {
+            namespace: super::super::LogicalSourceNamespace::new("source-a").unwrap(),
+            admission: 2,
+            stream_epoch: "stream".into(),
+        };
+        assert_eq!(observation_binding(record.clone(), &current, &row).unwrap().admission, 1);
+        let mut retained = row.clone();
+        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        assert!(observation_binding(record.clone(), &current, &retained).is_ok());
+        retained.name = "forged".into();
+        assert!(observation_binding(record.clone(), &current, &retained).is_err());
+        let mut retired_record = record;
+        let mut retired_row = row.clone();
+        retired_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        retired_record.metadata = serde_json::to_string(&retired_row).unwrap();
+        assert!(observation_binding(retired_record, &current, &row).is_err());
     }
 
     fn decode(record: GenerationRecord) -> Result<(GenerationRecord, CatalogRow), StorageError> {

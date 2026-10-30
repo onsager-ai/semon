@@ -1033,6 +1033,17 @@ pub(crate) fn read_page_snapshot(
             .map(|row| {
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
                     // ImmutableCatalog supplies its pinned relative inputs.
+                    if relative.query.is_some()
+                        && let Some(runtime) = runtime.as_deref()
+                    {
+                        match transaction.row_runtime_binding(relative)
+                            .and_then(|binding| binding.map(|binding| crate::native_evidence::RuntimeObservations::bound(&binding, runtime)).transpose())
+                        {
+                            Ok(Some(runtime)) => return relative_status(options, &runtime, recorded.as_deref(), relative),
+                            Ok(None) => {}
+                            Err(_) => return json!({"state":null,"observation":"unavailable"}),
+                        }
+                    }
                     runtime_observations
                         .as_ref()
                         .map(|runtime| {
@@ -1170,7 +1181,18 @@ pub(crate) fn read_page_snapshot(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
+        let row_runtime = if row.query.is_some() {
+            runtime.as_deref().map(|runtime| -> io::Result<Option<crate::native_evidence::RuntimeObservations>> {
+                transaction.row_runtime_binding(&row)?
+                    .map(|binding| crate::native_evidence::RuntimeObservations::bound(&binding, runtime))
+                    .transpose()
+            }).transpose()?.flatten()
+        } else {
+            None
+        };
         let runtime = pinned.and_then(|saved| saved.runtime.clone()).or_else(|| {
+            row_runtime.as_ref().and_then(|runtime| runtime.expected(&row))
+        }).or_else(|| {
             runtime_observations
                 .as_ref()
                 .and_then(|runtime| runtime.expected(&row))

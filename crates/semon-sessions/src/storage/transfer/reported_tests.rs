@@ -519,7 +519,7 @@ pub(crate) fn advance_catalog(
     finish_catalog(&mut cache, options, std::slice::from_ref(&input))
 }
 
-fn finish_catalog(
+pub(crate) fn finish_catalog(
     cache: &mut crate::events::EventCache,
     options: &crate::Options,
     inputs: &[crate::Input],

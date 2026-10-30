@@ -6,6 +6,21 @@ use rusqlite::{Connection, OpenFlags};
 use std::{ops::Deref, time::Duration};
 
 impl NativeReaderBinding {
+    pub(crate) fn runtime_binding_at(
+        &self,
+        db: &Connection,
+    ) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
+        self.validate(db, &self.config().namespace)?;
+        let admission = match self {
+            Self::Semantic(owner) => owner.admission(),
+            Self::Admitted(config) => namespace::require_admitted(db, &config.namespace)?.generation,
+        };
+        Ok(crate::storage::QueryRuntimeBinding {
+            namespace: self.config().namespace.clone(),
+            admission,
+            stream_epoch: self.config().expected_stream_epoch.clone().ok_or(StorageError::ScopeChanged)?,
+        })
+    }
     pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         let config = self.config();
         let database = config.backend.sqlite_database()?;

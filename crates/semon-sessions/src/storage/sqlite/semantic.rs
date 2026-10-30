@@ -307,6 +307,10 @@ const SEMANTIC_SUPPORT_SCHEMA: &[(&str, &str)] = &[
         "CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER NOT NULL,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,epoch)) STRICT, WITHOUT ROWID;",
     ),
     (
+        "storage_semantic_publication_generation",
+        "CREATE INDEX IF NOT EXISTS storage_semantic_publication_generation ON storage_semantic_publications(namespace,generation,proof_digest,admission);",
+    ),
+    (
         "storage_semantic_profiles",
         "CREATE TABLE IF NOT EXISTS storage_semantic_profiles(namespace TEXT PRIMARY KEY,admission INTEGER NOT NULL,recipe TEXT NOT NULL,epoch INTEGER NOT NULL) STRICT;",
     ),
@@ -1888,6 +1892,15 @@ impl Stage {
         .map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
+        // Local producer authority is not part of transported receipts. Equal
+        // admission counters across stores cannot manufacture this grant.
+        if tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE meta.value=excluded.value", params![
+            ns,
+            format!("catalog_native_publication:{generation}"),
+            format!("{}:{}", self.source.admission, self.source.config.expected_stream_epoch.as_deref().ok_or_else(|| refuse("semantic_stream_epoch"))?),
+        ]).map_err(error)? != 1 {
+            return Err(refuse("semantic_native_publication_grant"));
+        }
         super::proof_generations::publish(
             &tx,
             ns,
@@ -1905,6 +1918,9 @@ impl Stage {
             },
         )
         .map_err(StoreError::Configured)?;
+        for metadata in &metadata {
+            super::proof_generations::native_observation_grant(&tx, ns, self.source.admission, self.source.config.expected_stream_epoch.as_deref().ok_or_else(|| refuse("semantic_stream_epoch"))?, metadata).map_err(StoreError::Configured)?;
+        }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_generation_refs")
             .map_err(error)?;
@@ -1924,8 +1940,15 @@ impl Stage {
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
         tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,selected_observed_at.to_string()]).map_err(error)?;
-        // Readiness is solely for the private listing cohort. No global
-        // completeness claim can qualify selected/proof/search readers.
+        // A qualified imported closure survives an unrelated native component
+        // publication. The carried rows retain their original proof authority.
+        let carried_listing = super::proof_generations::imported_catalog(&tx, &crate::storage::QueryRuntimeBinding {
+            namespace: self.source.config.namespace.clone(),
+            admission: self.source.admission,
+            stream_epoch: self.source.config.expected_stream_epoch.clone().ok_or_else(|| refuse("semantic_stream_epoch"))?,
+        }).map_err(StoreError::Configured)? && tx.query_row("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='semantic_listing_generation' AND value=?2) AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1)", params![ns,previous], |row|row.get::<_,bool>(0)).map_err(error)?;
+        // This listing closure makes no full-source completeness claim and
+        // cannot qualify selected/proof/search readers.
         tx.execute(
             "DELETE FROM main.meta WHERE namespace=?1 AND key='semantic_listing_generation'",
             [ns],
@@ -1935,7 +1958,7 @@ impl Stage {
             && projection_keys.len() == prepared.rows.len()
         {
             let complete: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path)) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints e WHERE e.namespace=c.namespace AND e.session_key=c.session_key))",[ns],|r|r.get(0)).map_err(error)?;
-            if complete {
+            if complete || carried_listing {
                 tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'semantic_listing_generation',?2)",params![ns,generation]).map_err(error)?;
             }
         }

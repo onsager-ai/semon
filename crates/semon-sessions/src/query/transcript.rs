@@ -367,6 +367,8 @@ fn virtual_read(
         Err(error) => return Err(unavailable(error)),
     };
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
+    let admitted_binding = binding.runtime_binding_at(&tx).map_err(unavailable)?;
+    let imported_origin = crate::storage::sqlite::proof_generations::imported_catalog(&tx, &admitted_binding).map_err(unavailable)?;
     let runtime_observations = match binding.runtime_binding().map_err(unavailable)? {
         Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
             .map_err(unavailable)?,
@@ -382,7 +384,12 @@ fn virtual_read(
         let Some(query) = &row.query else {
             return Ok(None);
         };
-        let row_runtime = runtime_observations.expected(row);
+        let row_runtime = if imported_origin || query["runtime"].as_str().is_some_and(|saved| saved.starts_with("source-runtime-v1:")) {
+            let binding = crate::storage::sqlite::proof_generations::observation_binding(&tx, &admitted_binding, row).map_err(unavailable)?;
+            crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(unavailable)?.expected(row)
+        } else {
+            runtime_observations.expected(row)
+        };
         if !crate::model::summary::query_observation_matches(
             query,
             &row.sources,
@@ -786,7 +793,13 @@ fn read_inner(
         return Ok(None);
     }
     let runtime = crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?;
-    let row_runtime = match binding.runtime_binding().map_err(unavailable)? {
+    let current = binding.runtime_binding_at(&tx).map_err(unavailable)?;
+    let observation_binding = if crate::storage::sqlite::proof_generations::imported_catalog(&tx, &current).map_err(unavailable)? || saved["runtime"].as_str().is_some_and(|saved| saved.starts_with("source-runtime-v1:")) {
+        Some(crate::storage::sqlite::proof_generations::observation_binding(&tx, &current, &row).map_err(unavailable)?)
+    } else {
+        binding.runtime_binding().map_err(unavailable)?
+    };
+    let row_runtime = match observation_binding {
         Some(binding) => crate::native_evidence::RuntimeObservations::bound(&binding, &runtime)
             .map_err(unavailable)?,
         None => crate::native_evidence::RuntimeObservations::new(options),

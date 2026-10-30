@@ -91,10 +91,10 @@ impl QueryCatalogStore for QueryCatalog {
                         eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
-                let binding = snapshot
-                    .runtime_binding()
-                    .ok_or(StorageError::ScopeChanged)?;
                 let expected = runtime.as_deref().map(|runtime| {
+                    let binding = snapshot.row_runtime_binding(&row)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                        .ok_or(StorageError::ScopeChanged)?;
                     crate::native_evidence::RuntimeObservations::bound(&binding, runtime)
                         .map(|observations| observations.expected(&row))
                         .map_err(|_| StorageError::ScopeChanged)
@@ -307,8 +307,6 @@ impl QueryCatalogStore for QueryCatalog {
             .generation(&self.options)
             .map_err(|error| QueryError::io(&error))?;
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
-            let tx_snapshot = snapshot.runtime_binding().ok_or(StorageError::ScopeChanged)?;
-            let observations = crate::native_evidence::RuntimeObservations::bound(&tx_snapshot, &runtime).map_err(|_| StorageError::ScopeChanged)?;
             let mut request = crate::catalog::Request::parse("limit=64").map_err(|_| StorageError::InvalidArguments)?;
             let mut rows = BTreeMap::new();
             let mut owners = BTreeMap::new();
@@ -316,7 +314,8 @@ impl QueryCatalogStore for QueryCatalog {
             let mut content = BTreeMap::new();
             let mut emit = |row: crate::model::summary::CatalogRow, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(StorageError::ScopeChanged); }
-                let expected = observations.expected(&row);
+                let binding = snapshot.row_runtime_binding(&row).map_err(|_| StorageError::ScopeChanged)?.ok_or(StorageError::ScopeChanged)?;
+                let expected = crate::native_evidence::RuntimeObservations::bound(&binding, &runtime).map_err(|_| StorageError::ScopeChanged)?.expected(&row);
                 let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
                 if !crate::model::summary::query_observation_matches(saved, &row.sources, true, expected.as_deref()).map_err(|_| StorageError::ScopeChanged)? { return Err(StorageError::ScopeChanged); }
                 let witness = saved.to_string();
