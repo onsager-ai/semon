@@ -1174,6 +1174,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .native_ids
                 .push("uncaptured native dependency".into());
             assert_eq!(replayed.runtime_for(&wrong_native), None);
+            let mut wrong_owner = row.clone();
+            wrong_owner.key = "uncaptured owner with identical dependencies and sources".into();
+            assert_eq!(replayed.runtime_for(&wrong_owner), None);
             let mut wrong_query = row.clone();
             wrong_query.query.as_mut().unwrap()["rows"]["uncaptured query dependency"] =
                 serde_json::json!({});
@@ -1201,6 +1204,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .capture_runtime(row, &different_cwds, row_runtime.clone())
                     .is_err()
             );
+            let long_cwds = std::collections::BTreeSet::from(["x".repeat(1024 * 1024 + 1)]);
+            let long_runtime = captured.runtime_observation(row, &long_cwds).unwrap();
+            let mut long_capture = crate::storage::selected::PresentationObservations::default();
+            long_capture.runtime.clone_from(&captured.runtime);
+            long_capture
+                .capture_runtime(row, &long_cwds, long_runtime.clone())
+                .unwrap();
+            assert_eq!(long_capture.runtime_for(row), Some(long_runtime.clone()));
+            let encoded = serde_json::to_vec(&long_capture).unwrap();
+            assert!(encoded.len() < 4096, "long CWDs must not enter the capture");
+            let long_replayed: crate::storage::selected::PresentationObservations =
+                serde_json::from_slice(&encoded).unwrap();
+            assert_eq!(long_replayed.runtime_for(row), Some(long_runtime));
+            let mut long_prepared = copy_prepared(saved);
+            long_prepared.relationships.presentation = Some(long_capture);
+            assert!(long_prepared.staged_model_witness().unwrap().len() < 1024 * 1024);
             assert_eq!(conflicting.runtime_for(row), Some(row_runtime));
             assert_eq!(conflicting.runtime_for(endpoint), Some(endpoint_runtime));
             let scopes = saved
@@ -1219,6 +1238,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 "tampered_capture",
                 "wrong_dependencies",
                 "wrong_generation",
+                "cross_owner_capture",
                 "global_drift",
             ] {
                 let mut altered = copy_prepared(saved);
@@ -1249,6 +1269,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         altered.relationships.presentation =
                             Some(serde_json::from_value(capture).unwrap());
                     }
+                    "cross_owner_capture" => {
+                        let other_key = altered
+                            .rows
+                            .iter()
+                            .find(|row| row.key != key)
+                            .unwrap()
+                            .key
+                            .clone();
+                        let mut capture = serde_json::to_value(
+                            altered.relationships.presentation.as_ref().unwrap(),
+                        )
+                        .unwrap();
+                        let rows = capture["runtime_rows"].as_object_mut().unwrap();
+                        let first = rows.remove(&key).unwrap();
+                        let other = rows.remove(&other_key).unwrap();
+                        rows.insert(key.clone(), other);
+                        rows.insert(other_key, first);
+                        altered.relationships.presentation =
+                            Some(serde_json::from_value(capture).unwrap());
+                    }
                     "tampered_capture" | "wrong_dependencies" | "wrong_generation" => {
                         let mut capture = serde_json::to_value(
                             altered.relationships.presentation.as_ref().unwrap(),
@@ -1263,9 +1303,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         } else {
                             let scopes = cohorts.get_mut(&source).unwrap().as_object_mut().unwrap();
                             let cwds = pg.runtime_source_cwds(&altered.rows[0].sources).unwrap();
+                            let cwd_fingerprint =
+                                crate::native_evidence::runtime::cwd_fingerprint(&cwds);
                             let dependency = crate::native_evidence::runtime::dependency_identity(
                                 &altered.rows[0],
-                                &cwds,
+                                &cwd_fingerprint,
                             )
                             .unwrap();
                             if case == "wrong_dependencies" {

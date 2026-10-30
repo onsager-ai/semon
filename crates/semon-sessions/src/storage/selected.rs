@@ -357,7 +357,7 @@ pub(crate) struct PresentationWitness {
 pub(crate) struct PresentationObservations {
     pub(crate) runtime: Option<String>,
     runtime_rows: BTreeMap<String, BTreeMap<String, BTreeMap<String, String>>>,
-    runtime_cwds: BTreeMap<String, BTreeSet<String>>,
+    runtime_cwd_fingerprints: BTreeMap<String, String>,
     pub(crate) facts_known: bool,
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
@@ -477,7 +477,7 @@ impl PresentationObservations {
         Self {
             runtime,
             runtime_rows: BTreeMap::new(),
-            runtime_cwds: BTreeMap::new(),
+            runtime_cwd_fingerprints: BTreeMap::new(),
             facts_known,
             selection_known,
             machine_label,
@@ -503,11 +503,13 @@ impl PresentationObservations {
         runtime: String,
     ) -> io::Result<()> {
         let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
-        let dependency = crate::native_evidence::runtime::dependency_identity(row, cwds)?;
+        let cwd_fingerprint = crate::native_evidence::runtime::cwd_fingerprint(cwds);
+        let dependency =
+            crate::native_evidence::runtime::dependency_identity(row, &cwd_fingerprint)?;
         if self
-            .runtime_cwds
+            .runtime_cwd_fingerprints
             .get(&source)
-            .is_some_and(|saved| saved != cwds)
+            .is_some_and(|saved| saved != &cwd_fingerprint)
         {
             return Err(io::Error::other("presentation runtime source CWDs changed"));
         }
@@ -534,7 +536,8 @@ impl PresentationObservations {
         if count >= 260 {
             return Err(io::Error::other("presentation runtime budget exceeded"));
         }
-        self.runtime_cwds.insert(source.clone(), cwds.clone());
+        self.runtime_cwd_fingerprints
+            .insert(source.clone(), cwd_fingerprint);
         self.runtime_rows
             .entry(row.key.clone())
             .or_default()
@@ -565,8 +568,9 @@ impl PresentationObservations {
     pub(crate) fn runtime_for(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
         self.runtime.as_ref()?;
         let source = crate::retention::source_generation(&row.sources).ok()?;
-        let cwds = self.runtime_cwds.get(&source)?;
-        let dependency = crate::native_evidence::runtime::dependency_identity(row, cwds).ok()?;
+        let cwd_fingerprint = self.runtime_cwd_fingerprints.get(&source)?;
+        let dependency =
+            crate::native_evidence::runtime::dependency_identity(row, cwd_fingerprint).ok()?;
         self.runtime_rows
             .get(&row.key)?
             .get(&source)?

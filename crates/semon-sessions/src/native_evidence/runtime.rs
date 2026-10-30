@@ -257,11 +257,28 @@ pub(crate) fn dependencies(
     keys
 }
 
+pub(crate) fn cwd_fingerprint(cwds: &BTreeSet<String>) -> String {
+    // Set order and byte lengths identify exact CWDs without copying long paths.
+    let mut hash = Sha256::new();
+    hash.update(b"semon-runtime-cwds-v1\0");
+    hash.update((cwds.len() as u64).to_be_bytes());
+    for cwd in cwds {
+        hash.update((cwd.len() as u64).to_be_bytes());
+        hash.update(cwd.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
 pub(crate) fn dependency_identity(
     row: &crate::model::summary::CatalogRow,
-    cwds: &BTreeSet<String>,
+    cwd_fingerprint: &str,
 ) -> io::Result<String> {
-    let bytes = serde_json::to_vec(&dependencies(row, cwds)).map_err(io::Error::other)?;
+    let bytes = serde_json::to_vec(&(
+        "semon-runtime-dependencies-v1",
+        dependencies(row, &BTreeSet::new()),
+        cwd_fingerprint,
+    ))
+    .map_err(io::Error::other)?;
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
