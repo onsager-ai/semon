@@ -84,17 +84,13 @@ try {
         const field = JSON.parse(body.toString('utf8'));
         fieldTexts[field.field.chunk] = field.text;
       }
-      if (
-        url.pathname === '/api/sessions' &&
-        response.status() === 200 &&
-        body &&
-        catalogPages.length < 20
-      ) {
+      if (url.pathname === '/api/sessions' && response.status() === 200 && body) {
         const catalog = JSON.parse(body.toString('utf8'));
         catalogPages.push({
           path: url.pathname + url.search,
           machine: catalog.machine,
           completeness: catalog.completeness,
+          search: catalog.search,
           rows: catalog.items.slice(0, 60).map(({ key, harness, last, machine }) => ({
             key,
             harness,
@@ -102,6 +98,8 @@ try {
             source_key: machine?.key ?? catalog.machine,
           })),
         });
+        // Keep the initial publication and the latest bounded progression.
+        if (catalogPages.length > 20) catalogPages.splice(1, 1);
       }
       if (responses.length < MAX_NETWORK_EVENTS)
         responses.push({
@@ -217,20 +215,34 @@ try {
   started = performance.now();
   await query.fill(fixture.catalog_key);
   const [searchResponse] = await Promise.all([
-    page.waitForResponse((response) => {
-      const url = new URL(response.url());
-      return (
-        url.pathname === '/api/sessions' &&
-        url.searchParams.get('q') === fixture.catalog_key &&
-        url.searchParams.get('machine') === fixture.source_key &&
-        (!fixture.harness || url.searchParams.get('harness') === fixture.harness)
-      );
-    }),
+    page.waitForResponse(
+      async (response) => {
+        const url = new URL(response.url());
+        if (
+          url.pathname !== '/api/sessions' ||
+          url.searchParams.get('q') !== fixture.catalog_key ||
+          url.searchParams.get('machine') !== fixture.source_key ||
+          (fixture.harness && url.searchParams.get('harness') !== fixture.harness)
+        )
+          return false;
+        if (response.status() !== 200) return true;
+        const catalog = await response.json();
+        // The reader refreshes partial publications and incomplete metadata
+        // searches itself. Observe that progress without issuing extra reads.
+        return (
+          catalog.items.some((item) => item.key === fixture.catalog_key) ||
+          (catalog.completeness.state === 'complete' && catalog.search?.index_complete !== false)
+        );
+      },
+      { timeout: 60000 },
+    ),
     query.press('Enter'),
   ]);
   assert.equal(searchResponse.status(), 200);
   const searchPage = await searchResponse.json(),
     selectedItem = searchPage.items.find((item) => item.key === fixture.catalog_key);
+  const selectedCatalogReadyMs = performance.now() - started;
+  Object.assign(measurements, { selectedCatalogReadyMs });
   assert.ok(selectedItem, 'Metadata search must return the exact fixture catalog key');
   assert.equal(selectedItem.machine?.key ?? searchPage.machine, fixture.source_key);
   if (fixture.harness) assert.equal(selectedItem.harness, fixture.harness);
@@ -311,6 +323,7 @@ try {
     paintTiming,
     filterMs,
     searchMs,
+    selectedCatalogReadyMs,
     selectedMs,
     earlierMs,
     fieldMs,
@@ -333,6 +346,7 @@ try {
       firstVisibleCatalogRowMs,
       filterMs,
       searchMs,
+      selectedCatalogReadyMs,
       selectedMs,
       earlierMs,
       fieldMs,
