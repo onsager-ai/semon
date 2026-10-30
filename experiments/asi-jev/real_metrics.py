@@ -453,6 +453,55 @@ def _score_metrics(
     return result, point_by_dimension, event_ids
 
 
+def _harness_descriptive_points(
+    references: dict[str, dict[str, Any]],
+    row_by_event: dict[str, dict[int, dict[str, Any]]],
+    gold_field: str,
+) -> dict[str, Any]:
+    event_ids = sorted(
+        event_id for event_id in row_by_event
+        if references[event_id][gold_field] is not None
+    )
+    contributions = _event_contributions(event_ids, row_by_event, references, gold_field)
+    result: dict[str, Any] = {
+        "estimate_type": "descriptive_point_estimate",
+        "confidence_intervals": "not_computed",
+        "bootstrap_scope": "pooled_condition_context_metrics_only",
+        "harness_role_confounded": True,
+    }
+    for harness in ("claude", "codex"):
+        stratum_ids = [
+            event_id for event_id in event_ids
+            if references[event_id]["harness"] == harness
+        ]
+        stratum: dict[str, Any] = {
+            "unique_event_count": len(stratum_ids),
+            "session_count": len({references[event_id]["session_id"] for event_id in stratum_ids}),
+            "dimensions": {},
+        }
+        if stratum_ids:
+            weights = Counter({event_id: 1 for event_id in stratum_ids})
+            for dimension, labels in DIMENSIONS.items():
+                point = _metric_values(_confusion(contributions, weights, dimension), labels)
+                stratum["dimensions"][dimension] = {
+                    "accuracy": point["accuracy"],
+                    "macro_precision": point["macro_precision"],
+                    "macro_recall": point["macro_recall"],
+                    "macro_f1": point["macro_f1"],
+                    "per_class": {
+                        label: {
+                            "precision": values["precision"],
+                            "recall": values["recall"],
+                            "f1": values["f1"],
+                            "positive_events": int(round(values["support"])),
+                        }
+                        for label, values in point["per_class"].items()
+                    },
+                }
+        result[harness] = stratum
+    return result
+
+
 def _paired_delta(
     references: dict[str, dict[str, Any]],
     left_rows: dict[str, dict[int, dict[str, Any]]],
@@ -961,6 +1010,9 @@ def score_records(
             "scored_event_count": len(scored_ids),
             "prediction_row_count": total_rows,
             "metrics": metrics,
+            "harness_descriptive_points": _harness_descriptive_points(
+                references, row_by_event, "gold",
+            ),
             "phase_boundary": _boundary_metrics(references, row_by_event),
             "false_alert_budget": alert_budget,
             "operations": operations,
@@ -970,6 +1022,10 @@ def score_records(
                 references, row_by_event, total_rows, "causal_gold", draws, seed + index * 31 + 1009, checkpoint,
             )
             score["causal_reference_metrics"] = causal_metrics if causal_ids else None
+            score["causal_reference_harness_descriptive_points"] = (
+                _harness_descriptive_points(references, row_by_event, "causal_gold")
+                if causal_ids else None
+            )
         output_conditions[condition][context] = score
 
     agreement = _agreement(references, annotation_a, annotation_b, "gold")
