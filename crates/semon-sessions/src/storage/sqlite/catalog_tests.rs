@@ -6199,8 +6199,8 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             )
             .unwrap();
         }
-        let prefix_len = usize::try_from(ledger.offset.min(crate::source_chunks::SIZE as u64))
-            .unwrap();
+        let prefix_len =
+            usize::try_from(ledger.offset.min(crate::source_chunks::SIZE as u64)).unwrap();
         assert!(prefix_len > 0 && prefix_len <= bytes.len());
         let read = crate::events::store::chunk_proofs::Focused::open(database, path, ledger)
             .and_then(|proof| proof.verify(0, &bytes[..prefix_len]));
@@ -6241,12 +6241,10 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             .unwrap()
             .into();
         let original_bytes = fs::read(&path).unwrap();
-        let (_, original_ledger) = crate::events::store::ledger_row(
-            &db,
-            path.to_string_lossy().as_ref(),
-        )
-        .unwrap()
-        .unwrap();
+        let (_, original_ledger) =
+            crate::events::store::ledger_row(&db, path.to_string_lossy().as_ref())
+                .unwrap()
+                .unwrap();
         let mut archived_ledger = None;
         let original: i64 = db
             .query_row(
@@ -6303,11 +6301,14 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 ))
                 .unwrap();
                 {
-                    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+                    let evidence =
+                        crate::native_evidence::NativeEvidence::new(fixture.options.clone());
                     let mut work = crate::viewer::lock(&evidence.work);
-                    assert!(evidence
-                        .refresh_catalog(&mut work, crate::model::now_ms())
-                        .is_err());
+                    assert!(
+                        evidence
+                            .refresh_catalog(&mut work, crate::model::now_ms())
+                            .is_err()
+                    );
                 }
                 db.execute_batch("DROP TRIGGER reject_native_relocation;")
                     .unwrap();
@@ -6404,12 +6405,10 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             let selected: String=db.query_row("SELECT source_path FROM session_catalog_sources WHERE session_key='native-session' AND lifecycle='current'",[],|row|row.get(0)).unwrap();
             assert_eq!(selected, new.to_string_lossy());
             if !append {
-                let (_, ledger) = crate::events::store::ledger_row(
-                    &db,
-                    new.to_string_lossy().as_ref(),
-                )
-                .unwrap()
-                .unwrap();
+                let (_, ledger) =
+                    crate::events::store::ledger_row(&db, new.to_string_lossy().as_ref())
+                        .unwrap()
+                        .unwrap();
                 archived_ledger = Some(ledger);
                 assert_retained_chunk_generation(
                     &db,
@@ -6718,10 +6717,13 @@ fn scoped_runtime_metadata_refuses_an_uncommitted_source_ledger() {
     fixture.source("scoped-runtime-ledger");
     fixture.publish_existing();
     let db = fixture.db();
-    let metadata: String = db.query_row(
-        "SELECT metadata FROM session_catalog WHERE session_key='scoped-runtime-ledger'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='scoped-runtime-ledger'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let mut row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
     assert_eq!(
         crate::storage::sqlite::catalog::runtime_source_cwds(&db, &row.sources).unwrap(),

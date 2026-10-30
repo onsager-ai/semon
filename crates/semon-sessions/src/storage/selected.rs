@@ -498,7 +498,9 @@ impl PresentationObservations {
             return Err(io::Error::other("presentation runtime budget exceeded"));
         }
         let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
-        self.runtime_rows.entry(row.key.clone()).or_insert((source, runtime));
+        self.runtime_rows
+            .entry(row.key.clone())
+            .or_insert((source, runtime));
         Ok(())
     }
     pub(crate) fn runtime_for(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {

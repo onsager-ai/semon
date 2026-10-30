@@ -47,7 +47,11 @@ fn assistant_offsets(data: &QueryData, sid: &str) -> Vec<(usize, u64, u32)> {
         .collect()
 }
 
-fn scoped_runtime_reader_oracle(options: &Options, rows: &[summary::CatalogRow]) -> Vec<String> {
+fn scoped_runtime_reader_oracle(
+    options: &Options,
+    rows: &[summary::CatalogRow],
+    cwds: &[BTreeSet<String>],
+) -> Vec<String> {
     let initial = crate::native_evidence::query_runtime_generation(options).unwrap();
     let publication = crate::native_evidence::RuntimeObservations::for_publication_measured(
         options,
@@ -57,9 +61,10 @@ fn scoped_runtime_reader_oracle(options: &Options, rows: &[summary::CatalogRow])
     let reader = crate::native_evidence::RuntimeObservations::new(options);
     let scopes = rows
         .iter()
-        .map(|row| {
-            let expected = reader.scope(row).unwrap();
-            assert_eq!(publication.scope(row).unwrap(), expected);
+        .zip(cwds)
+        .map(|(row, cwds)| {
+            let expected = reader.scope(row, cwds).unwrap();
+            assert_eq!(publication.scope(row, cwds).unwrap(), expected);
             expected
         })
         .collect();
@@ -84,12 +89,18 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
     home.build_query();
     let (_, rows) = read_catalog(&home);
     assert_eq!(rows.len(), 2);
-    let local = scoped_runtime_reader_oracle(&home.options, &rows);
+    let cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let cwds = rows
+        .iter()
+        .map(|row| cache.runtime_source_cwds(&row.sources).unwrap())
+        .collect::<Vec<_>>();
+    let binding = cache.query_runtime_binding().unwrap().unwrap();
+    let local = scoped_runtime_reader_oracle(&home.options, &rows, &cwds);
     assert!(local.iter().all(|scope| scope.starts_with("scoped-v1:")));
     for (row, scope) in rows.iter().zip(&local) {
         assert_eq!(
             row.query.as_ref().unwrap()["runtime"].as_str(),
-            Some(scope.as_str())
+            Some(binding.witness(scope).unwrap().as_str())
         );
     }
 
@@ -105,7 +116,7 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
         facts: Some(facts_path.clone()),
         ..home.options.clone()
     };
-    let recorded = scoped_runtime_reader_oracle(&options, &rows);
+    let recorded = scoped_runtime_reader_oracle(&options, &rows, &cwds);
     for change in ["process-start", "name", "repository", "lock"] {
         let mut changed = facts.clone();
         match change {
@@ -125,43 +136,50 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
         }
         crate::write_facts(&facts_path, &changed, &crate::Options::default().source).unwrap();
         assert_ne!(
-            scoped_runtime_reader_oracle(&options, &rows),
+            scoped_runtime_reader_oracle(&options, &rows, &cwds),
             recorded,
             "{change}"
         );
     }
     crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
     home.live(42, "root", "waiting", json!({"waitingFor":"approval"}));
-    assert_ne!(scoped_runtime_reader_oracle(&options, &rows), recorded);
+    assert_ne!(
+        scoped_runtime_reader_oracle(&options, &rows, &cwds),
+        recorded
+    );
 
-    let initial = crate::native_evidence::query_runtime_generation(&options).unwrap();
     let reader = crate::native_evidence::RuntimeObservations::new(&options);
     let mut row = rows[0].clone();
-    row.query = Some(json!({"runtime":initial}));
-    assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
-    row.query = Some(json!({"runtime":"unsupported-runtime"}));
-    assert_eq!(reader.expected(&row).as_deref(), Some(initial.as_str()));
-    assert_ne!(
-        reader.expected(&row).as_deref(),
-        Some("unsupported-runtime")
-    );
+    let scoped = reader.scope(&row, &cwds[0]).unwrap();
+    row.query.as_mut().unwrap()["runtime"] = json!("unsupported-runtime");
+    assert_eq!(reader.scope(&row, &cwds[0]).unwrap(), scoped);
+    assert_ne!(scoped, "unsupported-runtime");
 }
 
 #[test]
-fn publication_runtime_unavailable_inputs_keep_reader_scope_fallbacks() {
+fn publication_runtime_capture_does_not_open_the_options_cache() {
     let home = Home::new();
-    home.top("root", &[human("root", ts(0, 0), "fallback root")]);
+    home.top(
+        "root",
+        &[human("root", ts(0, 0), "explicit runtime metadata")],
+    );
     home.build_query();
     let (_, rows) = read_catalog(&home);
+    let cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let cwds = rows
+        .iter()
+        .map(|row| cache.runtime_source_cwds(&row.sources).unwrap())
+        .collect::<Vec<_>>();
     let absent_index = Options {
         cache: home.root.join("absent/index.json"),
         ..home.options.clone()
     };
-    let initial = crate::native_evidence::query_runtime_generation(&absent_index).unwrap();
+    let initial = scoped_runtime_reader_oracle(&home.options, &rows, &cwds);
     assert_eq!(
-        scoped_runtime_reader_oracle(&absent_index, &rows),
-        vec![initial]
+        scoped_runtime_reader_oracle(&absent_index, &rows, &cwds),
+        initial,
     );
+    assert!(!absent_index.cache.with_extension("sqlite3").exists());
 
     let unreadable = home.root.join("unreadable-facts");
     fs::create_dir(&unreadable).unwrap();
@@ -171,22 +189,20 @@ fn publication_runtime_unavailable_inputs_keep_reader_scope_fallbacks() {
         .set_len(64 * 1024 * 1024 + 1)
         .unwrap();
     for facts in [unreadable, oversized] {
-        for cache in [&home.options.cache, &absent_index.cache] {
-            let options = Options {
-                facts: Some(facts.clone()),
-                cache: cache.clone(),
-                ..home.options.clone()
-            };
-            let scope = scoped_runtime_reader_oracle(&options, &rows);
-            if cache == &home.options.cache {
-                assert!(scope[0].starts_with("scoped-v1:"));
-            } else {
-                assert_eq!(
-                    scope[0],
-                    crate::native_evidence::query_runtime_generation(&options).unwrap()
-                );
-            }
-        }
+        let options = Options {
+            facts: Some(facts),
+            ..home.options.clone()
+        };
+        let observed = scoped_runtime_reader_oracle(&options, &rows, &cwds);
+        let absent_options = Options {
+            cache: absent_index.cache.clone(),
+            ..options
+        };
+        assert_eq!(
+            scoped_runtime_reader_oracle(&absent_options, &rows, &cwds),
+            observed
+        );
+        assert!(observed.iter().all(|scope| scope.starts_with("scoped-v1:")));
     }
 }
 

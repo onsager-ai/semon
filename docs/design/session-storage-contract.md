@@ -344,7 +344,6 @@ SQLite oracles are tracked separately in the writer inventory.
 | `mcp.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `model/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `model.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-| `native_evidence/runtime.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_evidence.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_header.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `native_sidecar.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |

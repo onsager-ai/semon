@@ -138,21 +138,38 @@ impl RuntimeObservations {
     pub(crate) fn projections(&self) -> io::Result<Vec<(RuntimeDependency, String)>> {
         let facts = self.facts.as_ref().ok_or_else(unavailable)?;
         let mut keys = BTreeSet::from([RuntimeDependency::Common]);
-        keys.extend(facts.codex_locks.keys().chain(self.pids.keys()).chain(self.runs.keys())
-            .cloned().map(RuntimeDependency::Native));
-        keys.extend(self.names.keys().cloned().map(|(harness, id)| RuntimeDependency::Name(harness, id)));
+        keys.extend(
+            facts
+                .codex_locks
+                .keys()
+                .chain(self.pids.keys())
+                .chain(self.runs.keys())
+                .cloned()
+                .map(RuntimeDependency::Native),
+        );
+        keys.extend(
+            self.names
+                .keys()
+                .cloned()
+                .map(|(harness, id)| RuntimeDependency::Name(harness, id)),
+        );
         keys.extend(facts.repos.keys().cloned().map(RuntimeDependency::Repo));
-        keys.into_iter().map(|key| {
-            let value = self.dependency(&key)?.ok_or_else(unavailable)?;
-            Ok((key, value))
-        }).collect()
+        keys.into_iter()
+            .map(|key| {
+                let value = self.dependency(&key)?.ok_or_else(unavailable)?;
+                Ok((key, value))
+            })
+            .collect()
     }
 
     fn dependency(&self, key: &RuntimeDependency) -> io::Result<Option<String>> {
         let facts = self.facts.as_ref().ok_or_else(unavailable)?;
         let value = match key {
             RuntimeDependency::Common => serde_json::to_vec(&(
-                facts.version, &facts.hostname, &facts.home, &facts.offline_since,
+                facts.version,
+                &facts.hostname,
+                &facts.home,
+                &facts.offline_since,
             )),
             RuntimeDependency::Native(id) => {
                 let lock = facts.codex_locks.get(id);
@@ -161,11 +178,22 @@ impl RuntimeObservations {
                 if lock.is_none() && pids.is_empty() && runs.is_empty() {
                     return Ok(None);
                 }
-                let process = |pid: &u32| (
-                    *pid, facts.proc_starts.get(pid), facts.runs.get(pid), facts.process_ancestors.get(pid),
-                );
-                let processes = pids.iter().map(|pid| (pid, process(&pid.pid))).collect::<Vec<_>>();
-                let runs = runs.iter().map(|index| &facts.reported_runs[*index]).collect::<Vec<_>>();
+                let process = |pid: &u32| {
+                    (
+                        *pid,
+                        facts.proc_starts.get(pid),
+                        facts.runs.get(pid),
+                        facts.process_ancestors.get(pid),
+                    )
+                };
+                let processes = pids
+                    .iter()
+                    .map(|pid| (pid, process(&pid.pid)))
+                    .collect::<Vec<_>>();
+                let runs = runs
+                    .iter()
+                    .map(|index| &facts.reported_runs[*index])
+                    .collect::<Vec<_>>();
                 serde_json::to_vec(&(lock.map(process), processes, runs))
             }
             RuntimeDependency::Name(harness, id) => {
@@ -184,7 +212,8 @@ impl RuntimeObservations {
                 let Some(repo) = repo else { return Ok(None) };
                 serde_json::to_vec(&repo)
             }
-        }.map_err(io::Error::other)?;
+        }
+        .map_err(io::Error::other)?;
         Ok(Some(format!("{:x}", Sha256::digest(value))))
     }
 }
@@ -207,8 +236,16 @@ pub(crate) fn dependencies(
     row: &crate::model::summary::CatalogRow,
     cwds: &BTreeSet<String>,
 ) -> BTreeSet<RuntimeDependency> {
-    let mut ids = row.native_ids.iter().map(String::as_str).collect::<BTreeSet<_>>();
-    if let Some(rows) = row.query.as_ref().and_then(|query| query["rows"].as_object()) {
+    let mut ids = row
+        .native_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if let Some(rows) = row
+        .query
+        .as_ref()
+        .and_then(|query| query["rows"].as_object())
+    {
         ids.extend(rows.keys().map(String::as_str));
     }
     let mut keys = BTreeSet::from([RuntimeDependency::Common]);
@@ -221,7 +258,10 @@ pub(crate) fn dependencies(
 }
 
 pub(crate) fn scope_parts(parts: &[(RuntimeDependency, Option<String>)]) -> io::Result<String> {
-    if !parts.iter().any(|(key, value)| *key == RuntimeDependency::Common && value.is_some()) {
+    if !parts
+        .iter()
+        .any(|(key, value)| *key == RuntimeDependency::Common && value.is_some())
+    {
         return Err(unavailable());
     }
     let bytes = serde_json::to_vec(parts).map_err(io::Error::other)?;
