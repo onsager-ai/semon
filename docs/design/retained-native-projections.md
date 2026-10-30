@@ -61,6 +61,17 @@ through the existing removal writer after its physical observations, retaining
 its Source locks and read snapshot through the ledger comparison and write.
 PostgreSQL staging likewise consumes prepared physical absence with durable
 removal evidence; an unledgered missing path alone cannot authorize retirement.
+Completed PostgreSQL native relocation keeps the old path's exact removal claim
+until qualified successor publication acknowledges it. Re-observing that removed
+path during semantic staging is a metadata-only no-op only when both exact native
+ledgers, identities and immutable proof headers still qualify the recorded move.
+The relocation transaction retains its verbatim original request under the old
+path together with its exact hashed acknowledgement; an appended successor may
+advance the semantic relocation witness without rewriting that receipt. A retired
+marker alone cannot bypass the active-stage withdrawal guard or grant archive
+custody. This qualifies the ordinary PostgreSQL producer only. Transfer of the
+complete relocation authority, including its original receipt, acknowledgement,
+retired ledger and mutable semantic witness, remains unqualified.
 Resumed primitive indexing also sends physically absent, ledgered inputs through
 the ordinary removal writer before recording. If that advances a claim, the
 producer yields its old preparation. The next qualified negative primitive pins

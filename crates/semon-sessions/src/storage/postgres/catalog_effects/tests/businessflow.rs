@@ -1,7 +1,8 @@
 //! The ordinary native model must run after PG ingest, not be copied from the
 //! SQLite oracle, admitted publication and lease-bound Query bodies/fields.
 use super::*;
-use crate::events::EventCache;
+use crate::events::{EventCache, Outcome};
+use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
 use crate::storage::native_events::NativeEventStore;
 
 fn stage_inputs(
@@ -1877,7 +1878,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         assert!(
-            crate::storage::postgres::native_keys::read_meta(
+            native_keys::read_meta(
                 tx,
                 format!("raw-write-intent:{}", raw_intent.operation).as_bytes(),
                 131072
@@ -2410,6 +2411,108 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     moved_cache
         .begin_semantic_stage(&moved_paths, &moved_runtime)
         .unwrap();
+    let removed = vec![(codex.to_str().unwrap().to_owned(), Some(old_ledger.clone()))];
+    let receipt_key = format!("native-relocation-receipt:{}", codex.display());
+    let (relocation_request, removal_revision) = pool
+        .transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let request = native_keys::read_meta(tx, receipt_key.as_bytes(), 16384)?.unwrap();
+            let revision: i64 = tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&namespace.as_str().as_bytes(), &codex.to_str().unwrap().as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(withdrawal::remove(tx, &removed)?, Outcome::Written);
+            let after: i64 = tx.driver.query_one("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&namespace.as_str().as_bytes(), &codex.to_str().unwrap().as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(after, revision, "relocation replay preserves the stage claim");
+            Ok((request, revision))
+        })
+        .unwrap();
+    let ack_key = {
+        use sha2::Digest;
+        format!(
+            "native-relocation-ack:{:x}",
+            sha2::Sha256::digest(&relocation_request)
+        )
+    };
+    // Each missing binding refuses under the real active semantic stage. The
+    // deliberate error rolls the fixture mutation back before the next case.
+    for key in [
+        receipt_key.clone(),
+        ack_key,
+        format!("native_catalog_relocation:{}", codex.display()),
+        format!("source-retired:{}", codex.display()),
+        format!("native_codex_header:{}", codex.display()),
+        format!("native_codex_header:{}", archived.display()),
+    ] {
+        let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            native_keys::delete_meta(tx, key.as_bytes())?;
+            assert_eq!(
+                withdrawal::remove(tx, &removed)?,
+                Outcome::Conflict,
+                "missing relocation binding: {key}"
+            );
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert!(matches!(refused, Err(StorageError::Conflict)));
+    }
+    let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let mut request: serde_json::Value = serde_json::from_slice(&relocation_request).unwrap();
+        request[4]["size"] = serde_json::json!(moved_stat.size + 1);
+        native_keys::put_meta(
+            tx,
+            receipt_key.as_bytes(),
+            &serde_json::to_vec(&request).unwrap(),
+        )?;
+        assert_eq!(
+            withdrawal::remove(tx, &removed)?,
+            Outcome::Conflict,
+            "a reconstructed physical Stat has no exact original ACK"
+        );
+        Err::<(), _>(StorageError::Conflict)
+    });
+    assert!(matches!(refused, Err(StorageError::Conflict)));
+    for path in [&codex, &archived] {
+        let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3)", &[&namespace.as_str().as_bytes(), &path.to_str().unwrap().as_bytes(), &b"pending".as_slice()]).map_err(sqlstate::error)?;
+            assert_eq!(withdrawal::remove(tx, &removed)?, Outcome::Conflict);
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert!(matches!(refused, Err(StorageError::Conflict)));
+        let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            native_keys::put_meta(
+                tx,
+                format!("raw-write-inflight:{}", path.display()).as_bytes(),
+                b"pending",
+            )?;
+            assert_eq!(withdrawal::remove(tx, &removed)?, Outcome::Conflict);
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert!(matches!(refused, Err(StorageError::Conflict)));
+        let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("UPDATE semon_pg_native_page_generations SET chunks_header=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&namespace.as_str().as_bytes(), &path.to_str().unwrap().as_bytes(), &b"{}".as_slice()]).map_err(sqlstate::error)?;
+            assert!(
+                matches!(
+                    withdrawal::remove(tx, &removed),
+                    Err(StorageError::ScopeChanged)
+                ),
+                "immutable proof header must qualify the exact ledger"
+            );
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert!(matches!(refused, Err(StorageError::Conflict)));
+    }
+    let refused = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = vec![(
+            removed[0].0.clone(),
+            Some(crate::events::Ledger {
+                offset: old_ledger.offset + 1,
+                ..old_ledger.clone()
+            }),
+        )];
+        assert_eq!(
+            withdrawal::remove(tx, &changed)?,
+            Outcome::Conflict,
+            "an arbitrary removal ledger cannot bypass the active stage"
+        );
+        Err::<(), _>(StorageError::Conflict)
+    });
+    assert!(matches!(refused, Err(StorageError::Conflict)));
     let (moved_generation, moved_rows) = loop {
         let batch = moved_cache.semantic_batch(64).unwrap().unwrap();
         let model = moved_cache
@@ -2429,6 +2532,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             break (ack.1.unwrap(), rows);
         }
     };
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND revision=$3)", &[&namespace.as_str().as_bytes(), &codex.to_str().unwrap().as_bytes(), &removal_revision]).map_err(sqlstate::error)?.get(0);
+        assert!(
+            !pending,
+            "qualified successor publication acknowledges the old claim"
+        );
+        Ok(())
+    })
+    .unwrap();
     assert_eq!(
         moved_rows
             .iter()
@@ -2478,6 +2590,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     moved_cache
         .ingest(&format!("{:064x}", 156), &archived, "codex")
         .unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(
+            native_keys::read_meta(tx, receipt_key.as_bytes(), 16384)?.as_ref(),
+            Some(&relocation_request),
+            "append preserves the exact original relocation receipt"
+        );
+        assert_eq!(
+            withdrawal::remove(tx, &removed)?,
+            Outcome::Written,
+            "completed relocation replay follows the qualified appended proof"
+        );
+        Ok(())
+    })
+    .unwrap();
     let appended =
         crate::model::prepare_sources(&options, &mut moved_cache, &moved_inputs, 1790812804000)
             .unwrap();

@@ -44,6 +44,19 @@ pub(in crate::storage::postgres) fn remove(
     if replayed == files.len() {
         return Ok(Outcome::Written);
     }
+    let mut relocated = 0;
+    for (path, ledger) in files {
+        if super::super::source_lifecycle::relocation_removed(
+            tx,
+            path,
+            ledger.as_ref().ok_or(StorageError::InvalidArguments)?,
+        )? {
+            relocated += 1;
+        }
+    }
+    if relocated == files.len() {
+        return Ok(Outcome::Written);
+    }
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
     if active {
         return Ok(Outcome::Conflict);
