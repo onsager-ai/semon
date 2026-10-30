@@ -3094,15 +3094,29 @@ impl Stage {
                     // membership, just as in Owners::replay. Every relation
                     // still needs a real owner and evidence for both ends.
                     let real = |key: &String| prepared.relationships.endpoints.contains_key(key);
-                    let known = |key: &String| {
-                        real(key) || relation.stubs.iter().any(|stub| &stub.key == key)
+                    let known = |key: &String| -> Result<bool, StoreError> {
+                        if real(key) || relation.stubs.iter().any(|stub| &stub.key == key) {
+                            return Ok(true);
+                        }
+                        // A real endpoint staged on an earlier page is durable
+                        // evidence even though this prepared page omits it.
+                        // Relations are bounded above, so this stays bounded
+                        // at two namespace-scoped lookups per relation.
+                        tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",
+                            params![ns, key],
+                            |row| row.get(0),
+                        )
+                        .map_err(error)
                     };
-                    if !(real(&relation.from) || relation.to.as_ref().is_some_and(real))
-                        || !known(&relation.from)
-                        || relation.to.as_ref().is_some_and(|to| !known(to))
-                    {
-                        #[cfg(test)]
-                        eprintln!("semantic_record_conflict: relation_endpoint_evidence");
+                    let has_prepared_endpoint =
+                        real(&relation.from) || relation.to.as_ref().is_some_and(real);
+                    let from_known = known(&relation.from)?;
+                    let to_known = match relation.to.as_ref() {
+                        Some(to) => known(to)?,
+                        None => true,
+                    };
+                    if !has_prepared_endpoint || !from_known || !to_known {
                         #[cfg(test)]
                         eprintln!("semantic_record_conflict: relation_endpoint_evidence");
                         return Ok(Outcome::Conflict);

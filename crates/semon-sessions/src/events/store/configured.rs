@@ -9124,6 +9124,182 @@ mod tests {
         }
 
         #[test]
+        fn configured_semantic_domain67_absent_staged_endpoint_conflicts_without_effects() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[0];
+            let inputs = selector_inputs(options, false);
+            let mut cache = open(&f.config);
+            for (i, input) in inputs.iter().enumerate() {
+                cache
+                    .ingest(
+                        &format!("{:064x}", 6800 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
+            }
+            let paths = inputs
+                .iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+
+            let mut rejected = false;
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|input| {
+                        batch.paths.contains(
+                            &input.full_path(options).to_string_lossy().into_owned(),
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                if batch.phase == Phase::Publication {
+                    break;
+                }
+                if batch.phase != Phase::Relations {
+                    let model = crate::model::prepare_semantic_batch(
+                        options,
+                        &mut cache,
+                        &selected,
+                        &batch,
+                        1_790_000_000_000,
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        cache
+                            .record_semantic_batch(&batch, model.prepared())
+                            .unwrap(),
+                        Outcome::Written
+                    );
+                    continue;
+                }
+
+                let mut prepared = crate::model::prepare_staged_sources(
+                    options,
+                    &mut cache,
+                    &selected,
+                    &batch.context,
+                    true,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                let candidate = prepared
+                    .relationships
+                    .relations
+                    .iter()
+                    .find_map(|(id, relation)| {
+                        let real = |key: &String| {
+                            prepared.relationships.endpoints.contains_key(key)
+                        };
+                        let stub = |key: &String| {
+                            relation.stubs.iter().any(|entry| &entry.key == key)
+                        };
+                        if !(real(&relation.from)
+                            || relation.to.as_ref().is_some_and(real))
+                        {
+                            return None;
+                        }
+                        if !real(&relation.from)
+                            && !stub(&relation.from)
+                            && batch.context.endpoints.contains_key(&relation.from)
+                        {
+                            return Some((id.clone(), relation.from.clone(), true));
+                        }
+                        relation.to.as_ref().and_then(|to| {
+                            (!real(to)
+                                && !stub(to)
+                                && batch.context.endpoints.contains_key(to))
+                            .then(|| (id.clone(), to.clone(), false))
+                        })
+                    });
+                let Some(candidate) = candidate else {
+                    assert_eq!(
+                        cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                        Outcome::Written
+                    );
+                    continue;
+                };
+                assert!(
+                    f.db()
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1)",
+                            [&candidate.1],
+                            |row| row.get::<_, bool>(0),
+                        )
+                        .unwrap(),
+                    "the unchanged endpoint comes from this namespace's staged state"
+                );
+                let relation = prepared
+                    .relationships
+                    .relations
+                    .get_mut(&candidate.0)
+                    .unwrap();
+                let absent = "absent-staged-endpoint";
+                if candidate.2 {
+                    relation.from = absent.into();
+                } else {
+                    relation.to = Some(absent.into());
+                }
+                assert!(!batch.context.endpoints.contains_key(absent));
+                assert!(!prepared.relationships.endpoints.contains_key(absent));
+                assert!(prepared.relationships.relations[&candidate.0]
+                    .stubs
+                    .iter()
+                    .all(|stub| stub.key.as_str() != absent));
+                assert!(!f
+                    .db()
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1)",
+                        [absent],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap());
+
+                let before = shared_state(&f);
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                    Outcome::Conflict
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "an absent relation endpoint has zero transaction effects"
+                );
+                let relation = prepared
+                    .relationships
+                    .relations
+                    .get_mut(&candidate.0)
+                    .unwrap();
+                if candidate.2 {
+                    relation.from = candidate.1;
+                } else {
+                    relation.to = Some(candidate.1);
+                }
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, &prepared).unwrap(),
+                    Outcome::Written,
+                    "the original cross-page endpoint remains qualified"
+                );
+                rejected = true;
+                break;
+            }
+            assert!(rejected, "relation stage must contain a cross-page endpoint");
+        }
+
+        #[test]
         fn configured_semantic_domain67_claude_event_producer_projects_real_call() {
             let (f, _, options, _) = model_sources();
             let options = &options[1];
