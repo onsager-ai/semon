@@ -2695,7 +2695,7 @@ mod catalog_owner_tests {
                 evidence
                     .prepare_catalog(&mut work, model::now_ms())
                     .unwrap();
-                assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, usize>(0)).unwrap(), (index * 64).min(130));
+                assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, i64>(0)).unwrap(), (index * 64).min(130));
                 assert_eq!(
                     lock(&evidence.catalog_search).tickets[0].waiting,
                     BTreeSet::from([path.clone()])
@@ -2776,7 +2776,7 @@ mod catalog_owner_tests {
                 evidence
                     .prepare_catalog(&mut work, model::now_ms())
                     .unwrap();
-                assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, usize>(0)).unwrap(), expected);
+                assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, i64>(0)).unwrap(), expected);
                 assert_eq!(
                     lock(&evidence.catalog_search).tickets[0].waiting,
                     BTreeSet::from([path.clone()])
@@ -2827,7 +2827,7 @@ mod catalog_owner_tests {
             evidence
                 .prepare_catalog(&mut work, model::now_ms())
                 .unwrap();
-            assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, usize>(0)).unwrap(), expected);
+            assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary-%'", [], |row| row.get::<_, i64>(0)).unwrap(), expected);
             assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)", [&path], |row| row.get::<_, bool>(0)).unwrap());
             assert!(!work.events.as_ref().unwrap().qualified_catalog().unwrap());
         }
@@ -2847,7 +2847,7 @@ mod catalog_owner_tests {
         evidence
             .prepare_catalog(&mut work, model::now_ms())
             .unwrap();
-        assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id IN ('selected-parent','related-child')", [], |row| row.get::<_, usize>(0)).unwrap(), 2);
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE native_id IN ('selected-parent','related-child')", [], |row| row.get::<_, i64>(0)).unwrap(), 2);
         for path in [&parent, &child] {
             db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
         }
@@ -3216,7 +3216,7 @@ mod catalog_owner_tests {
             db.query_row(
                 "SELECT COUNT(*) FROM session_catalog_sources WHERE native_id LIKE 'ordinary%'",
                 [],
-                |row| row.get::<_, usize>(0)
+                |row| row.get::<_, i64>(0)
             )
             .unwrap(),
             64,
