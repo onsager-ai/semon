@@ -4029,7 +4029,9 @@ mod catalog_owner_tests {
                     .unwrap();
                 let mut journal = config.source_observations().unwrap();
                 let claims = journal.claims(std::slice::from_ref(&changed)).unwrap();
-                let before = claims[0].1.expect("the prepared source has a pending claim");
+                let before = claims[0]
+                    .1
+                    .expect("the prepared source has a pending claim");
                 let operation = crate::storage::source_observations::SourceOperation::capture(
                     config.namespace.as_str(),
                     "invalidate",
@@ -4069,7 +4071,12 @@ mod catalog_owner_tests {
             "refused publication must leave the new claim pending"
         );
         assert_eq!(
-            db.query_row("SELECT value FROM meta WHERE key='catalog_generation'", [], |row| row.get::<_, String>(0)).unwrap(),
+            db.query_row(
+                "SELECT value FROM meta WHERE key='catalog_generation'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
             generation,
             "the changed claim must fence the Catalog generation"
         );
