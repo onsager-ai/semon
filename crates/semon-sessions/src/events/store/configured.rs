@@ -4795,28 +4795,32 @@ mod tests {
             port.has_search_slots(&a.config.namespace, "model-0", None)
                 .is_err()
         );
-        assert!(matches!(
-            binding.proof_snapshot(),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
+        // The default local reader also restores this native binding. Opening
+        // metadata does not authorize a body; selected readers still qualify
+        // their exact row, recipes and byte proofs before provider I/O.
+        assert!(binding.proof_snapshot().is_ok());
         let navigation = crate::storage::navigation_store(binding.clone());
-        assert_eq!(
-            navigation.catalog_generation(),
-            Err(StorageError::NamespaceUpgradePending)
+        let generation = navigation.catalog_generation().unwrap();
+        assert!(
+            navigation
+                .bookmarked_target_keys("model-0")
+                .unwrap()
+                .is_empty()
         );
-        assert_eq!(
-            navigation.bookmarked_target_keys("model-0"),
-            Err(StorageError::NamespaceUpgradePending)
-        );
-        assert!(matches!(
-            navigation.native_resolution(
+        let resolution = navigation
+            .native_resolution(
                 "codex",
                 "model-0",
                 crate::CatalogReadScope::Current,
-                None
-            ),
-            Err(StorageError::NamespaceUpgradePending)
-        ));
+                Some(&generation),
+            )
+            .unwrap();
+        assert_eq!(
+            resolution.qualified_head(),
+            Some((generation.as_str(), false))
+        );
+        assert_eq!(resolution.keys, ["model-0"]);
+        assert!(resolution.metadata.is_some());
         let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
             a.config.namespace.as_str().into(),
             options[0].clone(),
@@ -4842,19 +4846,14 @@ mod tests {
                 .is_err()
         );
         assert!(a.config.catalog_generation().is_err());
-        let private = owned_semantic(&a.config);
-        assert!(matches!(
-            private.session_slots(&model.prepared().rows[0], None, 64),
-            Err(StoreError::Configured(
-                StorageError::NamespaceUpgradePending
-            ))
-        ));
         assert!(matches!(
             crate::storage::sqlite::open_configured_index(&a.config),
             Err(StorageError::MultiSourceUnqualified)
         ));
         assert_eq!(shared_state(&a), before);
     }
+
+    include!("configured_partial_reader_tests.rs");
 
     #[test]
     fn configured_semantic_model_refuses_noncurrent_schema_and_changed_raw_zero_writes() {

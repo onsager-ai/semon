@@ -946,6 +946,10 @@ fn read_inner(
         )?,
     };
     let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text)?;
+    // Query observations are optional metadata. Authenticate the selected row
+    // even without one before its recipes can admit any native/provider bytes.
+    let current = binding.runtime_binding_at(&transaction)?;
+    crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)?;
     let context = crate::storage::selected::range_context(
         &crate::storage::sqlite::selected::Context::owned(&transaction),
         &key,
