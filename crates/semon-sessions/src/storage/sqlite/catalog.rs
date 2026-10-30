@@ -9,7 +9,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, types::Value as SqlValue};
 use serde_json::Value;
-use std::io;
+use std::{io, time::Instant};
 
 /// Two direct keyset ranges avoid scanning earlier keys when many sessions
 /// share the same timestamp. OFFSET and mixed-order tuple comparisons do not
@@ -181,9 +181,24 @@ pub(crate) fn read_page(
     admit_search: bool,
     admission: &mut Option<crate::catalog::CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let timing = crate::native_timing::enabled().then(Instant::now);
     let mut connection = binding.connection()?;
+    if let Some(started) = timing {
+        eprintln!(
+            "semon sessions native: catalog_page_stage=open elapsed_us={} units=1",
+            started.elapsed().as_micros()
+        );
+    }
+    let snapshot_started = crate::native_timing::enabled().then(Instant::now);
     let transaction = connection.transaction()?;
     let qualified = binding.validate(&transaction, &binding.config().namespace)?;
+    if let Some(started) = snapshot_started {
+        eprintln!(
+            "semon sessions native: catalog_page_stage=snapshot elapsed_us={} units=1",
+            started.elapsed().as_micros()
+        );
+    }
+    let page_started = crate::native_timing::enabled().then(Instant::now);
     let reply = crate::catalog::read_page_snapshot_with_search(
         options,
         machine,
@@ -192,6 +207,12 @@ pub(crate) fn read_page(
         admit_search,
         admission,
     )?;
+    if let Some(started) = page_started {
+        eprintln!(
+            "semon sessions native: catalog_page_stage=page elapsed_us={} units=1",
+            started.elapsed().as_micros()
+        );
+    }
     transaction.commit()?;
     Ok(reply)
 }
