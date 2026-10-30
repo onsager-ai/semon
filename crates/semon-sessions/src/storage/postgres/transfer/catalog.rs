@@ -1095,6 +1095,45 @@ mod tests {
             Ok(())
         })
         .unwrap();
+        let recent = |config: &StoreConfig, seconds| {
+            let mut recent_options = options.clone();
+            recent_options.all = false;
+            recent_options.since = std::time::Duration::from_secs(seconds);
+            recent_options.source = crate::storage::HostSource::new(
+                config.namespace.clone(),
+                config.expected_stream_epoch.clone().unwrap(),
+            )
+            .unwrap()
+            .with_store(config.clone())
+            .unwrap();
+            let mut query = crate::Query::from_sources(std::sync::Arc::new(
+                crate::SessionSources::with_machines(vec![(String::new(), recent_options)]),
+            ));
+            let originals = host.clone();
+            let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
+                Ok(Box::new(originals.clone()))
+            };
+            query
+                .call_catalog_at(
+                    "list_sessions",
+                    &serde_json::json!({"limit":60}),
+                    Some(&readers),
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    1_790_812_860_001,
+                )
+                .unwrap()
+        };
+        // Capture the forward observations before reverse capture freezes the
+        // PG source: acquiring a new Catalog lease requires a permitted write.
+        // Current membership and the retained-only owner's time stay covered.
+        let mut forward_recent = Vec::new();
+        for (seconds, total) in [(30, 1), (120, 2)] {
+            eprintln!("transfer_query_window direction=pg seconds={seconds}");
+            let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+            let forward = recent(&config, seconds);
+            assert_eq!(forward["total"], total, "recent window {seconds}s");
+            forward_recent.push((seconds, forward));
+        }
         let backwards = stage(&config, &reverse, &[121; 32]);
         for category in [
             transfer::Category::PageGenerations,
@@ -1146,45 +1185,9 @@ mod tests {
         drop(reverse_db);
         eprintln!("transfer_query_direction reverse_sqlite");
         assert_eq!(ordinary(&reverse).unwrap(), forward_ordinary);
-        // Window membership still follows Current headers, while a wide
-        // window includes the original retained-only owner's own last time.
-        for (seconds, total) in [(30, 1), (120, 2)] {
-            let recent = |config: &StoreConfig| {
-                let mut recent_options = options.clone();
-                recent_options.all = false;
-                recent_options.since = std::time::Duration::from_secs(seconds);
-                recent_options.source = crate::storage::HostSource::new(
-                    config.namespace.clone(),
-                    config.expected_stream_epoch.clone().unwrap(),
-                )
-                .unwrap()
-                .with_store(config.clone())
-                .unwrap();
-                let mut query = crate::Query::from_sources(std::sync::Arc::new(
-                    crate::SessionSources::with_machines(vec![(String::new(), recent_options)]),
-                ));
-                let originals = host.clone();
-                let readers = move |_: &str, _: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
-                    Ok(Box::new(originals.clone()))
-                };
-                query
-                    .call_catalog_at(
-                        "list_sessions",
-                        &serde_json::json!({"limit":60}),
-                        Some(&readers),
-                        crate::SessionSourceReadMode::ProviderOnly,
-                        1_790_812_860_001,
-                    )
-                    .unwrap()
-            };
-            let forward = {
-                eprintln!("transfer_query_window direction=pg seconds={seconds}");
-                let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
-                recent(&config)
-            };
-            assert_eq!(forward["total"], total, "recent window {seconds}s");
+        for (seconds, forward) in forward_recent {
             eprintln!("transfer_query_window direction=sqlite seconds={seconds}");
-            assert_eq!(recent(&reverse), forward, "recent window {seconds}s");
+            assert_eq!(recent(&reverse, seconds), forward, "recent window {seconds}s");
         }
         assert_eq!(
             crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap(),
