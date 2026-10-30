@@ -39,6 +39,17 @@ import grants for carried observations, even when admission counters coincide.
 Forward and reverse reads with authorized
 originals and absent local Raw remain subject to exact-revision CI qualification.
 
+Runtime freshness uses per-session Facts/PID dependencies inside the existing
+namespace/admission/stream observation envelope. Native identities, names,
+reported runs, process evidence and source-CWD repository facts share one derived
+recipe on both engines. CWD metadata comes from an exact ledger in the qualified
+storage snapshot; shared derivation never opens an Options-derived SQLite file.
+The PostgreSQL producer prepares identity-and-activity-addressed dependency
+digests with its existing current Facts head, so ordinary reads use point keys
+without parsing whole Raw Facts. Immutable presentation manifests capture each
+row's derived runtime observation. An unrelated runtime change preserves a
+row's observation, while an unproved owner or dependency remains unavailable.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when

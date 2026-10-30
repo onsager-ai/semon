@@ -356,6 +356,7 @@ pub(crate) struct PresentationWitness {
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationObservations {
     pub(crate) runtime: Option<String>,
+    runtime_rows: BTreeMap<String, (String, String)>,
     pub(crate) facts_known: bool,
     pub(crate) selection_known: bool,
     pub(crate) machine_label: Option<String>,
@@ -471,6 +472,7 @@ impl PresentationObservations {
             .and_then(|runtime| binding.and_then(|binding| binding.witness(&runtime).ok()));
         Self {
             runtime,
+            runtime_rows: BTreeMap::new(),
             facts_known,
             selection_known,
             machine_label,
@@ -484,6 +486,26 @@ impl PresentationObservations {
     }
     fn source_key(source: &crate::model::summary::CatalogSource) -> io::Result<String> {
         crate::retention::source_generation(std::slice::from_ref(source)).map_err(io::Error::other)
+    }
+    /// The real producer supplies a freshly derived, storage-qualified scope;
+    /// a carried row's saved Query value alone cannot establish freshness.
+    pub(crate) fn capture_runtime(
+        &mut self,
+        row: &crate::model::summary::CatalogRow,
+        runtime: String,
+    ) -> io::Result<()> {
+        if self.runtime_rows.len() >= 128 && !self.runtime_rows.contains_key(&row.key) {
+            return Err(io::Error::other("presentation runtime budget exceeded"));
+        }
+        let source = crate::retention::source_generation(&row.sources).map_err(io::Error::other)?;
+        self.runtime_rows.entry(row.key.clone()).or_insert((source, runtime));
+        Ok(())
+    }
+    pub(crate) fn runtime_for(&self, row: &crate::model::summary::CatalogRow) -> Option<String> {
+        self.runtime.as_ref()?;
+        let source = crate::retention::source_generation(&row.sources).ok()?;
+        let (saved, runtime) = self.runtime_rows.get(&row.key)?;
+        (saved == &source).then(|| runtime.clone())
     }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
         Self::source_key(source)
@@ -588,7 +610,7 @@ impl PresentationObservations {
         }
         crate::catalog::recorded_status(
             row,
-            self.runtime.as_deref(),
+            self.runtime_for(row).as_deref(),
             row.sources.iter().all(|source| {
                 Self::source_key(source)
                     .ok()

@@ -17,7 +17,7 @@ use std::{
     time::Instant,
 };
 
-mod runtime;
+pub(crate) mod runtime;
 pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {

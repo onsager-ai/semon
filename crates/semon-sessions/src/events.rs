@@ -1235,6 +1235,12 @@ pub(crate) trait IndexStore: Send {
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
         Ok(None)
     }
+    fn runtime_source_cwds(
+        &self,
+        _sources: &[crate::model::summary::CatalogSource],
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        Err(StoreError::Configured(crate::storage::StorageError::Unavailable))
+    }
     fn begin_semantic_stage(
         &mut self,
         paths: &[String],
@@ -1794,6 +1800,13 @@ impl EventCache {
             .transpose()
             .map(Option::flatten)
             .map_err(|error| io::Error::other(error.to_string()))
+    }
+    pub(crate) fn runtime_source_cwds(
+        &self,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> io::Result<std::collections::BTreeSet<String>> {
+        self.store.as_ref().ok_or_else(|| io::Error::other("runtime metadata store unavailable"))?
+            .runtime_source_cwds(sources).map_err(io::Error::other)
     }
     #[allow(dead_code)]
     pub(crate) fn open_semantic(
