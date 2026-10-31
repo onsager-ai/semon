@@ -17,6 +17,9 @@ impl OwnerClosurePort for Plan<'_> {
     fn members(&self, kind: &str, id: &str) -> rusqlite::Result<Vec<String>> {
         self.db.prepare("SELECT source_path FROM main.catalog_semantic_inputs WHERE namespace=?1 AND harness='claude' AND is_top=1 AND (native_id=?2 AND ?3='lineage:claude' OR source_path IN (SELECT source_path FROM main.catalog_native_dependencies WHERE namespace=?1 AND harness=?3 AND native_id=?2)) ORDER BY source_path LIMIT 65")?.query_map(params![self.ns,id,kind], |r| r.get(0))?.collect()
     }
+    fn native_members(&self, harness: &str, id: &str) -> rusqlite::Result<Vec<String>> {
+        self.db.prepare("SELECT source_path FROM main.catalog_semantic_inputs WHERE namespace=?1 AND harness COLLATE BINARY=?2 COLLATE BINARY AND native_id COLLATE BINARY=?3 COLLATE BINARY ORDER BY source_path COLLATE BINARY LIMIT 65")?.query_map(params![self.ns,harness,id], |r| r.get(0))?.collect()
+    }
 }
 
 impl PublicationPlanPort for Plan<'_> {
@@ -69,5 +72,72 @@ impl ContextPort for Plan<'_> {
         }
         .endpoint_with_budget(key, used)
         .map(Some)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::store::semantic_stage::owner_closure_with;
+
+    fn owner_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE main.catalog_semantic_inputs(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT COLLATE NOCASE NOT NULL,native_id TEXT COLLATE NOCASE NOT NULL,is_top INTEGER NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,source_path));
+             CREATE TABLE main.files(namespace TEXT NOT NULL,path TEXT NOT NULL,links TEXT NOT NULL,PRIMARY KEY(namespace,path));",
+        )
+        .unwrap();
+        db
+    }
+
+    fn add_owner_input(
+        db: &Connection,
+        namespace: &str,
+        path: &str,
+        harness: &str,
+        native_id: &str,
+    ) {
+        db.execute(
+            "INSERT INTO main.catalog_semantic_inputs VALUES(?1,?2,?3,?4,1,'{}')",
+            params![namespace, path, harness, native_id],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO main.files VALUES(?1,?2,'{}')",
+            params![namespace, path],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn codex_native_members_are_exact_and_namespace_scoped() {
+        let db = owner_db();
+        for (namespace, path, harness, id) in [
+            ("source-a", "z-peer", "codex", "Case-ID"),
+            ("source-a", "a-seed", "codex", "Case-ID"),
+            ("source-a", "lower-case", "codex", "case-id"),
+            ("source-a", "different-id", "codex", "other-id"),
+            ("source-a", "different-harness", "claude", "Case-ID"),
+            ("source-b", "different-namespace", "codex", "Case-ID"),
+        ] {
+            add_owner_input(&db, namespace, path, harness, id);
+        }
+
+        let source_a = Plan {
+            db: &db,
+            ns: "source-a",
+        };
+        assert_eq!(
+            owner_closure_with(&source_a, "a-seed").unwrap(),
+            vec!["a-seed".to_owned(), "z-peer".to_owned()]
+        );
+        let source_b = Plan {
+            db: &db,
+            ns: "source-b",
+        };
+        assert_eq!(
+            owner_closure_with(&source_b, "different-namespace").unwrap(),
+            vec!["different-namespace".to_owned()]
+        );
     }
 }

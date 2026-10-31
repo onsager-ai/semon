@@ -817,8 +817,8 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
     )?;
     Ok(!pending)
 }
-/// A Claude top-level identity is the exact union of its native continuation,
-/// session and bridge links. Semantic parent/edge neighbours are excluded.
+/// Codex groups use staged native identity; Claude top-level identities use
+/// native continuation, session and bridge links. Semantic neighbours are excluded.
 struct OrdinaryOwnerPlan<'a>(&'a Connection);
 impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
     fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>> {
@@ -835,6 +835,9 @@ impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
     }
     fn members(&self, kind: &str, id: &str) -> rusqlite::Result<Vec<String>> {
         self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=1 AND (native_id=?1 AND ?2='lineage:claude' OR source_path IN (SELECT source_path FROM catalog_native_dependencies WHERE harness=?2 AND native_id=?1)) ORDER BY source_path LIMIT 65")?.query_map(params![id,kind], |r| r.get(0))?.collect()
+    }
+    fn native_members(&self, harness: &str, id: &str) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness COLLATE BINARY=?1 COLLATE BINARY AND native_id COLLATE BINARY=?2 COLLATE BINARY ORDER BY source_path COLLATE BINARY LIMIT 65")?.query_map(params![harness,id], |r| r.get(0))?.collect()
     }
 }
 impl PublicationPlanPort for OrdinaryOwnerPlan<'_> {
@@ -3000,6 +3003,127 @@ mod tests {
     use crate::storage::{
         source_observations::SourceObservationStore, sqlite::source_journal::SourceJournal,
     };
+    use std::collections::BTreeMap;
+
+    fn physical_owner_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE catalog_semantic_inputs(source_path TEXT PRIMARY KEY,harness TEXT COLLATE NOCASE NOT NULL,native_id TEXT COLLATE NOCASE NOT NULL,is_top INTEGER NOT NULL);
+             CREATE TABLE files(path TEXT PRIMARY KEY,links TEXT NOT NULL);",
+        )
+        .unwrap();
+        db
+    }
+
+    fn add_physical_owner_input(db: &Connection, path: &str, harness: &str, native_id: &str) {
+        db.execute(
+            "INSERT INTO catalog_semantic_inputs VALUES(?1,?2,?3,1)",
+            params![path, harness, native_id],
+        )
+        .unwrap();
+        db.execute("INSERT INTO files VALUES(?1,'{}')", [path]).unwrap();
+    }
+
+    #[test]
+    fn codex_physical_owner_closure_is_complete_exact_and_bounded() {
+        let db = physical_owner_db();
+        for count in [1, 2, 64] {
+            let id = format!("rollout-{count}");
+            for i in (0..count).rev() {
+                add_physical_owner_input(
+                    &db,
+                    &format!("group-{count}/source-{i:02}"),
+                    "codex",
+                    &id,
+                );
+            }
+            let expected = (0..count)
+                .map(|i| format!("group-{count}/source-{i:02}"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                owner_closure_with(&OrdinaryOwnerPlan(&db), &expected[0]).unwrap(),
+                expected
+            );
+        }
+
+        for i in 0..65 {
+            add_physical_owner_input(
+                &db,
+                &format!("overflow/source-{i:02}"),
+                "codex",
+                "rollout-overflow",
+            );
+        }
+        let error = owner_closure_with(&OrdinaryOwnerPlan(&db), "overflow/source-00")
+            .unwrap_err();
+        match error {
+            rusqlite::Error::ToSqlConversionFailure(source) => {
+                assert_eq!(source.to_string(), "semantic_physical_owner_source_budget");
+            }
+            error => panic!("unexpected source budget error: {error}"),
+        }
+    }
+
+    #[test]
+    fn codex_physical_owner_closure_uses_binary_id_and_harness_equality() {
+        let db = physical_owner_db();
+        for (path, harness, id) in [
+            ("rollout/a", "codex", "Case-ID"),
+            ("rollout/b", "codex", "Case-ID"),
+            ("rollout/case", "codex", "case-id"),
+            ("rollout/other", "codex", "other-id"),
+            ("rollout/claude", "claude", "Case-ID"),
+        ] {
+            add_physical_owner_input(&db, path, harness, id);
+        }
+        assert_eq!(
+            owner_closure_with(&OrdinaryOwnerPlan(&db), "rollout/a").unwrap(),
+            vec!["rollout/a".to_owned(), "rollout/b".to_owned()]
+        );
+    }
+
+    struct TestPublicationPlan {
+        pending: Vec<String>,
+        sources: BTreeMap<String, Vec<String>>,
+    }
+
+    impl PublicationPlanPort for TestPublicationPlan {
+        fn pending(&self) -> rusqlite::Result<Vec<String>> {
+            Ok(self.pending.clone())
+        }
+        fn sources(&self, key: &str) -> rusqlite::Result<Vec<String>> {
+            Ok(self.sources.get(key).cloned().unwrap_or_default())
+        }
+        fn owners(&self, path: &str) -> rusqlite::Result<Vec<String>> {
+            Ok(self
+                .sources
+                .iter()
+                .filter(|(_, paths)| paths.iter().any(|candidate| candidate == path))
+                .map(|(key, _)| key.clone())
+                .collect())
+        }
+    }
+
+    #[test]
+    fn publication_packing_defers_an_owner_that_will_not_fit() {
+        let plan = TestPublicationPlan {
+            pending: vec!["owner-a".to_owned(), "owner-b".to_owned()],
+            sources: BTreeMap::from([
+                (
+                    "owner-a".to_owned(),
+                    (0..60).map(|i| format!("a-{i:02}")).collect(),
+                ),
+                (
+                    "owner-b".to_owned(),
+                    (0..5).map(|i| format!("b-{i:02}")).collect(),
+                ),
+            ]),
+        };
+        let groups = publication_groups_with(&plan).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].len(), 60);
+        assert!(groups[0].iter().all(|path| path.starts_with("a-")));
+    }
 
     fn header_repair_journal(store: &SqliteStore) -> SourceJournal {
         SourceJournal::owned(store.owner.clone())
