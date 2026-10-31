@@ -74,9 +74,7 @@ fn edge_source_needs(
             .map(|(_, recipe)| recipe)
             .filter(|recipe| !recipe.is_null())
         {
-            let path = recipe["path"]
-                .as_str()
-                .ok_or(StorageError::ScopeChanged)?;
+            let path = recipe["path"].as_str().ok_or(StorageError::ScopeChanged)?;
             let source: crate::model::summary::CatalogSource =
                 serde_json::from_value(recipe["source"].clone())
                     .map_err(|_| StorageError::ScopeChanged)?;
@@ -114,13 +112,8 @@ fn qualify_context_candidate(
         .map_err(|_| StorageError::ScopeChanged)?;
     if let Some(query) = &row.query
         && (query["source_generation"] != source_generation
-            || !crate::model::summary::query_observation_matches(
-                query,
-                &row.sources,
-                false,
-                None,
-            )
-            .map_err(|_| StorageError::ScopeChanged)?)
+            || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
+                .map_err(|_| StorageError::ScopeChanged)?)
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -162,7 +155,8 @@ fn selected_edge_context(
         return Err(StorageError::Busy);
     }
 
-    let mut candidates = BTreeMap::<(String, bool), Option<crate::model::summary::CatalogRow>>::new();
+    let mut candidates =
+        BTreeMap::<(String, bool), Option<crate::model::summary::CatalogRow>>::new();
     let mut qualified = BTreeSet::<(String, bool)>::new();
     for need in needs {
         match context_sources.get(&need.source.path) {
@@ -186,12 +180,8 @@ fn selected_edge_context(
                 };
                 if candidate.key != *owner
                     || !candidate.sources.contains(&need.source)
-                    || crate::catalog::source_relative(
-                        options,
-                        &candidate.harness,
-                        &need.source,
-                    )
-                    .is_none()
+                    || crate::catalog::source_relative(options, &candidate.harness, &need.source)
+                        .is_none()
                 {
                     continue;
                 }
