@@ -1430,13 +1430,10 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         leftovers.sort();
-        #[cfg(unix)]
-        let expected = [FACTS_FILE, "facts.json.sources.sqlite"].as_slice();
-        #[cfg(not(unix))]
         let expected = [FACTS_FILE].as_slice();
         assert_eq!(
             leftovers, expected,
-            "only the original and derived projection remain"
+            "receiver and canonical Facts reads do not create a storage projection"
         );
     }
 
