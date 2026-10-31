@@ -5584,7 +5584,10 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
     second.top("peer", &[human("peer", ts(23, 0), "needle newer")]);
     let (first_options, first_config) = configured_options(&first, "catalog-first", 'b');
     let (second_options, second_config) = configured_options(&second, "catalog-second", 'c');
-    for (options, config) in [(&first_options, &first_config), (&second_options, &second_config)] {
+    for (options, config) in [
+        (&first_options, &first_config),
+        (&second_options, &second_config),
+    ] {
         let mut cache = admitted_semantic_cache(config);
         crate::model::observe_catalog(
             options,
