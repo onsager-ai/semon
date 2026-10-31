@@ -5003,7 +5003,7 @@ mod tests {
         cache
             .ingest(&"b".repeat(64), &owner_path, "claude")
             .unwrap();
-        cache.ingest(&"b".repeat(64), &peer_path, "claude").unwrap();
+        cache.ingest(&"c".repeat(64), &peer_path, "claude").unwrap();
         let mut inputs = vec![inputs[1].clone(), peer_input];
         inputs.sort();
         let (batch, model) =
@@ -5181,7 +5181,7 @@ mod tests {
         .unwrap();
         caches[1].ingest(&"b".repeat(64), &path, "claude").unwrap();
         caches[1]
-            .ingest(&"b".repeat(64), &peer_path, "claude")
+            .ingest(&"c".repeat(64), &peer_path, "claude")
             .unwrap();
         let mut replacement_inputs = vec![inputs[1].clone(), peer_input.clone()];
         replacement_inputs.sort();
