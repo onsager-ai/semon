@@ -871,6 +871,70 @@ fn archived_event_index_survives_absence_without_current_membership() {
         .unwrap();
     let connection = fixture.db();
     let before = indexed_rows(&connection, path.to_str().unwrap());
+    let session_key: String = connection
+        .query_row(
+            "SELECT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND source_path=?1",
+            [path.to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let projection_cohorts = || {
+        let current = connection
+            .query_row(
+                "SELECT c.metadata,p.generation,p.version,p.source_generation FROM main.session_catalog c JOIN main.session_slot_projections p ON p.namespace=c.namespace AND p.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",
+                [&session_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let history = connection
+            .query_row(
+                "SELECT h.metadata,p.generation,p.version,p.source_generation FROM main.session_history_catalog h JOIN main.session_history_projections p ON p.namespace=h.namespace AND p.session_key=h.session_key WHERE h.namespace=semon_namespace() AND h.session_key=?1",
+                [&session_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u32>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .unwrap();
+        (current, history)
+    };
+    let (main_before, history_before) = projection_cohorts();
+    assert_ne!(
+        main_before.0, history_before.0,
+        "append publication keeps the first Catalog cohort in History"
+    );
+    assert_ne!(
+        main_before.1, history_before.1,
+        "the current and immutable History headers belong to different generations"
+    );
+    assert_ne!(main_before.3, history_before.3);
+    let main_row: crate::model::summary::CatalogRow =
+        serde_json::from_str(&main_before.0).unwrap();
+    let history_row: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_before.0).unwrap();
+    let main_source = main_row
+        .sources
+        .iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    let history_source = history_row
+        .sources
+        .iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    assert_eq!(main_source.prefix_sha256, ready.source.prefix_sha256);
+    assert_ne!(history_source.prefix_sha256, ready.source.prefix_sha256);
     assert!(
         before.len() >= 5,
         "fixture includes event and token metadata"
@@ -906,13 +970,180 @@ fn archived_event_index_survives_absence_without_current_membership() {
             "ordinary disappearance still removes unmarked indexes"
         );
         assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let (main_after, history_after) = projection_cohorts();
+        let before_metadata: Value = serde_json::from_str(&main_before.0).unwrap();
+        let mut after_metadata: Value = serde_json::from_str(&main_after.0).unwrap();
+        assert_eq!(before_metadata["lifecycle"], "current");
+        assert_eq!(after_metadata["lifecycle"], "retained");
+        after_metadata["lifecycle"] = before_metadata["lifecycle"].clone();
+        assert_eq!(
+            after_metadata, before_metadata,
+            "retirement changes only the main Catalog lifecycle"
+        );
+        assert_eq!(
+            (&main_after.1, main_after.2, &main_after.3),
+            (&main_before.1, main_before.2, &main_before.3),
+            "retirement keeps the main slot header unchanged"
+        );
+        assert_eq!(history_after, history_before, "History remains immutable");
     }
+    let retained_marker: String = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retained_marker, marker);
     let retained = crate::source_projection_ready(&fixture.options, "claude", relative)
         .unwrap()
         .unwrap();
     assert_eq!(retained.lifecycle, "retained");
     assert_eq!(retained.source, ready.source);
+    assert_eq!(retained.projection_generation, ready.projection_generation);
     assert_eq!(fixture.body("").1["items"], json!([]));
+}
+
+#[test]
+fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
+    let fixture = Fixture::new();
+    fixture.publish(2);
+    use std::io::Write;
+    for (id, name) in [
+        ("session-00000", "fallback"),
+        ("session-00001", "invalid-main"),
+    ] {
+        let path = fixture
+            .options
+            .claude_home
+            .join(format!("projects/project/{id}.jsonl"));
+        writeln!(
+            fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{}",
+            json!({
+                "type":"user",
+                "uuid":format!("{name}-append"),
+                "message":{"role":"user","content":format!("{name} append")}
+            })
+        )
+        .unwrap();
+    }
+    native_refresh(&fixture);
+    let connection = fixture.db();
+    let paths = [
+        fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00000.jsonl"),
+        fixture
+            .options
+            .claude_home
+            .join("projects/project/session-00001.jsonl"),
+    ];
+    let session_keys = paths
+        .iter()
+        .map(|path| {
+            connection
+                .query_row(
+                    "SELECT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND source_path=?1",
+                    [path.to_str().unwrap()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let history: (String, String) = connection
+        .query_row(
+            "SELECT h.metadata,p.generation FROM main.session_history_catalog h JOIN main.session_history_projections p ON p.namespace=h.namespace AND p.session_key=h.session_key WHERE h.namespace=semon_namespace() AND h.session_key=?1",
+            [&session_keys[0]],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let history_row: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history.0).unwrap();
+    let history_source = history_row
+        .sources
+        .iter()
+        .find(|source| source.path == paths[0])
+        .unwrap()
+        .clone();
+    let current_generation: String = connection
+        .query_row(
+            "SELECT generation FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1",
+            [&session_keys[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(current_generation, history.1);
+
+    for (index, path) in paths.iter().enumerate() {
+        connection
+            .execute(
+                "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=semon_namespace() AND session_key=?1 AND source_path=?2",
+                rusqlite::params![session_keys[index], path.to_str().unwrap()],
+            )
+            .unwrap();
+    }
+
+    // Model a latest Catalog row that no longer represents this retained path.
+    // Its matching main header uses the new empty source vector; readiness must
+    // return the immutable History metadata and header as one cohort.
+    let current_metadata: String = connection
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+            [&session_keys[0]],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut current_row: Value = serde_json::from_str(&current_metadata).unwrap();
+    current_row["sources"] = json!([]);
+    current_row["native_ids"] = json!([]);
+    connection
+        .execute(
+            "UPDATE main.session_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+            rusqlite::params![session_keys[0], current_row.to_string()],
+        )
+        .unwrap();
+    let empty_source_generation =
+        crate::retention::source_generation(&[]).expect("empty source vector hashes");
+    connection
+        .execute(
+            "UPDATE main.session_slot_projections SET source_generation=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+            rusqlite::params![session_keys[0], empty_source_generation],
+        )
+        .unwrap();
+
+    let fallback = crate::source_projection_ready(
+        &fixture.options,
+        "claude",
+        "projects/project/session-00000.jsonl",
+    )
+        .unwrap()
+        .unwrap();
+    assert_eq!(fallback.lifecycle, "retained");
+    assert_eq!(fallback.source.native_id, history_source.native_id);
+    assert_eq!(fallback.source.offset, history_source.offset);
+    assert_eq!(fallback.source.prefix_sha256, history_source.prefix_sha256);
+    assert_eq!(fallback.projection_generation, history.1);
+    assert_ne!(fallback.projection_generation, current_generation);
+
+    // This path remains in the latest row, so its unsupported main header is
+    // selected and must refuse instead of falling back to its older History row.
+    connection
+        .execute(
+            "UPDATE main.session_slot_projections SET version=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+            rusqlite::params![session_keys[1], crate::slot_projection::VERSION + 1],
+        )
+        .unwrap();
+    assert!(
+        crate::source_projection_ready(
+            &fixture.options,
+            "claude",
+            "projects/project/session-00001.jsonl"
+        )
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]

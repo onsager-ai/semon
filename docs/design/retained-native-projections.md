@@ -194,12 +194,16 @@ rebuild or grant authority to read different source bytes.
 pre-eviction guard. It never creates an index, reads bodies, opens the global
 EventCache or builds a model. It checks exact allowlisted path mappings, the
 supported recipe version, per-session source digest and complete publication
-marker. It prefers current observations, then qualified retained observations;
-pending source observations, ambiguous references, missing headers and unsupported/stale versions return
-not-ready. At most eight owner metadata records, each at most 1 MiB with 64 source
-references, are considered. SQLite checks stored byte length before returning
-metadata; over-budget context defers eviction. Their source
-vectors are necessary relationship context for the selected source.
+marker. Current mappings use their main Catalog row and matching slot header.
+For a retained mapping, the latest main Catalog row and its matching slot header
+are selected when that row contains the exact path; immutable History metadata
+and its own header are used only when the latest row omits the path. The two
+cohorts are never mixed. Pending source observations, ambiguous references,
+missing headers and unsupported/stale versions return not-ready. At most eight
+owner metadata records, each at most 1 MiB with 64 source references, are
+considered. SQLite checks stored byte length before returning metadata;
+over-budget context defers eviction. Their source vectors are necessary
+relationship context for the selected source.
 
 The result is historical source provenance, not permission to remove bytes or
 control a native session. Before removing local bytes, an authorized host must
