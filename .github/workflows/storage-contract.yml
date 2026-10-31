@@ -143,7 +143,9 @@ jobs:
             events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals \
             events::store::tests::event_cache_uses_owner_committed_discovery_witness \
             events::store::tests::recovery_witness_checks_marker_created_by_ack_trigger \
-            events::store::tests::recovery_witness_requalifies_mutable_source_journal_rows; do
+            events::store::tests::recovery_witness_requalifies_mutable_source_journal_rows \
+            events::store::configured::tests::domain52::configured_semantic_domain94_name_source_change_refuses_without_effects \
+            events::store::configured::tests::domain52::configured_semantic_domain94_name_members_preserve_missing_custody_then_page; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/namespace-fixture-case.log" 2>&1 || case_result=$?
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/namespace-fixture-case.log"; then case_result=1; fi
