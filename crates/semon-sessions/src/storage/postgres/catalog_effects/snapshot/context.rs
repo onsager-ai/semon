@@ -108,7 +108,12 @@ impl ContextLookup for Snapshot<'_, '_> {
     fn relative(
         &self,
         key: &str,
-    ) -> io::Result<Option<(String, Option<crate::storage::catalog::CatalogObservationOwner>)>> {
+    ) -> io::Result<
+        Option<(
+            String,
+            Option<crate::storage::catalog::CatalogObservationOwner>,
+        )>,
+    > {
         let current = self.catalog(key, false).map_err(io::Error::other)?;
         let current_harness = current.as_ref().map(|row| row.harness.clone());
         let lifecycle = if current_harness.is_some() {

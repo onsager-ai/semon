@@ -1503,7 +1503,10 @@ mod sqlite_tests {
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].name, "Harbor queue");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Retained);
-        assert_eq!(found.rows[0].owner, Some(crate::storage::catalog::CatalogObservationOwner::Catalog));
+        assert_eq!(
+            found.rows[0].owner,
+            Some(crate::storage::catalog::CatalogObservationOwner::Catalog)
+        );
         // An absent retained source is not a readable current fallback.
         connection
             .execute("DELETE FROM main.session_history_catalog", [])
@@ -1554,8 +1557,25 @@ mod sqlite_tests {
             vec!["target-00000", "target-00001"]
         );
         assert_eq!(changed, baseline);
-        let first_bytes = serde_json::to_vec(&first.rows.iter().map(|selected| &selected.row).collect::<Vec<_>>()).unwrap();
-        assert_eq!(serde_json::to_vec(&grown.rows.iter().map(|selected| &selected.row).collect::<Vec<_>>()).unwrap(), first_bytes);
+        let first_bytes = serde_json::to_vec(
+            &first
+                .rows
+                .iter()
+                .map(|selected| &selected.row)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_vec(
+                &grown
+                    .rows
+                    .iter()
+                    .map(|selected| &selected.row)
+                    .collect::<Vec<_>>()
+            )
+            .unwrap(),
+            first_bytes
+        );
         eprintln!(
             "metadata q fixed-two-row SQL VM {baseline}->{changed}; single in-memory read {first_micros}->{grown_micros}us; response {} bytes; unrelated rows0->20000 (not a restart or browser journey)",
             first_bytes.len()

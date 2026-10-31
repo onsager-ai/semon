@@ -2518,6 +2518,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     snapshot,
                 )
                 .map_err(|_| StorageError::ScopeChanged)?;
+                let rows = rows.into_iter().map(|selected| selected.row).collect::<Vec<_>>();
                 Ok((rows, page, first))
             },
         )
@@ -3826,13 +3827,38 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let runtime = crate::native_evidence::query_runtime_generation(&options)
                 .map_err(|_| StorageError::ScopeChanged)?;
             let expected = snapshot
-                .runtime_observation(&options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
+                .runtime_observation(
+                    &options,
+                    &row,
+                    crate::storage::catalog::CatalogObservationOwner::Catalog,
+                    &runtime,
+                )
                 .map_err(|_| StorageError::ScopeChanged)?
                 .ok_or(StorageError::ScopeChanged)?;
             let mut retained_display = row.clone();
             retained_display.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-            assert_eq!(snapshot.runtime_observation(&options, &retained_display, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime).unwrap().as_deref(), Some(expected.as_str()));
-            assert!(snapshot.runtime_observation(&options, &retained_display, crate::storage::catalog::CatalogObservationOwner::History, &runtime).is_err());
+            assert_eq!(
+                snapshot
+                    .runtime_observation(
+                        &options,
+                        &retained_display,
+                        crate::storage::catalog::CatalogObservationOwner::Catalog,
+                        &runtime
+                    )
+                    .unwrap()
+                    .as_deref(),
+                Some(expected.as_str())
+            );
+            assert!(
+                snapshot
+                    .runtime_observation(
+                        &options,
+                        &retained_display,
+                        crate::storage::catalog::CatalogObservationOwner::History,
+                        &runtime
+                    )
+                    .is_err()
+            );
 
             if !crate::model::summary::query_observation_matches(
                 saved,
