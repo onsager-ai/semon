@@ -4510,10 +4510,22 @@ mod tests {
         assert_eq!(reply["total"], part.rows.len());
         let summaries = reply["sessions"].as_array().unwrap();
         assert_eq!(summaries.len(), part.rows.len());
-        for row in part.rows.values() {
+        let mut children = std::collections::BTreeMap::<String, Vec<String>>::new();
+        for (id, row) in &part.rows {
+            if let Some(parent) = row["summary"]["parent"].as_str() {
+                children
+                    .entry(parent.to_owned())
+                    .or_default()
+                    .push(id.clone());
+            }
+        }
+        for (id, row) in &part.rows {
+            let mut expected = row["summary"].clone();
+            expected["children"] =
+                serde_json::json!(children.get(id).cloned().unwrap_or_default());
             assert!(
-                summaries.contains(&row["summary"]),
-                "existing Query filters/rendering consume every persisted summary"
+                summaries.contains(&expected),
+                "existing Query preserves every persisted summary field and rebuilds children from the output cohort"
             );
         }
         assert_eq!(
@@ -5072,21 +5084,56 @@ mod tests {
             crate::storage::sqlite::history::OriginalHistory::admitted(&db, &source).unwrap();
         for row in &model.prepared().rows {
             assert!(preserve_original(&history, row).unwrap());
-            db.execute(
-                "DELETE FROM session_catalog WHERE namespace=?1 AND session_key=?2",
-                params![config.namespace.as_str(), row.key],
-            )
-            .unwrap();
-            crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-                &db,
-                config.namespace.as_str(),
-                &row.key,
-                source_owner.admission(),
-                config.expected_stream_epoch.as_deref().unwrap(),
-            )
-            .unwrap();
         }
         db.execute_batch("COMMIT").unwrap();
+        let original_keys = model
+            .prepared()
+            .rows
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<BTreeSet<_>>();
+        drop(history);
+        drop(source);
+        drop(source_owner);
+
+        // Retire through the admitted native producer. The exact original
+        // History recipes were copied above before these temporary sources
+        // disappear, and publication records their normal retained lifecycle.
+        for input in &inputs {
+            fs::remove_file(input.full_path(options)).unwrap();
+        }
+        cache
+            .retire_scoped_sources(
+                options,
+                &inputs,
+                &BTreeSet::new(),
+                &crate::facts::MachineFacts::Local,
+            )
+            .unwrap();
+        let (retirement_batch, retirement_model) =
+            model_ready_many(&fixture, &mut cache, options, &inputs, "history-retirement");
+        assert!(retirement_model.prepared().rows.is_empty());
+        assert_eq!(
+            retirement_model
+                .prepared()
+                .relationships
+                .retired_owners
+                .iter()
+                .map(|row| row.key.clone())
+                .collect::<BTreeSet<_>>(),
+            original_keys,
+            "the normal producer retires every owner from the original cohort"
+        );
+        assert_eq!(
+            cache
+                .publish_semantic_catalog(&retirement_batch, retirement_model.prepared())
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        cache
+            .finish_semantic_stage(retirement_batch.epoch)
+            .unwrap();
         let mut finite = options.clone();
         finite.all = false;
         finite.since = std::time::Duration::from_millis(1);
