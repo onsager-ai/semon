@@ -837,6 +837,9 @@ pub(crate) fn read_page_snapshot_with_search(
     admit_search: bool,
     admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let timing_enabled = crate::native_timing::enabled();
+    let mut measurements = crate::native_timing::Measurements::new(timing_enabled);
+    let total_started = measurements.start();
     transaction.require_current()?;
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
@@ -853,6 +856,7 @@ pub(crate) fn read_page_snapshot_with_search(
             false,
         ));
     }
+    let capture_started = measurements.start();
     let pinned = transaction.presentation_observations();
     let runtime = if pinned.is_some() {
         None
@@ -879,6 +883,7 @@ pub(crate) fn read_page_snapshot_with_search(
         },
         |saved| saved.selection_known,
     );
+    measurements.record("catalog_runtime_facts_capture", capture_started, 1);
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
@@ -912,6 +917,7 @@ pub(crate) fn read_page_snapshot_with_search(
         ));
     }
     let observed_at = meta("catalog_observed_at")?.and_then(|value| value.parse::<i64>().ok());
+    let selected_started = measurements.start();
     let (mut selected, search_next, search_report) = if let Some(query) = &request.q {
         let scope = crate::catalog_search::scope_key(request.scope);
         if meta("search_version")?.as_deref() != Some(crate::catalog_search::VERSION)
@@ -967,6 +973,8 @@ pub(crate) fn read_page_snapshot_with_search(
     } else {
         (transaction.rows(request)?, None, None)
     };
+    measurements.record("catalog_selected_rows", selected_started, selected.len());
+    let history_started = measurements.start();
     let mut partial_history = std::collections::BTreeSet::new();
     for row in &selected {
         if transaction.has_history(&row.key)? {
@@ -1011,6 +1019,7 @@ pub(crate) fn read_page_snapshot_with_search(
             }
         }
     }
+    measurements.record("catalog_history_qualification", history_started, selected.len());
     if request.sid.is_some() && selected.is_empty() {
         return Ok(error(
             404,
@@ -1093,7 +1102,13 @@ pub(crate) fn read_page_snapshot_with_search(
                 transaction.selected_details(&row.key, &row.sources, &mut |relative| {
                     let expected = runtime
                         .as_deref()
-                        .map(|runtime| transaction.runtime_observation(options, relative, runtime))
+                        .map(|runtime| {
+                            let started = measurements.start();
+                            let expected =
+                                transaction.runtime_observation(options, relative, runtime);
+                            measurements.record("catalog_runtime_observation", started, 1);
+                            expected
+                        })
                         .transpose();
                     match expected {
                         Ok(expected) => relative_status(
@@ -1141,6 +1156,7 @@ pub(crate) fn read_page_snapshot_with_search(
         "unavailable"
     };
     let mut items = Vec::with_capacity(selected.len());
+    let item_loop_started = measurements.start();
     for row in selected {
         let mut retired_native = false;
         let mut refs = Vec::new();
@@ -1235,16 +1251,15 @@ pub(crate) fn read_page_snapshot_with_search(
         // A complete membership publication can precede a new runtime facts
         // snapshot. Keep status unavailable, but expose the stale derivation so
         // readers retry instead of retaining unknown dots until navigation.
-        let runtime = pinned
-            .and_then(|saved| saved.runtime_for(&row))
-            .or_else(|| {
-                runtime.as_deref().and_then(|runtime| {
-                    transaction
-                        .runtime_observation(options, &row, runtime)
-                        .ok()
-                        .flatten()
-                })
-            });
+        let runtime = match pinned.and_then(|saved| saved.runtime_for(&row)) {
+            Some(runtime) => Some(runtime),
+            None => runtime.as_deref().and_then(|runtime| {
+                let started = measurements.start();
+                let observed = transaction.runtime_observation(options, &row, runtime);
+                measurements.record("catalog_runtime_observation", started, 1);
+                observed.ok().flatten()
+            }),
+        };
         let runtime_pending = current
             && facts_known
             && !retired_native
@@ -1312,10 +1327,17 @@ pub(crate) fn read_page_snapshot_with_search(
         }
         items.push(item);
     }
-    if runtime
-        .as_ref()
-        .is_some_and(|before| transaction.runtime_generation(options).ok().as_ref() != Some(before))
-    {
+    measurements.record("catalog_item_loop_inclusive", item_loop_started, items.len());
+    let runtime_recheck_started = runtime.as_ref().and_then(|_| measurements.start());
+    let runtime_changed = runtime.as_ref().is_some_and(|before| {
+        transaction.runtime_generation(options).ok().as_ref() != Some(before)
+    });
+    measurements.record(
+        "catalog_runtime_recheck",
+        runtime_recheck_started,
+        usize::from(runtime.is_some()),
+    );
+    if runtime_changed {
         for item in &mut items {
             for section in ["ancestors", "runs"] {
                 if let Some(relatives) = item
@@ -1358,14 +1380,22 @@ pub(crate) fn read_page_snapshot_with_search(
     {
         page_state = "incomplete";
     }
-    Ok(reply(
+    let response = reply(
         200,
         json!({"api":1,"machine":machine,"read_scope":request.scope,"generation":generation,"observed_at":observed_at,
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":true,"global_union":false},
         "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
-    ))
+    );
+    measurements.record("catalog_page_total", total_started, 1);
+    if timing_enabled {
+        measurements.emit(
+            &crate::native_timing::id(&crate::events::EventCache::path(&options.cache)),
+            "catalog_page_read",
+        );
+    }
+    Ok(response)
 }
 
 #[cfg(test)]
