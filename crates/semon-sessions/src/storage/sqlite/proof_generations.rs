@@ -1742,9 +1742,7 @@ pub(crate) fn reconcile_native_observation_owners(
             })
         })
     };
-    if catalog_proof_owned
-        && let Some(digest) = catalog_digest.as_ref()
-    {
+    if catalog_proof_owned && let Some(digest) = catalog_digest.as_ref() {
         db.execute(
             "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
             params![namespace, session_key, digest, admission, stream],
@@ -1770,9 +1768,7 @@ pub(crate) fn reconcile_native_observation_owners(
             })
             .map(|grant| grant.4.clone())
     });
-    if history_proof_owned
-        && let Some(digest) = history_digest.as_ref()
-    {
+    if history_proof_owned && let Some(digest) = history_digest.as_ref() {
         db.execute(
             "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
             params![namespace, session_key, digest, admission, stream],

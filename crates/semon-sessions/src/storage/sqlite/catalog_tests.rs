@@ -3682,7 +3682,12 @@ fn selected_projection_upgrade_preserves_admitted_query_runtime() {
             &format!("sid=selected&scope={scope}&limit=1"),
             None,
         );
-        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert!(!body["entries"].as_array().unwrap().is_empty());
     }

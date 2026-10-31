@@ -3037,8 +3037,7 @@ pub(super) fn published(
 mod tests {
     use super::*;
     use crate::storage::{
-        source_observations::SourceObservationStore,
-        sqlite::source_journal::SourceJournal,
+        source_observations::SourceObservationStore, sqlite::source_journal::SourceJournal,
     };
 
     fn header_repair_journal(store: &SqliteStore) -> SourceJournal {
