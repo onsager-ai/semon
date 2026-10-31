@@ -10188,20 +10188,66 @@ mod tests {
         ];
         let mut outcomes = Vec::new();
         for (store, writer) in stores.iter_mut().zip(writers) {
-            outcomes.push(catalog_write(store, &rows, &projections, true, writer).unwrap());
+            // Real source retention requires a complete initial publication.
+            outcomes.push(catalog_write(store, &rows, &projections, false, writer).unwrap());
         }
+        assert!(outcomes.iter().all(|outcome| outcome.0 == Outcome::Written));
         assert!(outcomes.windows(2).all(|pair| pair[0] == pair[1]));
         // Keep a history-only owner in every arm while replacing Current grams.
         let retained = rows[63].key.clone();
-        for store in &mut stores {
-            let tx = store
+        let mut original = rows[63].clone();
+        original.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let input =
+            crate::native_evidence::catalog_input(&original.sources[0].path, &options).unwrap();
+        for (store, writer) in stores.iter_mut().zip(writers) {
+            let original_recipes = catalog_recipes(&store.connection, "session_slots", &retained);
+            assert!(!original_recipes.is_empty());
+            let header: (String, u32, Option<String>, i64) = store.connection.query_row("SELECT generation,version,source_generation,total FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key=?1", [&retained], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap();
+            let scoped_options = crate::Options {
+                cache: store.path.with_extension("json"),
+                ..options.clone()
+            };
+            let proof =
+                crate::session_source_proof(&scoped_options, input.root.as_str(), &input.path)
+                    .unwrap()
+                    .unwrap();
+            let ready =
+                crate::source_projection_ready(&scoped_options, input.root.as_str(), &input.path)
+                    .unwrap()
+                    .unwrap();
+            crate::retain_source_event_index(&scoped_options, &proof, &ready).unwrap();
+            // A complete publication may omit this exact archived generation.
+            // Its normal preflight copies original custody before retirement.
+            assert_eq!(
+                catalog_write(store, &rows[..63], &projections, false, writer)
+                    .unwrap()
+                    .0,
+                Outcome::Written
+            );
+            assert_eq!(
+                crate::history_projection::catalog(&store.connection, &retained)
+                    .unwrap()
+                    .unwrap(),
+                json(&original).unwrap(),
+                "retirement preserves the exact original owner metadata"
+            );
+            assert_eq!(
+                catalog_recipes(&store.connection, "session_history_slots", &retained),
+                original_recipes,
+                "retirement preserves original recipe bytes and slot order"
+            );
+            let copied_header: String = store
                 .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key=?1",
+                    [format!("history_original_header:{retained}")],
+                    |row| row.get(0),
+                )
                 .unwrap();
-            tx.execute("INSERT INTO session_history_catalog SELECT session_key,json_set(metadata,'$.lifecycle','retained') FROM session_catalog WHERE session_key=?1", [&retained]).unwrap();
-            tx.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&retained]).unwrap();
-            crate::catalog_search::retire_key(&tx, &retained).unwrap();
-            tx.commit().unwrap();
+            assert_eq!(copied_header, json(&Some(header)).unwrap());
+            assert!(crate::history_projection::qualified(&store.connection, &original).unwrap());
+            let lifecycle: (String, i64) = store.connection.query_row("SELECT lifecycle,(SELECT COUNT(*) FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current') FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [&retained], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+            assert_eq!(lifecycle, ("retained".into(), 0));
         }
         for row in &mut rows[..63] {
             row.name = "shared original grams".into();
@@ -10262,11 +10308,11 @@ mod tests {
             for (message, trigger) in [
                 (
                     "traversal-after-three-valid",
-                    "CREATE TEMP TRIGGER traversal_failure BEFORE INSERT ON session_search_memberships WHEN (SELECT COUNT(*) FROM session_search_memberships)=3 BEGIN SELECT RAISE(ABORT,'traversal-after-three-valid'); END;",
+                    "CREATE TEMP TRIGGER traversal_failure BEFORE INSERT ON main.session_search_memberships WHEN NEW.namespace=semon_namespace() AND (SELECT COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace())=3 BEGIN SELECT RAISE(ABORT,'traversal-after-three-valid'); END;",
                 ),
                 (
                     "traversal-ack-after-search",
-                    "CREATE TEMP TRIGGER traversal_failure BEFORE DELETE ON session_catalog_invalidations WHEN (SELECT COUNT(*) FROM session_search_memberships)>3 BEGIN SELECT RAISE(ABORT,'traversal-ack-after-search'); END;",
+                    "CREATE TEMP TRIGGER traversal_failure BEFORE DELETE ON main.session_catalog_invalidations WHEN OLD.namespace=semon_namespace() AND (SELECT COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace())>3 BEGIN SELECT RAISE(ABORT,'traversal-ack-after-search'); END;",
                 ),
             ] {
                 let tx = store
@@ -10854,11 +10900,13 @@ mod tests {
             Outcome::Conflict
         );
         assert_eq!(invalidation(&store), Some((1, "changed".into())));
-        store.connection.execute_batch("CREATE TEMP TRIGGER fail_observation BEFORE UPDATE ON session_catalog_invalidations BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+        store.connection.execute_batch("CREATE TEMP TRIGGER fail_observation BEFORE UPDATE ON main.session_catalog_invalidations WHEN NEW.namespace=semon_namespace() BEGIN SELECT RAISE(ABORT,'interrupted'); END;").unwrap();
+        let error = store
+            .write_one("a.jsonl", Some(&ledger(1)), None, &ledger(2), &full())
+            .unwrap_err();
         assert!(
-            store
-                .write_one("a.jsonl", Some(&ledger(1)), None, &ledger(2), &full())
-                .is_err()
+            error.to_string().contains("interrupted"),
+            "actual injected invalidation failure: {error}"
         );
         assert_eq!(store.read_one("a.jsonl").unwrap().unwrap().0, ledger(1));
         assert_eq!(invalidation(&store), Some((1, "changed".into())));
@@ -10891,7 +10939,10 @@ mod tests {
         // Acknowledging work never reuses a revision for later observations.
         store
             .connection
-            .execute("DELETE FROM session_catalog_invalidations", [])
+            .execute(
+                "DELETE FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()",
+                [],
+            )
             .unwrap();
         store
             .write_one("a.jsonl", None, None, &ledger(3), &full())
