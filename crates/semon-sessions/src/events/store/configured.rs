@@ -6378,6 +6378,7 @@ mod tests {
             overview: None,
             trace: None,
             query: None,
+            query_recipe: None,
             lifecycle: Default::default(),
             key: key.clone(),
             name: key.clone(),

@@ -34,9 +34,10 @@ impl SelectedRecipe {
         };
         let reference = recipe.reference(row).map_err(std::io::Error::other)?;
         let encoded = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
-        let query = row.query.as_mut().ok_or_else(|| {
-            std::io::Error::other("Selected Query observation unavailable")
-        })?;
+        let query = row
+            .query
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("Selected Query observation unavailable"))?;
         query["selected"] = serde_json::to_value(reference).map_err(std::io::Error::other)?;
         Ok(Some(encoded))
     }
@@ -61,12 +62,17 @@ impl SelectedRecipe {
     pub(crate) fn decode(row: &CatalogRow, text: &str) -> std::io::Result<Self> {
         let metadata = serde_json::to_vec(row).map_err(std::io::Error::other)?;
         if metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX {
-            return Err(std::io::Error::other("Selected Query metadata budget exceeded"));
+            return Err(std::io::Error::other(
+                "Selected Query metadata budget exceeded",
+            ));
         }
-        let selected = row.query.as_ref().and_then(|query| query.get("selected"))
+        let selected = row
+            .query
+            .as_ref()
+            .and_then(|query| query.get("selected"))
             .ok_or_else(|| std::io::Error::other("Selected Query reference unavailable"))?;
-        let expected: SelectedRecipeRef = serde_json::from_value(selected.clone())
-            .map_err(std::io::Error::other)?;
+        let expected: SelectedRecipeRef =
+            serde_json::from_value(selected.clone()).map_err(std::io::Error::other)?;
         let recipe: Self = serde_json::from_str(text).map_err(std::io::Error::other)?;
         if expected != recipe.reference(row).map_err(std::io::Error::other)? {
             return Err(std::io::Error::other("Selected Query recipe changed"));
@@ -87,7 +93,8 @@ mod selected_recipe_tests {
             "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[],
                 "split_unknown_messages":0,"by_model":{},"by_day":{}},
             "sources":[],"query":{"version":1}
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     fn recipe() -> SelectedRecipe {
@@ -102,12 +109,16 @@ mod selected_recipe_tests {
     fn detached_recipe_preserves_complete_payload_and_compact_observation() {
         let mut row = row();
         let mut recipe = recipe();
-        recipe.session["busy"] = json!(vec![[100,200]; 2048]);
+        recipe.session["busy"] = json!(vec![[100, 200]; 2048]);
         row.query_recipe = Some(recipe.clone());
         let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
         let metadata = serde_json::to_string(&row).unwrap();
         assert!(metadata.len() < 8192);
-        assert!(row.query.as_ref().unwrap()["selected"].get("session").is_none());
+        assert!(
+            row.query.as_ref().unwrap()["selected"]
+                .get("session")
+                .is_none()
+        );
         assert_eq!(SelectedRecipe::decode(&row, &encoded).unwrap(), recipe);
         let restored: CatalogRow = serde_json::from_str(&metadata).unwrap();
         assert!(restored.query_recipe.is_none());
@@ -127,9 +138,17 @@ mod selected_recipe_tests {
         assert!(SelectedRecipe::decode(&foreign, &encoded).is_err());
         foreign = row.clone();
         foreign.sources.push(crate::model::summary::CatalogSource {
-            path: "source.jsonl".into(), native_id: "native".into(),
-            dev: 1, ino: 1, size: 1, modified_ns: 1, changed_ns: Some(1),
-            offset: 1, prefix_sha256: [1;32], tail_sha256: [1;32], native_role: None,
+            path: "source.jsonl".into(),
+            native_id: "native".into(),
+            dev: 1,
+            ino: 1,
+            size: 1,
+            modified_ns: 1,
+            changed_ns: Some(1),
+            offset: 1,
+            prefix_sha256: [1; 32],
+            tail_sha256: [1; 32],
+            native_role: None,
         });
         assert!(SelectedRecipe::decode(&foreign, &encoded).is_err());
         row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
@@ -146,7 +165,12 @@ mod selected_recipe_tests {
         let mut changed = recipe();
         changed.session["busy"] = json!([]);
         assert!(SelectedRecipe::decode(&row, &serde_json::to_string(&changed).unwrap()).is_err());
-        row.query.as_mut().unwrap().as_object_mut().unwrap().remove("selected");
+        row.query
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("selected");
         assert!(SelectedRecipe::decode(&row, &encoded).is_err());
     }
 
@@ -156,7 +180,7 @@ mod selected_recipe_tests {
         original.query_recipe = Some(recipe());
         let original_payload = SelectedRecipe::detach(&mut original).unwrap().unwrap();
         let mut current = original.clone();
-        current.query_recipe.as_mut().unwrap().session["busy"] = json!([[100,200],[300,400]]);
+        current.query_recipe.as_mut().unwrap().session["busy"] = json!([[100, 200], [300, 400]]);
         let current_payload = SelectedRecipe::detach(&mut current).unwrap().unwrap();
         original.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         assert!(SelectedRecipe::decode(&original, &original_payload).is_ok());
@@ -170,7 +194,9 @@ mod selected_recipe_tests {
         row.query_recipe = Some(recipe());
         let mut encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
         let metadata = serde_json::to_vec(&row).unwrap().len();
-        encoded.push_str(&" ".repeat(crate::storage::proof_codec::METADATA_MAX - metadata - encoded.len()));
+        encoded.push_str(
+            &" ".repeat(crate::storage::proof_codec::METADATA_MAX - metadata - encoded.len()),
+        );
         assert!(SelectedRecipe::decode(&row, &encoded).is_ok());
         encoded.push(' ');
         assert!(SelectedRecipe::decode(&row, &encoded).is_err());
@@ -212,7 +238,9 @@ pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
             }
         }
         if let Some(recipe) = &row.query_recipe {
-            row.query.as_mut().ok_or_else(|| std::io::Error::other("Selected Query observation missing"))?["selected"] =
+            row.query
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("Selected Query observation missing"))?["selected"] =
                 serde_json::to_value(recipe).map_err(std::io::Error::other)?;
         }
     }
