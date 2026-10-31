@@ -4362,6 +4362,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         original_metadata,
         original_source,
         original_source_generation,
+        original_source_ledger,
         original_projection,
         original_slots,
     ) = {
@@ -4379,6 +4380,9 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         let original_source = original.sources.first().unwrap().clone();
         let original_source_generation =
             crate::retention::source_generation(&original.sources).unwrap();
+        let original_source_ledger = crate::source_carrier::ledger_digest(
+            &crate::source_carrier::ledger(&original_source),
+        );
         let original_projection: (String, String, i64, i64) = db
             .query_row(
                 "SELECT generation,source_generation,version,total FROM main.session_slot_projections WHERE session_key='live-history'",
@@ -4400,10 +4404,22 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             original_metadata,
             original_source,
             original_source_generation,
+            original_source_ledger,
             original_projection,
             original_slots,
         )
     };
+    let original_transcript = crate::query::transcript::read(
+        &fixture.options,
+        "live-history",
+        crate::CatalogReadScope::Current,
+        &json!({"id":"live-history"}),
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        crate::model::now_ms(),
+    )
+    .unwrap()
+    .expect("original Current transcript must be readable before append");
     writeln!(
         fs::OpenOptions::new().append(true).open(&source).unwrap(),
         "{}",
@@ -4443,6 +4459,16 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     assert_eq!(serde_json::to_string(&history).unwrap(), original_metadata);
     assert_eq!(history.sources[0], original_source);
+    assert_eq!(
+        crate::retention::source_generation(&history.sources).unwrap(),
+        original_source_generation
+    );
+    assert_eq!(
+        crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
+            &history.sources[0],
+        )),
+        original_source_ledger
+    );
     let history_projection: (String, String, i64, i64) = db
         .query_row(
             "SELECT generation,source_generation,version,total FROM main.session_history_projections WHERE session_key='live-history'",
@@ -4464,25 +4490,6 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     assert_eq!(history_slots, original_slots);
     drop(statement);
 
-    let original_source_path = original_source.path.to_string_lossy().into_owned();
-    let original_source_ledger =
-        crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&original_source));
-    let original_history_proof: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_proof_sources s ON s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key WHERE r.namespace=semon_namespace() AND r.session_key='live-history' AND r.kind='history' AND g.prefix=?1 AND g.metadata=?2 AND s.path=?3 AND s.ledger=?4)",
-            rusqlite::params![
-                original_source_generation,
-                original_metadata,
-                original_source_path,
-                original_source_ledger,
-            ],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        original_history_proof,
-        "the producer must retain the original source proof and digests"
-    );
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
     let current = binding.runtime_binding_at(&tx).unwrap();
@@ -4524,7 +4531,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     );
     assert_eq!(live_fields["session"]["state"], "waiting-question");
     assert!(live_fields["session"]["open_question"].is_object());
-    let current_read = crate::query::transcript::read(
+    let current_transcript = crate::query::transcript::read(
         &fixture.options,
         "live-history",
         crate::CatalogReadScope::Current,
@@ -4532,11 +4539,9 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         None,
         crate::SessionSourceReadMode::LocalThenProvider,
         crate::model::now_ms(),
-    );
-    assert!(
-        current_read.unwrap().is_some(),
-        "the Current MCP recipe must remain qualified beside History"
-    );
+    )
+    .unwrap()
+    .expect("the Current MCP recipe must remain qualified beside History");
     let read = || {
         crate::query::transcript::read(
             &fixture.options,
@@ -4548,9 +4553,22 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             crate::model::now_ms(),
         )
     };
-    assert!(
-        read().unwrap().is_some(),
-        "exact history recipe must qualify"
+    let history_transcript = read()
+        .unwrap()
+        .expect("exact History recipe must qualify through its original source prefix");
+    assert_eq!(
+        history_transcript["entries"],
+        original_transcript["entries"],
+        "History must read the original transcript from its retained prefix"
+    );
+    let current_entries = current_transcript["entries"].to_string();
+    let history_entries = history_transcript["entries"].to_string();
+    assert!(current_entries.contains("Checking the available choices."));
+    assert!(!history_entries.contains("Checking the available choices."));
+    assert_ne!(
+        current_transcript["entries"],
+        history_transcript["entries"],
+        "Current includes appended progress while History remains original"
     );
     let facts_path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(facts_path).unwrap();
