@@ -8288,10 +8288,9 @@ mod tests {
 
     #[test]
     fn direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant() {
+        use crate::storage::catalog::CatalogObservationOwner;
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
-        use crate::storage::sqlite::proof_generations::{
-            CatalogObservationOwner, query_recipe_observation,
-        };
+        use crate::storage::sqlite::proof_generations::query_recipe_observation;
         // The ordinary producer authors metadata, source witnesses and grants.
         // Until its payload hook exists, the admitted fixture writer supplies
         // only the matching payload cell; it never writes observation authority.
