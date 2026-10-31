@@ -553,8 +553,21 @@ pub(crate) fn finish_catalog(
         if batch.paths.is_empty() {
             continue;
         }
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| {
+                inputs
+                    .iter()
+                    .find(|input| {
+                        input.full_path(options).to_string_lossy().as_ref() == path.as_str()
+                    })
+                    .cloned()
+                    .expect("every staged path must map to a declared fixture Input")
+            })
+            .collect::<Vec<_>>();
         let model = cache
-            .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
+            .prepare_semantic_model_batch(options, &batch_inputs, &batch, 1_790_000_000_000)
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(

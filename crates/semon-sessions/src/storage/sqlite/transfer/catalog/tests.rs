@@ -301,9 +301,9 @@ pub(crate) fn seed_large_presentation(
         path: "projects/resumed/catalog.jsonl".into(),
     };
     let parent_path = input.full_path(&options);
-    // Use the ordinary withdrawal/successor lifecycle: a same-path append
-    // legitimately clears history. Preserve the first native prefix under its
-    // original host authority before the same native identity resumes.
+    // Withdraw the old path before the same native identity resumes under a
+    // new path; same-path append legitimately clears history. Preserve the
+    // first native prefix under its original host authority.
     let mut parent = std::fs::read_to_string(&old_path).unwrap();
     std::fs::remove_file(&old_path).unwrap();
     let mut cache = cache(source);
@@ -322,16 +322,12 @@ pub(crate) fn seed_large_presentation(
         &runtime,
         true,
     );
-    assert!(
-        finish_catalog(&mut cache, &options, std::slice::from_ref(&old_input)).is_empty()
-    );
+    assert!(finish_catalog(&mut cache, &options, std::slice::from_ref(&old_input)).is_empty());
     let mut inputs = vec![input];
     let children = (0..CHILDREN)
         .map(|index| format!("large-child-{index:02}"))
         .collect::<Vec<_>>();
-    let timestamp = |second: usize| {
-        format!("2026-10-01T00:{:02}:{:02}Z", second / 60, second % 60)
-    };
+    let timestamp = |second: usize| format!("2026-10-01T00:{:02}:{:02}Z", second / 60, second % 60);
     let calls = children.iter().enumerate().map(|(index, _)| {
         json!({"type":"tool_use","id":format!("spawn-{index:02}"),"name":"Agent","input":{"description":format!("sanitized task {index}"),"prompt":"sanitized 0"}})
     }).collect::<Vec<_>>();
@@ -375,12 +371,20 @@ pub(crate) fn seed_large_presentation(
         inputs.push(child_input);
     }
     std::fs::write(&parent_path, parent).unwrap();
-    let paths = inputs.iter().map(|input| input.full_path(&options)).collect::<Vec<_>>();
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(&options))
+        .collect::<Vec<_>>();
     for (index, path) in paths.iter().enumerate() {
-        cache.ingest(&format!("{:064x}", 1000 + index), path, "claude").unwrap();
+        cache
+            .ingest(&format!("{:064x}", 1000 + index), path, "claude")
+            .unwrap();
     }
     cache.flush_cold_writes().unwrap();
-    let paths = paths.iter().map(|path| path.to_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let paths = paths
+        .iter()
+        .map(|path| path.to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     begin_active_catalog(&mut cache, &paths, &runtime, true);
     let rows = finish_catalog(&mut cache, &options, &inputs);
@@ -395,26 +399,40 @@ pub(crate) fn seed_large_presentation(
         params![source.namespace.as_str(), id, parent_key], |row| row.get(0),
     ).unwrap();
     let metadata_recipe_bytes = metadata.len() + query_recipe.as_ref().map_or(0, String::len);
-    let witness: crate::storage::selected::PresentationWitness = serde_json::from_str(&presentation).unwrap();
+    let witness: crate::storage::selected::PresentationWitness =
+        serde_json::from_str(&presentation).unwrap();
     let context = serde_json::to_value(&witness.context).unwrap();
     let relative = context["relative"].as_object().unwrap();
     let previews = context["preview_catalog"].as_object().unwrap();
-    let edges = context["edge"].as_object().unwrap().values().map(|value| {
-        serde_json::from_str::<serde_json::Value>(value.as_str().unwrap()).unwrap()
-    }).collect::<Vec<_>>();
-    let family_bytes = relative.values().map(|value| value.as_str().unwrap().len()).sum::<usize>();
-    let preview_bytes = previews.values().map(|value| value.as_str().unwrap().len()).sum::<usize>();
+    let edges = context["edge"]
+        .as_object()
+        .unwrap()
+        .values()
+        .map(|value| serde_json::from_str::<serde_json::Value>(value.as_str().unwrap()).unwrap())
+        .collect::<Vec<_>>();
+    let family_bytes = relative
+        .values()
+        .map(|value| value.as_str().unwrap().len())
+        .sum::<usize>();
+    let preview_bytes = previews
+        .values()
+        .map(|value| value.as_str().unwrap().len())
+        .sum::<usize>();
     let context_bytes = serde_json::to_vec(&witness.context).unwrap().len();
     let family = crate::storage::selected::selected_family(
         &witness.context,
         &parent_key,
         &mut |relative, _| witness.relative_statuses[&relative.key].clone(),
-    ).unwrap();
+    )
+    .unwrap();
     let aggregate_bytes: i64 = db.query_row(
         "SELECT sum(octet_length(metadata)) FROM storage_proof_presentations WHERE namespace=?1 AND id=?2",
         params![source.namespace.as_str(), id], |row| row.get(0),
     ).unwrap();
-    let source_paths = rows.iter().flat_map(|row| row.sources.iter().map(|source| source.path.clone())).collect::<std::collections::BTreeSet<_>>();
+    let source_paths = rows
+        .iter()
+        .flat_map(|row| row.sources.iter().map(|source| source.path.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
     let child_sizes = children.iter().map(|child| {
         db.query_row(
             "SELECT octet_length(g.metadata),octet_length(g.slots) FROM storage_proof_refs f JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current'",
@@ -423,15 +441,31 @@ pub(crate) fn seed_large_presentation(
     }).collect::<Vec<_>>();
     eprintln!(
         "large_catalog_real children={} sources={} metadata={} metadata_recipe={} slots={} presentation={} context={} family_owners={} family_bytes={} family_state={} preview_owners={} preview_bytes={} handoffs={} publication_presentations={} child_cells={child_sizes:?}",
-        children.len(), source_paths.len(), metadata.len(), metadata_recipe_bytes, slots.len(), presentation.len(), context_bytes,
-        relative.len(), family_bytes, family["state"], previews.len(), preview_bytes, edges.len(), aggregate_bytes,
+        children.len(),
+        source_paths.len(),
+        metadata.len(),
+        metadata_recipe_bytes,
+        slots.len(),
+        presentation.len(),
+        context_bytes,
+        relative.len(),
+        family_bytes,
+        family["state"],
+        previews.len(),
+        preview_bytes,
+        edges.len(),
+        aggregate_bytes,
     );
     assert_eq!(rows.len(), CHILDREN + 1);
     assert_eq!(source_paths.len(), CHILDREN + 1);
     assert_eq!(family["state"], "complete");
     assert_eq!(family["runs"].as_array().unwrap().len(), CHILDREN);
     assert_eq!(relative.len(), CHILDREN + 1);
-    assert!(relative.values().all(|value| value.as_str().unwrap().len() <= 65536));
+    assert!(
+        relative
+            .values()
+            .all(|value| value.as_str().unwrap().len() <= 65536)
+    );
     assert!(family_bytes <= transfer::MAX_PAGE_BYTES);
     assert_eq!(previews.len(), CHILDREN + 1);
     assert_eq!(edges.len(), CHILDREN);
@@ -443,10 +477,20 @@ pub(crate) fn seed_large_presentation(
         let role = row.sources[0].native_role.as_ref().unwrap();
         assert_eq!(role["Agent"]["parent"], parent_key);
         assert_eq!(role["Agent"]["tool_use_id"], format!("spawn-{index:02}"));
-        assert!(row.sources[0].path.ends_with(format!("catalog/subagents/agent-{child}.jsonl")));
+        assert!(
+            row.sources[0]
+                .path
+                .ends_with(format!("catalog/subagents/agent-{child}.jsonl"))
+        );
         let key = serde_json::to_string(&(child,)).unwrap();
-        assert!(previews[&key].is_string(), "child must own a canonical result preview");
-        let edge = edges.iter().find(|edge| edge["to"].as_str() == Some(child.as_str())).unwrap();
+        assert!(
+            previews[&key].is_string(),
+            "child must own a canonical result preview"
+        );
+        let edge = edges
+            .iter()
+            .find(|edge| edge["to"].as_str() == Some(child.as_str()))
+            .unwrap();
         assert_eq!(edge["kind"], "spawn");
         assert_eq!(edge["from"], parent_key);
         assert_eq!(edge["brief_session"], parent_key);
@@ -455,9 +499,16 @@ pub(crate) fn seed_large_presentation(
     assert_eq!(parent.sources.len(), 1);
     assert_eq!(parent.sources[0].native_id, "catalog");
     assert_eq!(parent.sources[0].path, parent_path);
-    assert!(child_sizes.iter().all(|(metadata, slots)| *metadata <= 65536 && *slots <= transfer::MAX_PAGE_BYTES as i64));
+    assert!(
+        child_sizes.iter().all(
+            |(metadata, slots)| *metadata <= 65536 && *slots <= transfer::MAX_PAGE_BYTES as i64
+        )
+    );
     assert!(metadata_recipe_bytes <= transfer::MAX_PAGE_BYTES);
-    assert!(query_recipe.is_none(), "non-null immutable recipe activation is not qualified here");
+    assert!(
+        query_recipe.is_none(),
+        "non-null immutable recipe activation is not qualified here"
+    );
     assert!(slots.len() <= transfer::MAX_PAGE_BYTES);
     assert!(context_bytes > transfer::MAX_PAGE_BYTES);
     assert!(context_bytes <= 8 * transfer::MAX_PAGE_BYTES);
@@ -478,7 +529,10 @@ pub(crate) fn seed_large_presentation(
                 params![source.namespace.as_str(), id, row.key, original.path.to_string_lossy()],
                 |row| row.get(0),
             ).unwrap();
-            assert_eq!(ledger, crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(original)));
+            assert_eq!(
+                ledger,
+                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(original))
+            );
         }
     }
     let (current, history, nonnull): (i64, i64, i64) = db.query_row(
