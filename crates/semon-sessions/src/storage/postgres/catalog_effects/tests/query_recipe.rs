@@ -353,21 +353,39 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         .unwrap();
     let key =
         super::super::observations::history_key(&history_owner, history_token.metadata.as_bytes());
-    let mut checked = false;
-    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        super::super::super::native_keys::delete_meta(tx, key.as_bytes())?;
-        snapshot::in_transaction(tx, &successor, |view| {
-            assert!(matches!(
-                view.load_query_recipe(&history_token),
-                Err(Error::ObservationChanged)
-            ));
-            Ok(())
-        })?;
-        checked = true;
-        Err::<(), _>(StorageError::Conflict)
-    });
-    assert_eq!(result, Err(StorageError::Conflict));
-    assert!(checked);
+    for fault in ["payload_bytes", "grant"] {
+        let mut checked = false;
+        let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            snapshot::in_transaction(tx, &successor, |view| {
+                assert_eq!(
+                    view.load_query_recipe(&history_token).unwrap(),
+                    Some(expected.clone())
+                );
+                {
+                    let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                    if fault == "payload_bytes" {
+                        // Transaction-local corruption is rolled back below;
+                        // the selected History owner must reject changed bytes.
+                        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET query_recipe=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 AND metadata=$5", &[&namespace.as_str().as_bytes(), &history_owner.as_bytes(), &row.key.as_bytes(), &format!("{payload}\n").as_bytes(), &history_token.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
+                    } else {
+                        super::super::super::native_keys::delete_meta(&mut tx, key.as_bytes())?;
+                    }
+                }
+                assert!(
+                    matches!(
+                        view.load_query_recipe(&history_token),
+                        Err(Error::ObservationChanged)
+                    ),
+                    "{fault}"
+                );
+                Ok(())
+            })?;
+            checked = true;
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert_eq!(result, Err(StorageError::Conflict));
+        assert!(checked, "{fault}");
+    }
     fs::remove_dir_all(data.root).unwrap();
 }
 
