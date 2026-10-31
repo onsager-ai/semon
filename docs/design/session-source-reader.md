@@ -434,7 +434,7 @@ claim and the native allowlist.
 
 ## Current Semon storage contract
 
-The Event Index initializes namespace-owned schema 34 with parser/cache version
+The Event Index initializes namespace-owned schema 35 with parser/cache version
 29 in one transaction, including the namespace-prefixed NOCASE scheduling
 indexes, pricing fingerprints and native usage readiness default 0. Both the
 standalone host and configured hosts now use this same admitted Source contract.

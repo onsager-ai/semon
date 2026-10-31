@@ -1,6 +1,9 @@
 //! Durable relationship work in the Event Index. Queues hold content-free
 //! metadata; each worker still observes at most the existing 64 native sources.
 use super::*;
+#[path = "semantic_plan.rs"]
+mod plan;
+pub(crate) use plan::{ContextPort, OwnerClosurePort, PublicationPlanPort, context_with, owner_closure_with, publication_groups_with};
 use crate::model::relation_stage::{
     Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
 };
@@ -8,7 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Receipt keys retain ordinary relay order through bounded staged replay.
 // Other stored recipes are unsupported under the current producer contract.
-pub(super) const RECIPE: &str = "recorded-origin-turn-native-receipt-order-v5";
+pub(super) const RECIPE: &str = "recorded-origin-turn-physical-owner-groups-v6";
 pub(super) fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -31,7 +34,7 @@ pub(super) const SCHEMA: &str = "
 CREATE TABLE catalog_semantic_stage (
  namespace TEXT NOT NULL, singleton INTEGER NOT NULL CHECK(singleton=1), epoch INTEGER NOT NULL,
  phase TEXT NOT NULL CHECK(phase IN ('indexing','identity','relations','publication')),
- generation TEXT, runtime TEXT NOT NULL, revision INTEGER NOT NULL, resetting INTEGER NOT NULL DEFAULT 0, reset_after TEXT NOT NULL DEFAULT '', key_after_harness TEXT NOT NULL DEFAULT '', key_after_native TEXT NOT NULL DEFAULT '', keys_done INTEGER NOT NULL DEFAULT 0, key_candidate TEXT NOT NULL DEFAULT '', key_epoch INTEGER NOT NULL DEFAULT 0, withdrawal_authority TEXT,
+ generation TEXT, original_generation TEXT, runtime TEXT NOT NULL, revision INTEGER NOT NULL, resetting INTEGER NOT NULL DEFAULT 0, reset_after TEXT NOT NULL DEFAULT '', key_after_harness TEXT NOT NULL DEFAULT '', key_after_native TEXT NOT NULL DEFAULT '', keys_done INTEGER NOT NULL DEFAULT 0, key_candidate TEXT NOT NULL DEFAULT '', key_epoch INTEGER NOT NULL DEFAULT 0, withdrawal_authority TEXT, validation_after TEXT NOT NULL DEFAULT '', validation_revision INTEGER, validation_done INTEGER NOT NULL DEFAULT 0,
  PRIMARY KEY(namespace,singleton)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE catalog_semantic_frontier (
@@ -47,6 +50,9 @@ CREATE TABLE catalog_semantic_sources (
  dev INTEGER, ino INTEGER, size INTEGER, mtime_ns BLOB, ctime_ns BLOB, resume_at INTEGER, head_sha256 BLOB, tail_sha256 BLOB,
  PRIMARY KEY(namespace,source_path)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_prior_owners(namespace TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,published INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(namespace,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_prior_sources(namespace TEXT NOT NULL,session_key TEXT NOT NULL,source_path TEXT NOT NULL,PRIMARY KEY(namespace,session_key,source_path)) STRICT, WITHOUT ROWID;
+CREATE INDEX catalog_semantic_prior_source_owner ON catalog_semantic_prior_sources(namespace,source_path,session_key);
 CREATE TABLE catalog_semantic_inputs(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,is_top INTEGER NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
 CREATE TABLE catalog_semantic_keys(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL,key_epoch INTEGER NOT NULL,PRIMARY KEY(namespace,harness,native_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX semantic_input_collision ON catalog_semantic_inputs(namespace,native_id,harness);
@@ -128,6 +134,8 @@ pub(super) const STAGE_TABLES: &[&str] = &[
     "catalog_semantic_stage",
     "catalog_semantic_frontier",
     "catalog_semantic_sources",
+    "catalog_semantic_prior_owners",
+    "catalog_semantic_prior_sources",
     "catalog_semantic_inputs",
     "catalog_semantic_keys",
     "catalog_semantic_endpoints",
@@ -808,59 +816,31 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
 }
 /// A Claude top-level identity is the exact union of its native continuation,
 /// session and bridge links. Semantic parent/edge neighbours are excluded.
+struct OrdinaryOwnerPlan<'a>(&'a Connection);
+impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
+    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>> {
+        self.0.query_row("SELECT harness,is_top FROM catalog_semantic_inputs WHERE source_path=?1", [path], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+    }
+    fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)> {
+        self.0.query_row("SELECT s.native_id,CASE WHEN octet_length(f.links)<=1048576 THEN f.links END FROM catalog_semantic_inputs s JOIN files f ON f.path=s.source_path WHERE s.source_path=?1", [path], |r| Ok((r.get(0)?, r.get(1)?)))
+    }
+    fn members(&self, kind: &str, id: &str) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=1 AND (native_id=?1 AND ?2='lineage:claude' OR source_path IN (SELECT source_path FROM catalog_native_dependencies WHERE harness=?2 AND native_id=?1)) ORDER BY source_path LIMIT 65")?.query_map(params![id,kind], |r| r.get(0))?.collect()
+    }
+}
+impl PublicationPlanPort for OrdinaryOwnerPlan<'_> {
+    fn pending(&self) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE published=0 ORDER BY session_key LIMIT 64")?.query_map([], |r| r.get(0))?.collect()
+    }
+    fn sources(&self, key: &str) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65")?.query_map([key], |r| r.get(0))?.collect()
+    }
+    fn owners(&self, path: &str) -> rusqlite::Result<Vec<String>> {
+        self.0.prepare("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1 ORDER BY session_key LIMIT 65")?.query_map([path], |r| r.get(0))?.collect()
+    }
+}
 fn owner_closure(c: &Connection, seed: &str) -> rusqlite::Result<Vec<String>> {
-    let Some((harness, top)) = c
-        .query_row(
-            "SELECT harness,is_top FROM catalog_semantic_inputs WHERE source_path=?1",
-            [seed],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, bool>(1)?)),
-        )
-        .optional()?
-    else {
-        return Ok(vec![seed.to_owned()]);
-    };
-    if harness != "claude" || !top {
-        return Ok(vec![seed.to_owned()]);
-    }
-    let mut paths = BTreeSet::new();
-    let mut pending = vec![seed.to_owned()];
-    let mut ids = BTreeSet::new();
-    let mut bridges = BTreeSet::new();
-    let mut used = 0usize;
-    while let Some(path) = pending.pop() {
-        if !paths.insert(path.clone()) {
-            continue;
-        }
-        if paths.len() > 64 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        let (id,links):(String,Option<String>)=c.query_row("SELECT s.native_id,CASE WHEN octet_length(f.links)<=1048576 THEN f.links END FROM catalog_semantic_inputs s JOIN files f ON f.path=s.source_path WHERE s.source_path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let links: super::super::Links = bounded(links, &mut used)?;
-        let mut selectors = Vec::new();
-        for id in std::iter::once(id)
-            .chain(links.session_ids)
-            .chain(links.continued_in)
-        {
-            if ids.insert(id.clone()) {
-                selectors.push(("lineage:claude", id));
-            }
-        }
-        for id in links.bridges {
-            if bridges.insert(id.clone()) {
-                selectors.push(("bridge:claude", id));
-            }
-        }
-        for (kind, id) in selectors {
-            let mut q=c.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=1 AND (native_id=?1 AND ?2='lineage:claude' OR source_path IN (SELECT source_path FROM catalog_native_dependencies WHERE harness=?2 AND native_id=?1)) ORDER BY source_path LIMIT 65")?;
-            for found in q.query_map(params![id, kind], |r| r.get::<_, String>(0))? {
-                let found = found?;
-                if !paths.contains(&found) {
-                    pending.push(found);
-                }
-            }
-        }
-    }
-    Ok(paths.into_iter().collect())
+    owner_closure_with(&OrdinaryOwnerPlan(c), seed)
 }
 /// Qualification is a separate bounded Identity sub-phase after reduction.
 pub(crate) trait QualificationPort {
@@ -1167,7 +1147,7 @@ fn event_page(c: &Connection) -> rusqlite::Result<bool> {
 
 fn reset(c: &Connection, runtime: &str) -> rusqlite::Result<()> {
     c.execute(metadata_increment(c)?, ["semantic_epoch"])?;
-    c.execute("UPDATE catalog_semantic_stage SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'),phase='indexing',generation=?1,runtime=?2,revision=?3,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL",params![generation(c)?,runtime,revision(c)?])?;
+    c.execute("UPDATE catalog_semantic_stage SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'),phase='indexing',generation=?1,original_generation=?1,runtime=?2,revision=?3,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL",params![generation(c)?,runtime,revision(c)?])?;
     Ok(())
 }
 /// Unreachable staging records carry no authority without the singleton epoch.
@@ -1176,6 +1156,8 @@ fn reset(c: &Connection, runtime: &str) -> rusqlite::Result<()> {
 fn gc_page(c: &Connection) -> rusqlite::Result<Option<usize>> {
     let mut budget = 64;
     for (table, key) in [
+        ("catalog_semantic_prior_sources", "session_key,source_path"),
+        ("catalog_semantic_prior_owners", "session_key"),
         ("catalog_semantic_inputs", "source_path"),
         ("catalog_semantic_keys", "harness,native_id"),
         ("catalog_semantic_relations", "relation_id"),
@@ -1612,72 +1594,41 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
     })
     .map_err(|_| rusqlite::Error::InvalidQuery)
 }
-fn load_context(
-    c: &Connection,
-    paths: &[String],
-    p: Phase,
-    epoch: i64,
-) -> rusqlite::Result<Context> {
-    let mut owners = BTreeSet::new();
-    for path in paths {
-        let mut q = c.prepare(
-            "SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1",
-        )?;
-        for owner in q.query_map([path], |r| r.get::<_, String>(0))? {
-            owners.insert(owner?);
-        }
+impl ContextPort for OrdinaryOwnerPlan<'_> {
+    fn owners(&self, path: &str) -> rusqlite::Result<Vec<String>> {
+        PublicationPlanPort::owners(self, path)
     }
-    let mut selected = owners.clone();
-    let mut out = Context {
-        epoch: Some(epoch),
-        replay_owners: if p == Phase::Publication {
-            owners.iter().cloned().collect()
-        } else {
-            Vec::new()
-        },
-        ..Context::default()
-    };
-    let mut used = 0;
-    for owner in &owners {
-        if p == Phase::Publication {
-            // Incident edges can exceed one metadata page for a single owner.
-            // Replay them after releasing this writer, through read-only pages.
-            let mut q=c.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_key=?1 ORDER BY session_key")?;
-            let mut children = Vec::new();
-            for child in q.query_map([owner], |r| r.get::<_, String>(0))? {
-                let child = child?;
-                used += child.len();
-                if used > MAX_CONTEXT {
-                    return Err(rusqlite::Error::InvalidQuery);
-                }
-                children.push(child);
-            }
-            out.children.insert(owner.clone(), children);
-            let total:Option<f64>=c.query_row("SELECT family_cost FROM catalog_semantic_endpoints WHERE session_key=?1 AND cost_done=1",[owner],|r|r.get(0))?;
-            out.family_costs.insert(owner.clone(), total);
+    fn children(&self, key: &str, used: &mut usize) -> rusqlite::Result<Vec<String>> {
+        let mut children = Vec::new();
+        let mut q = self.0.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE parent_key=?1 ORDER BY session_key")?;
+        for child in q.query_map([key], |r| r.get::<_, String>(0))? {
+            let child = child?;
+            *used = used.saturating_add(child.len());
+            if *used > MAX_CONTEXT { return Err(rusqlite::Error::InvalidQuery); }
+            children.push(child);
         }
-        let parent: Option<String> = c
-            .query_row(
-                "SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key=?1",
-                [owner],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        selected.extend(parent);
+        Ok(children)
     }
-    for key in selected {
-        let found:Option<(Option<String>,Option<String>,Option<String>)>=c.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1",[&key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        if let Some((text, parent, root)) = found {
-            let mut endpoint: Endpoint = bounded(text, &mut used)?;
+    fn cost(&self, key: &str) -> rusqlite::Result<Option<f64>> {
+        self.0.query_row("SELECT family_cost FROM catalog_semantic_endpoints WHERE session_key=?1 AND cost_done=1", [key], |r| r.get(0))
+    }
+    fn parent(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        self.0.query_row("SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key=?1", [key], |r| r.get(0)).optional().map(Option::flatten)
+    }
+    fn endpoint(&self, key: &str, used: &mut usize) -> rusqlite::Result<Option<Endpoint>> {
+        let found: Option<(Option<String>,Option<String>,Option<String>)> = self.0.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1", [key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        found.map(|(text,parent,root)| {
+            let mut endpoint: Endpoint = bounded(text, used)?;
             endpoint.parent = parent.clone();
             endpoint.row.parent = parent;
-            endpoint.root = root.unwrap_or_else(|| key.clone());
-            endpoint.root_alive = root_alive(c, &endpoint.root)?;
-            out.endpoints.insert(key, endpoint);
-        }
+            endpoint.root = root.unwrap_or_else(|| key.to_owned());
+            endpoint.root_alive = root_alive(self.0, &endpoint.root)?;
+            Ok(endpoint)
+        }).transpose()
     }
-    Ok(out)
+}
+fn load_context(c: &Connection, paths: &[String], p: Phase, epoch: i64) -> rusqlite::Result<Context> {
+    context_with(&OrdinaryOwnerPlan(c), paths, p, epoch)
 }
 
 /// Only a complete shared matching observation can consume a companion owner.
@@ -1904,7 +1855,7 @@ impl SqliteStore {
                 ["semantic_epoch"],
             )
             .map_err(failure)?;
-            tx.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?2,?3 FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'",params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
+            tx.execute("INSERT INTO catalog_semantic_stage(singleton,epoch,phase,generation,original_generation,runtime,revision) SELECT 1,CAST(value AS INTEGER),'indexing',?1,?1,?2,?3 FROM meta WHERE namespace=semon_namespace() AND key='semantic_epoch'",params![generation(&tx).map_err(failure)?,runtime,revision(&tx).map_err(failure)?]).map_err(failure)?;
         }
         record_recipe(&tx).map_err(failure)?;
         for path in paths {
@@ -2099,25 +2050,8 @@ impl SqliteStore {
                 }
             };
             if p == "publication" {
-                let keys=tx.prepare("SELECT session_key FROM catalog_semantic_endpoints WHERE published=0 ORDER BY session_key LIMIT 64").map_err(failure)?.query_map([],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
-                let mut selected = BTreeSet::new();
-                for key in keys {
-                    let owner_paths=tx.prepare("SELECT source_path FROM catalog_semantic_owner_sources WHERE session_key=?1 ORDER BY source_path LIMIT 65").map_err(failure)?.query_map([key],|r|r.get::<_,String>(0)).map_err(failure)?.collect::<Result<Vec<_>,_>>().map_err(failure)?;
-                    if owner_paths.len() > 64 {
-                        return Err(StoreError::Data(
-                            "semantic owner source budget exceeded".into(),
-                        ));
-                    }
-                    let added = owner_paths
-                        .iter()
-                        .filter(|path| !selected.contains(*path))
-                        .count();
-                    if selected.len() + added > 64 {
-                        break;
-                    }
-                    publication_groups.push(owner_paths.clone());
-                    selected.extend(owner_paths);
-                }
+                publication_groups = publication_groups_with(&OrdinaryOwnerPlan(&tx)).map_err(failure)?;
+                let selected: BTreeSet<String> = publication_groups.iter().flatten().cloned().collect();
                 paths = selected.into_iter().collect();
                 if !paths.is_empty() {
                     result_phase = Phase::Publication;

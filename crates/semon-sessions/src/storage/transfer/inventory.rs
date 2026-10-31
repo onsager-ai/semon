@@ -85,6 +85,8 @@ pub(crate) fn sqlite(name: &str) -> Option<Disposition> {
         "catalog_semantic_stage"
         | "catalog_semantic_frontier"
         | "catalog_semantic_sources"
+        | "catalog_semantic_prior_owners"
+        | "catalog_semantic_prior_sources"
         | "catalog_semantic_inputs"
         | "catalog_semantic_keys"
         | "catalog_semantic_endpoints"
