@@ -577,6 +577,8 @@ struct SqliteStore {
     owner: configured::NativeOwnership,
     connection: Connection,
     path: PathBuf,
+    #[cfg(test)]
+    observation_journal: source_journal::SourceJournal,
     selected_runs: Option<std::collections::BTreeSet<String>>,
     semantic_rejection: Option<&'static str>,
     #[cfg(test)]
@@ -2113,6 +2115,18 @@ pub(crate) fn write_session_descriptions(
 impl IndexStore for SqliteStore {
     fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
         crate::facts::source_authority::Sources::sqlite(path)
+    }
+    #[cfg(test)]
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&self.observation_journal)
+    }
+    #[cfg(test)]
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&mut self.observation_journal)
     }
     fn session_descriptions(
         &self,
@@ -6050,8 +6064,7 @@ mod tests {
     impl TestSourceObservations for SqliteStore {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
-            let mut journal =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
+            let journal = &mut self.observation_journal;
             if journal
                 .recovery_is_current()
                 .map_err(StoreError::Configured)?
@@ -6082,8 +6095,7 @@ mod tests {
             complete: bool,
         ) -> Result<(), StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
-            let mut journal =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
+            let journal = &mut self.observation_journal;
             if journal
                 .discovery_is_current(paths, complete)
                 .map_err(StoreError::Configured)?
@@ -6550,7 +6562,7 @@ mod tests {
 
         // A recovery marker introduced by discovery itself must not be hidden
         // when a completed witness is advanced across known owner writes.
-        store.connection.execute_batch("CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
+        store.observation_journal.connection_for_test().unwrap().execute_batch("CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
         assert!(store.discover_recovery_sources().unwrap());
         store
             .discover_catalog_sources(&["/trigger-intent.jsonl".into()], false)
@@ -6567,24 +6579,32 @@ mod tests {
         );
         assert!(store.discover_recovery_sources().unwrap());
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch("DROP TRIGGER request_recovery_during_discovery;")
             .unwrap();
 
         // The schema cookie returns to A, but the rollback clock still changes.
         let schema: i64 = store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .pragma_query_value(None, "schema_version", |r| r.get(0))
             .unwrap();
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch(
                 "BEGIN IMMEDIATE; CREATE TABLE transient_discovery(value TEXT); ROLLBACK;",
             )
             .unwrap();
         assert_eq!(
             store
-                .connection
+                .observation_journal
+                .connection_for_test()
+                .unwrap()
                 .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
             schema
@@ -6603,11 +6623,13 @@ mod tests {
         // A failed publication rolls back both membership and claims. It cannot
         // arm a successful no-op witness or advance the recovery witness.
         let next = vec!["/fault-source.jsonl".to_owned()];
-        store.connection.execute_batch("CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON session_catalog_invalidations WHEN NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;").unwrap();
+        store.observation_journal.connection_for_test().unwrap().execute_batch("CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON session_catalog_invalidations WHEN NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;").unwrap();
         assert!(store.discover_catalog_sources(&next, false).is_err());
         assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/fault-source.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch("DROP TRIGGER fail_cold_discovery;")
             .unwrap();
         crate::native_timing::take_discovery_records();
@@ -6715,6 +6737,7 @@ mod tests {
         }];
         let mut cache = crate::events::EventCache {
             store: Some(Box::new(store)),
+            observation_namespace: fixture_namespace().as_str().to_owned(),
             observation_path: Some(path),
             ..crate::events::EventCache::default()
         };
@@ -7421,10 +7444,12 @@ mod tests {
             )
             .unwrap()
             .into_test_connection();
+            let observation_journal = prepared_observation_journal(&owner);
             SqliteStore {
                 owner,
                 connection,
                 path,
+                observation_journal,
                 selected_runs: None,
                 semantic_rejection: None,
                 traversal_observation: None,
@@ -7469,10 +7494,12 @@ mod tests {
         )
         .unwrap()
         .into_test_connection();
+        let observation_journal = prepared_observation_journal(&owner);
         SqliteStore {
             owner,
             connection,
             path,
+            observation_journal,
             selected_runs: None,
             semantic_rejection: None,
             traversal_observation: None,
@@ -10052,10 +10079,12 @@ mod tests {
                 crate::storage::NativeReaderBinding::Semantic(owner.clone())
                     .validate(&connection, &config.namespace)
                     .unwrap();
+                let observation_journal = prepared_observation_journal(&owner);
                 SqliteStore {
                     owner,
                     connection,
                     path,
+                    observation_journal,
                     selected_runs: Some(Default::default()),
                     semantic_rejection: None,
                     traversal_observation: None,
@@ -13165,12 +13194,23 @@ fn current_test_store_with_epoch(
     crate::storage::NativeReaderBinding::Semantic(owner.clone())
         .validate(&connection, namespace)
         .unwrap();
+    let observation_journal = prepared_observation_journal(&owner);
     SqliteStore {
         owner,
         connection,
         path: path.to_owned(),
+        observation_journal,
         selected_runs: None,
         semantic_rejection: None,
         traversal_observation: None,
     }
+}
+
+#[cfg(test)]
+fn prepared_observation_journal(
+    owner: &configured::NativeOwnership,
+) -> source_journal::SourceJournal {
+    let journal = source_journal::SourceJournal::owned(owner.clone());
+    journal.prepare().unwrap();
+    journal
 }
