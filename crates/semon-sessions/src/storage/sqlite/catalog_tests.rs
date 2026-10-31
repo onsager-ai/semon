@@ -6053,13 +6053,18 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         assert!(row.get("transcript").is_none());
         row["status"].clone()
     };
-    let refuse_corrupt = |scope: &str, case: &str| {
+    let unavailable_corrupt = |scope: &str, case: &str| {
         let (code, body) = page(scope);
+        assert_eq!(code, 200, "the list remains readable for {case}: {body}");
+        assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert_eq!(
-            code, 503,
-            "exact published row witness refused {case}: {body}"
+            body["items"][0]["status"],
+            json!({"state":null,"observation":"unavailable"}),
+            "changed Query metadata cannot authorize a status for {case}"
         );
-        assert!(body.get("items").is_none());
+        for private in ["query", "details", "transcript"] {
+            assert!(body["items"][0].get(private).is_none());
+        }
     };
 
     crate::events::CACHE_READS.with(|reads| reads.set(0));
@@ -6082,7 +6087,7 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
             let mut changed = original.clone();
             changed["query"]["state"] = json!(state);
             write_corrupt(&original_lifecycle, &changed);
-            refuse_corrupt("", &format!("query.state={state}"));
+            unavailable_corrupt("", &format!("query.state={state}"));
             restore_exact();
         }
     }
@@ -6094,7 +6099,7 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         let mut changed = original.clone();
         changed["query"][field] = value;
         write_corrupt(&original_lifecycle, &changed);
-        refuse_corrupt("", &format!("query.{field}"));
+        unavailable_corrupt("", &format!("query.{field}"));
         restore_exact();
     }
 
