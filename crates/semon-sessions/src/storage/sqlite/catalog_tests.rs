@@ -4650,10 +4650,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
     let refused =
         read().expect_err("history selection must not bypass a live Current runtime refusal");
-    assert_eq!(refused.code, "io");
+    assert_eq!(refused.code, "unavailable");
     assert_eq!(
         refused.message,
-        crate::storage::StorageError::ScopeChanged.to_string()
+        "Native Query runtime observations changed during the query"
     );
 
     fs::remove_file(
