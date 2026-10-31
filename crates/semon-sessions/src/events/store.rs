@@ -9071,9 +9071,7 @@ mod tests {
                     assert!(
                         matches!(
                             &error,
-                            StoreError::Configured(
-                                crate::storage::StorageError::Unavailable
-                            )
+                            StoreError::Configured(crate::storage::StorageError::Unavailable)
                         ),
                         "expected sanitized configured-storage error: {error}"
                     );
