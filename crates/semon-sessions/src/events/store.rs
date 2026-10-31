@@ -8931,9 +8931,10 @@ mod tests {
         }
         let mut oversized = rows[..2].to_vec();
         oversized[1].name = "x".repeat(1_048_576);
-        // Reuse row 0's real source so row 1's old source recipe is retained
-        // by the owned OriginalHistory producer during this same publication.
-        oversized[1].sources = rows[0].sources.clone();
+        // Adding row 0's real source preserves row 1's original recipe through
+        // OriginalHistory. Keep both sources in the incoming publication so
+        // catalog_write claims every affected owner's current source.
+        oversized[1].sources.extend(rows[0].sources.iter().cloned());
         let metadata = oversized
             .iter()
             .map(json)
@@ -9008,10 +9009,12 @@ mod tests {
                 "search coverage does not claim the oversized row is fully indexed"
             );
         }
-        let mut affected_without_row = rows[2].clone();
+        // Keep the other shared-source owner incoming. The only withdrawn
+        // owner already has original custody, so preflight reaches search.
+        let mut affected_without_row = rows[0].clone();
         affected_without_row
             .sources
-            .push(oversized[1].sources[0].clone());
+            .extend(rows[1].sources.iter().cloned());
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
             (&mut row_wise, CatalogWriter::RowWise),
@@ -9039,7 +9042,9 @@ mod tests {
                 "bounded-metadata refusal rolls back the entire scoped publication"
             );
         }
-        let duplicate = vec![rows[0].clone(), rows[0].clone()];
+        // This owner keeps its original source closure after the rolled-back
+        // publication, so the duplicate reaches the member constraint.
+        let duplicate = vec![rows[2].clone(), rows[2].clone()];
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
             (&mut row_wise, CatalogWriter::RowWise),
