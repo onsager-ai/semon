@@ -4427,13 +4427,15 @@ fn ordinary_single_machine_focus_does_not_qualify_a_provisional_native_identity(
         NOW,
     )
     .unwrap();
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
-    db.execute(
-        "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",
-        [],
-    )
-    .unwrap();
+    let db = home.semantic_publisher_connection();
+    assert_eq!(
+        db.execute(
+            "UPDATE main.meta SET value='partial' WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
     home.lines(
         "codex/sessions/2026/09/24/rollout-lead.jsonl",
         &[
@@ -4484,13 +4486,15 @@ fn ordinary_multi_machine_focus_does_not_infer_absence_from_partial_discovery() 
         )
         .unwrap();
     }
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&second.options.cache)).unwrap();
-    db.execute(
-        "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_completeness','partial')",
-        [],
-    )
-    .unwrap();
+    let db = second.semantic_publisher_connection();
+    assert_eq!(
+        db.execute(
+            "UPDATE main.meta SET value='partial' WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
     // This newly discovered duplicate is outside the peer's partial projection.
     second.top("lead", &[human("lead", ts(12, 0), "unpublished duplicate")]);
     let mut query = Query::with_machines(vec![
