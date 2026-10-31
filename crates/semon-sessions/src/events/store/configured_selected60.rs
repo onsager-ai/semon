@@ -377,7 +377,11 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
         .unwrap();
     let current = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
     assert_eq!(current["identity"]["machine_label"], "independent-facts-change");
-    assert_ne!(before["identity"]["facts_observation"], current["identity"]["facts_observation"]);
+    // Freshness reports availability, not a Facts revision. Both publications
+    // are cached; the changed machine label above proves fresh Facts were used.
+    for publication in [&before, &current] {
+        assert_eq!(publication["identity"]["facts_observation"], serde_json::json!({"state":"cached"}));
+    }
 
     let (next, next_model) = model_ready(&f, &mut cache, options, input, "selected60-next-runtime");
     assert_eq!(cache.publish_semantic_catalog(&next, next_model.prepared()).unwrap().0, Outcome::Written);
