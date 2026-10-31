@@ -123,7 +123,10 @@ fn prepared_query_recipe_for_test(
     if !PREPARED_QUERY_RECIPE.with(std::cell::Cell::get) {
         return Ok(None);
     }
-    let recipe = row.query_recipe.as_ref().ok_or(StorageError::ScopeChanged)?;
+    let recipe = row
+        .query_recipe
+        .as_ref()
+        .ok_or(StorageError::ScopeChanged)?;
     let payload = serde_json::to_string(recipe).map_err(|_| StorageError::Unavailable)?;
     proof_codec::validate_query_recipe_cell(metadata, Some(&payload))?;
     crate::query_projection::SelectedRecipe::decode(row, &payload)

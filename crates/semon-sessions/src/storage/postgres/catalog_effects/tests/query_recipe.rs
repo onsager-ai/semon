@@ -9,11 +9,16 @@ use crate::storage::{
 // A completed semantic publication schedules bounded cleanup. A Written
 // begin may only advance that cleanup; establish an actual stage before the
 // shared publication fixture starts consuming batches.
-fn begin_fixture_stage(cache: &mut crate::events::EventCache, paths: &[String]) {
+fn begin_fixture_stage(
+    cache: &mut crate::events::EventCache,
+    options: &Options,
+    paths: &[String],
+) {
+    let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
     for _ in 0..256 {
         assert_eq!(
             cache
-                .begin_semantic_stage_with_journal(paths, "transfer-real-model", true)
+                .begin_semantic_stage_with_journal(paths, &runtime, true)
                 .unwrap(),
             crate::events::Outcome::Written
         );
@@ -50,7 +55,7 @@ fn advance_imported_fixture(
             &crate::facts::MachineFacts::Local,
         )
         .unwrap();
-    begin_fixture_stage(&mut cache, &[old_path.to_str().unwrap().to_owned()]);
+    begin_fixture_stage(&mut cache, options, &[old_path.to_str().unwrap().to_owned()]);
     assert!(
         crate::storage::transfer::reported::tests::finish_catalog(
             &mut cache,
@@ -62,7 +67,7 @@ fn advance_imported_fixture(
     fs::write(&path, body).unwrap();
     cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
-    begin_fixture_stage(&mut cache, &[path.to_str().unwrap().to_owned()]);
+    begin_fixture_stage(&mut cache, options, &[path.to_str().unwrap().to_owned()]);
     let rows = crate::storage::transfer::reported::tests::finish_catalog(
         &mut cache,
         options,
@@ -288,41 +293,33 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
 #[test]
 fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt() {
     use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
-    use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
+    use crate::storage::transfer::reported::tests::{apply, root, seed_catalog_input, sqlite, stage};
+    use rusqlite::OptionalExtension;
     let root = root();
     let source = sqlite(&root, "query-recipe-import");
-    let (options, initial) = seed_catalog(&source, &root);
+    let (options, input) = seed_catalog_input(&source, &root);
     // Change representation before the real producer records its exact model
     // witness. Authority is still authored only by ordinary publication.
     use std::io::Write;
-    let path = &initial[0].sources[0].path;
+    let path = input.full_path(&options);
+    let path = &path;
     writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":"catalog","uuid":"recipe-import-successor","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"recipe import successor"}})).unwrap();
     let mut cache = crate::storage::transfer::reported::tests::cache(&source);
     cache.ingest(&"8".repeat(64), path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
     let paths = vec![path.to_str().unwrap().to_owned()];
+    let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     assert_eq!(
         cache
-            .begin_semantic_stage_with_journal(&paths, "query-recipe-import", true)
+            .begin_semantic_stage_with_journal(&paths, &runtime, true)
             .unwrap(),
         crate::events::Outcome::Written
     );
     let input = crate::native_evidence::catalog_input(path, &options).unwrap();
     let mut published = None;
     for _ in 0..256 {
-        let Some(batch) = cache.semantic_batch(64).unwrap() else {
-            // Completing the seeded publication leaves bounded semantic GC.
-            // begin advances those ordinary pages before creating the next
-            // stage, so Written alone does not yet promise a batch.
-            assert_eq!(
-                cache
-                    .begin_semantic_stage_with_journal(&paths, "query-recipe-import", true)
-                    .unwrap(),
-                crate::events::Outcome::Written
-            );
-            continue;
-        };
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
         if batch.paths.is_empty() {
             continue;
         }
@@ -388,13 +385,17 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     .into_test_connection();
     let tx = db.transaction().unwrap();
     let binding = reader.runtime_binding_at(&tx).unwrap();
-    crate::storage::sqlite::proof_generations::query_recipe_observation(
+    let source_observation = crate::storage::sqlite::proof_generations::query_recipe_observation(
         &tx,
         &binding,
         Owner::Catalog,
         row,
     )
     .unwrap();
+    let source_proof = match source_observation.residence {
+        QueryRecipeResidence::Immutable { generation, .. } => generation,
+        _ => panic!("ordinary semantic publication must own the immutable recipe"),
+    };
     let current_payload: Option<String> = tx
         .query_row(
             "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3",
@@ -408,12 +409,24 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     );
     let immutable_payload: Option<String> = tx
         .query_row(
-            "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND metadata=?3",
-            rusqlite::params![source.namespace.as_str(), row.key, compact.metadata],
+            "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND metadata=?3 AND id=?4",
+            rusqlite::params![source.namespace.as_str(), row.key, compact.metadata, source_proof.0],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(immutable_payload.as_ref(), Some(payload));
+    let original_history: Option<String> = tx
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![source.namespace.as_str(), row.key],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    assert!(
+        original_history.is_none(),
+        "compact publication is the first original owner"
+    );
     tx.commit().unwrap();
     drop(db);
     drop(cache);
@@ -436,13 +449,14 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         .unwrap();
     let namespace = &config.namespace;
     let token = snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |view| {
+        assert!(view.owner(&row.key)?.is_none());
         let selected = view.catalog(&row.key, false)?.unwrap();
         let token = view
             .query_recipe_observation(Owner::Catalog, &selected)
             .unwrap();
         assert!(matches!(
-            token.residence,
-            QueryRecipeResidence::Immutable { .. }
+            &token.residence,
+            QueryRecipeResidence::Immutable { generation, .. } if generation == &source_proof
         ));
         assert_eq!(token.original, binding);
         assert_eq!(Some(token.destination.clone()), view.runtime_binding());
