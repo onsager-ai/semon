@@ -5091,7 +5091,6 @@ mod tests {
             .iter()
             .map(|row| row.key.clone())
             .collect::<BTreeSet<_>>();
-        drop(history);
         drop(source);
         drop(source_owner);
 
