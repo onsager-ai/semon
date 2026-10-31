@@ -4889,9 +4889,10 @@ mod tests {
 
     #[test]
     fn configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority() {
+        use crate::storage::catalog::CatalogObservationOwner;
         use crate::storage::query::QueryRecipeLoadError;
         use crate::storage::sqlite::proof_generations::{
-            CatalogObservationOwner, load_query_recipe, query_recipe_observation,
+            load_query_recipe, query_recipe_observation,
         };
         let (fixture, _, options, inputs) = model_sources();
         let mut cache = EventCache::open_semantic(
