@@ -154,7 +154,7 @@ The shared private value types are:
 
 ```rust,ignore
 struct OriginId { initial_stage_epoch: i64 }
-enum OriginPhase { Discovering, Sealed, Draining, Invalid, Finished }
+enum OriginPhase { Discovering, Sealed, Draining, Finishing, Invalid, Finished }
 struct OriginHeader {
     id: OriginId,
     phase: OriginPhase,
@@ -162,6 +162,10 @@ struct OriginHeader {
     stream: String,
     sealed_revision: Option<i64>,
     first_publication: Option<String>,
+    final_generation: Option<String>,
+    final_revision: Option<i64>,
+    finish_phase: FinishPhase,
+    finish_after: String,
 }
 struct OriginMember {
     path: String,
@@ -169,9 +173,39 @@ struct OriginMember {
 }
 struct OriginPublication {
     origin: OriginId,
+    // The original holder epoch is part of the retained caller request.
     held_epoch: i64,
+    // Existing catalog_semantic_stage.key_epoch; stable on takeover and
+    // advanced by a derived reset. It is not a new lifecycle allocator.
+    key_epoch: i64,
     expected_generation: Option<String>,
+    selection_digest: String,
     group_digest: String,
+}
+struct OriginGroup {
+    selected_owners: Vec<String>,
+    selected_paths: Vec<String>,
+    claims: Vec<(String, Option<i64>)>,
+}
+enum FinishPhase { VerifyOwners, VerifySources, Cleanup, Finalize }
+enum SemanticWork { Batch(Batch), OriginContextAdvanced }
+struct OriginPublicationReceipt {
+    origin: OriginId,
+    held_epoch: i64,
+    key_epoch: i64,
+    selection_digest: String,
+    group_digest: String,
+    expected_generation: Option<String>,
+    generation: String,
+    admission: u64,
+    stream: String,
+}
+struct OriginContext {
+    owner: String,
+    after_child: String,
+    complete: bool,
+    // Canonically ordered child keys for one selected parent, at most 1 MiB.
+    child_keys: Vec<String>,
 }
 struct OriginOwnerWitness {
     key: String,
@@ -189,12 +223,27 @@ struct OriginSourceWitness {
 
 Namespace, runtime and live generation remain in the existing admitted stage
 binding; these values do not introduce another native identity or authority.
-`OriginId` is the epoch allocated when that same stage was first created. It is
-immutable across holder takeover and derived reset. The existing held epoch
-still changes on takeover/reset and fences old callers; no second epoch counter
-is allocated. A publication group digest hashes its origin, held epoch, expected
-head, canonical selected keys, exact claims and prepared-model witness. Exact
-receipt replay precedes the now-stale head/claim CAS, as in existing publication.
+`OriginId` is the initial epoch of this stage and remains immutable through
+takeover, reset and finish. The existing held `epoch` changes on takeover and
+reset. `key_epoch` is the existing derived-key generation: takeover leaves it
+unchanged, while reset already increments it. It separates rebuilt work from
+exact retries without allocating another lifecycle counter.
+
+For one group, `selection_digest` hashes the origin root, original held epoch,
+`key_epoch`, expected head, sorted selected owner keys and sorted physical paths
+with their exact nullable claims. `group_digest` hashes that selection digest
+with the exact prepared model witness, Catalog rows, slot projections and
+presentation observations. Claims include every selected path, including paths
+whose accepted claim is null. The batch and the original `PreparedSources` stay
+together at the caller boundary for exact replay.
+
+`semantic_batch` returns either a bounded `Batch` or
+`OriginContextAdvanced`. The latter means one durable context page was advanced;
+the producer returns pending without opening Raw or preparing a model. It
+prevents a metadata paging loop from becoming unbounded inside one producer
+tick. The batch carries `selected_owners` separately from
+`Context.replay_owners`: selected owners define publication progress, while
+replay owners define bounded native relationship context.
 
 Only an owned native discovery producer may create the origin. The proposed
 private operations are `enroll_origin_page`, `seal_origin`,
@@ -209,17 +258,23 @@ once by the actual producer after sealing, before any Current publication.
 #### Persistent rows and pages
 
 SQLite keeps the existing `catalog_semantic_stage` row and adds nullable origin
-header fields: `origin_epoch`, `origin_phase`, `origin_admission`, `origin_stream`,
-`origin_sealed_revision` and `origin_first_generation`. Existing `generation`,
+header fields: `origin_epoch`, `origin_phase` (`discovering`, `sealed`,
+`draining`, `finishing`, `invalid`, `finished`), `origin_admission`,
+`origin_stream`, `origin_sealed_revision`, `origin_first_generation`,
+`origin_final_generation`, `origin_final_revision`, `origin_finish_phase` and
+`origin_finish_after`. Existing `generation`,
 `runtime`, `epoch` and reduction cursors keep their current jobs. The SQLite WIP
 represents an unactivated runtime using explicit `origin_runtime_bound=0` while
 retaining the existing non-null runtime column. Its placeholder contents convey
 no authority; publication requires activation and the held stage binding.
 PostgreSQL should encode that same logical distinction as an optional bound
 runtime in its header. Existing `catalog_semantic_sources` rows gain immutable
-origin membership/admission-claim fields; the normal mutable claim and derived
-progress fields are separate. The source row is enrolled in the same discovery
-transaction that records its backfill membership and initial invalidation.
+`origin_epoch`, `origin_member` and `origin_claim` fields; the normal mutable
+claim and derived progress fields are separate. The source row is enrolled in
+the same discovery transaction that records its backfill membership and initial
+invalidation. `catalog_semantic_endpoints.published` is the selected-owner
+queue; source `publication_done` and `ack_done` remain independent per-path
+queue bits.
 
 Two small witness relations belong to that same stage family:
 
@@ -234,10 +289,24 @@ catalog_semantic_origin_sources(
   head_sha256, tail_sha256,
   PRIMARY KEY(namespace, origin_epoch, source_path));
 catalog_semantic_origin_publications(
-  namespace, origin_epoch, held_epoch, request_digest, generation,
-  admission, stream,
-  PRIMARY KEY(namespace, origin_epoch, held_epoch));
+  namespace, origin_epoch, held_epoch, key_epoch, selection_digest,
+  group_digest, expected_generation, generation, admission, stream,
+  PRIMARY KEY(namespace, origin_epoch, held_epoch, key_epoch, group_digest),
+  UNIQUE(namespace, origin_epoch, held_epoch, key_epoch, selection_digest));
+catalog_semantic_origin_context(
+  namespace, origin_epoch, key_epoch, owner_key, kind, after_key,
+  complete, payload CHECK(octet_length(payload)<=1048576),
+  PRIMARY KEY(namespace, origin_epoch, key_epoch, owner_key, kind));
 ```
+
+`group_digest` hashes the full request and `selection_digest` names the selected
+group. The unique selection key makes one selected group admit only one request:
+an exact digest replays its receipt, while a changed body, projection or
+presentation for the same selected owners and claims conflicts. Different
+selected groups in one held epoch have different selection digests and receipts.
+The receipt stores the original holder epoch and expected head. `payload` in the
+context table is used only for one selected owner's bounded parent summary; it
+is at most 1 MiB and is never an all-stage or all-endpoint document.
 
 Allocation also proves the Current baseline is empty in that same owned
 transaction: no Current Catalog rows, Current source membership, native Current
@@ -254,7 +323,21 @@ every ledger. This is a non-authorizing comparison witness, never a Raw recipe,
 lease, source grant or substitute for current canonical qualification. The
 current owner row's complete source cohort supplies owner-to-source membership;
 its existing membership check must still pass. Source witnesses are deduplicated
-by physical path within the origin.
+by physical path within the origin. An accepted null claim is
+`acknowledged=1, accepted_claim=NULL`, distinct from a missing witness.
+
+For `kind='parent_children'`, one `catalog_semantic_origin_context` row stores
+one selected parent's canonical child-key list, last child key read and
+completion bit. Each producer tick reads at most 64 rows using the
+`catalog_semantic_parent_key(namespace,parent_key,session_key)` index and
+`session_key > after_key ORDER BY session_key LIMIT 65`. It appends at most 64
+keys, checks the accumulated payload remains at most 1 MiB, and advances the
+cursor and `complete` bit in the same transaction. `load_context` reads that
+row only after `complete=1`. Thus the 80-child parent summary is assembled from
+bounded durable metadata pages without reading child Raw logs or retaining an
+all-endpoint map. If the one selected summary exceeds 1 MiB, refuse without
+publishing a truncated parent. The aggregate selected `Context`, including all
+selected endpoints and completed summaries, also remains within 1 MiB.
 
 PostgreSQL uses the existing `catalog_stage_items` family. `seq=0` remains a
 bounded header; other rows are typed items for source progress, endpoints,
@@ -282,7 +365,8 @@ it is not an origin/holder epoch. Conceptual item mappings are:
 | Admitted membership and claim | Existing source row plus immutable origin fields | `source`, full physical path |
 | Accepted owner comparison | Origin-owner witness row | `origin-owner`, full session key |
 | Accepted source comparison | Origin-source witness row | `origin-source`, full physical path |
-| Selected-group replay | Group-qualified stage publication receipt | `publication`, canonical group digest |
+| Selected-group replay | Group-qualified stage publication receipt | `publication`, origin plus full group digest |
+| Parent summary cursor/payload | Bounded selected-owner context row | `origin-context`, origin plus owner key |
 | Existing derived work | Existing sources/endpoints/frontiers/relations | Typed item with its complete existing logical key |
 
 For example, a PostgreSQL source lookup qualifies namespace bytes, stable root,
@@ -292,12 +376,26 @@ unexpected full key refuses. SQLite uses its existing namespace/path or
 namespace/session-key indexes with the equivalent keyset predicate. Neither
 adapter discovers membership by scanning payloads of unrelated stage items.
 
-The existing semantic publication receipt key must distinguish selected groups
-within a held stage epoch. Use the deterministic group digest, retaining the
-held epoch as a fence and indexed receipt qualifier. One receipt per entire
-stage cannot acknowledge a second group. First ordinary publication records its
-group receipt in the same stage family; later semantic publications use their
-existing proof/presentation authority and selected-group receipts.
+The receipt key is `(namespace, origin_epoch, original held_epoch, key_epoch,
+group_digest)`, with a unique `(namespace, origin_epoch, held_epoch, key_epoch,
+selection_digest)` constraint. The selection digest includes expected head,
+sorted selected owner keys, sorted selected physical paths and exact nullable
+claims. The group digest additionally includes the exact prepared model witness,
+rows, slot projections and presentation observations. Thus distinct groups share
+one held epoch, but one selected group cannot commit two different requests.
+The receipt stores the result generation, expected generation, admission and
+stream; it stores no reconstructable model payload.
+
+The API passes an `OriginGroup` from the stage batch into publication. It never
+accepts an origin token supplied as external authority. After native capability
+validation, the publisher computes the group digests and looks up the composite
+receipt before checking current holder, head, claim or stage CAS. An exact match
+returns the recorded generation with zero database writes, including no ACK or
+queue progress update. The same selection with a different group digest
+conflicts. With no receipt, a stale holder conflicts before effects. First
+publication and later semantic publication use this same receipt identity;
+the first request has an absent expected head and subsequent groups bind the
+current live head.
 
 #### State and first-publication CAS
 
@@ -319,30 +417,104 @@ existing proof/presentation authority and selected-group receipts.
 4. Capture only this group's accepted owner digests and source witnesses from
    those validated rows/ledgers/claims. Publish Current and the existing native
    grants, write the group receipt, ACK only its exact claims, and move the same
-   stage to `Draining` with its resulting live generation. All effects commit
-   atomically. Any receipt/capture failure rolls back publication and ACK.
-   The SQLite WIP retains the first group's original held epoch, admission and
-   stream in its immutable receipt. A reopened native producer in `Draining`
-   reacquires that committed token even after normal held-epoch takeover. Its
-   exact receipt lookup runs after current native capability validation and
-   before live head/held-epoch checks, returning the recorded generation without
-   any second ACK or progress write. A changed first-group request is refused;
-   this committed token cannot authorize the next cohort.
-5. Later groups require the current held epoch and live head, complete selected
-   owner closures and the ordinary current claims. They publish/ACK only their
-   selected paths/owners, advance only those progress flags and witnesses, and
-   update the stage's live head in that same transaction. Unselected pending
-   work is untouched. Empty publication requests finish only after all durable
-   queues and final witnesses qualify.
+   stage to `Draining` with its resulting live generation. In the same
+   transaction set `ack_done=1` and clear `claim` only for these selected source
+   paths. Leave `publication_done=0` and leave their semantic endpoint
+   `published=0`: the newest cohort is an ordinary first projection, and the
+   later semantic drain must republish its owners after complete identity and
+   relationship derivation. Any receipt/capture failure rolls back publication
+   and ACK. Exact replay returns the recorded generation without a second ACK
+   or progress write; that receipt cannot authorize the next group.
+5. Derive the sealed inventory through the existing source, identity and
+   relationship queues. At `Publication`, select at most 64
+   `catalog_semantic_endpoints` with `published=0` in canonical key order. For
+   each selected owner, fetch its complete owned source cohort from the indexed
+   owner/source membership; do not split an owner. The deduplicated union of
+   selected owner paths and selected removal paths must contain at most 64
+   physical sources. `Batch.selected_owners` carries the exact owner set and
+   `Batch.paths` the exact path set; the prepared rows and claims must match both.
+   Parent and relationship context comes from the bounded context paging below.
+   After full closure and witness validation, publish the selected owners and
+   ACK only selected non-null claims. In one transaction set only selected
+   endpoints `published=1`, selected paths `publication_done=1,ack_done=1`,
+   record or reuse their source/owner witnesses, insert the group receipt and
+   advance the live head. Unselected queue rows and claims are unchanged.
 
-An exact retry requires the caller to retain the original `PreparedSources`:
-its absent base head, selected claims, rows, slot projections and presentation
-observations. The regression tears down/reopens the actual EventCache producer
-while retaining that same request at the caller boundary. The receipt stores
-its digest and result, not a reconstructable request payload. Full process loss
-of that caller payload therefore does not imply that fresh model preparation
-will reproduce an exact retry; new preparation is a new request. Durable model
-payload recovery and later cohort publication remain outside this SQLite WIP.
+An exact retry requires the caller to retain the original `Batch` origin group
+and `PreparedSources`: original held epoch and `key_epoch`, expected head,
+selected owners and paths, exact nullable claims, rows, model witness, slot
+projections and presentation observations. The regression tears down/reopens the
+actual EventCache producer while retaining that same request at the caller
+boundary. The receipt stores its digests and result, not a reconstructable
+request payload. Full process loss of that caller payload therefore does not
+imply that fresh model preparation will reproduce an exact retry; new
+preparation is a new request. Reopen/takeover replay uses the retained original
+held epoch to find the receipt before checking the now-stale holder/head. Durable
+model payload recovery remains outside this SQLite WIP.
+
+#### Cumulative owner queue and selected context
+
+The origin drain does not call the ordinary full `Owners::affected` union over
+all admitted paths. That union would contain 81 Current owners in the cold81
+case and would restore the refusal M3 is meant to resolve. Instead, seed the
+existing indexed owner, native identity and relationship neighbor ports from
+the selected group, and persist one keyset closure cursor in the existing
+frontier family. Visit every affected Current owner in pages of at most 64:
+
+* If the exact owner witness, current native grant, complete source membership,
+  and every incident source witness still match, exclude that owner from the
+  pre-origin `prior_owners` payload. Continue visiting its neighbors so a new
+  child, alias, collision or off-origin sibling cannot be hidden by the witness.
+* For every owner outside the origin, or every origin owner whose comparison
+  fails, load its complete Current row and all owned physical sources. Keep
+  only this non-excluded closure in memory. The complete off-origin owner and
+  physical-source union must fit the existing 64-owner/64-source and 1 MiB
+  limits. Continue keyset traversal to completion; never stop at 64 and silently
+  drop another edge. If the limit is exceeded, refuse before Raw preparation or
+  publication. Ordinary non-origin work keeps the existing full-closure path.
+
+The selected owner cohort is a separate bound: at most 64 selected owners and
+at most 64 distinct physical sources in the union of their complete owned
+cohorts. A multi-source owner is indivisible. Every selected source path must
+be in the sealed inventory to receive an origin exception. A post-seal path
+stays an ordinary journal claim and cannot inherit its parent's exception.
+
+Relationship context is loaded only for the selected owner group and its
+bounded companions. In the current SQLite `load_context`, parent-child keys
+are read with an unbounded loop even though the accumulated byte count is
+checked. Replace that loop with `catalog_semantic_origin_context` progress:
+`(origin_epoch,key_epoch,owner_key,kind='parent_children',after_key,complete,
+payload)`. Each `semantic_batch` call advances at most 64 children from the
+indexed `catalog_semantic_endpoints(parent_key,session_key)` relation and
+appends their canonical keys to this one-parent payload, capped at 1 MiB. It
+returns `OriginContextAdvanced` until the completion bit is set; these ticks do
+not parse Raw or prepare models. The final `Context` reads a completed payload
+for only the selected parent(s). The 80-child fixture therefore keeps all 80
+keys in the parent summary while each metadata fetch and each context stays
+within its existing bound. Physical companions remain at most 64 and are not
+expanded to every child source.
+
+`catalog_semantic_sources.ack_done` records source-claim ACK and
+`publication_done` records selected source publication; endpoint `published`
+records selected-owner publication. These flags are updated only for the
+selected group. The first M2 cohort may already have acknowledged a physical
+path while its owner is still awaiting complete semantic publication. A later
+group can reuse that path's accepted source witness after exact ledger/claim
+comparison; it does not insert a duplicate witness or ACK it again. If the
+claim or ledger changed, the old witness fails comparison. A successor witness
+can be stored only in the same transaction as a normal validated publication
+and exact ACK. `acknowledged=1, accepted_claim=NULL` records an accepted null
+claim explicitly.
+
+For a JSON claim, sibling/native identity invalidation and invalidation of the
+affected origin-source/owner comparison must occur before deleting that exact
+claim. Keep both operations inside the publication transaction: first verify
+the full selected closure and write the Q1 sibling/native identity effects,
+then write the selected publication and receipt, then delete only each selected
+`(path,revision)` claim and advance the Catalog head. A failure at any point
+rolls back identity changes, witnesses, receipts, Current/History/slot/search
+effects and ACK together. No invalidation is inferred after the JSON claim has
+already disappeared.
 
 The SQLite first-publication header CAS is conceptually the following guarded
 update, inside the transaction that already validates/updates the Catalog head:
@@ -359,14 +531,20 @@ WHERE namespace=:namespace AND epoch=:held_epoch
 ```
 
 Require exactly one changed row; otherwise roll back every publication effect.
-Subsequent group CAS requires `origin_phase='draining'` and exact live generation
-instead of the absent head. The PostgreSQL equivalent locks the existing source
-state row, validates the decoded header/binding, then updates the stable-root
-`seq=0` item with `WHERE namespace_digest=... AND namespace=:full_namespace AND
+Subsequent group CAS requires `origin_phase='draining'`, the exact current held
+epoch, unchanged `key_epoch`, and `generation=:expected_generation`; the new
+head replaces `generation` in the same transaction as Catalog-head CAS, group
+receipt insertion, selected progress and ACK. Require one changed stage row.
+The receipt insert uses the composite group key above; first-group CAS still
+requires the absent head and sets `origin_first_generation` once. The PostgreSQL
+equivalent locks the existing source state row, validates the decoded
+header/binding, then updates the stable-root `seq=0` item with
+`WHERE namespace_digest=... AND namespace=:full_namespace AND
 stage_epoch=:origin_epoch AND seq=0 AND active AND payload_hash=:old_header_hash`.
-The new payload contains the exact held epoch and live head. Require one row and
-retain the full bytes/hash validation. This CAS and Catalog-head CAS are in the
-same transaction. Header revision/watermark alone cannot substitute for either.
+The new payload contains the exact held epoch, `key_epoch` and live head.
+Require one row and retain the full bytes/hash validation. This CAS and
+Catalog-head CAS are in the same transaction. Header revision/watermark alone
+cannot substitute for either.
 
 Completed exact group-receipt replay may return its acknowledgement without
 effects before checking a now-stale held epoch/head, matching the existing replay
@@ -402,23 +580,72 @@ selected changed sources and affected prior sources still must fit 64 before
 Raw preparation. In particular, finishing an initial 64-owner origin never
 allows a later 65th source to reuse its exception.
 
-Derived reset/takeover may retain immutable membership and accepted provenance,
-but must invalidate old held batches/model witnesses and recheck every
-exception. Recovery fences/invalidates the origin before replacing admitted
-membership. A concurrent publisher cannot adopt or advance its live head. A
-new admission, stream or incompatible runtime cannot inherit the exception.
+#### Reset, takeover and finish
+
+Takeover and reset are distinct transitions on the existing stage row. A normal
+same-runtime takeover advances only the held `epoch` under the namespace CAS;
+it keeps `OriginId`, `key_epoch`, accepted witnesses, selected-owner cursors and
+receipts. Old unfinished batches fail the holder check. A completed batch can
+still exact-replay its receipt using its retained original `held_epoch` before
+that check.
+
+A derived reset advances the held `epoch` and existing `key_epoch`, invalidates
+the old model witness and returns progress to indexing. It does not allocate a
+new OriginId or admit new inventory. Preserve sealed membership and accepted
+comparison witnesses, then recheck every owner/source witness as pages are
+rebuilt. A changed source claim or ledger makes that source and its incident
+owner exception fail comparison; a new validated publication may record its
+successor. Runtime, admission or stream replacement invalidates the origin's
+exception entirely. Do the Q1 sibling/native identity invalidation and mark the
+affected comparison stale before any JSON claim deletion, in the reset's same
+transaction. `reset_page` uses the existing 64-metadata-item mutation budget;
+it resumes by keyset cursor after restart and never deletes Raw, Current or
+History.
+
+Finish has four durable phases on the same stage: `VerifyOwners`,
+`VerifySources`, `Cleanup`, and `Finalize`. Verification checks at most 64 owner
+or source witnesses per call, including complete Current membership, native
+grant, exact source ledger/claim and the recorded acknowledgement bit. It
+requires every initial member and selected endpoint to be complete, no pending
+claims, the current Catalog head equal to the stage generation, and an unchanged
+source journal revision. Persist the verified owner/source keyset cursor and
+the exact final head/revision; do not build a final inventory map.
+
+After both verification passes, set `origin_phase='finishing'` and freeze new
+group publications. Cleanup removes derived context, frontier, event, relation,
+endpoint and model-witness rows in pages of at most 64 metadata mutations total.
+Keep immutable origin membership and accepted owner/source witnesses until
+finalization so a journal change during cleanup can return to bounded reset and
+recovery. The active source rows retain their immutable origin fields; a later
+ordinary `begin` refreshes mutable claim/progress fields with an upsert while
+preserving immutable `origin_epoch`, `origin_member` and `origin_claim`.
+
+The final transaction rechecks the exact final Catalog head, source journal
+revision, no pending invalidations, completed selected queues and all final
+witness cursors. Only then may it mark the Catalog complete and remove the
+active stage row. If any input changes during finish, keep completeness partial,
+invalidate the old finish cursor, and resume or reset with the same OriginId;
+cleanup never ACKs a source claim. Group receipts are excluded from derived
+cleanup and retained with the origin for the exact-replay lifetime. During
+`Finishing` they may only return a matching generation with zero writes; after
+the active stage is removed they remain read-only receipts. A Finished receipt,
+owner witness or source witness cannot create a new group, exclude an owner
+from a later ordinary closure, or grant source/native authority. This prevents
+an orphan receipt from authorizing work and preserves the M2 exact retry after
+finalization.
 
 #### Operation bounds and implementation checkpoints
 
 | Operation | Resident/operation bound | Durable progress |
 | --- | --- | --- |
 | Discovery | Existing 512 examined entries, at most 64 accepted paths | Append the same accepted page and claims; seal in final transaction |
-| Index/identity | At most 64 physical sources, existing 4 MiB source slices and complete-owner closure rules | Per-source progress and existing ledger witnesses |
-| Relationship preparation | Existing actor/seed and event limits, at most 64 physical companions, 1 MiB context | Frontier/event/relation cursors; no all-endpoint map |
-| Witness/context reads | At most 64 metadata items per page, 1 MiB per payload/context | Keyset cursor; no uncapped loop inside one producer tick |
-| Publication | At most 64 selected owners and 64 distinct physical sources; existing metadata/projection byte limits | Selected-group receipt, flags, ACK and live head in one transaction |
-| Prior owners outside origin | Existing complete 64-owner/source and 1 MiB closure refusal | No origin-based increase or truncation |
-| Reset/cleanup | Existing 64 metadata-item mutation budget | Preserve origin root/provenance separately from derived reset cursors |
+| Index/identity | At most 64 physical sources, existing 4 MiB source slices, and one complete selected owner's source cohort | Per-source progress and existing ledger witnesses |
+| Selected owner cohort | At most 64 selected owners and at most 64 distinct complete owned physical sources; never split an owner's sources | `published` owner queue plus exact selected source paths |
+| Relationship/context | Existing actor/seed/event limits, at most 64 physical companions, 1 MiB aggregate selected `Context` | Frontier/event/relation cursors; parent summary cursor and completion payload; no all-endpoint map |
+| Witness/context reads | At most 64 metadata items per page, 1 MiB per payload/context | Keyset cursor; one page per producer tick; no uncapped loop |
+| Publication | At most 64 selected owners and 64 distinct physical sources; existing metadata/projection byte limits | Group-qualified receipt, selected owner/source flags, exact ACK and live head in one transaction |
+| Prior owners outside origin | Complete affected closure; existing 64-owner/source and 1 MiB refusal | Origin matches exclude only exact accepted Current owners; no origin-based increase or truncation |
+| Reset/cleanup | At most 64 metadata-item mutations per call | Existing holder/key epochs, reset cursor, finish verification cursors and cleanup cursor |
 
 Receipt records contain keys/digests and source witnesses, not another copy of
 all model metadata. PostgreSQL packs them by both item count and bytes; it may
@@ -429,23 +656,54 @@ limit is enlarged to fit a cumulative stage. Parent child names and incident
 placements use the existing bounded metadata/replay ports, not Raw loading of
 all children.
 
-Implementation checkpoints, each requiring review before the next:
+CI control mapping for the SQLite checkpoint:
 
-1. Review these shared types, lifecycle-root/held-epoch distinction, native-only
-   discovery hook, keyed item layout and deterministic selected receipt key.
-2. Implement SQLite owned discovery plus atomic first-publication transition,
-   including rollback, crash/replay, stale holder and generic-journal refusal
-   controls. This alone is not an integrable oversized-component fix.
-3. Implement SQLite cumulative queues, selected-owner context/publication,
-   receipt matching, selected ACK and bounded reset/recovery. Require unchanged
-   cold81 and old-window completion, every parent/parent-summary assertion,
-   unchanged Domain52 64-prior-plus-new refusal and zero-effects assertions.
-4. Implement PostgreSQL typed stage items and the identical transitions with
-   independent adapter/conformance oracles. Do not retain a second all-stage
-   JSON implementation or different origin semantics.
-5. Run cross-backend corruption/missing-witness, post-seal mutation, collision,
-   takeover, runtime/admission replacement and competing-publication controls;
-   then exact final Source/Hub checks and original first-page/background gates.
+* Keep `cold_origin_first_publication_binds_inventory_and_selected_ack`,
+  `cold_origin_committed_response_loss_reopens_and_replays_exact_facade_request`,
+  `cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin`,
+  `cold_origin_head_loss_with_current_is_not_an_empty_baseline`, and
+  `generic_discovery_cannot_allocate_a_cold_origin`. They retain the M2 owned
+  discovery, selected first ACK, rollback, exact replay, nonempty-head refusal
+  and generic-journal refusal controls.
+* Add `cold_origin_81_finishes_in_selected_groups`: publish the first newest 64,
+  drain the remaining source/owner pages, reach `complete` only after the final
+  witness pass, and assert all 81 Current owners and no pending initial claims.
+* Keep `cold_codex_family_crossing_batches_preserves_every_native_parent` for
+  all 80 child `parent_key` values, and
+  `resumable_catalog_keeps_current_old_family_outside_viewer_scan_window` for
+  all 80 child summaries plus the parent's exact 80-child summary. The latter
+  must prove the bounded child-key pages preserve every child without opening
+  all child Raw logs for parent context.
+* Keep the unchanged regression
+  `events::store::configured::tests::domain52::configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication`
+  in the inline `domain52` module of
+  `crates/semon-sessions/src/events/store/configured.rs`. Its 64 Current
+  children plus a new 65th child must still return
+  `semantic_affected_owner_source_budget`, preserve the complete prior
+  publication, and leave `shared_state` unchanged.
+* Add multi-group same-held-epoch receipt coverage: two different groups create
+  two receipts; a retained exact request for group one replays read-only after
+  takeover and after later groups advance the head; changed model/projection/
+  presentation for the same selection conflicts; an unfinished stale holder
+  writes nothing. Add a JSON-claim failure control proving sibling/native
+  identity invalidation, receipt, publication and exact ACK roll back together.
+* Add restart controls during parent-summary paging, derived reset, final witness
+  verification and 64-item cleanup. An input arriving during finish must leave
+  completeness partial and recover with the same origin root. A selected
+  summary above 1 MiB refuses without truncation.
+
+M2 owned discovery and first publication are already implemented in the SQLite
+WIP and have five focused controls passing in CI; that checkpoint remains
+nonintegrable until M3. Review this concrete M3 receipt key, owner/source split,
+parent-summary cursor and finish contract before implementation. Then implement
+SQLite cumulative queues, selected-owner context/publication, receipt matching,
+selected ACK and bounded reset/recovery. PostgreSQL remains a separate later
+checkpoint: implement the same semantics with typed `catalog_stage_items`, no
+whole-stage JSON representation, and independent adapter/conformance oracles.
+Only after both adapters pass their corruption, missing-witness, post-seal
+mutation, collision, takeover, runtime/admission replacement and
+competing-publication controls run the exact final Source/Hub checks and original
+first-page/background gates.
 
 No local cargo (including formatting), Node tests, project typechecks or other
 CPU-bound validation is authorized while thermal readings are unavailable.
