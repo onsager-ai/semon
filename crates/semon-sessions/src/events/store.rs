@@ -10913,21 +10913,26 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn usage_delete_bind_namespace(db: &Connection, namespace: &str) {
+        let namespace = crate::storage::LogicalSourceNamespace::new(namespace).unwrap();
+        crate::storage::sqlite::catalog_namespace::register(db, &namespace).unwrap();
+    }
+
     fn usage_delete_fixture() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.pragma_update(None, "foreign_keys", true).unwrap();
-        db.create_scalar_function(
-            "semon_namespace",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| Ok("selected".to_owned()),
-        )
-        .unwrap();
+        tree_state::register(&db).unwrap();
+        usage_delete_bind_namespace(&db, "selected");
+        for schema in authored_storage_ddl() {
+            db.execute_batch(schema).unwrap();
+        }
         db.execute_batch(
-            "CREATE TABLE files(namespace TEXT NOT NULL,file_id INTEGER NOT NULL,PRIMARY KEY(namespace,file_id)) STRICT, WITHOUT ROWID; INSERT INTO files VALUES('selected',1),('selected',2),('foreign',1);",
+            "INSERT INTO files(namespace,file_id,path,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,failed,pending,tool_ids,yields,busy,links,codex_tokens,codex_tokens_by_model) VALUES
+             ('selected',1,'selected-1',0,0,0,X'00',0,X'',X'',0,'[]','[]','[]','[]','{}','{}','{}'),
+             ('selected',2,'selected-2',0,0,0,X'00',0,X'',X'',0,'[]','[]','[]','[]','{}','{}','{}'),
+             ('foreign',1,'foreign-1',0,0,0,X'00',0,X'',X'',0,'[]','[]','[]','[]','{}','{}','{}');",
         )
         .unwrap();
-        db.execute_batch(copied_usage_schema()).unwrap();
         let seed = ["a", "b", "c", "z"]
             .into_iter()
             .map(|id| {
@@ -10944,23 +10949,11 @@ mod tests {
             usage: seed.keys().cloned().collect(),
             ..Default::default()
         };
-        db.create_scalar_function(
-            "semon_namespace",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| Ok("foreign".to_owned()),
-        )
-        .unwrap();
+        usage_delete_bind_namespace(&db, "foreign");
         let tx = db.unchecked_transaction().unwrap();
         write_copied_usage_rows(&tx, 1, &changes, &seed, &mut Default::default()).unwrap();
         tx.commit().unwrap();
-        db.create_scalar_function(
-            "semon_namespace",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
-            |_| Ok("selected".to_owned()),
-        )
-        .unwrap();
+        usage_delete_bind_namespace(&db, "selected");
         let tx = db.unchecked_transaction().unwrap();
         write_copied_usage_rows(&tx, 1, &changes, &seed, &mut Default::default()).unwrap();
         write_copied_usage_rows(&tx, 2, &changes, &seed, &mut Default::default()).unwrap();
