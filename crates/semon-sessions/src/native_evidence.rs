@@ -651,6 +651,15 @@ impl NativeEvidence {
         {
             return Ok(true);
         }
+        if let Some(generation) = generation.as_deref()
+            && !work
+                .events
+                .as_mut()
+                .expect("event cache initialized")
+                .rebuild_catalog_search(generation)?
+        {
+            return Ok(true);
+        }
         // A peer can publish and consume the journal before this owner audits
         // its source stamps. That is a new observation for this owner without
         // another derivation or publication. Successful own publications already
@@ -4271,6 +4280,199 @@ mod catalog_owner_tests {
             }
         }
         panic!("bounded fixture observation did not finish");
+    }
+
+    fn search_publication_state(
+        connection: &rusqlite::Connection,
+    ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        [
+            "meta",
+            "session_catalog",
+            "session_history_catalog",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+            "storage_semantic_profiles",
+        ]
+        .into_iter()
+        .map(|table| {
+            let mut statement = connection
+                .prepare(&format!("SELECT * FROM main.{table}"))
+                .unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort_by_key(|row| format!("{row:?}"));
+            (table.to_owned(), rows)
+        })
+        .collect()
+    }
+
+    fn strict_catalog_reader_available(options: &Options) -> bool {
+        let config = options.source.config(&options.cache).unwrap();
+        let binding = crate::storage::NativeReaderBinding::Admitted(config.clone());
+        let connection = binding.connection().unwrap();
+        connection.execute_batch("BEGIN DEFERRED").unwrap();
+        binding.validate(&connection, &config.namespace).is_ok()
+    }
+
+    #[test]
+    fn stale_catalog_search_is_reported_then_rebuilt_after_audit() {
+        let (root, options, _) = audit_fixture();
+        let initial = NativeEvidence::new(options.clone());
+        drain_catalog(&initial, &std::cell::Cell::new(0));
+        drop(initial);
+
+        let config = options.source.config(&options.cache).unwrap();
+        let database = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let generation: String = database
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let catalog_before = database
+            .prepare("SELECT session_key,metadata FROM main.session_catalog WHERE namespace=semon_namespace() ORDER BY session_key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let history_before = database
+            .prepare("SELECT session_key,metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        database
+            .execute(
+                "UPDATE main.meta SET value='stale-search' WHERE namespace=semon_namespace() AND key='search_version'",
+                [],
+            )
+            .unwrap();
+        drop(database);
+
+        assert!(crate::events::store::catalog_work_pending(&options).unwrap());
+        assert!(
+            !strict_catalog_reader_available(&options),
+            "strict readers remain unavailable while search metadata is stale"
+        );
+
+        let evidence = NativeEvidence::new(options.clone());
+        drain_catalog(&evidence, &std::cell::Cell::new(0));
+        assert!(
+            !crate::events::store::catalog_work_pending(&options).unwrap(),
+            "the producer completes the stale search demand"
+        );
+        assert!(strict_catalog_reader_available(&options));
+
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let database = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let catalog_version: String = database
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recipe: String = database
+            .query_row(
+                "SELECT recipe FROM main.storage_semantic_profiles WHERE namespace=semon_namespace()",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cache.session_catalog_generation().as_deref(),
+            Some(generation.as_str())
+        );
+        assert_eq!(
+            database
+                .prepare("SELECT session_key,metadata FROM main.session_catalog WHERE namespace=semon_namespace() ORDER BY session_key")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap(),
+            catalog_before
+        );
+        assert_eq!(
+            database
+                .prepare("SELECT session_key,metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key")
+                .unwrap()
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap(),
+            history_before
+        );
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            generation
+        );
+
+        database
+            .execute(
+                "UPDATE main.meta SET value='unsupported' WHERE namespace=semon_namespace() AND key='catalog_version'",
+                [],
+            )
+            .unwrap();
+        let before = search_publication_state(&database);
+        assert!(cache.rebuild_catalog_search(&generation).is_err());
+        assert_eq!(search_publication_state(&database), before);
+        database
+            .execute(
+                "UPDATE main.meta SET value=?1 WHERE namespace=semon_namespace() AND key='catalog_version'",
+                [&catalog_version],
+            )
+            .unwrap();
+
+        database
+            .execute(
+                "UPDATE main.storage_semantic_profiles SET recipe='unsupported' WHERE namespace=semon_namespace()",
+                [],
+            )
+            .unwrap();
+        let before = search_publication_state(&database);
+        assert!(cache.rebuild_catalog_search(&generation).is_err());
+        assert_eq!(search_publication_state(&database), before);
+        database
+            .execute(
+                "UPDATE main.storage_semantic_profiles SET recipe=?1 WHERE namespace=semon_namespace()",
+                [&recipe],
+            )
+            .unwrap();
+
+        drop(cache);
+        drop(database);
+        evidence.retire();
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn append_audit_record(options: &Options, input: &crate::Input) {

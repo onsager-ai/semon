@@ -100,6 +100,13 @@ publication. It does not execute a separate insertion program for every gram. A 
 or competing publication cannot satisfy a stale claim. An untrusted append that
 lands after scanning requeues only its affected paths.
 
+Search refresh resolves at most 64 keys and 1 MiB of catalog metadata per
+cohort. Current eligibility follows `session_catalog.lifecycle`; RetainedHistory
+eligibility follows that predicate or a matching history row. Both scopes
+derive fields and grams from Current catalog metadata. A missing catalog row
+remains in the removal roster so old postings are withdrawn, while a History
+row alone cannot create a new document or restore Current membership.
+
 Published Event Index payloads and native description derivations are released.
 The worker retains scoped metadata and the existing queue/lifetime behavior;
 this change adds no workers. Selected reads reuse the same producer and existing

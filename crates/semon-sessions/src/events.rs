@@ -1115,6 +1115,13 @@ pub(crate) trait IndexStore: Send {
 
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+    /// Rebuild a stale derived Catalog search projection from the current
+    /// metadata rows, fenced to the audited Catalog generation.
+    fn rebuild_catalog_search(&mut self, _expected_generation: &str) -> Result<bool, StoreError> {
+        // Backends that publish search atomically with Catalog need no repair
+        // step of their own.
+        Ok(true)
+    }
     /// Acknowledge a bounded observation only while its exact publication is
     /// current and no source invalidation or semantic stage remains.
     fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError>;
@@ -2810,6 +2817,14 @@ impl EventCache {
             .session_catalog_generation()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn rebuild_catalog_search(&mut self, expected_generation: &str) -> io::Result<bool> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("producer store unavailable"))?
+            .rebuild_catalog_search(expected_generation)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn note_catalog_audit(

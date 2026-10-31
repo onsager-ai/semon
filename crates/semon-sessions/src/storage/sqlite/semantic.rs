@@ -215,7 +215,11 @@ impl AdmittedSource {
                 return Err(StorageError::NamespaceUpgradePending);
             }
         }
-        self.validate(db)
+        self.owner
+            .as_ref()
+            .ok_or(StorageError::NamespaceUpgradePending)?
+            .validate_catalog_publication_ready(db)
+            .map(|_| ())
     }
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
@@ -278,7 +282,8 @@ impl SemanticStaging {
     /// Explicit private admission into the authored composite native profile.
     #[allow(dead_code)]
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
-        let owner = crate::events::store::configured::NativeOwnership::admit(config)?;
+        let owner =
+            crate::events::store::configured::NativeOwnership::admit_catalog_publisher(config)?;
         let db = SourceJournal::owned(owner.clone()).connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         owner.validate_ready(&db)?;
@@ -1764,6 +1769,8 @@ impl Stage {
         let previous = publication_head
             .base_generation()
             .map_err(StoreError::Configured)?;
+        let search_current =
+            super::search::current_for_generation(&tx, previous.as_deref()).map_err(error)?;
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND runtime=?3 AND resetting=0)",params![ns,batch.epoch,batch.runtime],|r|r.get(0)).map_err(error)?;
         if !valid || self.epoch != Some(batch.epoch) {
             #[cfg(test)]
@@ -2074,36 +2081,32 @@ impl Stage {
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_trace").map_err(error)?;
         publication_phase("search_effects");
-        crate::catalog_search::publish_current_rows_with_store(
-            &tx,
-            &prepared.rows.iter().collect::<Vec<_>>(),
-            &super::search::SearchWriter::admitted(&tx, &self.source)
-                .map_err(StoreError::Configured)?,
-        )
-        .map_err(error)?;
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_search").map_err(error)?;
-        if !retired.is_empty() {
-            use crate::storage::catalog::SearchPublicationStore;
-            let search = super::search::SearchWriter::admitted(&tx, &self.source)
-                .map_err(StoreError::Configured)?;
-            let mut rows = Vec::new();
-            for (key, _) in &retired {
-                let text: String = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,key],|r|r.get(0)).map_err(error)?;
-                rows.push(
-                    serde_json::from_str::<crate::model::summary::CatalogRow>(&text)
-                        .map_err(|e| StoreError::Data(e.to_string()))?,
-                );
+        if search_current {
+            crate::catalog_search::publish_current_rows_with_store(
+                &tx,
+                &prepared.rows.iter().collect::<Vec<_>>(),
+                &super::search::SearchWriter::admitted(&tx, &self.source)
+                    .map_err(StoreError::Configured)?,
+            )
+            .map_err(error)?;
+            if !retired.is_empty() {
+                use crate::storage::catalog::SearchPublicationStore;
+                let search = super::search::SearchWriter::admitted(&tx, &self.source)
+                    .map_err(StoreError::Configured)?;
+                let keys = retired
+                    .iter()
+                    .map(|(key, _)| key.clone())
+                    .collect::<Vec<_>>();
+                for keys in keys.chunks(crate::catalog_search::MAX_PUBLICATION_KEYS) {
+                    search.begin(keys).map_err(error)?;
+                    for key in keys {
+                        search.validate(key).map_err(error)?;
+                    }
+                    search
+                        .remove(crate::CatalogReadScope::Current)
+                        .map_err(error)?;
+                }
             }
-            search
-                .begin(&rows.iter().collect::<Vec<_>>())
-                .map_err(error)?;
-            for row in &rows {
-                search.validate(&row.key).map_err(error)?;
-            }
-            search
-                .remove(crate::CatalogReadScope::Current)
-                .map_err(error)?;
         }
         // Negative effects change the publication even without replacement rows.
         let repeat = unchanged
@@ -2322,6 +2325,15 @@ impl Stage {
         publication_head
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
+        let search = super::search::SearchWriter::admitted(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        if search_current {
+            super::search::write_generation(&tx, &generation)?;
+        } else {
+            super::search::rebuild_projection(&tx, &search, &generation)?;
+        }
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_search").map_err(error)?;
         // The projection is complete for an actually empty Current catalog.
         if prepared.transcripts.is_empty() {
             let current_empty: bool = tx
