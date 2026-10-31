@@ -7364,6 +7364,25 @@ mod tests {
         (open(left), open(right))
     }
 
+    fn catalog_store(options: &crate::Options) -> SqliteStore {
+        let config = options.source.config(&options.cache).unwrap();
+        let path = config.backend.sqlite_database().unwrap().clone();
+        let owner = configured::NativeOwnership::restore(&config).unwrap();
+        let connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        SqliteStore {
+            owner,
+            connection,
+            path,
+            selected_runs: None,
+            semantic_rejection: None,
+            traversal_observation: None,
+        }
+    }
+
     type CatalogState = BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>;
 
     fn catalog_state(connection: &Connection) -> CatalogState {
@@ -8236,7 +8255,7 @@ mod tests {
         drop(pause);
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let mut store = catalog_store(&options);
         let outcome =
             catalog_write(&mut store, &rows, &projections, true, CatalogWriter::Auto).unwrap();
         assert_eq!(outcome.0, Outcome::Conflict);
@@ -8474,7 +8493,7 @@ mod tests {
         assert!(header_lines[0].contains(&format!("proof_ledger_digest={}", &digest[..12])));
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let mut store = catalog_store(&options);
         let _ = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         let publish_lines = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         let publish_line = publish_lines.first().expect("publish diagnostic");
@@ -8553,7 +8572,7 @@ mod tests {
         );
 
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let mut store = opened(&crate::events::EventCache::path(&options.cache)).0;
+        let mut store = catalog_store(&options);
         let _ = catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap();
         let logs = CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().clone());
         assert!(
