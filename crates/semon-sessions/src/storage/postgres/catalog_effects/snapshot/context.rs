@@ -42,6 +42,53 @@ impl Snapshot<'_, '_> {
             .map(|text| serde_json::from_str(&text).map_err(io::Error::other))
             .transpose()
     }
+
+    fn trace_value_for_source(
+        &self,
+        key: &str,
+        source_generation: &str,
+    ) -> io::Result<Option<Value>> {
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        tx.check().map_err(io::Error::other)?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let generation = self.generation.as_bytes();
+        let key_bytes = key.as_bytes();
+        let source_bytes = source_generation.as_bytes();
+        let rows = tx
+            .driver
+            .query(
+                "SELECT session_key=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND source_generation=$5",
+                &[
+                    &ns,
+                    &generation,
+                    &digest(key.as_bytes()),
+                    &key_bytes,
+                    &source_bytes,
+                ],
+            )
+            .map_err(sqlstate::error)
+            .map_err(io::Error::other)?;
+        tx.check().map_err(io::Error::other)?;
+        if rows.len() > 1 {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        let Some(row) = rows.first() else {
+            return Ok(None);
+        };
+        if !row.get::<_, bool>(0) {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        let metadata = row
+            .get::<_, Option<Vec<u8>>>(1)
+            .ok_or(StorageError::Busy)
+            .map_err(io::Error::other)?;
+        serde_json::from_slice(&metadata)
+            .map(Some)
+            .map_err(io::Error::other)
+    }
 }
 
 impl ContextLookup for Snapshot<'_, '_> {
@@ -50,15 +97,18 @@ impl ContextLookup for Snapshot<'_, '_> {
             return Ok(None);
         };
         if crate::retention::source_generation(&row.sources).map_err(io::Error::other)? != source {
-            return Err(io::Error::other(StorageError::ScopeChanged));
+            return Ok(None);
         }
-        let Some(value) = self.trace_value(key)? else {
+        let Some(value) = self.trace_value_for_source(key, source)? else {
             return Ok(None);
         };
         let mut details = value["details"].clone();
         details["busy"] = value["busy"].clone();
         details["content_generation"] = value["content_generation"].clone();
-        Ok(Some((Some(details.to_string()), true)))
+        Ok(Some((
+            Some(details.to_string()),
+            row.lifecycle == crate::model::summary::CatalogLifecycle::Current,
+        )))
     }
     fn relative(&self, key: &str) -> io::Result<Option<String>> {
         self.catalog(key, false).map_err(io::Error::other)?.map(|row| {
