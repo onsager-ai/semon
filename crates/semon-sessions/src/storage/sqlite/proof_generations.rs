@@ -753,6 +753,7 @@ fn diagnose_observation_refusal(stage: &'static str) {
     }
 }
 
+#[cfg(test)]
 fn diagnose_immutable_observation_join(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
@@ -760,9 +761,6 @@ fn diagnose_immutable_observation_join(
     reference_kind: &str,
     prefix: &str,
 ) {
-    if !cfg!(test) && !crate::native_timing::enabled() {
-        return;
-    }
     let mut normalized = selected.clone();
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let Ok(metadata) = serde_json::to_string(&normalized) else {
@@ -913,6 +911,7 @@ fn verify_immutable_observation(
                 rows.len()
             );
         }
+        #[cfg(test)]
         diagnose_immutable_observation_join(db, current, selected, reference_kind, prefix);
         return Err(StorageError::ScopeChanged.into());
     };
