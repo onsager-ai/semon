@@ -124,6 +124,72 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(test)]
+fn family_owner_phase_diagnostic(fixture: &Fixture, phase: &'static str, key: &str) {
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let current = binding.runtime_binding_at(&tx).unwrap();
+    let admission = i64::try_from(current.admission).unwrap();
+    let namespace = current.namespace.as_str();
+
+    for (owner, table) in [
+        ("catalog", "session_catalog"),
+        ("history", "session_history_catalog"),
+    ] {
+        let row_present: bool = tx
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM main.{table} WHERE namespace=?1 AND session_key=?2)"
+                ),
+                rusqlite::params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let metadata: Option<String> = tx
+            .query_row(
+                &format!(
+                    "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE namespace=?1 AND session_key=?2"
+                ),
+                rusqlite::params![namespace, key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten();
+        let normalized_digest = metadata.as_deref().and_then(|metadata| {
+            let mut row: crate::model::summary::CatalogRow =
+                serde_json::from_str(metadata).ok()?;
+            row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            let normalized = serde_json::to_string(&row).ok()?;
+            Some(crate::storage::proof_codec::digest(normalized.as_bytes()))
+        });
+        let digest_available = normalized_digest.is_some();
+        let digest = normalized_digest.unwrap_or_default();
+        let grant: Option<(bool, bool, bool, bool)> = tx
+            .query_row(
+                "SELECT metadata_digest=?3,admission=?4,stream=?5,direct_capture IS NOT NULL FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?6",
+                rusqlite::params![
+                    namespace,
+                    key,
+                    digest,
+                    admission,
+                    current.stream_epoch,
+                    owner
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .unwrap();
+        let (digest_matches, admission_matches, stream_matches, direct_capture_present) =
+            grant.unwrap_or_default();
+        eprintln!(
+            "family_owner_phase phase={phase} owner={owner} row_present={row_present} normalized_digest_matches_grant={} admission_match={admission_matches} stream_match={stream_matches} direct_capture_present={direct_capture_present}",
+            digest_available && digest_matches
+        );
+    }
+}
+
 #[test]
 fn catalog_runtime_churn_does_not_starve_unrelated_history_or_new_sessions() {
     let fixture = Fixture::new();
@@ -6443,7 +6509,13 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
     )
     .unwrap();
     fixture.publish(2);
+    if state == "work" {
+        family_owner_phase_diagnostic(&fixture, "extent_after_initial_publish", "session-00001");
+    }
     native_refresh(&fixture);
+    if state == "work" {
+        family_owner_phase_diagnostic(&fixture, "extent_after_native_refresh", "session-00001");
+    }
     let db = fixture.db();
     let (turn_id, turn_metadata): (String, String) = db.query_row(
             "SELECT turn_id,metadata FROM session_trace_turns WHERE session_key='session-00000' ORDER BY turn_id LIMIT 1",
@@ -6740,6 +6812,9 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
         assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     }
     save(&original);
+    if state == "work" {
+        family_owner_phase_diagnostic(&fixture, "extent_after_metadata_reset", "session-00001");
+    }
     let path = fixture.options.facts.as_ref().unwrap();
     let facts = crate::read_facts(path).unwrap();
     let mut changed = facts.clone();
@@ -6773,7 +6848,13 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
 
     fs::remove_file(child_source).unwrap();
+    if state == "work" {
+        family_owner_phase_diagnostic(&fixture, "extent_before_retirement_publish", "session-00001");
+    }
     fixture.publish_existing();
+    if state == "work" {
+        family_owner_phase_diagnostic(&fixture, "extent_after_retirement_publish", "session-00001");
+    }
     let history: String = db
         .query_row(
             "SELECT metadata FROM session_history_catalog WHERE session_key='session-00001'",
@@ -6876,6 +6957,7 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     crate::write_facts(path, &facts, &fixture.options.source).unwrap();
     facts_write.complete().unwrap();
     fixture.publish_existing();
+    family_owner_phase_diagnostic(&fixture, "status_after_initial_publish", "family-child");
     let status = || {
         let (code, body) = fixture.body("sid=family-parent");
         assert_eq!(code, 200);
@@ -6887,7 +6969,9 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     crate::write_facts(path, &facts, &fixture.options.source).unwrap();
     facts_write.complete().unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+    family_owner_phase_diagnostic(&fixture, "status_before_retirement_publish", "family-child");
     fixture.publish_existing();
+    family_owner_phase_diagnostic(&fixture, "status_after_retirement_publish", "family-child");
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
     // Native selection retirement publishes a Retained display in Catalog;
     // there is no immutable History metadata or History observation to borrow.
