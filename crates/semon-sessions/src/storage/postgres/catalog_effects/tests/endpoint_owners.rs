@@ -189,8 +189,14 @@ fn pg_imported_current_handoff_preserves_its_proof_and_old_current_reads() {
             Some(generation.as_str()),
             "deferred withdrawal preserves the imported Current head"
         );
-        assert!(pending, "deferred withdrawal marks semantic catch-up pending");
-        assert!(mutation, "deferred withdrawal records the exact source intent");
+        assert!(
+            pending,
+            "deferred withdrawal marks semantic catch-up pending"
+        );
+        assert!(
+            mutation,
+            "deferred withdrawal records the exact source intent"
+        );
         assert!(invalidation, "deferred withdrawal records source removal");
     });
     assert_eq!(continued.len(), 1);
