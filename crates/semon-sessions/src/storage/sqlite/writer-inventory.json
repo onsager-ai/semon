@@ -78,6 +78,7 @@
     "events/store/native_usage/repair.rs",
     "events/store/relocation.rs",
     "events/store/reprice.rs",
+    "events/store/semantic_plan.rs",
     "events/store/semantic_stage.rs",
     "events/store/tree_state.rs",
     "facts/native_names.rs",

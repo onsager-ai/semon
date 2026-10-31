@@ -1243,8 +1243,8 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
                 // Each owner is individually bounded before decoding. Limit
                 // total metadata captured by this durable discovery step too.
                 let length: i64 = c.query_row("SELECT octet_length(metadata) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'", params![ns,key], |r| r.get(0)).map_err(error)?;
-                let length = usize::try_from(length)
-                    .map_err(|_| refuse("semantic_affected_owner_bytes"))?;
+                let length =
+                    usize::try_from(length).map_err(|_| refuse("semantic_affected_owner_bytes"))?;
                 if metadata_bytes.saturating_add(length) > 1048576 {
                     if consumed == 0 && metadata_bytes == 0 {
                         return Err(refuse("semantic_affected_owner_bytes"));
