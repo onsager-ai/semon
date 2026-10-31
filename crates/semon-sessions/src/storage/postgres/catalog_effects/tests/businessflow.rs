@@ -3810,8 +3810,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         observed.evidence.store_config.as_ref().unwrap().backend,
         crate::storage::StoreBackend::Postgres { .. }
     ));
-    // A selected read cannot reuse a publication under different runtime
-    // Facts, even when its immutable Raw recipes and host custody still match.
+    // The local publication cannot qualify this different, unprepared Facts
+    // context, even when its immutable Raw recipes and host custody still match.
     let changed_runtime_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),
@@ -3820,17 +3820,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: generation.clone(),
         options: facts_options.clone(),
     };
-    assert!(
-        crate::storage::query::QueryCatalogStore::selected_body(
-            &changed_runtime_store,
-            &namespace,
-            &prepared.rows[0].key,
-            &serde_json::json!({"limit":1}),
-            1790812802000,
-            &retained_host,
-        )
-        .is_err()
-    );
+    for row in &prepared.rows {
+        for tool in ["read_transcript", "get_session"] {
+            let error = query
+                .call_bound_selected_at(
+                    tool,
+                    &serde_json::json!({"id":row.key}),
+                    1790812802000,
+                    &changed_runtime_store,
+                    &retained_host,
+                    None,
+                )
+                .unwrap_err();
+            assert_eq!(
+                error.code, "unavailable",
+                "unqualified Facts context {tool} {}",
+                row.key
+            );
+        }
+    }
     let from = fs::metadata(&path).unwrap().len();
     let writer = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -3862,6 +3870,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         root: crate::InputRoot::Claude,
         path: "sessions/4242.json".into(),
     };
+    assert!(!pid_input.full_path(&facts_options).exists());
     fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
     let pid_write = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -3872,6 +3881,67 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         None,
     )
     .unwrap();
+    // The moved publication already owns the continued parent prefix. Its
+    // exact Index cohort is still qualified before this independent PID write.
+    let pid_owner = moved_rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.native_ids.iter().any(|id| id == "one"))
+        .unwrap();
+    let mut pid_host = moved_host.clone();
+    pid_host.0.extend(retained_host.0.iter().cloned());
+    let assert_pid_ledgers = || {
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &moved_store.generation,
+            |snapshot| {
+                assert_eq!(
+                    snapshot.catalog(&pid_owner.key, false)?.unwrap().lifecycle,
+                    crate::model::summary::CatalogLifecycle::Current
+                );
+                let history = snapshot.owner(&pid_owner.key)?.is_some();
+                let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                assert!(
+                    super::super::super::native_reader::runtime_source_cwds_if_current(
+                        &mut tx,
+                        &row.sources,
+                    )?
+                    .is_some(),
+                    "the PID owner must qualify through its exact selected Index ledgers"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+    };
+    assert_pid_ledgers();
+    let pid_body = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":pid_owner.key,"limit":100}),
+            1790812802000,
+            &moved_store,
+            &pid_host,
+            None,
+        )
+        .unwrap();
+    let pid_fields = query
+        .call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":pid_owner.key}),
+            1790812802000,
+            &moved_store,
+            &pid_host,
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::json!({"body":pid_body,"fields":pid_fields}),
+        next_bodies[&pid_owner.key],
+        "the qualified parent keeps its exact continued body and fields before PID creation"
+    );
     // Earlier fixture mutations restored bytes, not their watched file clocks.
     // Isolate this PID write from those intentional runtime witness changes.
     let before_pid_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
@@ -3892,23 +3962,76 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         expected_field,
         "the retained native field proof survives an independent runtime mutation"
     );
+    assert_pid_ledgers();
     for tool in ["read_transcript", "get_session"] {
+        let error = query
+            .call_bound_selected_at(
+                tool,
+                &serde_json::json!({"id":pid_owner.key}),
+                1790812802000,
+                &moved_store,
+                &pid_host,
+                None,
+            )
+            .unwrap_err();
         assert_eq!(
-            query
-                .call_bound_selected_at(
-                    tool,
-                    &serde_json::json!({"id":prepared.rows[0].key}),
-                    1790812802000,
-                    &query_store,
-                    &retained_host,
-                    None,
-                )
-                .unwrap_err()
-                .code,
-            "unavailable",
-            "a stale live runtime context must refuse"
+            (error.code, error.message.as_str()),
+            ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+            "the previously qualified PID owner must refuse {tool}"
         );
     }
+    // The original parent has an advanced Index and a changed Native("one")
+    // observation. Every other original owner retains its exact Index and
+    // scoped dependencies, including relocated/withdrawn sources whose host
+    // bytes and native proofs remain authorized in this original generation.
+    let mut affected_owners = 0;
+    let mut unaffected_owners = 0;
+    for row in &prepared.rows {
+        let affected = row.harness == "claude" && row.native_ids.iter().any(|id| id == "one");
+        assert_eq!(
+            affected,
+            row.sources.iter().any(|source| source.path == path),
+            "the fixture's changed native identity and parent source agree"
+        );
+        let body = query.call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":row.key,"limit":100}),
+            1790812802000,
+            &query_store,
+            &retained_host,
+            None,
+        );
+        let fields = query.call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":row.key}),
+            1790812802000,
+            &query_store,
+            &retained_host,
+            None,
+        );
+        if affected {
+            affected_owners += 1;
+            for (tool, result) in [("read_transcript", body), ("get_session", fields)] {
+                let error = result.unwrap_err();
+                assert_eq!(
+                    (error.code, error.message.as_str()),
+                    ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+                    "affected original Current {tool} {}",
+                    row.key
+                );
+            }
+        } else {
+            unaffected_owners += 1;
+            assert_eq!(
+                serde_json::json!({"body":body.unwrap(),"fields":fields.unwrap()}),
+                expected_bodies[&row.key],
+                "unchanged original Current body and fields {}",
+                row.key
+            );
+        }
+    }
+    assert!(affected_owners > 0, "fixture has a PID-dependent owner");
+    assert!(unaffected_owners > 0, "fixture has unchanged qualified owners");
     assert_eq!(captured_bodies(&pool), expected_bodies);
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
@@ -5371,13 +5494,39 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap_err();
         assert_eq!(error.code, "unknown_session");
     }
-    // Captured reads of a row that is physically Current in their immutable
-    // generation retain captured proof semantics even after live Facts change.
+    // Live Current reads refuse after the canonical Facts bytes change.
+    // Explicit captured reads of that same immutable generation retain their
+    // independent proof and host custody.
     let captured_key = &facts_rows
         .iter()
         .find(|row| current.iter().any(|(key, _)| key == &row.key))
         .unwrap()
         .key;
+    let live_current_store = super::super::snapshot::query::QueryCatalog {
+        captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: facts_options.clone(),
+    };
+    for tool in ["read_transcript", "get_session"] {
+        let error = query
+            .call_bound_selected_at(
+                tool,
+                &serde_json::json!({"id":captured_key}),
+                1790812802000,
+                &live_current_store,
+                &withdrawal_host,
+                None,
+            )
+            .unwrap_err();
+        assert_eq!(
+            (error.code, error.message.as_str()),
+            ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+            "changed canonical Facts must refuse live Current {tool}"
+        );
+    }
     let captured_current_store = super::super::snapshot::query::QueryCatalog {
         captured: true,
         pool: pool.clone(),
