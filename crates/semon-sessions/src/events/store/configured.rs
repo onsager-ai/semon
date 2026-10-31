@@ -5021,7 +5021,8 @@ mod tests {
         fs::create_dir_all(peer_path.parent().unwrap()).unwrap();
         fs::write(&peer_path, concat!(
             "{\"type\":\"user\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:04:00Z\",\"message\":{\"role\":\"user\",\"content\":\"peer prompt\"}}\n",
-            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-done\",\"parentUuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:05:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"peer finished\"}]}}\n"
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-done\",\"parentUuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:05:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"peer finished\"}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-handback\",\"parentUuid\":\"peer-done\",\"timestamp\":\"2026-10-01T00:05:00Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"peer-handback-tool\",\"name\":\"SubagentHandback\",\"input\":{\"message\":\"peer finished\"}}]}}\n"
         )).unwrap();
         fs::write(peer_path.with_extension("meta.json"), "{\"toolUseId\":\"toolu-peer\",\"description\":\"peer\",\"agentType\":\"general-purpose\"}").unwrap();
         let mut cache = EventCache::open_semantic(
