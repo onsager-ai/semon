@@ -1613,9 +1613,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         .iter()
                         .flat_map(|candidate| &candidate.sources)
                         .any(|source| source == &expected);
-                    let fixture_revision = if expected == continued_parent_source {
+                    let expected_reference = crate::SessionSourceRef {
+                        root: target.harness.clone(),
+                        path: crate::catalog::source_relative(
+                            &retained_options,
+                            &target.harness,
+                            &expected,
+                        )
+                        .expect("fixture recipe is within the configured harness root"),
+                        native_id: expected.native_id.clone(),
+                        offset: expected.offset,
+                        prefix_sha256: expected.prefix_sha256,
+                        tail_sha256: expected.tail_sha256,
+                    };
+                    let fixture_revision = if expected_reference == continued_parent_source {
                         "continued_parent"
-                    } else if expected == retained_parent_source {
+                    } else if expected_reference == retained_parent_source {
                         "original_parent"
                     } else {
                         "other"
