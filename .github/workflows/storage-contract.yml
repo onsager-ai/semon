@@ -63,6 +63,17 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Direct Catalog repricing preserves exact row authority
+        id: reprice_authority
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: cargo test --locked -p semon-sessions --lib events::store::tests::direct_catalog_reprice_preserves_exact_observation_authority -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/reprice-authority.log"
+      - name: Retain repricing authority result
+        if: ${{ !cancelled() && steps.reprice_authority.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: reprice-authority
+          path: ${{ runner.temp }}/reprice-authority.log
       - name: Retained row authority diagnostic (not qualification)
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         env:
