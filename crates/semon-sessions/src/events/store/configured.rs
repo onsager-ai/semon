@@ -7539,6 +7539,60 @@ mod tests {
             panic!("domain producer did not reach publication");
         }
 
+        #[test]
+        fn semantic_rejection_real_publication_revision_refuses_without_writes() {
+            use crate::storage::source_observations::{
+                SourceMutationReceipt, SourceObservationStore, SourceOperation,
+            };
+
+            let (f, _, options, inputs) = model_sources();
+            let options = &options[0];
+            let input = &inputs[0];
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            cache
+                .ingest(
+                    &"a".repeat(64),
+                    &input.full_path(options),
+                    "codex",
+                )
+                .unwrap();
+            let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            assert_eq!(batch.phase, Phase::Publication);
+
+            let unrelated = format!(
+                "{}.unrelated",
+                input.full_path(options).to_string_lossy()
+            );
+            let mut journal = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap());
+            let expected = journal.claims(std::slice::from_ref(&unrelated)).unwrap();
+            let operation = SourceOperation::capture(
+                f.config.namespace.as_str(),
+                "invalidate",
+                &serde_json::to_vec(&expected).unwrap(),
+            );
+            assert_eq!(
+                journal.invalidate(&operation, &expected).unwrap(),
+                SourceMutationReceipt::Applied
+            );
+
+            let before = shared_state(&f);
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
+                Outcome::Conflict,
+                "the recorded Publication batch is stale after source revision advances"
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "stale Publication revision makes no additional writes"
+            );
+        }
+
         fn publish(
             cache: &mut EventCache,
             f: &Fixture,
