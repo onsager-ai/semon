@@ -1021,13 +1021,17 @@ fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
             "{}",
             json!({
                 "type":"user",
+                "sessionId":id,
                 "uuid":format!("{name}-append"),
+                "parentUuid":id,
+                "cwd":"/synthetic/project",
+                "timestamp":"2026-10-01T00:00:01Z",
                 "message":{"role":"user","content":format!("{name} append")}
             })
         )
         .unwrap();
     }
-    native_refresh(&fixture);
+    fixture.publish_existing();
     let connection = fixture.db();
     let paths = [
         fixture
@@ -3727,6 +3731,16 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
         assert_eq!(page["entries"][0]["text"], "synthetic prompt");
         assert_eq!(page["content_observation"]["state"], "cached");
 
+        let after = session_catalog_identity(&fixture.options, "source", "selected")
+            .unwrap()
+            .unwrap();
+        assert!(
+            after.source_refs[0].source.offset > before.source_refs[0].source.offset,
+            "append producer must publish the new consumed prefix before a fresh read: scope={scope} before={} after={}",
+            before.source_refs[0].source.offset,
+            after.source_refs[0].source.offset
+        );
+
         assert_eq!(
             crate::session_overview_observe(
                 &fixture.options,
@@ -3741,7 +3755,7 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
         assert_eq!(
             fresh.status,
             200,
-            "fresh transcript refused: code={} fence={} stage={} local_revision={} selected_stage={:?}",
+            "fresh transcript refused: scope={scope} code={} fence={} stage={} local_revision={} selected_stage={:?}",
             fresh_body["error"]["code"],
             fresh_body["fence_reason"],
             fresh_body["stage"],
