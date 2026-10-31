@@ -156,7 +156,7 @@ mod tests {
                 tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,'op','payload',$2,1)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
                 for (key,last,model,repo) in [("tie",100,"m","repo"),("older",90,"other","")] {
                     let row = CatalogRow {
-                        overview:None,trace:None,query:None,lifecycle:Default::default(),
+                        overview:None,trace:None,query_recipe:None,query:None,lifecycle:Default::default(),
                         key:key.into(),name:format!("Écho {name}"),harness:"claude".into(),kind:"session".into(),presentation_kind:None,
                         native_ids:vec![key.into()],parent:None,parent_source:None,repo:if repo.is_empty() { None } else { Some(repo.into()) },branch:None,model:model.into(),effort:None,
                         start:Some(1),last:Some(last),tokens:[0.0;3],cost:Default::default(),sources:vec![crate::model::summary::CatalogSource {

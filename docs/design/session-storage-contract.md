@@ -45,6 +45,15 @@ formal union path; mixed or different-pool PG workspaces refuse explicitly.
 The existing source and metadata limits remain, and exact CI qualification of
 the new SQL, isolation and presentation path is pending.
 
+The PG native physical contract is now v11. It includes nullable `bytea`
+`query_recipe` cells on current Catalog rows, retained History headers and
+immutable selected proof generations for typed Catalog transfer. These cells
+are inactive paired storage: production publication and read paths remain
+inline and unchanged. The v11 marker and native shape hash refuse v10 stores;
+there is no migration or dual-read path. Shared Catalog version 5 and PG
+publication envelope v1 remain unchanged, with no format activation in this
+prerequisite.
+
 ## One current SQLite contract
 
 All current tables use the namespace-leading physical contract. Namespace-local
