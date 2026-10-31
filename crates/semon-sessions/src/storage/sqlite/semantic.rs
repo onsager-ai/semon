@@ -1970,6 +1970,19 @@ impl Stage {
         publication_head
             .publish_generation(&generation, &version)
             .map_err(StoreError::Configured)?;
+        // The projection is complete for an actually empty Current catalog.
+        if prepared.transcripts.is_empty() {
+            let current_empty: bool = tx
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current')",
+                    [ns],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            if current_empty {
+                tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_projection_catalog_generation',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,generation]).map_err(error)?;
+            }
+        }
         tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,selected_observed_at.to_string()]).map_err(error)?;
         // A qualified imported closure survives an unrelated native component
         // publication. The carried rows retain their original proof authority.
