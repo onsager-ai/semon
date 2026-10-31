@@ -5,6 +5,9 @@ use crate::storage::transfer::{
 };
 use rusqlite::types::Value;
 
+#[cfg(test)]
+mod tests;
+
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) {
     use CatalogRowKind::*;
     match kind {
@@ -221,18 +224,18 @@ pub(super) fn capture(
         .map(|i| names[*i])
         .collect::<Vec<_>>()
         .join(",");
+    let cursor = catalog_rows::capture_cursor(state.native_key.as_deref())?;
     let mut binds = vec![Value::Text(tx.1.into())];
-    let after = if let Some(cursor) = &state.native_key {
-        let cursor: Vec<serde_json::Value> =
-            serde_json::from_str(cursor).map_err(|_| StorageError::ScopeChanged)?;
-        if cursor.len() != kind.keys().len() {
+    let after = if let Some(cursor) = &cursor {
+        if cursor.key.len() != kind.keys().len() {
             return Err(StorageError::ScopeChanged);
         }
-        for value in cursor {
-            binds.push(sql_value(&value)?);
+        for value in &cursor.key {
+            binds.push(sql_value(value)?);
         }
+        let comparison = if cursor.pending() { "=" } else { ">" };
         format!(
-            " AND ({keys})>({})",
+            " AND ({keys}){comparison}({})",
             (2..binds.len() + 1)
                 .map(|i| format!("?{i}"))
                 .collect::<Vec<_>>()
@@ -268,6 +271,13 @@ pub(super) fn capture(
     let mut bytes = 0usize;
     for size in &sizes {
         let size = usize::try_from(*size).map_err(|_| StorageError::ScopeChanged)?;
+        if count == 0 && size > transfer::MAX_PAGE_BYTES {
+            if size > catalog_rows::MAX_CATALOG_ROW_BYTES {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
+            count = 1;
+            break;
+        }
         if bytes
             .checked_add(size)
             .is_none_or(|n| n > transfer::MAX_PAGE_BYTES)
@@ -277,8 +287,8 @@ pub(super) fn capture(
         bytes += size;
         count += 1;
     }
-    if count == 0 && !sizes.is_empty() {
-        return Err(StorageError::Busy);
+    if cursor.as_ref().is_some_and(|cursor| cursor.pending()) && count != 1 {
+        return Err(StorageError::ScopeChanged);
     }
     let rows =
         tx.0.prepare(&format!("SELECT {columns} {suffix} LIMIT {count}"))
@@ -290,41 +300,49 @@ pub(super) fn capture(
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(failed)?;
     if rows.is_empty() {
+        if cursor.as_ref().is_some_and(|cursor| cursor.pending()) {
+            return Err(StorageError::ScopeChanged);
+        }
         state.native_family += 1;
         state.native_key = None;
     } else {
-        for row in &rows {
+        let mut records = Vec::new();
+        for row in rows {
             verify_authority(tx, kind, &row.0).inspect_err(|_error| {
                 #[cfg(test)]
                 eprintln!("transfer capture graph refused: component={kind:?} error={_error:?}");
             })?;
-        }
-        catalog_rows::append(
-            tx,
-            state,
-            rows.into_iter()
-                .map(|row| TransferRecord::CatalogRow {
+            let fragments = catalog_rows::fragments(
+                state.manifest.identity(),
+                catalog_rows::CatalogRowData {
                     generation: generation.clone(),
                     kind,
                     values: row.0,
-                })
-                .collect(),
-        )?;
+                },
+            )?;
+            records.extend(catalog_rows::resume_fragments(fragments, cursor.as_ref())?);
+        }
+        catalog_rows::append(tx, state, records)?;
     }
     transfer::reported::save_capture(tx, state)?;
     Ok(state.progress())
 }
 
-pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), StorageError> {
-    catalog_rows::validate(record)?;
-    let TransferRecord::CatalogRow {
-        generation,
-        kind,
-        values,
-    } = record
-    else {
-        return Err(StorageError::InvalidArguments);
+pub(super) fn apply(
+    tx: &mut Inbox<'_>,
+    record: &TransferRecord,
+    snapshot: &[u8; 32],
+) -> Result<(), StorageError> {
+    let Some(row) = catalog_rows::apply_fragment(tx, record, snapshot)? else {
+        return Ok(());
     };
+    apply_row(tx, &row)
+}
+
+fn apply_row(tx: &mut Inbox<'_>, row: &catalog_rows::CatalogRowData) -> Result<(), StorageError> {
+    let generation = &row.generation;
+    let kind = &row.kind;
+    let values = &row.values;
     catalog_rows::bind_imported_generation(tx, generation)?;
     verify_authority(tx, *kind, values)?;
     catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
