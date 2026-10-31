@@ -5233,6 +5233,8 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
                 .set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2))
                 .unwrap(),
             "legacy" => {
+                // This changes Catalog metadata and projection without a
+                // producer-owned grant; the read below must refuse it.
                 let mut db = fixture.db();
                 let text: String = db
                     .query_row(
@@ -5271,6 +5273,15 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
         }
         let strict = get(query, crate::SessionSourceReadMode::LocalThenProvider);
         let strict_body: Value = serde_json::from_slice(&strict.body).unwrap();
+        if mutation == "legacy" {
+            assert_eq!(strict.status, 503);
+            assert_eq!(strict_body["error"]["code"], "transcript_unavailable");
+            assert!(strict_body.get("entries").is_none());
+            assert!(strict_body.get("fence_reason").is_none());
+            assert!(strict_body.get("local_revision_reason").is_none());
+            assert!(strict_body.get("stage").is_none());
+            continue;
+        }
         assert_eq!(
             strict.status,
             409,
@@ -5287,7 +5298,6 @@ fn local_only_provisional_codex_pages_use_persisted_covering_proofs() {
             match mutation {
                 "append" => "size_grew",
                 "copy" => "identity",
-                "legacy" => "missing_change_token",
                 _ => "change_time",
             }
         );
@@ -5575,6 +5585,8 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     fs::write(&path, "{}\n").unwrap();
                 }
                 "legacy" => {
+                    // This changes Catalog metadata and projection without a
+                    // producer-owned grant; the read below must refuse it.
                     // Remove the persisted physical change-time witness.
                     let mut db = fixture.db();
                     let text: String = db
@@ -5604,6 +5616,15 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
             }
             let stale = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
             let stale_body: Value = serde_json::from_slice(&stale.body).unwrap();
+            if mutation == "legacy" {
+                assert_eq!(stale.status, 503);
+                assert_eq!(stale_body["error"]["code"], "transcript_unavailable");
+                assert!(stale_body.get("entries").is_none());
+                assert!(stale_body.get("fence_reason").is_none());
+                assert!(stale_body.get("local_revision_reason").is_none());
+                assert!(stale_body.get("stage").is_none());
+                continue;
+            }
             assert_eq!(
                 stale.status,
                 409,
@@ -5864,6 +5885,12 @@ fn legacy_source_metadata_does_not_invent_a_local_generation_proof() {
     let mut source = row.sources[0].clone();
     assert_eq!(source_state(&source), "cached");
     source.changed_ns = None;
+    let expected = crate::source_carrier::ledger(&source);
+    let actual = crate::source_carrier::ledger(&row.sources[0]);
+    assert_eq!(
+        crate::source_carrier::mismatch(&expected.stat, &actual.stat),
+        Some(crate::source_carrier::RevisionReason::MissingChangeToken)
+    );
     let legacy = serde_json::to_value(&source).unwrap();
     assert!(legacy.get("changed_ns").is_none());
     let migrated: CatalogSource = serde_json::from_value(legacy).unwrap();
