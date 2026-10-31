@@ -1007,12 +1007,17 @@ pub(crate) fn read_page_snapshot_with_search(
                 }
                 // History extends source context only; current indexed fields
                 // remain the list ordering/filter and native selection oracle.
-                if history.key != current.key
-                    || history.harness != current.harness
-                    || history.last != current.last
-                    || history.repo != current.repo
-                    || history.model != current.model
-                {
+                let key_equal = history.key == current.key;
+                let harness_equal = history.harness == current.harness;
+                let last_equal = history.last == current.last;
+                let repo_equal = history.repo == current.repo;
+                let model_equal = history.model == current.model;
+                if !key_equal || !harness_equal || !last_equal || !repo_equal || !model_equal {
+                    if crate::native_timing::enabled() {
+                        eprintln!(
+                            "semon sessions native: catalog_page_refused reason=history_catalog_context_changed key_equal={key_equal} harness_equal={harness_equal} last_equal={last_equal} repo_equal={repo_equal} model_equal={model_equal}"
+                        );
+                    }
                     return Err(io::Error::other("history catalog context changed").into());
                 }
                 *current = history;
