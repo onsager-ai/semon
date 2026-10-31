@@ -5614,7 +5614,9 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
     };
     // Keep the native oracle on the semantic producer path. Configured
     // machines below supply the separately admitted Catalog reader snapshots.
-    let mut native = Query::from_sources(Arc::new(SessionSources::with_machines(native_machines)));
+    let mut native = Query::from_sources(Arc::new(SessionSources::with_machines(
+        native_machines.clone(),
+    )));
     for args in [
         json!({"text":"needle"}),
         json!({"text":"needle","limit":1}),
@@ -5645,7 +5647,7 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         NOW,
     )
     .unwrap();
-    native
+    Query::from_sources(Arc::new(SessionSources::with_machines(native_machines)))
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap_err();
     assert_eq!(
