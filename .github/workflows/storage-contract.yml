@@ -550,6 +550,31 @@ jobs:
       - name: Native Claude name and owned member replay qualification
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
+      - name: Native turn identity and filename-owner publication qualification
+        id: filename_owner
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
+            events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
+            events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/filename-owner-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/filename-owner-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/filename-owner-case.log" >> "$RUNNER_TEMP/filename-owner-tests.log"
+            echo "CASE name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/filename-owner-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/filename-owner-tests.log"
+          exit "$result"
+      - name: Retain native turn identity and filename-owner results
+        if: ${{ !cancelled() && steps.filename_owner.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: filename-owner-tests
+          path: ${{ runner.temp }}/filename-owner-tests.log
       - name: Native frontier physical-work qualification
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
