@@ -88,7 +88,10 @@ fn edge_source_needs(row: &CatalogRow) -> Result<Vec<EdgeSourceNeed>, StorageErr
                 if needs.len() >= 64 {
                     return Err(StorageError::Busy);
                 }
-                needs.push(EdgeSourceNeed { source, owners });
+                needs.push(EdgeSourceNeed {
+                    source,
+                    owners: owners.clone(),
+                });
             }
         }
     }
