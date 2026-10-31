@@ -107,7 +107,9 @@ source authorization, generation and read-cohort fences.
 
 ## Progressive initial ingestion and recovery
 
-The following origin extension is proposed and is not implemented or qualified.
+The following origin extension remains unqualified. A WIP SQLite milestone
+implements only owned discovery and its first ordinary publication; cumulative
+completion, receipt-based prior-owner exclusion and PostgreSQL remain pending.
 The scoped oversized-component implementation must retain the initial producer
 origin before its first partial Current publication. A stage created only after
 the newest cohort has published cannot distinguish that cohort from an existing
@@ -179,6 +181,7 @@ struct OriginOwnerWitness {
 struct OriginSourceWitness {
     path: String,
     accepted_claim: Option<i64>,
+    // One scalar representation of the existing Ledger fields.
     accepted_ledger: Ledger,
     acknowledged: bool,
 }
@@ -208,11 +211,12 @@ once by the actual producer after sealing, before any Current publication.
 SQLite keeps the existing `catalog_semantic_stage` row and adds nullable origin
 header fields: `origin_epoch`, `origin_phase`, `origin_admission`, `origin_stream`,
 `origin_sealed_revision` and `origin_first_generation`. Existing `generation`,
-`runtime`, `epoch` and reduction cursors keep their current jobs. Runtime is
-nullable only for an unactivated `discovering`/`sealed` origin; a constraint
-requires it for every warm stage and every draining origin. PostgreSQL encodes
-the same distinction as an optional bound runtime in its header, never an empty
-string treated as authority. Existing `catalog_semantic_sources` rows gain immutable
+`runtime`, `epoch` and reduction cursors keep their current jobs. The SQLite WIP
+represents an unactivated runtime using explicit `origin_runtime_bound=0` while
+retaining the existing non-null runtime column. Its placeholder contents convey
+no authority; publication requires activation and the held stage binding.
+PostgreSQL should encode that same logical distinction as an optional bound
+runtime in its header. Existing `catalog_semantic_sources` rows gain immutable
 origin membership/admission-claim fields; the normal mutable claim and derived
 progress fields are separate. The source row is enrolled in the same discovery
 transaction that records its backfill membership and initial invalidation.
@@ -225,16 +229,23 @@ catalog_semantic_origin_owners(
   namespace, origin_epoch, session_key, metadata_digest, publication,
   PRIMARY KEY(namespace, origin_epoch, session_key));
 catalog_semantic_origin_sources(
-  namespace, origin_epoch, source_path, accepted_claim, accepted_ledger,
+  namespace, origin_epoch, source_path, accepted_claim,
   acknowledged, dev, ino, size, mtime_ns, ctime_ns, resume_at,
   head_sha256, tail_sha256,
   PRIMARY KEY(namespace, origin_epoch, source_path));
 ```
 
+Allocation also proves the Current baseline is empty in that same owned
+transaction: no Current Catalog rows, Current source membership, native Current
+observation grants or Current proof references. An absent/corrupt derived head
+with any such evidence is recovery/refusal, never a new origin; Current and
+History remain preserved.
+
 The owner witness references the already required native Catalog observation
 grant and canonical metadata digest. It does not duplicate the Catalog row or
 mint another grant. `Ledger` is exactly the existing stat/offset/prefix/tail
-value; the scalar columns permit indexed SQL mismatch detection without loading
+value; it is stored only as scalar columns, without a redundant serialized
+Ledger blob. Those columns permit indexed SQL mismatch detection without loading
 every ledger. This is a non-authorizing comparison witness, never a Raw recipe,
 lease, source grant or substitute for current canonical qualification. The
 current owner row's complete source cohort supplies owner-to-source membership;

@@ -292,6 +292,7 @@ pub(crate) struct SourceJournal {
     writer: std::cell::RefCell<Option<Connection>>,
     config: StoreConfig,
     owner: Option<crate::events::store::configured::NativeOwnership>,
+    origin_discovery: bool,
 }
 #[allow(non_snake_case)]
 pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
@@ -299,6 +300,7 @@ pub(crate) fn SourceJournal(config: StoreConfig) -> SourceJournal {
         writer: std::cell::RefCell::new(None),
         config,
         owner: None,
+        origin_discovery: false,
     }
 }
 
@@ -320,7 +322,13 @@ impl SourceJournal {
             writer: std::cell::RefCell::new(None),
             config: owner.config().clone(),
             owner: Some(owner),
+            origin_discovery: false,
         }
+    }
+    pub(crate) fn owned_origin(owner: crate::events::store::configured::NativeOwnership) -> Self {
+        let mut journal = Self::owned(owner);
+        journal.origin_discovery = true;
+        journal
     }
     pub(crate) fn connection(&self) -> Result<Connection, StorageError> {
         if self
@@ -608,6 +616,9 @@ impl SourceObservationStore for SourceJournal {
         }
         discover(&tx, expected_namespace, paths, complete)
             .map_err(|error| phase_failed("discover-effect", error))?;
+        if self.origin_discovery && let Some(owner) = &self.owner {
+            super::semantic::origin::discover(&tx, owner, paths, complete)?;
+        }
         insert_receipt(&tx, expected_namespace, operation)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(SourceMutationReceipt::Applied)

@@ -679,7 +679,6 @@ pub(crate) fn capture(
 pub(crate) struct Publication<'a> {
     pub(crate) rows: &'a [crate::model::summary::CatalogRow],
     pub(crate) transcripts: Option<&'a [Projection]>,
-    // The optional PostgreSQL publisher binds this payload into its receipt.
-    #[cfg_attr(not(feature = "postgres"), expect(dead_code))]
+    // Native publishers bind this payload into their exact operation receipts.
     pub(crate) observations: Option<&'a crate::storage::selected::PresentationObservations>,
 }

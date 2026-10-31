@@ -1232,6 +1232,17 @@ impl Writer {
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
+        self.publish_catalog_with_origin(publication, expected, claims, closed, None)
+    }
+
+    pub(crate) fn publish_catalog_with_origin(
+        &self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        closed: bool,
+        origin: Option<&crate::model::relation_stage::OriginPublication>,
+    ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         connection
             .create_scalar_function(
@@ -1262,12 +1273,12 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        let result = store.publish_catalog_with_writer(
+        let result = store.publish_catalog_with_stage(
             publication,
             expected,
             claims,
             closed,
-            None,
+            origin.map(super::CatalogStage::Origin),
             super::CatalogWriter::Auto,
         )?;
         Ok(

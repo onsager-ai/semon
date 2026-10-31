@@ -821,6 +821,12 @@ impl NativeEvidence {
                 return Ok(CatalogPreparation::Pending);
             }
         }
+        if cache.semantic_origin_pending()? {
+            let runtime = self.query_runtime()?;
+            if self.begin_catalog_stage(cache, &[], &runtime)? != crate::events::Outcome::Written {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "cold origin activation changed"));
+            }
+        }
         let use_newest =
             cache.session_catalog_generation().is_none() && !discovery.newest.is_empty();
         let mut attempted_ticket = None;
