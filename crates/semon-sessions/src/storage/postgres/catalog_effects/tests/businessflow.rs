@@ -1507,10 +1507,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let append_oracle_path = append_oracle_options
         .claude_home
         .join("projects/project/one.jsonl");
-    fs::create_dir_all(append_oracle_path.parent().unwrap()).unwrap();
-    fs::create_dir_all(&append_oracle_options.codex_home).unwrap();
-    fs::create_dir_all(&append_oracle_options.copilot_home).unwrap();
-    fs::copy(&claude_parent, &append_oracle_path).unwrap();
+    // Native neighbors and metadata determine spawn and receipt rendering.
+    // The Catalog-only inputs above omit the subagent metadata sidecars.
+    for input in crate::inputs::inputs(&options).unwrap() {
+        let destination = input.full_path(&append_oracle_options);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(input.full_path(&options), destination).unwrap();
+    }
     let mut append_oracle_query = crate::Query::from_sources(std::sync::Arc::new(
         crate::SessionSources::with_machines(vec![(recent_machine.into(), append_oracle_options)]),
     ));
@@ -1518,14 +1521,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite same-append prefix publication");
     let prefix_ids = prefix_list["sessions"].as_array().unwrap();
-    // The copied parent contains a successful SendMessage to related154, but
-    // its matching receipt lives in the omitted agent file. Query lists that
-    // relationship placeholder beside the one physical parent session.
     let append_oracle_key = prefix_ids
         .iter()
         .find(|session| session["id"].as_str() == Some(appended_key.as_str()))
         .and_then(|session| session["id"].as_str())
-        .expect("append oracle includes the original parent beside its relationship placeholder");
+        .expect("append oracle includes the original parent in the full native cohort");
     let append_prefix_body = append_oracle_query
         .call_at(
             "read_transcript",
