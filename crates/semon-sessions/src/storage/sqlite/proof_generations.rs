@@ -590,6 +590,63 @@ fn log_observation_row_comparison(
     }
 }
 
+/// SQL failures must abort producer transactions; unavailable evidence can
+/// leave one owner unchanged. Reader APIs retain their StorageError contract.
+#[derive(Debug)]
+pub(crate) enum ObservationPreparationError {
+    Evidence(StorageError),
+    Sql(rusqlite::Error),
+}
+
+impl From<StorageError> for ObservationPreparationError {
+    fn from(error: StorageError) -> Self {
+        Self::Evidence(error)
+    }
+}
+
+impl ObservationPreparationError {
+    fn into_storage(self) -> StorageError {
+        match self {
+            Self::Evidence(error) => error,
+            Self::Sql(error) => failed(error),
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static FAIL_OBSERVATION_READ: std::cell::Cell<Option<(&'static str, &'static str)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct ObservationReadFault<'a>(&'a Connection);
+
+#[cfg(test)]
+impl<'a> ObservationReadFault<'a> {
+    fn install(db: &'a Connection, owner: CatalogObservationOwner) -> Option<Self> {
+        let table = FAIL_OBSERVATION_READ.with(|fault| {
+            fault.get().filter(|(kind, _)| *kind == owner.kind()).map(|(_, table)| table)
+        })?;
+        // Deny the real preparation statement without damaging the fixture DB.
+        db.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+            match context.action {
+                rusqlite::hooks::AuthAction::Read { table_name, .. } if table_name == table => {
+                    rusqlite::hooks::Authorization::Deny
+                }
+                _ => rusqlite::hooks::Authorization::Allow,
+            }
+        })).unwrap();
+        Some(Self(db))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ObservationReadFault<'_> {
+    fn drop(&mut self) {
+        self.0.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+    }
+}
+
 /// Query observations use original producer coordinates only after the same
 /// destination admission grant that qualifies a retained selected lease.
 pub(crate) fn observation_binding(
@@ -598,6 +655,7 @@ pub(crate) fn observation_binding(
     selected: &CatalogRow,
 ) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
     observation_binding_for_owner(db, current, selected, None)
+        .map_err(ObservationPreparationError::into_storage)
 }
 
 fn observation_binding_for_owner(
@@ -605,7 +663,7 @@ fn observation_binding_for_owner(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     local_owner: Option<CatalogObservationOwner>,
-) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
+) -> Result<crate::storage::QueryRuntimeBinding, ObservationPreparationError> {
     let ns = current.namespace.as_str();
     let owner_kind = local_owner.map(CatalogObservationOwner::kind);
     let proof_kind = local_owner.map(|owner| match owner {
@@ -642,7 +700,7 @@ fn observation_binding_for_owner(
                 ],
                 |row| row.get(0),
             )
-            .map_err(failed)?;
+            .map_err(ObservationPreparationError::Sql)?;
         if native {
             return Ok(current.clone());
         }
@@ -747,7 +805,7 @@ fn observation_binding_for_owner(
                AND (?10 IS NULL OR f.kind=?10)
              ORDER BY g.id LIMIT 1",
         )
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let values = statement
         .query_map(
             params![
@@ -790,9 +848,9 @@ fn observation_binding_for_owner(
                 ))
             },
         )
-        .map_err(failed)?
+        .map_err(ObservationPreparationError::Sql)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let (record, base, manifest, presentation, granted) = values
         .into_iter()
         .next()
@@ -808,7 +866,7 @@ fn observation_binding_for_owner(
         if crate::native_timing::enabled() {
             eprintln!("semon sessions native: observation_stage_refused boundary=grant_mismatch");
         }
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
     crate::selected_read::charge(
         64,
@@ -840,7 +898,7 @@ fn observation_binding_for_owner(
         if crate::native_timing::enabled() {
             eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
         }
-    })
+    }).map_err(ObservationPreparationError::Evidence)
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable
@@ -976,7 +1034,8 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = selected.clone();
     repaired.query = Some(query.clone());
-    let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)?;
+    let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
+        .map_err(ObservationPreparationError::into_storage)?;
     if selected.query.as_ref() == Some(query) {
         return Ok(());
     }
@@ -992,7 +1051,7 @@ pub(crate) fn prepare_repriced_observation(
     selected: &CatalogRow,
     cost: &crate::pricing::Cost,
     query: Option<&serde_json::Value>,
-) -> Result<PreparedObservationUpdate, StorageError> {
+) -> Result<PreparedObservationUpdate, ObservationPreparationError> {
     let mut repriced = selected.clone();
     repriced.cost = cost.clone();
     repriced.query = query.cloned();
@@ -1006,7 +1065,9 @@ fn prepare_observation_update(
     selected: &CatalogRow,
     repaired: &CatalogRow,
     local_only: bool,
-) -> Result<PreparedObservationUpdate, StorageError> {
+) -> Result<PreparedObservationUpdate, ObservationPreparationError> {
+    #[cfg(test)]
+    let _fault = ObservationReadFault::install(db, owner);
     let table = owner.table();
     let owner_kind = owner.kind();
     let namespace = current.namespace.as_str();
@@ -1017,18 +1078,18 @@ fn prepare_observation_update(
             |row| row.get(0),
         )
         .optional()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let stored = match stored {
         Some(Some(stored)) => stored,
-        Some(None) => return Err(StorageError::HistoryRetentionBounds),
-        None => return Err(StorageError::ScopeChanged),
+        Some(None) => return Err(StorageError::HistoryRetentionBounds.into()),
+        None => return Err(StorageError::ScopeChanged.into()),
     };
     let stored_row: CatalogRow =
         serde_json::from_str(&stored).map_err(|_| StorageError::Unavailable)?;
     if serde_json::to_value(&stored_row).map_err(|_| StorageError::Unavailable)?
         != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
     // Repricing requires this owner's local grant or immutable local Stage
@@ -1037,7 +1098,7 @@ fn prepare_observation_update(
     if proven.namespace.as_str() != current.namespace.as_str()
         || proven.stream_epoch != current.stream_epoch
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
     let mut before = selected.clone();
@@ -1052,7 +1113,7 @@ fn prepare_observation_update(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     if owner_slot
         .as_ref()
         .is_some_and(|(digest, slot_admission, stream)| {
@@ -1061,7 +1122,7 @@ fn prepare_observation_update(
                 || stream != &current.stream_epoch
         })
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
@@ -1069,7 +1130,7 @@ fn prepare_observation_update(
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let normalized = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
     if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
-        return Err(StorageError::HistoryRetentionBounds);
+        return Err(StorageError::HistoryRetentionBounds.into());
     }
     Ok(PreparedObservationUpdate {
         namespace: namespace.to_owned(),

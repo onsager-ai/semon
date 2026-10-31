@@ -7728,7 +7728,7 @@ mod tests {
     fn direct_catalog_reprice_refuses_missing_or_tampered_authority() {
         for corrupt in [false, true] {
             let root = scratch("direct-catalog-reprice-refusal");
-            let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+            let (options, rows, projections) = catalog_native_fixture(&root, 3, false);
             let config = options.source.config(&options.cache).unwrap();
             let mut store = current_test_store_with_epoch(
                 &crate::events::EventCache::path(&options.cache),
@@ -7756,17 +7756,83 @@ mod tests {
             let mut fixture: Value = serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
             fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
             let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
-            crate::events::store::reprice::drain_for_store_test(&store.owner, table).unwrap();
+            crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).unwrap();
             let after: String = store.connection.query_row(
                 "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
                 params![namespace, rows[0].key], |r| r.get(0),
             ).unwrap();
             assert_eq!(after, before, "unproved rows retain their honest original metadata");
+            let unrelated = rows.iter().find(|row| row.key != rows[0].key && row.harness == "claude").unwrap();
+            let unrelated_fingerprint: String = publisher.query_row(
+                "SELECT pricing_fingerprint FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, unrelated.key], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(unrelated_fingerprint, table.fingerprint, "missing or invalid evidence does not block a qualified unrelated owner");
             let digest: Option<String> = publisher.query_row(
                 "SELECT metadata_digest FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
                 params![namespace, rows[0].key], |r| r.get(0),
             ).optional().unwrap();
             assert_eq!(digest, corrupt.then(|| "0".repeat(64)), "repricing cannot mint or repair authority");
+            drop(publisher);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_catalog_reprice_preparation_sql_failure_rolls_back_progress() {
+        use crate::storage::sqlite::proof_generations::FAIL_OBSERVATION_READ;
+        for (owner_kind, denied_table) in [
+            ("catalog", "session_catalog"),
+            ("catalog", "storage_catalog_native_observation_grants"),
+            ("history", "session_history_catalog"),
+            ("history", "storage_catalog_native_observation_grants"),
+        ] {
+            let root = scratch("direct-catalog-reprice-preparation-failure");
+            let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+            let config = options.source.config(&options.cache).unwrap();
+            let mut store = current_test_store_with_epoch(
+                &crate::events::EventCache::path(&options.cache),
+                &config.namespace,
+                config.expected_stream_epoch.as_deref().unwrap(),
+            );
+            assert_eq!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap().0, Outcome::Written);
+            let mut retained = rows[0].clone();
+            retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            store.connection.execute(
+                "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
+                params![config.namespace.as_str(), retained.key, serde_json::to_string(&retained).unwrap()],
+            ).unwrap();
+            crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+                &store.connection, config.namespace.as_str(), &retained.key,
+                store.owner.admission(), config.expected_stream_epoch.as_deref().unwrap(),
+            ).unwrap();
+            let publisher = crate::storage::sqlite::semantic::pricing_connection(&store.owner).unwrap();
+            publisher.execute(
+                "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) VALUES(?1,'session',?2)",
+                params![config.namespace.as_str(), retained.key],
+            ).unwrap();
+            let before = catalog_state(&store.connection);
+            let mut fixture: Value = serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
+            fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
+            let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+            FAIL_OBSERVATION_READ.with(|fault| fault.set(Some((owner_kind, denied_table))));
+            let error = crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).unwrap_err();
+            assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+            let failed = catalog_state(&store.connection);
+            for unchanged in ["session_catalog", "session_history_catalog", "storage_catalog_native_observation_grants", "pricing_recompute_pending"] {
+                assert_eq!(failed[unchanged], before[unchanged], "{owner_kind} preparation failure preserves {unchanged}");
+            }
+            let error = crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).unwrap_err();
+            assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+            assert_eq!(catalog_state(&store.connection), failed, "retry preserves the pricing cursor, pending owner and all observations");
+            FAIL_OBSERVATION_READ.with(|fault| fault.set(None));
+            crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).unwrap();
+            let fingerprint: String = store.connection.query_row(
+                "SELECT pricing_fingerprint FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), retained.key], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(fingerprint, table.fingerprint, "the failed owner remains retryable");
             drop(publisher);
             drop(store);
             fs::remove_dir_all(root).unwrap();

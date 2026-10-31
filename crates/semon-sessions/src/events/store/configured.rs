@@ -4776,6 +4776,16 @@ mod tests {
         let mut fixture: Value = serde_json::from_slice(include_bytes!("../../pricing/fixtures/models-dev.json")).unwrap();
         fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
         let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+        crate::storage::sqlite::proof_generations::FAIL_OBSERVATION_READ.with(|fault| {
+            fault.set(Some(("catalog", "storage_proof_generations")));
+        });
+        let error = crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap_err();
+        assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+        let failed = shared_state(&a);
+        let error = crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap_err();
+        assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+        assert_eq!(shared_state(&a), failed, "Stage SQL read failure retains the exact row/grant/progress/pending snapshot");
+        crate::storage::sqlite::proof_generations::FAIL_OBSERVATION_READ.with(|fault| fault.set(None));
         crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap();
         let encoded: String = db.query_row(
             "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
