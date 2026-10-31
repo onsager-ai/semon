@@ -9724,7 +9724,9 @@ mod tests {
         use std::io::Write;
         for count in [63usize, 64, 65, 257] {
             let root = scratch("catalog-paged-original");
-            let (options, _, _) = catalog_native_fixture(&root, 2, true);
+            // Assemble the intended original before its first publication;
+            // publishing the two-entry prefix would preserve that revision.
+            let (options, _, _) = catalog_native_fixture(&root, 2, false);
             let key = "native-cx-01";
             let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
             let original_path = options.codex_home.join(relative);
@@ -9759,6 +9761,18 @@ mod tests {
                 Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
             let expected = catalog_recipes(&original, "session_slots", key);
             assert_eq!(expected.len(), count);
+            let config = options.source.config(&options.cache).unwrap();
+            assert_eq!(
+                original
+                    .query_row(
+                        "SELECT COUNT(*) FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+                        params![config.namespace.as_str(), key],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0,
+                "the complete original must precede any retained revision"
+            );
             let marker: String = original
                 .query_row(
                     "SELECT value FROM meta WHERE key=?1",
