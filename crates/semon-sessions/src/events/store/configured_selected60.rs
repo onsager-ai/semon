@@ -553,6 +553,7 @@ fn configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_be
             &crate::slot_projection::Publication {
                 rows: &prepared.rows,
                 transcripts: Some(&prepared.transcripts),
+                observations: prepared.presentation_observations(),
             },
             prepared.base_generation.as_deref(),
         )
