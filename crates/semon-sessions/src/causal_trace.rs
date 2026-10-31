@@ -251,6 +251,29 @@ pub(crate) fn publish_owned(
     publish_record(trace_store, row, projection, record, &mut measurements)
 }
 
+/// Refresh only the mutable Query recipe projection when Current advances past
+/// an immutable History overview. The retained Trace and Query observations
+/// remain owned by their original History rows.
+pub(crate) fn publish_current_query_owned(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<()> {
+    if row.query.is_none() {
+        return Ok(());
+    }
+    let Some(query) = &projection.query else {
+        return Ok(());
+    };
+    let record = publication_record(
+        row,
+        projection,
+        &mut crate::native_timing::Measurements::default(),
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    query.publish(tx, row, &record.0)
+}
+
 fn publication_record(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,

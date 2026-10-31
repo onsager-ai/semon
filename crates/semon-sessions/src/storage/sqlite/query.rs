@@ -84,7 +84,9 @@ pub(crate) fn qualify_context_candidate(
     {
         return Err(StorageError::ScopeChanged);
     }
-    super::proof_generations::observation_binding_for_physical_owner(tx, current, candidate, owner)?;
+    super::proof_generations::observation_binding_for_physical_owner(
+        tx, current, candidate, owner,
+    )?;
     if history {
         if !crate::history_projection::qualified(tx, candidate).map_err(super::failed)? {
             return Err(StorageError::ScopeChanged);
@@ -94,7 +96,8 @@ pub(crate) fn qualify_context_candidate(
             crate::query_projection::header(tx, &crate::query_projection::identity(candidate))
                 .map_err(super::failed)?
                 .ok_or(StorageError::ScopeChanged)?;
-        let header: Value = serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
+        let header: Value =
+            serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
         use sha2::Digest;
         let query_generation = format!(
             "{:x}",

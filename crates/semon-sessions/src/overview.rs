@@ -189,6 +189,9 @@ pub(crate) fn publish_current_owned(
                     content_generation(&prior),
                 )?;
                 measurements.record("trace_update", started, 1);
+                let started = measurements.start();
+                crate::causal_trace::publish_current_query_owned(tx, row, current)?;
+                measurements.record("query_projection_update", started, 1);
             }
             let started = measurements.start();
             tx.prepare_cached(

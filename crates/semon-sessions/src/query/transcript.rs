@@ -1162,7 +1162,9 @@ fn read_inner(
                         let recipe = saved["selected"]["edges"]
                             .as_array()
                             .and_then(|edges| {
-                                edges.iter().find(|edge| edge["id"].as_str() == Some(id.as_str()))
+                                edges
+                                    .iter()
+                                    .find(|edge| edge["id"].as_str() == Some(id.as_str()))
                             })
                             .ok_or_else(|| unavailable("Native handoff recipe unavailable"))?;
                         vec![render_edge(

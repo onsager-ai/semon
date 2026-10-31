@@ -4,6 +4,7 @@ use super::*;
 fn retained_child_fields_use_exact_current_parent_after_original_history_is_preserved() {
     use crate::model::summary::CatalogRow;
     use crate::storage::StorageError;
+    use sha2::{Digest as _, Sha256};
     use std::io::Write;
 
     let home = Home::new("retained-endpoint-context");
@@ -80,19 +81,29 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
     assert_ne!(continued_parent.sources, original_parent.sources);
     let history_parent = load("lead", true);
     assert_eq!(history_parent.sources, original_parent.sources);
+    assert_eq!(history_parent.query, original_parent.query);
+    let history_source_generation =
+        crate::retention::source_generation(&history_parent.sources).unwrap();
+    assert_eq!(
+        history_parent.query.as_ref().unwrap()["source_generation"],
+        json!(history_source_generation)
+    );
+    let query_generation_of = |row: &CatalogRow| {
+        format!("{:x}", Sha256::digest(serde_json::to_vec(&row.query).unwrap()))
+    };
+    assert_eq!(
+        query_generation_of(&history_parent),
+        query_generation_of(&original_parent),
+        "retained History keeps its original Query generation"
+    );
     for (candidate, history) in [(&history_parent, true), (&continued_parent, false)] {
         let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
         let db = home.semantic_publisher_connection();
         let tx = db.unchecked_transaction().unwrap();
         let current = binding.runtime_binding_at(&tx).unwrap();
         let query_observation_matches = candidate.query.as_ref().is_some_and(|saved| {
-            crate::model::summary::query_observation_matches(
-                saved,
-                &candidate.sources,
-                false,
-                None,
-            )
-            .unwrap_or(false)
+            crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
+                .unwrap_or(false)
         });
         assert!(
             query_observation_matches,
@@ -101,8 +112,7 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         let sources_are_allowlisted = !candidate.sources.is_empty()
             && candidate.sources.len() <= 64
             && candidate.sources.iter().all(|source| {
-                crate::catalog::source_relative(&home.options, &candidate.harness, source)
-                    .is_some()
+                crate::catalog::source_relative(&home.options, &candidate.harness, source).is_some()
             });
         assert!(
             sources_are_allowlisted,
@@ -128,6 +138,52 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         assert!(
             history_header_is_qualified,
             "retained context History candidate must have a qualified History header"
+        );
+        let current_query_header = if history {
+            None
+        } else {
+            crate::query_projection::header(&tx, &crate::query_projection::identity(candidate))
+                .ok()
+                .flatten()
+                .and_then(|encoded| serde_json::from_str::<Value>(&encoded).ok())
+        };
+        let current_query_header_is_present = history || current_query_header.is_some();
+        assert!(
+            current_query_header_is_present,
+            "retained Current candidate must have a Query header"
+        );
+        let current_query_header_is_complete = history
+            || current_query_header
+                .as_ref()
+                .is_some_and(|header| header["version"] == 1 && header["complete"] == true);
+        assert!(
+            current_query_header_is_complete,
+            "retained Current candidate must have a complete Query header"
+        );
+        let current_query_header_has_source_generation = history
+            || current_query_header.as_ref().is_some_and(|header| {
+                candidate.query.as_ref().is_some_and(|query| {
+                    header["source_generation"] == query["source_generation"]
+                })
+            });
+        assert!(
+            current_query_header_has_source_generation,
+            "retained Current candidate Query header must match its source generation"
+        );
+        let query_generation = candidate
+            .query
+            .as_ref()
+            .and_then(|query| serde_json::to_vec(query).ok())
+            .map(|query| format!("{:x}", Sha256::digest(query)));
+        let current_query_header_has_query_generation = history
+            || current_query_header.as_ref().is_some_and(|header| {
+                query_generation.as_ref().is_some_and(|expected| {
+                    header["query_generation"].as_str() == Some(expected.as_str())
+                })
+            });
+        assert!(
+            current_query_header_has_query_generation,
+            "retained Current candidate Query header must match its Query generation"
         );
         crate::storage::sqlite::query::qualify_context_candidate(
             &tx,
@@ -180,6 +236,31 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         ));
         tx.rollback().unwrap();
     }
+    let mut parent_query = Query::from_sources(admitted(home.options.clone()));
+    let parent_fields = parent_query
+        .call_selected_at(
+            "local",
+            "lead",
+            "get_session",
+            &json!({"id":"lead"}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(parent_fields["session"]["id"], "lead");
+    assert_eq!(parent_fields["session"]["children"], json!(["child"]));
+    assert!(
+        parent_fields["session"]["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|handoff| {
+                handoff["from"] == "lead"
+                    && handoff["to"] == "child"
+                    && handoff["brief"] == "Review the parser"
+            })
+    );
     let child = load("child", false);
     let source = &child.sources[0];
     let archive = SelectedArchive {
@@ -235,6 +316,8 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         )
         .unwrap();
     assert_eq!(fields["session"]["id"], "child");
+    assert_eq!(fields["session"]["parent"], "lead");
+    assert_eq!(fields["session"]["children"], json!([]));
     assert!(
         fields["session"]["handoffs"]
             .as_array()

@@ -324,13 +324,8 @@ impl OriginalHistoryStore for History<'_, '_> {
         let Some(query) = &row.query else {
             return Ok(());
         };
-        if !crate::model::summary::query_observation_matches(
-            query,
-            &row.sources,
-            false,
-            None,
-        )
-        .map_err(|_| StorageError::ScopeChanged)?
+        if !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
+            .map_err(|_| StorageError::ScopeChanged)?
         {
             return Err(StorageError::ScopeChanged);
         }

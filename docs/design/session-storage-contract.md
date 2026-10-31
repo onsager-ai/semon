@@ -353,6 +353,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `overview_repair.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `pricing/runtime.rs` | direct | Repricing registry retains admitted SQLite ownership; registry lifecycle fixtures open current stores. |
 | `query/tests/recovery_tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `query/tests/retained_context_tests.rs` | direct | Test-only retained Query endpoint metadata, physical-owner grant and handoff fixture reads SQLite Catalog/History directly. |
 | `query/tests.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `query/transcript.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `query_projection.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
