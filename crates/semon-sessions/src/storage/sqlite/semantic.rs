@@ -1720,6 +1720,13 @@ impl Stage {
             .staged_model_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
         if producer_witness.len() > 2 * 1048576 {
+            #[cfg(test)]
+            eprintln!(
+                "semantic_context_budget: context bytes={} limit={} phase=publication paths={}",
+                producer_witness.len(),
+                2 * 1048576,
+                batch.paths.len()
+            );
             return Err(refuse("semantic_context_budget"));
         }
         let metadata = prepared
@@ -3334,7 +3341,16 @@ impl Stage {
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
-            if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
+            let context_bytes = metadata.len().saturating_add(projections.len());
+            if context_bytes > 2 * 1048576 {
+                #[cfg(test)]
+                eprintln!(
+                    "semantic_context_budget: publication bytes={} limit={} phase={} paths={}",
+                    context_bytes,
+                    2 * 1048576,
+                    phase,
+                    batch.paths.len()
+                );
                 return Err(refuse("semantic_context_budget"));
             }
             let paths =
@@ -3432,6 +3448,14 @@ impl Stage {
                         .map_err(|e| StoreError::Data(e.to_string()))?;
                     bytes += text.len();
                     if bytes > 1048576 {
+                        #[cfg(test)]
+                        eprintln!(
+                            "semantic_context_budget: identity bytes={} limit={} phase={} paths={}",
+                            bytes,
+                            1048576,
+                            phase,
+                            batch.paths.len()
+                        );
                         return Err(refuse("semantic_context_budget"));
                     }
                     encoded.push((endpoint, text));
@@ -3485,6 +3509,14 @@ impl Stage {
                         .map_err(|e| StoreError::Data(e.to_string()))?;
                     bytes = bytes.saturating_add(text.len());
                     if bytes > 1048576 {
+                        #[cfg(test)]
+                        eprintln!(
+                            "semantic_context_budget: relations bytes={} limit={} phase={} paths={}",
+                            bytes,
+                            1048576,
+                            phase,
+                            batch.paths.len()
+                        );
                         return Err(refuse("semantic_context_budget"));
                     }
                     tx.execute("UPDATE main.catalog_semantic_endpoints SET metadata=?3 WHERE namespace=?1 AND session_key=?2",params![ns,endpoint.row.key,text]).map_err(error)?;
