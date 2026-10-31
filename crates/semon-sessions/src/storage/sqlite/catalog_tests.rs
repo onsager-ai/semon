@@ -3469,11 +3469,12 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
         assert_eq!(
             fresh.status,
             200,
-            "fresh transcript refused: code={} fence={} stage={} local_revision={}",
+            "fresh transcript refused: code={} fence={} stage={} local_revision={} selected_stage={:?}",
             fresh_body["error"]["code"],
             fresh_body["fence_reason"],
             fresh_body["stage"],
-            fresh_body["local_revision_reason"]
+            fresh_body["local_revision_reason"],
+            crate::transcript_range::last_selected_read_stage()
         );
         let fresh = fresh_body;
         assert_ne!(fresh["identity"]["generation"], before.generation);
