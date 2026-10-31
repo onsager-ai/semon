@@ -1661,7 +1661,19 @@ mod tests {
     #[test]
     fn migration_candidate_work_is_independent_of_unrelated_history() {
         let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('overview_needed:selected','1'),('unrelated:initial','1');").unwrap();
+        let namespace = crate::storage::LogicalSourceNamespace::new("fixture-source").unwrap();
+        crate::storage::sqlite::catalog_namespace::register(&db, &namespace).unwrap();
+        db.execute_batch(crate::events::store::metadata_schema())
+            .unwrap();
+        db.execute(
+            "INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1'),(?1,?3,'1')",
+            rusqlite::params![
+                namespace.as_str(),
+                "overview_needed:selected",
+                "unrelated:initial"
+            ],
+        )
+        .unwrap();
         let measure = || {
             let mut statement = db.prepare(CANDIDATES).unwrap();
             let keys = statement
@@ -1675,10 +1687,32 @@ mod tests {
             )
         };
         let before = measure();
-        db.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO meta SELECT 'unrelated:'||printf('%05d',x),'1' FROM n;").unwrap();
+        db.execute_batch(
+            "WITH RECURSIVE n(x) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT x+1 FROM n WHERE x<20000
+             )
+             INSERT INTO main.meta(namespace,key,value)
+             SELECT semon_namespace(),'unrelated:'||printf('%05d',x),'1' FROM n;",
+        )
+        .unwrap();
         assert_eq!(measure(), before);
         assert_eq!(before.0, vec!["selected"]);
-        let plan:String=db.query_row("EXPLAIN QUERY PLAN SELECT substr(key,17) FROM meta WHERE key>='overview_needed:' AND key<'overview_needed;' ORDER BY key LIMIT 8",[],|row|row.get(3)).unwrap();
-        assert!(plan.contains("SEARCH meta USING COVERING INDEX"), "{plan}");
+        let plan: String = db
+            .query_row(
+                "EXPLAIN QUERY PLAN
+                 SELECT substr(key,17)
+                 FROM main.meta
+                 WHERE namespace=semon_namespace()
+                   AND key>'overview_needed:'
+                   AND key<'overview_needed;'
+                 ORDER BY key
+                 LIMIT 8",
+                [],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("SEARCH meta USING PRIMARY KEY"), "{plan}");
     }
 }
