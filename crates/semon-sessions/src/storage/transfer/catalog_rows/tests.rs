@@ -23,6 +23,28 @@ impl InboxTransaction for MemoryInbox {
     }
 }
 
+pub(crate) fn assert_catalog_categories_equal(
+    original: &SnapshotManifest,
+    reversed: &SnapshotManifest,
+) {
+    for kind in CatalogRowKind::ALL {
+        let category = kind.category();
+        assert_eq!(
+            original
+                .categories
+                .iter()
+                .find(|item| item.category == category)
+                .unwrap(),
+            reversed
+                .categories
+                .iter()
+                .find(|item| item.category == category)
+                .unwrap(),
+            "exact Catalog category {category:?}",
+        );
+    }
+}
+
 pub(crate) fn assert_provider_transcript(
     config: &StoreConfig,
     options: &crate::Options,

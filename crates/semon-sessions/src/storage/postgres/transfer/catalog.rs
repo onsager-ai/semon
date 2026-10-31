@@ -626,13 +626,11 @@ mod tests {
     #[test]
     fn pg_current_transfer225_real_large_presentation_reverse_and_final_rollback() {
         use crate::storage::sqlite::transfer::seed_large_presentation;
-        use catalog_rows::tests::assert_provider_transcript;
+        use catalog_rows::tests::{assert_catalog_categories_equal, assert_provider_transcript};
         let root = root();
         let source = sqlite(&root, "pg-real-large-source");
         let reverse = sqlite(&root, "pg-real-large-reverse");
-        let (options, key, id) = seed_large_presentation(&source, &root);
-        let mut host = crate::storage::transfer::reported::tests::selected_receipts::AuthorizedOriginals::default();
-        originals(&source, &options, &mut host);
+        let (options, key, id, host) = seed_large_presentation(&source, &root);
         let (pool, _) = super::super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let target = StoreConfig {
@@ -711,6 +709,7 @@ mod tests {
             assert_provider_transcript(&target, &options, &host, &key);
         }
         let reversed = stage(&target, &reverse, &[181; 32]);
+        assert_catalog_categories_equal(&manifest, &reversed);
         apply(&reverse, &reversed);
         reverse
             .transfer_inbox()
