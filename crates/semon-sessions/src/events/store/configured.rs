@@ -8223,11 +8223,18 @@ mod tests {
                 before: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
                 after: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
             ) {
-                assert_eq!(
-                    without_owner_custody(before, namespace, key),
-                    without_owner_custody(after, namespace, key),
-                    "Deferred custody cannot change Current, the publication head, proofs, or another Source"
-                );
+                let before_other = without_owner_custody(before, namespace, key);
+                let after_other = without_owner_custody(after, namespace, key);
+                assert!(before_other.keys().eq(after_other.keys()));
+                for (table, expected) in &before_other {
+                    let actual = &after_other[table];
+                    assert!(
+                        actual == expected,
+                        "Deferred custody changed {table}: before_rows={} after_rows={}",
+                        expected.len(),
+                        actual.len()
+                    );
+                }
 
                 let old = before["session_catalog"]
                     .iter()

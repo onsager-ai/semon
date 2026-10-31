@@ -63,17 +63,50 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
-      - name: Direct Catalog repricing preserves exact row authority
+      - name: Authenticated Catalog repricing transactions
         id: reprice_authority
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         shell: bash
-        run: cargo test --locked -p semon-sessions --lib events::store::tests::direct_catalog_reprice_preserves_exact_observation_authority -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/reprice-authority.log"
+        run: |
+          result=0
+          for group in direct_catalog_reprice configured_semantic_reprice_preserves_stage_only_authority current_transfer_catalog_reprice_preserves_imported_original_authority events::store::reprice::tests::; do
+            group_result=0
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/reprice-authority-case.log" 2>&1 || group_result=$?
+            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/reprice-authority-case.log"; then group_result=1; fi
+            cat "$RUNNER_TEMP/reprice-authority-case.log" >> "$RUNNER_TEMP/reprice-authority.log"
+            echo "GROUP name=$group status=$group_result" >> "$RUNNER_TEMP/reprice-authority.log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/reprice-authority.log"
+          exit "$result"
       - name: Retain repricing authority result
         if: ${{ !cancelled() && steps.reprice_authority.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: reprice-authority
           path: ${{ runner.temp }}/reprice-authority.log
+      - name: Current and retained observation contracts
+        id: retained_contracts
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for group in configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody configured_semantic_domain61_late_child_restarts_complete_native_cohort configured_semantic_selected65_private_witness_is_bound_independently_of_rows configured_semantic_real_model_claude_replacement_rollback_stale_and_history archived_event_index_survives_absence_without_current_membership retained_projection_falls_back_to_history_only_when_main_omits_path; do
+            group_result=0
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/retained-contract-case.log" 2>&1 || group_result=$?
+            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/retained-contract-case.log"; then group_result=1; fi
+            cat "$RUNNER_TEMP/retained-contract-case.log" >> "$RUNNER_TEMP/retained-contract-tests.log"
+            echo "GROUP name=$group status=$group_result" >> "$RUNNER_TEMP/retained-contract-tests.log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/retained-contract-tests.log"
+          exit "$result"
+      - name: Retain current and retained contract results
+        if: ${{ !cancelled() && steps.retained_contracts.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: retained-contract-tests
+          path: ${{ runner.temp }}/retained-contract-tests.log
       - name: Retained row authority diagnostic (not qualification)
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         env:
