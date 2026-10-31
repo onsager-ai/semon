@@ -746,6 +746,8 @@ struct VerifiedObservation {
     binding: crate::storage::QueryRuntimeBinding,
     row: CatalogRow,
     observations: Option<crate::storage::selected::PresentationObservations>,
+    record: proof_codec::GenerationRecord,
+    presentation: String,
 }
 
 fn diagnose_observation_refusal(stage: &'static str) {
@@ -877,7 +879,94 @@ fn verify_immutable_observation(
         binding: original_binding,
         row: original,
         observations,
+        record: record.clone(),
+        presentation: presentation.clone(),
     })
+}
+
+/// Reuse preserves each selected owner's original receipt and grants. Absence
+/// of immutable ownership requires issuance; malformed existing ownership fails.
+pub(super) fn reusable_presentations(
+    tx: &Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    prepared: &crate::model::PreparedSources,
+) -> Result<bool, StorageError> {
+    let ns = current.namespace.as_str();
+    // Capture after publication effects, in the same transaction, so changed
+    // History, relative context and source observations cannot masquerade as reuse.
+    let requested = capture_presentations(tx, ns, "", prepared, 0)?;
+    let mut reusable = !prepared.rows.is_empty();
+    if prepared.rows.iter().any(|row| !prepared.transcripts.iter().any(|p| p.key == row.key))
+        && (!prepared.pids.is_empty()
+            || !prepared.lineage_dependencies.is_empty()
+            || !prepared.relationships.relations.is_empty()
+            || prepared.relationships.endpoints.values().any(|endpoint| {
+                endpoint.pid.is_some() || !endpoint.names.is_empty() || !endpoint.paths.is_empty()
+            }))
+    {
+        // A row without a presentation has no persisted context witness for
+        // these producer inputs. Authenticate its old proof below, then issue.
+        reusable = false;
+    }
+    for (row, (_, presentation)) in prepared.rows.iter().zip(&requested) {
+        let owned: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current')",
+            params![ns, row.key],
+            |row| row.get(0),
+        ).map_err(failed)?;
+        if !owned {
+            reusable = false;
+            continue;
+        }
+        let prefix = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let verified = verify_immutable_observation(tx, current, row, "current", &prefix, false)
+            .map_err(ObservationPreparationError::into_storage)?;
+        let mut sources = row.sources.iter().map(|source| {
+            (
+                source.path.to_string_lossy().into_owned(),
+                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)),
+            )
+        }).collect::<Vec<_>>();
+        sources.sort();
+        let saved_sources = tx.prepare(
+            "SELECT path,ledger FROM storage_proof_sources WHERE namespace=?1 AND id=?2 AND session_key=?3 ORDER BY path LIMIT 65",
+        ).map_err(failed)?.query_map(params![ns, verified.record.id.0, row.key], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        if sources != saved_sources {
+            return Err(StorageError::ScopeChanged);
+        }
+        let slots = serde_json::to_string(&prepared.transcripts.iter()
+            .find(|projection| projection.key == row.key).map(|projection| &projection.slots))
+            .map_err(|_| StorageError::Unavailable)?;
+        let observations_match = match (
+            verified.observations.as_ref(), prepared.presentation_observations(),
+        ) {
+            (Some(saved), Some(requested)) => saved.same_publication_inputs_for(requested, row),
+            (None, None) => true,
+            _ => false,
+        };
+        let normalize = |text: &str| -> Result<serde_json::Value, StorageError> {
+            let witness: Option<crate::storage::selected::PresentationWitness> =
+                serde_json::from_str(text).map_err(|_| StorageError::Unavailable)?;
+            let mut value = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
+            if let Some(catalog) = value.get_mut("catalog").and_then(serde_json::Value::as_object_mut) {
+                // capture_presentations authors these from the publication's
+                // chosen generation/clock, rather than producer observations.
+                for key in ["catalog_generation", "slot_projection_catalog_generation", "catalog_observed_at"] {
+                    catalog.remove(key);
+                }
+            }
+            Ok(value)
+        };
+        reusable &= serde_json::to_value(&verified.row).map_err(|_| StorageError::Unavailable)?
+            == serde_json::to_value(row).map_err(|_| StorageError::Unavailable)?
+            && verified.record.slots == slots
+            && observations_match
+            && normalize(&verified.presentation)? == normalize(presentation)?;
+    }
+    Ok(reusable)
 }
 
 /// Query observations use original producer coordinates only after the same

@@ -1978,55 +1978,6 @@ impl Stage {
             let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
-        // Negative effects change the publication even without replacement rows.
-        let repeat = unchanged
-            && projections_unchanged
-            && retired.is_empty()
-            && prepared.withdrawals.is_empty()
-            && previous.is_some()
-            && prepared.claims.iter().all(|(_, claim)| claim.is_none());
-        let old_epoch = old_epoch
-            .map(|s| s.parse::<u64>())
-            .transpose()
-            .map_err(|_| refuse("semantic_publication_epoch"))?
-            .unwrap_or(0);
-        let epoch = if repeat {
-            old_epoch
-        } else {
-            old_epoch
-                .checked_add(1)
-                .ok_or_else(|| refuse("semantic_publication_epoch"))?
-        }
-        .to_string();
-        let version = crate::model::summary::CATALOG_VERSION.to_string();
-        let generation = if repeat {
-            previous
-                .clone()
-                .ok_or_else(|| refuse("semantic_publication_replay_head"))?
-        } else {
-            let mut generation_metadata = metadata.clone();
-            if !projection_witness.is_empty() {
-                generation_metadata.push(
-                    serde_json::to_string(&projection_witness)
-                        .map_err(|e| StoreError::Data(e.to_string()))?,
-                );
-            }
-            if prepared.rows.iter().any(|row| row.trace.is_some())
-                || !prepared.withdrawals.is_empty()
-                || !prepared.relationships.relations.is_empty()
-                || !prepared.pids.is_empty()
-                || !prepared.lineage_dependencies.is_empty()
-                || !prepared.relationships.retired_owners.is_empty()
-            {
-                generation_metadata.push(producer_witness.clone());
-            }
-            crate::storage::catalog::component_generation(
-                &version,
-                previous.as_deref(),
-                &epoch,
-                &generation_metadata,
-            )
-        };
         publication_phase("original_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
@@ -2059,9 +2010,6 @@ impl Stage {
                 &prepared.rows,
                 &prepared.transcripts,
             )?;
-            tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_projection_catalog_generation',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,generation]).map_err(error)?;
-        } else if !repeat {
-            tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='slot_projection_catalog_generation'",[ns]).map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_slots").map_err(error)?;
@@ -2157,71 +2105,119 @@ impl Stage {
                 .remove(crate::CatalogReadScope::Current)
                 .map_err(error)?;
         }
+        // Negative effects change the publication even without replacement rows.
+        let repeat = unchanged
+            && projections_unchanged
+            && retired.is_empty()
+            && prepared.withdrawals.is_empty()
+            && prepared.removed_sources.is_empty()
+            && previous.is_some()
+            && prepared.claims.iter().all(|(_, claim)| claim.is_none())
+            && super::proof_generations::reusable_presentations(
+                &tx,
+                &crate::storage::QueryRuntimeBinding {
+                    namespace: self.source.config.namespace.clone(),
+                    admission: self.source.admission,
+                    stream_epoch: self.source.config.expected_stream_epoch.clone()
+                        .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+                },
+                prepared,
+            ).map_err(StoreError::Configured)?;
+        let old_epoch = old_epoch
+            .map(|s| s.parse::<u64>())
+            .transpose()
+            .map_err(|_| refuse("semantic_publication_epoch"))?
+            .unwrap_or(0);
+        let epoch = if repeat {
+            old_epoch
+        } else {
+            old_epoch
+                .checked_add(1)
+                .ok_or_else(|| refuse("semantic_publication_epoch"))?
+        }
+        .to_string();
+        let version = crate::model::summary::CATALOG_VERSION.to_string();
+        let generation = if repeat {
+            previous
+                .clone()
+                .ok_or_else(|| refuse("semantic_publication_replay_head"))?
+        } else {
+            let mut generation_metadata = metadata.clone();
+            if !projection_witness.is_empty() {
+                generation_metadata.push(
+                    serde_json::to_string(&projection_witness)
+                        .map_err(|e| StoreError::Data(e.to_string()))?,
+                );
+            }
+            if prepared.rows.iter().any(|row| row.trace.is_some())
+                || !prepared.withdrawals.is_empty()
+                || !prepared.relationships.relations.is_empty()
+                || !prepared.pids.is_empty()
+                || !prepared.lineage_dependencies.is_empty()
+                || !prepared.relationships.retired_owners.is_empty()
+            {
+                generation_metadata.push(producer_witness.clone());
+            }
+            crate::storage::catalog::component_generation(
+                &version,
+                previous.as_deref(),
+                &epoch,
+                &generation_metadata,
+            )
+        };
+        if !prepared.transcripts.is_empty() {
+            tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_projection_catalog_generation',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,generation]).map_err(error)?;
+        } else if !repeat {
+            tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='slot_projection_catalog_generation'",[ns]).map_err(error)?;
+        }
         publication_phase("publication_proof");
         let selected_observed_at = crate::model::now_ms();
-        let presentations = super::proof_generations::capture_presentations(
-            &tx,
-            ns,
-            &generation,
-            prepared,
-            selected_observed_at,
-        )
-        .map_err(StoreError::Configured)?;
-        let proof_digest = super::proof_generations::bind_presentations(
-            &tx,
-            ns,
-            &generation,
-            &proof_digest,
-            &presentations,
-            prepared,
-        )
-        .map_err(StoreError::Configured)?;
-        tx.execute(
-            "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-            params![
+        if !repeat {
+            let presentations = super::proof_generations::capture_presentations(
+                &tx,
                 ns,
-                generation,
-                batch.epoch,
-                i64::try_from(self.source.admission)
-                    .map_err(|_| refuse("semantic_admission_range"))?,
-                batch.base_generation,
-                batch.source_revision,
-                proof_digest,
-                claims_text,
-                metadata_text
-            ],
-        )
-        .map_err(error)?;
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
-        // Local producer authority is not part of transported receipts. Equal
-        // admission counters across stores cannot manufacture this grant.
-        if tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE meta.value=excluded.value", params![
-            ns,
-            format!("catalog_native_publication:{generation}"),
-            format!("{}:{}", self.source.admission, self.source.config.expected_stream_epoch.as_deref().ok_or_else(|| refuse("semantic_stream_epoch"))?),
-        ]).map_err(error)? != 1 {
-            return Err(refuse("semantic_native_publication_grant"));
-        }
-        super::proof_generations::publish(
-            &tx,
-            ns,
-            self.source.admission,
-            self.source
-                .config
-                .expected_stream_epoch
-                .as_deref()
-                .ok_or_else(|| refuse("semantic_stream_epoch"))?,
-            &generation,
-            &proof_digest,
-            super::proof_generations::PreparedPresentations {
+                &generation,
                 prepared,
-                rows: &presentations,
-            },
-        )
-        .map_err(StoreError::Configured)?;
-        for metadata in &metadata {
-            super::proof_generations::native_observation_grant(
+                selected_observed_at,
+            )
+            .map_err(StoreError::Configured)?;
+            let proof_digest = super::proof_generations::bind_presentations(
+                &tx,
+                ns,
+                &generation,
+                &proof_digest,
+                &presentations,
+                prepared,
+            )
+            .map_err(StoreError::Configured)?;
+            tx.execute(
+                "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    ns,
+                    generation,
+                    batch.epoch,
+                    i64::try_from(self.source.admission)
+                        .map_err(|_| refuse("semantic_admission_range"))?,
+                    batch.base_generation,
+                    batch.source_revision,
+                    proof_digest,
+                    claims_text,
+                    metadata_text
+                ],
+            )
+            .map_err(error)?;
+            #[cfg(test)]
+            crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
+            // Local producer authority is not part of transported receipts. Equal
+            // admission counters across stores cannot manufacture this grant.
+            if tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value WHERE meta.value=excluded.value", params![
+                ns,
+                format!("catalog_native_publication:{generation}"),
+                format!("{}:{}", self.source.admission, self.source.config.expected_stream_epoch.as_deref().ok_or_else(|| refuse("semantic_stream_epoch"))?),
+            ]).map_err(error)? != 1 {
+                return Err(refuse("semantic_native_publication_grant"));
+            }
+            super::proof_generations::publish(
                 &tx,
                 ns,
                 self.source.admission,
@@ -2230,41 +2226,64 @@ impl Stage {
                     .expected_stream_epoch
                     .as_deref()
                     .ok_or_else(|| refuse("semantic_stream_epoch"))?,
-                metadata,
+                &generation,
+                &proof_digest,
+                super::proof_generations::PreparedPresentations {
+                    prepared,
+                    rows: &presentations,
+                },
             )
             .map_err(StoreError::Configured)?;
+            for metadata in &metadata {
+                super::proof_generations::native_observation_grant(
+                    &tx,
+                    ns,
+                    self.source.admission,
+                    self.source
+                        .config
+                        .expected_stream_epoch
+                        .as_deref()
+                        .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+                    metadata,
+                )
+                .map_err(StoreError::Configured)?;
+            }
+            let stream = self
+                .source
+                .config
+                .expected_stream_epoch
+                .as_deref()
+                .ok_or_else(|| refuse("semantic_stream_epoch"))?;
+            // An outgoing owner may have a direct Catalog capture instead of an
+            // immutable proof. Retained History keeps only that exact prior grant.
+            for row in &prepared.relationships.retired_owners {
+                super::proof_generations::reconcile_native_observation_owners(
+                    &tx,
+                    ns,
+                    &row.key,
+                    self.source.admission,
+                    stream,
+                )
+                .map_err(StoreError::Configured)?;
+            }
+            for row in prepared
+                .rows
+                .iter()
+                .chain(prepared.relationships.retired_owners.iter())
+            {
+                super::proof_generations::clear_native_observation_captures_owned_by_proofs(
+                    &tx,
+                    ns,
+                    &row.key,
+                    self.source.admission,
+                    stream,
+                )
+                .map_err(StoreError::Configured)?;
+            }
         }
-        let stream = self
-            .source
-            .config
-            .expected_stream_epoch
-            .as_deref()
-            .ok_or_else(|| refuse("semantic_stream_epoch"))?;
-        // An outgoing owner may have a direct Catalog capture instead of an
-        // immutable proof. Retained History keeps only that exact prior grant.
-        for row in &prepared.relationships.retired_owners {
-            super::proof_generations::reconcile_native_observation_owners(
-                &tx,
-                ns,
-                &row.key,
-                self.source.admission,
-                stream,
-            )
-            .map_err(StoreError::Configured)?;
-        }
-        for row in prepared
-            .rows
-            .iter()
-            .chain(prepared.relationships.retired_owners.iter())
-        {
-            super::proof_generations::clear_native_observation_captures_owned_by_proofs(
-                &tx,
-                ns,
-                &row.key,
-                self.source.admission,
-                stream,
-            )
-            .map_err(StoreError::Configured)?;
+        #[cfg(test)]
+        if repeat {
+            crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_generation_refs")

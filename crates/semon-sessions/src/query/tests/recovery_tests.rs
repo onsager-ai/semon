@@ -1706,6 +1706,43 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 }
 
 #[test]
+fn recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication() {
+    let home = Home::new("recovery-stage-reuse");
+    home.top("first", &[
+        human("first", ts(1, 0), "Publication reuse prompt"),
+        assistant("first", ts(1, 1), vec![text("Publication reuse answer")]),
+    ]);
+    publish(&home);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    ).unwrap().into_test_connection();
+    let generation = || db.query_row(
+        "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+        [], |row| row.get::<_, String>(0),
+    ).unwrap();
+    let direct_generation = generation();
+    assert!(recovery_proof_snapshot(&db, "first").is_empty());
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/-work-proj/first.jsonl".into(),
+    };
+    publish_semantic_stage(&home, &input);
+    let immutable_generation = generation();
+    assert_ne!(immutable_generation, direct_generation);
+    let provenance = recovery_stage_provenance(&db, "first");
+    let refs = recovery_proof_snapshot(&db, "first");
+    assert!(!provenance.is_empty());
+    let grants = recovery_stage_observation_grants(&db);
+    publish_semantic_stage(&home, &input);
+    assert_eq!(generation(), immutable_generation);
+    assert_eq!(recovery_stage_provenance(&db, "first"), provenance);
+    assert_eq!(recovery_proof_snapshot(&db, "first"), refs);
+    assert_eq!(recovery_stage_observation_grants(&db), grants);
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+}
+
+#[test]
 fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     use crate::storage::catalog::CatalogObservationOwner;
     use crate::storage::catalog::CatalogSnapshot;

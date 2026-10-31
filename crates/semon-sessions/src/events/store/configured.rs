@@ -6098,11 +6098,54 @@ mod tests {
             Outcome::Written
         );
         let (next, prepared) = publication_ready(&mut *store, &a.raw, "replay-again");
+        let proof_state = |db: &Connection| {
+            db.prepare("SELECT json_array(g.id,g.publication,g.proof,g.metadata,g.slots,r.base,r.manifest,r.digest,v.metadata,p.epoch,p.base_generation,p.claims,p.metadata) FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE g.namespace='source-a' ORDER BY g.id,g.session_key").unwrap()
+                .query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let original_proofs = proof_state(&a.db());
+        assert!(!original_proofs.is_empty());
+        for fault in ["semantic_publish_search", "semantic_publish_generation_refs", "semantic_publish_ack", "semantic_publish_head"] {
+            let before = shared_state(&a);
+            FAIL_EFFECT.with(|point| point.set(Some(fault)));
+            assert!(store.publish_semantic_catalog(&next, &prepared).is_err(), "{fault}");
+            FAIL_EFFECT.with(|point| point.set(None));
+            assert_eq!(shared_state(&a), before, "{fault}");
+        }
         assert_eq!(
             store.publish_semantic_catalog(&next, &prepared).unwrap(),
             first
         );
         assert_eq!(store.session_catalog_generation().unwrap(), first.1);
+        assert_eq!(proof_state(&a.db()), original_proofs);
+        assert_eq!(store.publish_semantic_catalog(&next, &prepared).unwrap(), first);
+        assert_eq!(proof_state(&a.db()), original_proofs);
+        assert_eq!(store.finish_semantic_stage(next.epoch).unwrap(), Outcome::Written);
+    }
+
+    #[test]
+    fn configured_semantic_noop_refuses_dangling_proof_source_and_grant() {
+        for corruption in [
+            "DELETE FROM storage_proof_presentations WHERE namespace='source-a'",
+            "DELETE FROM storage_proof_sources WHERE namespace='source-a'",
+            "DELETE FROM meta WHERE namespace='source-a' AND key LIKE 'catalog_native_observation:%'",
+            "UPDATE storage_proof_refs SET id='dangling' WHERE namespace='source-a' AND kind='current'",
+        ] {
+            let (a, _, _) = same_db_sources();
+            let mut store = owned_semantic(&a.config);
+            let (batch, prepared) = publication_ready(&mut *store, &a.raw, "original");
+            assert_eq!(store.publish_semantic_catalog(&batch, &prepared).unwrap().0, Outcome::Written);
+            assert_eq!(store.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+            let (next, prepared) = publication_ready(&mut *store, &a.raw, "unchanged");
+            let db = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
+            ).unwrap().into_test_connection();
+            db.execute(corruption, []).unwrap();
+            let before = shared_state(&a);
+            assert!(store.publish_semantic_catalog(&next, &prepared).is_err(), "{corruption}");
+            assert_eq!(shared_state(&a), before, "{corruption}");
+            assert_eq!(store.finish_semantic_stage(next.epoch).unwrap(), Outcome::Conflict);
+        }
     }
 
     #[test]
