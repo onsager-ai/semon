@@ -4889,7 +4889,7 @@ mod tests {
         .into_test_connection();
         let binding = reader.runtime_binding_at(&db).unwrap();
         let row = &model.prepared().rows[0];
-        let sizes: (usize, usize, usize, usize, usize, usize) = db
+        let sizes: (i64, i64, i64, i64, i64, i64) = db
             .query_row(
                 "SELECT octet_length(v.metadata),octet_length(g.metadata),octet_length(g.slots),octet_length(r.manifest),octet_length(c.metadata),octet_length(h.metadata)
                  FROM storage_proof_presentations v
