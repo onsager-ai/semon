@@ -4202,6 +4202,7 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
     let mcp = crate::query::transcript::read(
         &fixture.options,
         "archived",
+        crate::CatalogReadScope::RetainedHistory,
         &json!({"id":"archived","after":0,"limit":2}),
         Some(&fresh),
         crate::SessionSourceReadMode::LocalThenProvider,
@@ -4214,6 +4215,7 @@ fn selected_provider_ranges_render_native_records_without_restoring_sources() {
         crate::query::transcript::session(
             &fixture.options,
             "archived",
+            crate::CatalogReadScope::RetainedHistory,
             &json!({"id":"archived"}),
             Some(&fresh),
             crate::SessionSourceReadMode::LocalThenProvider,
@@ -4315,6 +4317,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         crate::query::transcript::read(
             &fixture.options,
             "live-history",
+            crate::CatalogReadScope::RetainedHistory,
             &json!({"id":"live-history"}),
             None,
             crate::SessionSourceReadMode::LocalThenProvider,
