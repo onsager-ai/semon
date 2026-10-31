@@ -767,87 +767,182 @@ fn diagnose_immutable_observation_join(
         eprintln!("catalog_retained_join_probe unavailable=true");
         return;
     };
-    let probe = db.query_row(
-        "WITH bounded_refs AS (
-            SELECT id FROM storage_proof_refs
-            WHERE namespace=?1 AND session_key=?2 AND kind=?3
-            ORDER BY id LIMIT 65
-         ), joined AS (
-            SELECT f.id,g.id AS generation_id,g.stream,g.prefix,g.metadata,
-                   p.generation AS publication_generation,
-                   r.publication AS root_publication,v.id AS presentation_id
-            FROM bounded_refs f
-            LEFT JOIN storage_proof_generations g
-              ON g.namespace=?1 AND g.id=f.id AND g.session_key=?2
-            LEFT JOIN storage_semantic_publications p
-              ON p.namespace=?1 AND p.generation=g.publication
-             AND p.proof_digest=g.proof AND p.admission=g.admission
-            LEFT JOIN storage_proof_presentation_roots r
-              ON r.namespace=p.namespace AND r.publication=p.generation
-             AND r.digest=p.proof_digest
-            LEFT JOIN storage_proof_presentations v
-              ON v.namespace=?1 AND v.id=g.id AND v.session_key=?2
-         )
-         SELECT count(*),
-                coalesce(sum(generation_id IS NULL),0),
-                coalesce(sum(stream=?4),0),
-                coalesce(sum(prefix=?5),0),
-                coalesce(sum(metadata=?6),0),
-                coalesce(sum(generation_id IS NULL OR
-                             (stream=?4 AND (prefix=?5 OR metadata=?6))),0),
-                coalesce(sum(generation_id IS NOT NULL),0),
-                coalesce(sum(publication_generation IS NOT NULL),0),
-                coalesce(sum(root_publication IS NOT NULL),0),
-                coalesce(sum(presentation_id IS NOT NULL),0),
-                coalesce(sum(publication_generation IS NOT NULL
-                             AND root_publication IS NOT NULL
-                             AND presentation_id IS NOT NULL
-                             AND stream=?4 AND prefix=?5),0)
-         FROM joined",
-        params![
-            current.namespace.as_str(),
-            selected.key,
-            reference_kind,
-            current.stream_epoch,
-            prefix,
-            metadata
-        ],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, i64>(9)?,
-                row.get::<_, i64>(10)?,
-            ))
-        },
-    );
+    let probe = db
+        .prepare(
+            "WITH current_refs AS (
+                SELECT id FROM storage_proof_refs
+                WHERE namespace=?1 AND session_key=?2 AND kind='current'
+                ORDER BY id LIMIT 65
+             ), history_refs AS (
+                SELECT id FROM storage_proof_refs
+                WHERE namespace=?1 AND session_key=?2 AND kind='history'
+                ORDER BY id LIMIT 65
+             ), bounded_refs AS (
+                SELECT 'current' AS kind,id FROM current_refs
+                UNION ALL
+                SELECT 'history' AS kind,id FROM history_refs
+             ), kinds(kind) AS (
+                SELECT 'current' UNION ALL SELECT 'history'
+             ), joined AS (
+                SELECT f.kind,g.id AS generation_id,g.stream,g.prefix,g.metadata,
+                       p.generation AS publication_generation,
+                       r.publication AS root_publication,v.id AS presentation_id
+                FROM bounded_refs f
+                LEFT JOIN storage_proof_generations g
+                  ON g.namespace=?1 AND g.id=f.id AND g.session_key=?2
+                LEFT JOIN storage_semantic_publications p
+                  ON p.namespace=?1 AND p.generation=g.publication
+                 AND p.proof_digest=g.proof AND p.admission=g.admission
+                LEFT JOIN storage_proof_presentation_roots r
+                  ON r.namespace=p.namespace AND r.publication=p.generation
+                 AND r.digest=p.proof_digest
+                LEFT JOIN storage_proof_presentations v
+                  ON v.namespace=?1 AND v.id=g.id AND v.session_key=?2
+             ), counts AS (
+                SELECT kind,count(*) AS refs_by_kind,
+                       coalesce(sum(generation_id IS NULL),0) AS dangling,
+                       coalesce(sum(stream=?3),0) AS stream_match,
+                       coalesce(sum(prefix=?4),0) AS prefix_match,
+                       coalesce(sum(metadata=?5),0) AS metadata_match,
+                       coalesce(sum(generation_id IS NULL OR
+                                    (stream=?3 AND (prefix=?4 OR metadata=?5))),0)
+                           AS candidate_route,
+                       coalesce(sum(generation_id IS NOT NULL),0) AS after_generation,
+                       coalesce(sum(publication_generation IS NOT NULL),0)
+                           AS after_publication,
+                       coalesce(sum(publication_generation IS NOT NULL
+                                    AND root_publication IS NOT NULL),0) AS after_root,
+                       coalesce(sum(publication_generation IS NOT NULL
+                                    AND root_publication IS NOT NULL
+                                    AND presentation_id IS NOT NULL),0)
+                           AS after_presentation,
+                       coalesce(sum(publication_generation IS NOT NULL
+                                    AND root_publication IS NOT NULL
+                                    AND presentation_id IS NOT NULL
+                                    AND stream=?3 AND prefix=?4),0) AS verifier_candidates
+                FROM joined GROUP BY kind
+             )
+             SELECT kinds.kind,coalesce(counts.refs_by_kind,0),
+                    coalesce(counts.dangling,0),coalesce(counts.stream_match,0),
+                    coalesce(counts.prefix_match,0),coalesce(counts.metadata_match,0),
+                    coalesce(counts.candidate_route,0),
+                    coalesce(counts.after_generation,0),
+                    coalesce(counts.after_publication,0),coalesce(counts.after_root,0),
+                    coalesce(counts.after_presentation,0),
+                    coalesce(counts.verifier_candidates,0)
+             FROM kinds LEFT JOIN counts USING(kind) ORDER BY kinds.kind",
+        )
+        .and_then(|mut statement| {
+            let rows = statement.query_map(
+                params![
+                    current.namespace.as_str(),
+                    selected.key,
+                    current.stream_epoch,
+                    prefix,
+                    metadata
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, i64>(9)?,
+                        row.get::<_, i64>(10)?,
+                        row.get::<_, i64>(11)?,
+                    ))
+                },
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        });
     match probe {
-        Ok((
-            refs_by_kind,
-            dangling,
-            stream,
-            prefix_match,
-            metadata_match,
-            route,
-            generation,
-            publication,
-            root,
-            presentation,
-            verifier,
-        )) => {
-            eprintln!(
-                "catalog_retained_join_probe refs_by_kind={refs_by_kind} refs_capped={} dangling={dangling} stream={stream} prefix={prefix_match} metadata={metadata_match} candidate_route={route} after_generation={generation} after_publication={publication} after_root={root} after_presentation={presentation} verifier_candidates={verifier}",
-                refs_by_kind == 65
-            );
+        Ok(rows) => {
+            for (
+                kind,
+                refs_by_kind,
+                dangling,
+                stream,
+                prefix_match,
+                metadata_match,
+                route,
+                generation,
+                publication,
+                root,
+                presentation,
+                verifier,
+            ) in rows
+            {
+                eprintln!(
+                    "catalog_retained_join_probe requested={reference_kind} kind={kind} refs_by_kind={refs_by_kind} refs_capped={} dangling={dangling} stream={stream} prefix={prefix_match} metadata={metadata_match} candidate_route={route} after_generation={generation} after_publication={publication} after_root={root} after_presentation={presentation} verifier_candidates={verifier}",
+                    refs_by_kind == 65
+                );
+            }
         }
         Err(_) => eprintln!("catalog_retained_join_probe unavailable=true"),
+    }
+
+    let admission = match i64::try_from(current.admission) {
+        Ok(admission) => admission,
+        Err(_) => {
+            eprintln!("catalog_retained_grant_probe unavailable=true");
+            return;
+        }
+    };
+    let metadata_digest = proof_codec::digest(metadata.as_bytes());
+    let grants = db
+        .prepare(
+            "SELECT owner_kind,metadata_digest=?3,admission=?4,stream=?5,
+                    direct_capture IS NOT NULL
+             FROM storage_catalog_native_observation_grants
+             WHERE namespace=?1 AND session_key=?2
+             ORDER BY owner_kind LIMIT 2",
+        )
+        .and_then(|mut statement| {
+            let rows = statement.query_map(
+                params![
+                    current.namespace.as_str(),
+                    selected.key,
+                    metadata_digest,
+                    admission,
+                    current.stream_epoch
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, bool>(3)?,
+                        row.get::<_, bool>(4)?,
+                    ))
+                },
+            )?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        });
+    match grants {
+        Ok(rows) => {
+            let slot = |owner: &str| {
+                rows.iter()
+                    .find(|row| row.0.as_str() == owner)
+                    .map(|row| (row.1, row.2, row.3, row.4))
+            };
+            for (owner, name) in [("catalog", "catalog"), ("history", "history")] {
+                let grant = slot(owner);
+                eprintln!(
+                    "catalog_retained_grant_probe owner={name} present={} metadata_digest_match={} admission_match={} stream_match={} capture_present={}",
+                    grant.is_some(),
+                    grant.is_some_and(|grant| grant.0),
+                    grant.is_some_and(|grant| grant.1),
+                    grant.is_some_and(|grant| grant.2),
+                    grant.is_some_and(|grant| grant.3),
+                );
+            }
+        }
+        Err(_) => eprintln!("catalog_retained_grant_probe unavailable=true"),
     }
 }
 
