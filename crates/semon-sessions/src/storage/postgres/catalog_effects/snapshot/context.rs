@@ -112,29 +112,129 @@ impl ContextLookup for Snapshot<'_, '_> {
         }).transpose()
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
-        use crate::storage::catalog::CatalogSnapshot;
-        let rows = self.rows(
-            &crate::catalog::Request::parse("limit=64")
-                .map_err(|_| io::Error::other(StorageError::InvalidArguments))?,
-        )?;
-        if rows.len() > 64 {
-            return Err(io::Error::other(StorageError::Busy));
-        }
+        let _scope = crate::selected_read::Scope::ensure();
+        // Match SQLite's 101-node recursive bound while reading only indexed
+        // children of the selected family. Truncated membership follows the
+        // stable key-digest index order; returned keys remain lexically sorted.
+        const FAMILY_NODES: usize = 101;
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        tx.check().map_err(io::Error::other)?;
+        let namespace = tx.namespace.as_str().as_bytes();
+        let generation = self.generation.as_bytes();
         let mut known = std::collections::BTreeSet::from([key.to_owned()]);
-        loop {
-            let before = known.len();
-            for row in &rows {
-                let value = serde_json::to_value(row).map_err(io::Error::other)?;
-                if value["parent"]
-                    .as_str()
-                    .is_some_and(|parent| known.contains(parent))
-                {
-                    known.insert(row.key.clone());
+        let mut frontier = std::collections::BTreeSet::from([key.to_owned()]);
+        while !frontier.is_empty() && known.len() < FAMILY_NODES {
+            let mut next = std::collections::BTreeSet::new();
+            for parent in &frontier {
+                let remaining = FAMILY_NODES - known.len() - next.len();
+                if remaining == 0 {
+                    break;
+                }
+                let parent_digest = digest(parent.as_bytes());
+                let limit =
+                    i64::try_from(remaining).map_err(|_| io::Error::other(StorageError::Busy))?;
+                let visited_bytes = known
+                    .iter()
+                    .chain(next.iter())
+                    .fold(0usize, |bytes, known| bytes.saturating_add(known.len()));
+                crate::selected_read::charge(0, visited_bytes)
+                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                let visited = known
+                    .iter()
+                    .chain(next.iter())
+                    .map(|known| known.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                let byte_limit = crate::selected_read::max_dynamic_bytes(64, remaining)
+                    .and_then(|bytes| {
+                        i64::try_from(bytes).map_err(|_| io::Error::other(StorageError::Busy))
+                    })
+                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                let rows = tx
+                    .driver
+                    .query(
+                        r#"
+                            WITH candidates AS MATERIALIZED (
+                                SELECT parent_key,parent_digest,key_digest,session_key
+                                FROM semon_pg_native_catalog_rows
+                                WHERE namespace_digest=sha256($1::bytea)
+                                  AND namespace=$1 AND generation=$2 AND parent_digest=$3
+                                  AND NOT (session_key=ANY($5::bytea[]))
+                                ORDER BY key_digest LIMIT $4
+                            ), measured AS (
+                                SELECT coalesce(sum(
+                                    octet_length(parent_key)::bigint
+                                  + octet_length(parent_digest)::bigint
+                                  + octet_length(key_digest)::bigint
+                                  + octet_length(session_key)::bigint
+                                ),0) AS bytes,
+                                coalesce(bool_and(
+                                    parent_key IS NOT NULL
+                                    AND octet_length(parent_key)<=1048576
+                                    AND octet_length(parent_digest)<=1048576
+                                    AND octet_length(key_digest)<=1048576
+                                    AND octet_length(session_key)<=1048576
+                                ),true) AS bounded
+                                FROM candidates
+                            )
+                            SELECT true AS refused,NULL::bytea,NULL::bytea,NULL::bytea,NULL::bytea
+                            FROM measured WHERE bytes>$6::bigint OR NOT bounded
+                            UNION ALL
+                            SELECT false AS refused,c.parent_key,c.parent_digest,c.key_digest,c.session_key
+                            FROM candidates c CROSS JOIN measured
+                            WHERE measured.bytes<=$6::bigint AND measured.bounded
+                            ORDER BY 4 NULLS FIRST
+                        "#,
+                        &[
+                            &namespace,
+                            &generation,
+                            &parent_digest,
+                            &limit,
+                            &visited,
+                            &byte_limit,
+                        ],
+                    )
+                    .map_err(sqlstate::error)
+                    .map_err(io::Error::other)?;
+                tx.check().map_err(io::Error::other)?;
+                for row in rows {
+                    if row.get::<_, bool>(0) {
+                        return Err(io::Error::other(StorageError::Busy));
+                    }
+                    let parent_key = row
+                        .get::<_, Option<Vec<u8>>>(1)
+                        .ok_or(StorageError::Busy)
+                        .map_err(io::Error::other)?;
+                    let parent_digest = row
+                        .get::<_, Option<Vec<u8>>>(2)
+                        .ok_or(StorageError::ScopeChanged)
+                        .map_err(io::Error::other)?;
+                    let key_digest = row.get::<_, Vec<u8>>(3);
+                    let session_key = row
+                        .get::<_, Option<Vec<u8>>>(4)
+                        .ok_or(StorageError::Busy)
+                        .map_err(io::Error::other)?;
+                    if parent_key.as_slice() != parent.as_bytes()
+                        || parent_digest != digest(&parent_key)
+                        || key_digest != digest(&session_key)
+                    {
+                        return Err(io::Error::other(StorageError::ScopeChanged));
+                    }
+                    crate::selected_read::charge(
+                        64,
+                        parent_key.len()
+                            + parent_digest.len()
+                            + key_digest.len()
+                            + session_key.len(),
+                    )
+                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                    next.insert(text(Some(session_key)).map_err(io::Error::other)?);
                 }
             }
-            if known.len() == before {
-                break;
-            }
+            known.extend(next.iter().cloned());
+            frontier = next;
         }
         known.remove(key);
         Ok(known.into_iter().collect())
@@ -198,3 +298,6 @@ impl ContextLookup for Snapshot<'_, '_> {
             .transpose()
     }
 }
+
+#[cfg(test)]
+mod tests;

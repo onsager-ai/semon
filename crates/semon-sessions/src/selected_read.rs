@@ -10,6 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+const DEFAULT_ROWS: usize = 131_072;
+const DEFAULT_BYTES: usize = 64 * 1024 * 1024;
+const DYNAMIC_MULTIPLIER: usize = 8;
+
 /// Cancellation and deadline for one selected native read/repair. This contains
 /// no source authority, credentials, or shared cache. Hosts retain their guard
 /// until blocking work exits and set `cancelled` when the request is dropped.
@@ -36,8 +40,8 @@ impl SelectedReadControl {
         Self {
             deadline,
             cancelled,
-            rows: 131_072,
-            bytes: 64 * 1024 * 1024,
+            rows: DEFAULT_ROWS,
+            bytes: DEFAULT_BYTES,
         }
     }
 
@@ -225,7 +229,7 @@ pub(crate) fn charge(fixed: usize, dynamic: usize) -> io::Result<()> {
         let Some(budget) = active.as_ref() else {
             return Ok(());
         };
-        let bytes = fixed.saturating_add(dynamic.saturating_mul(8));
+        let bytes = fixed.saturating_add(dynamic.saturating_mul(DYNAMIC_MULTIPLIER));
         let rows = budget.rows.get().saturating_add(1);
         let bytes = budget.bytes.get().saturating_add(bytes);
         if rows > budget.control.rows || bytes > budget.control.bytes {
@@ -236,6 +240,21 @@ pub(crate) fn charge(fixed: usize, dynamic: usize) -> io::Result<()> {
         budget.bytes.set(bytes);
         Ok(())
     })
+}
+
+/// Maximum raw dynamic bytes that can be returned by one bounded query while
+/// leaving room to account its fixed row storage. SQL callers use this before
+/// the driver materializes dynamic cells; inactive test/maintenance reads keep
+/// the same default request bound.
+pub(crate) fn max_dynamic_bytes(fixed_per_row: usize, max_rows: usize) -> io::Result<usize> {
+    check()?;
+    Ok(ACTIVE.with(|active| {
+        let active = active.borrow();
+        let available = active.as_ref().map_or(DEFAULT_BYTES, |budget| {
+            budget.control.bytes.saturating_sub(budget.bytes.get())
+        });
+        available.saturating_sub(fixed_per_row.saturating_mul(max_rows)) / DYNAMIC_MULTIPLIER
+    }))
 }
 
 pub(crate) fn sql_error(error: io::Error) -> rusqlite::Error {

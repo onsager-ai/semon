@@ -12,6 +12,7 @@ pub(super) const DIGEST_BODY: &str =
 
 pub(super) fn generated(table: &str) -> &'static [(&'static str, &'static str, bool)] {
     match table {
+        "catalog_rows" => &[("parent_digest", "sha256(parent_key)", true)],
         "files" => &[
             ("path_digest", "sha256(path)", false),
             ("cwd_digest", "sha256(cwd)", true),

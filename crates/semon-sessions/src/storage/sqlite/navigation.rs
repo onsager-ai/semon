@@ -212,7 +212,7 @@ mod tests {
         )
         .unwrap();
         db.execute(
-            "INSERT INTO main.session_history_catalog VALUES(semon_namespace(),'canonical',?1)",
+            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(semon_namespace(),'canonical',?1)",
             [&metadata],
         )
         .unwrap();

@@ -3722,7 +3722,29 @@ mod tests {
         crate::model::relation_stage::Batch,
         crate::model::SemanticModelBatch,
     ) {
-        let paths = vec![input.full_path(options).to_string_lossy().into_owned()];
+        model_ready_many(
+            fixture,
+            cache,
+            options,
+            std::slice::from_ref(input),
+            runtime,
+        )
+    }
+
+    fn model_ready_many(
+        fixture: &Fixture,
+        cache: &mut EventCache,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        runtime: &str,
+    ) -> (
+        crate::model::relation_stage::Batch,
+        crate::model::SemanticModelBatch,
+    ) {
+        let paths = inputs
+            .iter()
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
             cache
                 .begin_semantic_stage_with_journal(&paths, runtime, true)
@@ -3739,7 +3761,7 @@ mod tests {
                 let prepared = crate::model::prepare_semantic_batch(
                     options,
                     cache,
-                    std::slice::from_ref(input),
+                    inputs,
                     &batch,
                     1_790_000_000_000,
                 )
@@ -3760,12 +3782,7 @@ mod tests {
                 assert_eq!(shared_state(fixture), before);
             }
             let model = cache
-                .prepare_semantic_model_batch(
-                    options,
-                    std::slice::from_ref(input),
-                    &batch,
-                    1_790_000_000_000,
-                )
+                .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 return (batch, model);
@@ -4357,6 +4374,63 @@ mod tests {
             part.rows[&query_row.key], expected,
             "ordinary Query port reads exact persisted facts"
         );
+        let current_content_generation: Option<String> = db
+            .query_row(
+                "SELECT json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), query_row.key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten();
+        let current_projection_generation: Option<String> = db
+            .query_row(
+                "SELECT generation FROM session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), query_row.key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        if let (Some(content), Some(projection)) = (
+            current_content_generation.as_ref(),
+            current_projection_generation.as_ref(),
+        ) {
+            assert_ne!(
+                content, projection,
+                "Home content and slot projection generations are distinct"
+            );
+        }
+        if query_row.lifecycle == crate::model::summary::CatalogLifecycle::Retained {
+            assert!(
+                part.witnesses
+                    .iter()
+                    .any(|(key, _, history)| { key == &query_row.key && *history }),
+                "all-time retained Query uses its selected History source"
+            );
+            assert!(
+                !part.content.contains_key(&query_row.key),
+                "History has no overview content hint without its saved summary"
+            );
+            let summary = &part.rows[&query_row.key]["summary"];
+            assert!(
+                summary["alive"].is_null(),
+                "retained rows have no live process state"
+            );
+            assert!(
+                summary["run"].is_null(),
+                "retained rows have no live run state"
+            );
+            assert!(
+                summary["open_question"].is_null(),
+                "retained rows have no live question"
+            );
+            assert!(!matches!(
+                summary["state"].as_str(),
+                Some("working" | "waiting-question")
+            ));
+        } else if let Some(content) = current_content_generation {
+            assert_eq!(part.content.get(&query_row.key), Some(&content));
+        }
         for row in &prepared.rows {
             let trace = row.trace.as_ref().expect("real model trace");
             let witness: serde_json::Value =
@@ -4695,6 +4769,24 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_history_activity_profile_refuses_without_adoption() {
+        for change in [
+            "DROP INDEX session_history_query_activity",
+            "DROP INDEX session_history_query_active",
+            "DROP INDEX session_history_query_activity; ALTER TABLE session_history_catalog DROP COLUMN query_activity",
+        ] {
+            let (fixture, _, _, _) = model_sources();
+            fixture.db().execute_batch(change).unwrap();
+            let before = shared_state(&fixture);
+            assert!(matches!(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config),
+                Err(StorageError::NamespaceUpgradePending)
+            ));
+            assert_eq!(shared_state(&fixture), before);
+        }
+    }
+
+    #[test]
     fn configured_semantic_unsupported_trace_profile_refuses_without_adoption() {
         let (a, _, _, _) = model_sources();
         // This is a current-format but unsupported physical profile containing
@@ -4883,8 +4975,149 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_finite_history_only_saved_edge_is_indexed_and_bounded() {
+        use crate::storage::{catalog::preserve_original, query::QueryCatalogStore};
+        let (fixture, config, options, inputs) = model_sources();
+        let options = &options[1];
+        let owner_path = inputs[1].full_path(options);
+        fs::write(&owner_path, concat!(
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"first\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"cwd\":\"/sanitized\",\"message\":{\"role\":\"user\",\"content\":\"parent prompt\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"spawn\",\"parentUuid\":\"first\",\"timestamp\":\"2026-10-01T00:00:30Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu-peer\",\"name\":\"Task\",\"input\":{\"description\":\"peer\",\"subagent_type\":\"general-purpose\"}}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"answer\",\"parentUuid\":\"spawn\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"parent finished\"}]}}\n"
+        )).unwrap();
+        let peer_input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/model-1/subagents/agent-peer.jsonl".into(),
+        };
+        let peer_path = peer_input.full_path(options);
+        fs::create_dir_all(peer_path.parent().unwrap()).unwrap();
+        fs::write(&peer_path, concat!(
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:04:00Z\",\"message\":{\"role\":\"user\",\"content\":\"peer prompt\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-done\",\"parentUuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:05:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"peer finished\"}]}}\n"
+        )).unwrap();
+        fs::write(peer_path.with_extension("meta.json"), "{\"toolUseId\":\"toolu-peer\",\"description\":\"peer\",\"agentType\":\"general-purpose\"}").unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap();
+        cache
+            .ingest(&"b".repeat(64), &owner_path, "claude")
+            .unwrap();
+        cache.ingest(&"b".repeat(64), &peer_path, "claude").unwrap();
+        let mut inputs = vec![inputs[1].clone(), peer_input];
+        inputs.sort();
+        let (batch, model) =
+            model_ready_many(&fixture, &mut cache, options, &inputs, "history-only");
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        let owner = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key == "model-1")
+            .unwrap();
+        let cutoff = owner.query.as_ref().unwrap()["last"].as_i64().unwrap() + 1;
+        assert!(
+            !matches!(
+                owner.query.as_ref().unwrap()["state"].as_str(),
+                Some("work" | "wait")
+            ),
+            "the saved edge alone must admit the old owner"
+        );
+        let window = crate::storage::query::history_window(owner, Some(cutoff)).unwrap();
+        assert!(window.member && !window.edges.is_empty());
+
+        // Use the real custody copier and its exact native recipes, then
+        // exercise the missing-Current case through the actual Query adapter.
+        let source_owner = NativeOwnership::restore(&config).unwrap();
+        let source = crate::storage::sqlite::semantic::AdmittedSource::native(source_owner.clone());
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let history =
+            crate::storage::sqlite::history::OriginalHistory::admitted(&db, &source).unwrap();
+        for row in &model.prepared().rows {
+            assert!(preserve_original(&history, row).unwrap());
+            db.execute(
+                "DELETE FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), row.key],
+            )
+            .unwrap();
+            crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+                &db,
+                config.namespace.as_str(),
+                &row.key,
+                source_owner.admission(),
+                config.expected_stream_epoch.as_deref().unwrap(),
+            )
+            .unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let mut finite = options.clone();
+        finite.all = false;
+        finite.since = std::time::Duration::from_millis(1);
+        let port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: finite,
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&config)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
+        };
+        let now = cutoff + 1;
+        let mut baseline = None::<(_, _, _, _, crate::storage::query::Work)>;
+        for unrelated in [1, 20_001] {
+            db.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?2) INSERT OR IGNORE INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) SELECT ?1,'expired-'||i,'{}',0,0 FROM n", params![config.namespace.as_str(), unrelated]).unwrap();
+            crate::storage::query::WORK.with(|work| work.set(Default::default()));
+            let mut left = 8 * 1024 * 1024;
+            let part = port.read_cohort(&config.namespace, now, &mut left).unwrap();
+            let work = crate::storage::query::WORK.with(std::cell::Cell::get);
+            assert!(part.rows.contains_key(&owner.key));
+            assert!(part.witnesses.iter().all(|(_, _, history)| *history));
+            assert!(window.edges.is_subset(&part.edges));
+            assert!(window.turns.is_subset(&part.turns));
+            assert!(part.rows.values().all(|row| row["summary"]["alive"].is_null() && row["summary"]["run"].is_null()));
+            port.validate(&config.namespace, &part).unwrap();
+            if let Some((rows, edges, turns, spent, initial)) = &baseline {
+                assert_eq!(
+                    (
+                        &part.rows,
+                        &part.edges,
+                        &part.turns,
+                        &(8 * 1024 * 1024 - left)
+                    ),
+                    (rows, edges, turns, spent)
+                );
+                assert_eq!(work.metadata, initial.metadata);
+                assert!(
+                    work.vm_steps <= initial.vm_steps + 64,
+                    "expired History changed indexed work: {initial:?} -> {work:?}"
+                );
+            } else {
+                baseline = Some((
+                    part.rows,
+                    part.edges,
+                    part.turns,
+                    8 * 1024 * 1024 - left,
+                    work,
+                ));
+            }
+        }
+        let mut left = 64;
+        let error = port
+            .read_cohort(&config.namespace, now, &mut left)
+            .err()
+            .expect("eligible candidate keys must charge before materialization");
+        assert!(error.to_string().contains("budget"));
+    }
+
+    #[test]
     fn configured_semantic_real_model_claude_replacement_rollback_stale_and_history() {
-        use crate::storage::native_events::NativeEventStore;
+        use crate::storage::{native_events::NativeEventStore, query::QueryCatalogStore};
         use std::io::Write;
         let (a, b, options, inputs) = model_sources();
         let mut caches: Vec<_> = [&a.config, &b]
@@ -4928,16 +5161,49 @@ mod tests {
         let path = inputs[1].full_path(&options[1]);
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"replacement\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"continued Claude replacement\"}}}}").unwrap();
+        writeln!(raw, "{{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"spawn-peer\",\"parentUuid\":\"replacement\",\"timestamp\":\"2026-10-01T00:03:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu-peer\",\"name\":\"Task\",\"input\":{{\"description\":\"new peer\",\"subagent_type\":\"general-purpose\"}}}}]}}}}").unwrap();
         drop(raw);
+        let peer_input = crate::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/sanitized/model-1/subagents/agent-peer.jsonl".into(),
+        };
+        let peer_path = peer_input.full_path(&options[1]);
+        fs::create_dir_all(peer_path.parent().unwrap()).unwrap();
+        fs::write(
+            &peer_path,
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-user\",\"timestamp\":\"2026-10-01T00:04:00Z\",\"message\":{\"role\":\"user\",\"content\":\"new peer prompt\"}}\n",
+        )
+        .unwrap();
+        fs::write(
+            peer_path.with_extension("meta.json"),
+            "{\"toolUseId\":\"toolu-peer\",\"description\":\"new peer\",\"agentType\":\"general-purpose\"}",
+        )
+        .unwrap();
         caches[1].ingest(&"b".repeat(64), &path, "claude").unwrap();
+        caches[1]
+            .ingest(&"b".repeat(64), &peer_path, "claude")
+            .unwrap();
+        let mut replacement_inputs = vec![inputs[1].clone(), peer_input.clone()];
+        replacement_inputs.sort();
         let mut stale = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap(),
         )
         .unwrap();
-        let (old_batch, old_model) =
-            model_ready(&a, &mut stale, &options[1], &inputs[1], "old-model");
+        let (old_batch, old_model) = model_ready_many(
+            &a,
+            &mut stale,
+            &options[1],
+            &replacement_inputs,
+            "old-model",
+        );
         let old_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        let (batch, model) = model_ready(&a, &mut caches[1], &options[1], &inputs[1], "old-model");
+        let (batch, model) = model_ready_many(
+            &a,
+            &mut caches[1],
+            &options[1],
+            &replacement_inputs,
+            "old-model",
+        );
         assert!(batch.epoch > old_batch.epoch);
         let new_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(
@@ -4989,8 +5255,59 @@ mod tests {
         expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained: String = a.db().query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-b' AND session_key=?1",[&expected.key],|r|r.get(0)).unwrap();
         assert_eq!(retained, serde_json::to_string(&expected).unwrap());
-        // Query's existing retained-history preference remains exact after
-        // replacement; Current metadata and recipes above are checked separately.
+        let current = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key == expected.key)
+            .cloned()
+            .expect("replacement Current row");
+        let peer = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key != expected.key)
+            .expect("appended Claude subagent peer");
+        assert!(
+            current.query.as_ref().unwrap()["selected"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| {
+                    (edge["query"]["from"] == expected.key && edge["query"]["to"] == peer.key)
+                        || (edge["query"]["to"] == expected.key
+                            && edge["query"]["from"] == peer.key)
+                }),
+            "the appended Current graph records its new peer"
+        );
+        let retained_source_generation =
+            crate::retention::source_generation(&expected.sources).unwrap();
+        let current_source_generation =
+            crate::retention::source_generation(&current.sources).unwrap();
+        assert_ne!(retained_source_generation, current_source_generation);
+        let retained_header_source_generation: String = a
+            .db()
+            .query_row(
+                "SELECT source_generation FROM session_history_projections WHERE namespace='source-b' AND session_key=?1",
+                [&expected.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let current_header_source_generation: String = a
+            .db()
+            .query_row(
+                "SELECT source_generation FROM session_trace_headers WHERE namespace='source-b' AND session_key=?1",
+                [&expected.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            retained_header_source_generation,
+            retained_source_generation
+        );
+        assert_eq!(current_header_source_generation, current_source_generation);
+        // Query's all-time retained-history preference remains exact after
+        // replacement; the finite-window Current selection follows below.
         assert_stored_model(&a, &b, &options[1], model.prepared(), &expected);
         assert_eq!(namespace_state(&a, "source-a"), foreign);
         let before = shared_state(&a);
@@ -5004,6 +5321,72 @@ mod tests {
         );
         assert_eq!(shared_state(&a), before);
         assert_eq!(publication_snapshot_digest(&a), digest);
+
+        let history_last = expected.query.as_ref().unwrap()["last"]
+            .as_i64()
+            .expect("retained Query timestamp");
+        let current_last = current.query.as_ref().unwrap()["last"]
+            .as_i64()
+            .expect("Current Query timestamp");
+        assert!(history_last < current_last);
+        let finite_now = current_last + 1;
+        let finite_cutoff = history_last + 1;
+        let mut finite_options = options[1].clone();
+        finite_options.all = false;
+        finite_options.since =
+            std::time::Duration::from_millis(u64::try_from(finite_now - finite_cutoff).unwrap());
+        let finite_port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: finite_options,
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&b)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
+        };
+        let mut finite_budget = 8 * 1024 * 1024;
+        let finite_part = finite_port
+            .read_cohort(&b.namespace, finite_now, &mut finite_budget)
+            .unwrap();
+        let current_facts = current.query.as_ref().unwrap()["rows"][&current.key].clone();
+        assert_eq!(
+            finite_part.rows[&current.key], current_facts,
+            "a finite cutoff selects Current when only Current is recent"
+        );
+        assert!(
+            finite_part.rows.contains_key(&peer.key),
+            "Current relationship context includes its new peer"
+        );
+        assert!(
+            finite_part
+                .witnesses
+                .iter()
+                .any(|(key, _, history)| { key == &current.key && !history }),
+            "finite selection binds the recent Current Query facts"
+        );
+        finite_port.validate(&b.namespace, &finite_part).unwrap();
+
+        let facts_path = options[1].facts.as_ref().unwrap();
+        let mut changed_facts = crate::read_facts(facts_path).unwrap();
+        changed_facts.hostname = "changed-after-current-query-read".into();
+        crate::write_facts(facts_path, &changed_facts, &options[1].source).unwrap();
+        assert!(
+            finite_port.validate(&b.namespace, &finite_part).is_err(),
+            "Current Query facts are stale after runtime changes"
+        );
+        let invalidated_source = inputs[1]
+            .full_path(&options[1])
+            .to_string_lossy()
+            .into_owned();
+        a.db().execute(
+            "INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'changed',0)",
+            params![b.namespace.as_str(), invalidated_source],
+        ).unwrap();
+        let mut invalidated_budget = 8 * 1024 * 1024;
+        assert!(
+            finite_port
+                .read_cohort(&b.namespace, finite_now, &mut invalidated_budget)
+                .is_err(),
+            "Current Query reads refuse catalog invalidation"
+        );
     }
 
     #[test]
