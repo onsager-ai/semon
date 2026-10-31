@@ -4663,10 +4663,7 @@ mod tests {
             )
             .unwrap();
             let binding = reopened.query_runtime_binding().unwrap().unwrap();
-            assert_eq!(
-                binding.witness(&scoped_runtimes[i]).unwrap(),
-                witnesses[i]
-            );
+            assert_eq!(binding.witness(&scoped_runtimes[i]).unwrap(), witnesses[i]);
             let next = crate::storage::QueryRuntimeBinding {
                 admission: binding.admission + 1,
                 ..binding.clone()
