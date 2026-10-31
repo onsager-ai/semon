@@ -62,6 +62,27 @@ fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::Prepare
 type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
 #[derive(Clone)]
 struct BodyHost(BodySources);
+fn body_host_references(host: &BodyHost) -> Vec<crate::SessionSourceRef> {
+    host.0.iter().map(|(reference, _)| reference.clone()).collect()
+}
+
+fn body_host_diagnostic(
+    category: &'static str,
+    exact_reference_match: bool,
+    expected_pin_match: bool,
+    size_ok: bool,
+    offset_ok: bool,
+    range_ok: bool,
+    offset: u64,
+    max: usize,
+) {
+    if super::super::selected_reader::pid_read_diagnostics_enabled() {
+        eprintln!(
+            "pg_vertical140_pid_host category={category} exact_reference_match={exact_reference_match} expected_pin_match={expected_pin_match} size_ok={size_ok} offset_ok={offset_ok} range_ok={range_ok} offset={offset} max={max}"
+        );
+    }
+}
+
 impl crate::SessionSourceReader for BodyHost {
     fn read_range(
         &self,
@@ -70,28 +91,92 @@ impl crate::SessionSourceReader for BodyHost {
         offset: u64,
         max: usize,
     ) -> std::io::Result<crate::SessionSourceRange> {
-        let (saved, bytes) = self
+        let found = self
             .0
             .iter()
-            .find(|(saved, _)| saved == reference)
-            .ok_or_else(|| std::io::Error::other("host denied"))?;
-        if saved != reference
-            || expected.is_some_and(|pin| pin != "body-fixture")
-            || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
-        {
+            .find(|(saved, _)| saved == reference);
+        let expected_pin_match = expected.map_or(true, |pin| pin == "body-fixture");
+        let size_ok = max <= crate::source_reader::SESSION_SOURCE_CHUNK_MAX;
+        let Some((saved, bytes)) = found else {
+            body_host_diagnostic(
+                "missing_exact_reference",
+                false,
+                expected_pin_match,
+                size_ok,
+                false,
+                false,
+                offset,
+                max,
+            );
+            return Err(std::io::Error::other("host denied"));
+        };
+        let exact_reference_match = saved == reference;
+        if !exact_reference_match || !expected_pin_match || !size_ok {
+            let category = if !exact_reference_match {
+                "reference_mismatch"
+            } else if !expected_pin_match {
+                "expected_pin_mismatch"
+            } else {
+                "request_too_large"
+            };
+            body_host_diagnostic(
+                category,
+                exact_reference_match,
+                expected_pin_match,
+                size_ok,
+                false,
+                false,
+                offset,
+                max,
+            );
             return Err(std::io::Error::other("host denied"));
         }
-        let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+        let start = match usize::try_from(offset) {
+            Ok(start) => start,
+            Err(error) => {
+                body_host_diagnostic(
+                    "offset_unrepresentable",
+                    exact_reference_match,
+                    expected_pin_match,
+                    size_ok,
+                    false,
+                    false,
+                    offset,
+                    max,
+                );
+                return Err(std::io::Error::other(error));
+            }
+        };
+        let offset_ok = start <= bytes.len();
         let end = bytes.len().min(start.saturating_add(max));
+        let Some(range) = bytes.get(start..end) else {
+            body_host_diagnostic(
+                "range_out_of_bounds",
+                exact_reference_match,
+                expected_pin_match,
+                size_ok,
+                offset_ok,
+                false,
+                offset,
+                max,
+            );
+            return Err(std::io::Error::other("host range"));
+        };
+        body_host_diagnostic(
+            "accepted",
+            exact_reference_match,
+            expected_pin_match,
+            size_ok,
+            offset_ok,
+            true,
+            offset,
+            max,
+        );
         Ok(crate::SessionSourceRange {
             generation: "body-fixture".into(),
             length: bytes.len() as u64,
             offset,
-            bytes: std::sync::Arc::from(
-                bytes
-                    .get(start..end)
-                    .ok_or_else(|| std::io::Error::other("host range"))?,
-            ),
+            bytes: std::sync::Arc::from(range),
             cached: false,
         })
     }
@@ -3606,6 +3691,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         options: options.clone(),
     };
     let mut next_host = body_host(&options, &continued.rows);
+    let continued_host_refs = body_host_references(&next_host);
+    let original_host_refs = body_host_references(&retained_host);
     // A retained composite can select both exact original and successor
     // references for one physical path. Authorize those captured references
     // explicitly; a current-path entry alone cannot authorize an old prefix.
@@ -4514,6 +4601,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         options: options.clone(),
     };
     let mut moved_host = body_host(&options, &moved_rows);
+    let moved_host_refs = body_host_references(&moved_host);
     // Retained History can name both exact continued and original captures.
     moved_host.0.extend(next_host.0.iter().cloned());
     assert_eq!(
@@ -4686,6 +4774,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .find(|row| row.harness == "claude" && row.native_ids.iter().any(|id| id == "one"))
         .unwrap();
     let pid_host = moved_host.clone();
+    let pid_host_refs = body_host_references(&pid_host);
     let assert_pid_ledgers = || {
         super::super::snapshot::with_admitted_snapshot(
             &pool,
@@ -4702,13 +4791,53 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
+                if super::super::selected_reader::pid_read_diagnostics_enabled() {
+                    eprintln!(
+                        "pg_vertical140_pid_selection history_owner={history} selected_source_count={}",
+                        row.sources.len()
+                    );
+                    for (index, source) in row.sources.iter().enumerate() {
+                        let reference = crate::catalog::source_relative(
+                            &options,
+                            &row.harness,
+                            source,
+                        )
+                        .map(|path| crate::SessionSourceRef {
+                            root: row.harness.clone(),
+                            path,
+                            native_id: source.native_id.clone(),
+                            offset: source.offset,
+                            prefix_sha256: source.prefix_sha256,
+                            tail_sha256: source.tail_sha256,
+                        });
+                        if let Some(reference) = reference {
+                            eprintln!(
+                                "pg_vertical140_pid_source index={index} offset={} reference_constructed=true moved_match={} continued_match={} original_match={} combined_match={}",
+                                source.offset,
+                                moved_host_refs.iter().any(|saved| saved == &reference),
+                                continued_host_refs.iter().any(|saved| saved == &reference),
+                                original_host_refs.iter().any(|saved| saved == &reference),
+                                pid_host_refs.iter().any(|saved| saved == &reference),
+                            );
+                        } else {
+                            eprintln!(
+                                "pg_vertical140_pid_source index={index} offset={} reference_constructed=false moved_match=false continued_match=false original_match=false combined_match=false",
+                                source.offset
+                            );
+                        }
+                    }
+                }
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let current_index_qualified = super::super::super::native_reader::
+                    runtime_source_cwds_if_current(&mut tx, &current.sources)?
+                    .is_some();
+                if super::super::selected_reader::pid_read_diagnostics_enabled() {
+                    eprintln!(
+                        "pg_vertical140_pid_current_index qualified={current_index_qualified}"
+                    );
+                }
                 assert!(
-                    super::super::super::native_reader::runtime_source_cwds_if_current(
-                        &mut tx,
-                        &current.sources,
-                    )?
-                    .is_some(),
+                    current_index_qualified,
                     "the PID owner must qualify through its exact Current Index ledgers"
                 );
                 Ok(())
@@ -4716,9 +4845,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .unwrap();
     };
-    assert_pid_ledgers();
-    let pid_body = query
-        .call_bound_selected_at(
+    let pid_body = super::super::selected_reader::with_pid_read_diagnostics(|| {
+        assert_pid_ledgers();
+        query.call_bound_selected_at(
             "read_transcript",
             &serde_json::json!({"id":pid_owner.key,"limit":100}),
             1790812802000,
@@ -4726,7 +4855,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &pid_host,
             None,
         )
-        .unwrap();
+    })
+    .unwrap();
     let pid_fields = query
         .call_bound_selected_at(
             "get_session",

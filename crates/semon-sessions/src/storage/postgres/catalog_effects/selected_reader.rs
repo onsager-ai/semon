@@ -6,6 +6,44 @@ use crate::storage::{LogicalSourceNamespace, proof_lifetime::ProofGenerationId};
 use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
 use std::{io, sync::Arc};
 
+#[cfg(test)]
+std::thread_local! {
+    static PID_READ_DIAGNOSTICS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_pid_read_diagnostics<T>(f: impl FnOnce() -> T) -> T {
+    struct Reset(bool);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PID_READ_DIAGNOSTICS.with(|active| active.set(self.0));
+        }
+    }
+
+    let prior = PID_READ_DIAGNOSTICS.with(|active| active.replace(true));
+    let _reset = Reset(prior);
+    f()
+}
+
+#[cfg(test)]
+pub(super) fn pid_read_diagnostics_enabled() -> bool {
+    PID_READ_DIAGNOSTICS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn pid_read_diagnostic(
+    stage: &'static str,
+    outcome: &'static str,
+    offset: Option<u64>,
+    max: Option<usize>,
+) {
+    if pid_read_diagnostics_enabled() {
+        eprintln!(
+            "pg_vertical140_pid_read stage={stage} outcome={outcome} offset={offset:?} max={max:?}"
+        );
+    }
+}
+
 struct Reader<'a, 'b, 'tx> {
     tx: &'a std::sync::Mutex<&'b mut PgTxn<'tx>>,
     generation: &'a str,
@@ -78,34 +116,141 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
         offset: u64,
         max: usize,
     ) -> io::Result<SessionSourceRange> {
-        if reference != self.reference
-            || max == 0
-            || max > crate::source_reader::SESSION_SOURCE_CHUNK_MAX
-            || offset >= self.source.offset
-        {
+        let reference_matches = reference == self.reference;
+        let size_ok = max > 0 && max <= crate::source_reader::SESSION_SOURCE_CHUNK_MAX;
+        let offset_ok = offset < self.source.offset;
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "reader_input",
+            if !reference_matches {
+                "reference_mismatch"
+            } else if !size_ok {
+                "invalid_size"
+            } else if !offset_ok {
+                "offset_out_of_range"
+            } else {
+                "accepted"
+            },
+            Some(offset),
+            Some(max),
+        );
+        if !reference_matches || !size_ok || !offset_ok {
             return Err(io::Error::other(StorageError::InvalidArguments));
         }
         let size = crate::source_chunks::SIZE;
-        let index = usize::try_from(offset / size as u64).map_err(io::Error::other)?;
+        let index_result = usize::try_from(offset / size as u64);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "native_chunk_index",
+            if index_result.is_ok() {
+                "accepted"
+            } else {
+                "refused"
+            },
+            Some(offset),
+            Some(max),
+        );
+        let index = index_result.map_err(io::Error::other)?;
         let start = index as u64 * size as u64;
         let length = (self.source.offset - start).min(size as u64) as usize;
         let hash = (|| {
-            let mut borrowed = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            let borrowed_result = self.tx.lock();
+            #[cfg(test)]
+            pid_read_diagnostic(
+                "native_proof_transaction_lock",
+                if borrowed_result.is_ok() {
+                    "accepted"
+                } else {
+                    "refused"
+                },
+                Some(start),
+                Some(length),
+            );
+            let mut borrowed = borrowed_result.map_err(|_| StorageError::Unavailable)?;
             let tx = &mut **borrowed;
-            native_proof(tx, self.generation, self.source)?.chunk_hash(tx, index)
+            let proof = native_proof(tx, self.generation, self.source);
+            #[cfg(test)]
+            pid_read_diagnostic(
+                "native_proof_lookup",
+                if proof.is_ok() { "accepted" } else { "refused" },
+                Some(start),
+                Some(length),
+            );
+            let proof = proof?;
+            let chunk_hash = proof.chunk_hash(tx, index);
+            #[cfg(test)]
+            pid_read_diagnostic(
+                "native_chunk_hash_lookup",
+                if chunk_hash.is_ok() {
+                    "accepted"
+                } else {
+                    "refused"
+                },
+                Some(start),
+                Some(length),
+            );
+            chunk_hash
         })()
         .map_err(io::Error::other)?;
         // The authorized host supplies bytes. Its independent generation pin
         // and the persisted native hash must both match before parsing.
-        crate::selected_read::checkpoint("captured_body")?;
-        let part = self.host.read_range(reference, expected, start, length)?;
-        crate::selected_read::check()?;
-        if part.offset != start
-            || part.bytes.len() != length
-            || part.length < self.source.offset
-            || expected.is_some_and(|g| g != part.generation)
-            || <[u8; 32]>::from(Sha256::digest(&part.bytes)) != hash
-        {
+        let checkpoint = crate::selected_read::checkpoint("captured_body");
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "host_checkpoint",
+            if checkpoint.is_ok() { "accepted" } else { "refused" },
+            Some(start),
+            Some(length),
+        );
+        checkpoint?;
+        let host_result = self.host.read_range(reference, expected, start, length);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "host_callback",
+            if host_result.is_ok() { "returned" } else { "refused" },
+            Some(start),
+            Some(length),
+        );
+        let part = host_result?;
+        let check = crate::selected_read::check();
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "host_recheck",
+            if check.is_ok() { "accepted" } else { "refused" },
+            Some(start),
+            Some(length),
+        );
+        check?;
+        let response_outcome = if part.offset != start {
+            "offset_mismatch"
+        } else if part.bytes.len() != length {
+            "byte_count_mismatch"
+        } else if part.length < self.source.offset {
+            "consumed_prefix_short"
+        } else if expected.is_some_and(|g| g != part.generation) {
+            "generation_pin_mismatch"
+        } else {
+            "accepted"
+        };
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "host_response",
+            response_outcome,
+            Some(start),
+            Some(length),
+        );
+        if response_outcome != "accepted" {
+            return Err(io::Error::other(StorageError::ScopeChanged));
+        }
+        let hash_matches = <[u8; 32]>::from(Sha256::digest(&part.bytes)) == hash;
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "native_chunk_hash_verification",
+            if hash_matches { "accepted" } else { "mismatch" },
+            Some(start),
+            Some(length),
+        );
+        if !hash_matches {
             return Err(io::Error::other(StorageError::ScopeChanged));
         }
         let begin = (offset - start) as usize;
@@ -135,35 +280,66 @@ pub(in crate::storage::postgres) struct SelectedRecords<'a, 'b, 'tx> {
 }
 impl SelectedRecords<'_, '_, '_> {
     fn reference(&self, path: &std::path::Path) -> io::Result<&SessionSourceRef> {
-        self.sources
+        let found = self
+            .sources
             .iter()
             .find(|(source, _)| source.path == path)
-            .map(|(_, reference)| reference)
-            .ok_or_else(|| io::Error::other(StorageError::ScopeChanged))
+            .map(|(_, reference)| reference);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "source_path_lookup",
+            if found.is_some() { "matched" } else { "missing" },
+            None,
+            None,
+        );
+        found.ok_or_else(|| io::Error::other(StorageError::ScopeChanged))
     }
     pub fn read(
         &self,
         path: &std::path::Path,
         offset: u64,
     ) -> io::Result<(Option<serde_json::Value>, u64)> {
-        let reference = self.reference(path)?;
-        let part = self.read_range(reference, None, offset, 1)?;
-        crate::source_reader::read_native_record(self, reference, &part.generation, offset)
+        let result = (|| {
+            let reference = self.reference(path)?;
+            let part = self.read_range(reference, None, offset, 1)?;
+            crate::source_reader::read_native_record(self, reference, &part.generation, offset)
+        })();
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "line_read",
+            match &result {
+                Ok((Some(_), _)) => "record",
+                Ok((None, _)) => "missing_record",
+                Err(_) => "refused",
+            },
+            Some(offset),
+            None,
+        );
+        result
     }
     pub fn prompt(
         &self,
         file: &crate::model::SlotFile,
         offset: u64,
     ) -> Option<(serde_json::Value, u64)> {
-        let reference = self.reference(&file.path).ok()?;
-        file.prompts.record_from(
-            &mut SelectedFile {
-                reader: self,
-                reference,
-                position: offset,
-            },
-            offset,
-        )
+        let result = self.reference(&file.path).ok().and_then(|reference| {
+            file.prompts.record_from(
+                &mut SelectedFile {
+                    reader: self,
+                    reference,
+                    position: offset,
+                },
+                offset,
+            )
+        });
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "prompt_provider",
+            if result.is_some() { "record" } else { "missing_record" },
+            Some(offset),
+            None,
+        );
+        result
     }
     pub fn finish(&self) -> io::Result<()> {
         for (_, reference) in &self.sources {
@@ -188,18 +364,42 @@ impl SessionSourceReader for SelectedRecords<'_, '_, '_> {
         offset: u64,
         max: usize,
     ) -> io::Result<SessionSourceRange> {
-        let (source, saved) = self
+        let selected = self
             .sources
             .iter()
-            .find(|(_, saved)| saved == reference)
-            .ok_or_else(|| io::Error::other(StorageError::ScopeChanged))?;
+            .find(|(_, saved)| saved == reference);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "selected_reference_lookup",
+            if selected.is_some() { "matched" } else { "missing" },
+            Some(offset),
+            Some(max),
+        );
+        let (source, saved) = selected.ok_or_else(|| io::Error::other(StorageError::ScopeChanged))?;
         let key = format!("{}:{}", reference.root, reference.path);
-        let mut pins = self
-            .pins
-            .lock()
-            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        let pins_result = self.pins.lock();
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "request_pin_lock",
+            if pins_result.is_ok() {
+                "accepted"
+            } else {
+                "refused"
+            },
+            Some(offset),
+            Some(max),
+        );
+        let mut pins = pins_result.map_err(|_| io::Error::other(StorageError::Unavailable))?;
         let pin = pins.get(&key).map(String::as_str);
-        if expected.zip(pin).is_some_and(|(a, b)| a != b) {
+        let pin_matches = !expected.zip(pin).is_some_and(|(a, b)| a != b);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "request_generation_pin",
+            if pin_matches { "matched" } else { "mismatch" },
+            Some(offset),
+            Some(max),
+        );
+        if !pin_matches {
             return Err(io::Error::other(StorageError::ScopeChanged));
         }
         let reader = Reader {
@@ -209,18 +409,41 @@ impl SessionSourceReader for SelectedRecords<'_, '_, '_> {
             reference: saved,
             host: self.host,
         };
-        let mut left = self
-            .bytes_left
-            .lock()
-            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        let left_result = self.bytes_left.lock();
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "request_byte_budget_lock",
+            if left_result.is_ok() {
+                "accepted"
+            } else {
+                "refused"
+            },
+            Some(offset),
+            Some(max),
+        );
+        let mut left = left_result.map_err(|_| io::Error::other(StorageError::Unavailable))?;
         let size = crate::source_chunks::SIZE as u64;
         let start = offset / size * size;
         let physical = source.offset.saturating_sub(start).min(size) as usize;
-        *left = left
-            .checked_sub(physical)
-            .ok_or_else(|| io::Error::other(StorageError::Busy))?;
+        let remaining = left.checked_sub(physical);
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "request_byte_budget",
+            if remaining.is_some() { "accepted" } else { "exhausted" },
+            Some(offset),
+            Some(max),
+        );
+        *left = remaining.ok_or_else(|| io::Error::other(StorageError::Busy))?;
         let part = reader.read_range(reference, pin.or(expected), offset, max)?;
-        if part.generation.is_empty() || part.generation.len() > 4096 {
+        let generation_bounds_ok = !part.generation.is_empty() && part.generation.len() <= 4096;
+        #[cfg(test)]
+        pid_read_diagnostic(
+            "returned_generation_bounds",
+            if generation_bounds_ok { "accepted" } else { "refused" },
+            Some(offset),
+            Some(max),
+        );
+        if !generation_bounds_ok {
             return Err(io::Error::other(StorageError::ScopeChanged));
         }
         pins.entry(key).or_insert_with(|| part.generation.clone());

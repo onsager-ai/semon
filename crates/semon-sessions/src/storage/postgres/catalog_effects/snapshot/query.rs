@@ -566,9 +566,7 @@ impl QueryCatalogStore for QueryCatalog {
                     .selected(key, history, 0, 1)
                     .inspect_err(|_error| {
                         #[cfg(test)]
-                        eprintln!(
-                            "pg_selected_snapshot_lookup key={key:?} history={history}: {_error}"
-                        );
+                        eprintln!("pg_selected_snapshot_lookup outcome=refused");
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
                 let current_row = snapshot.catalog(key, false)?;
@@ -707,7 +705,7 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|error| {
                         #[cfg(test)]
-                        eprintln!("pg_selected_render_session key={key:?}: {error:?}");
+                        eprintln!("pg_selected_render_session outcome=refused");
                         let _ = error;
                         StorageError::Unavailable
                     })?;
@@ -762,13 +760,13 @@ impl QueryCatalogStore for QueryCatalog {
                 )
                 .map_err(|error| {
                     #[cfg(test)]
-                    eprintln!("pg_selected_render_page key={key:?}: {error:?}");
+                    eprintln!("pg_selected_render_page outcome=refused");
                     let _ = error;
                     StorageError::Unavailable
                 })?;
                 records.finish().map_err(|error| {
                     #[cfg(test)]
-                    eprintln!("pg_selected_records_finish key={key:?}: {error}");
+                    eprintln!("pg_selected_records_finish outcome=refused");
                     let _ = error;
                     StorageError::ScopeChanged
                 })?;
