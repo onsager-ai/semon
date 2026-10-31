@@ -269,6 +269,7 @@ impl Query {
             return self.execute_selected_at(
                 &source_key,
                 &target,
+                crate::CatalogReadScope::Current,
                 tool,
                 args,
                 reader.as_deref(),
