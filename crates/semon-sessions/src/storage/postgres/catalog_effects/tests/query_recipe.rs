@@ -20,8 +20,11 @@ fn pg_selected_recipe_large_fixture_measurement() {
     };
     config.create_native_store().unwrap();
     let root = crate::storage::transfer::reported::tests::root();
-    crate::storage::transfer::reported::tests::large_catalog::measure(&config, &root, |key, path| {
-        pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+    crate::storage::transfer::reported::tests::large_catalog::measure(
+        &config,
+        &root,
+        |key, path| {
+            pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
             use crate::storage::postgres::{model_cache, native_keys, native_reader};
             let generation = model_cache::generation(tx)?.unwrap();
             let current: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3)", &[&config.namespace.as_str().as_bytes(), &generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?.get(0);
@@ -35,7 +38,8 @@ fn pg_selected_recipe_large_fixture_measurement() {
             eprintln!("selected_large_fixture pg_initial_withdrawal current_absent=true claim_acknowledged=true retired_ledger_retained=true");
             Ok(())
         }).unwrap();
-    });
+        },
+    );
     fs::remove_dir_all(root).unwrap();
 }
 
