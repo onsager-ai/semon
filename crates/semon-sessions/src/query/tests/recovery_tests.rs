@@ -1509,7 +1509,8 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 }
 
 #[test]
-fn recovery_index_ahead_repriced_get_session_uses_bound_global_runtime() {
+fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
+    use crate::storage::catalog::CatalogSnapshot;
     use crate::storage::sqlite::proof_generations::{
         CatalogObservationOwner, prepare_repriced_observation,
     };
@@ -1559,10 +1560,7 @@ fn recovery_index_ahead_repriced_get_session_uses_bound_global_runtime() {
     tx.commit().unwrap();
     let repriced = recovery_catalog_row(&db, "session_catalog", "first");
     assert_ne!(repriced.cost.usd, selected.cost.usd);
-    let expected = Query::from_sources(admitted(home.options.clone()))
-        .call_at("get_session", &json!({"id":"first"}), NOW)
-        .unwrap();
-    let global = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(repriced.query, selected.query);
 
     let path = repriced.sources[0].path.to_string_lossy().into_owned();
     assert_eq!(
@@ -1578,24 +1576,36 @@ fn recovery_index_ahead_repriced_get_session_uses_bound_global_runtime() {
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        crate::native_evidence::query_runtime_generation(&home.options).unwrap(),
-        global
-    );
-    let actual = Query::from_sources(admitted(home.options.clone()))
-        .call_at("get_session", &json!({"id":"first"}), NOW)
+
+    let tx = db.transaction().unwrap();
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+    let global = snapshot.runtime_generation(&home.options).unwrap();
+    let captured_runtime = selected
+        .query
+        .as_ref()
+        .and_then(|query| query["runtime"].as_str())
         .unwrap();
-    assert_eq!(actual, expected);
+    assert_eq!(
+        snapshot
+            .runtime_observation(&home.options, &repriced, &global)
+            .unwrap()
+            .as_deref(),
+        Some(captured_runtime),
+        "the authenticated publication must preserve its captured runtime after a price-only rebind and Index advance"
+    );
 
     let hostname = home.options.proc_root.join("sys/kernel/hostname");
     let original_hostname = fs::read(&hostname).unwrap();
     fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
-    let changed_global = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    let refused = Query::from_sources(admitted(home.options.clone()))
-        .call_at("get_session", &json!({"id":"first"}), NOW);
+    let changed_global = snapshot.runtime_generation(&home.options).unwrap();
+    let refused = snapshot.runtime_observation(&home.options, &repriced, &changed_global);
     fs::write(&hostname, original_hostname).unwrap();
     assert_ne!(changed_global, global);
-    assert!(refused.is_err());
+    assert!(
+        refused.is_err(),
+        "a changed global runtime must not reuse the publication's captured row witness"
+    );
+    tx.rollback().unwrap();
 }
 
 #[test]
