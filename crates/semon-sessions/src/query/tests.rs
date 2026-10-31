@@ -698,8 +698,7 @@ fn native_projection_reuse_rebuilds_unqualified_and_corrupt_recipes_from_evidenc
             .unwrap();
         };
         observe(&mut cache);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let db = home.semantic_publisher_connection();
         let slots = || {
             db.prepare(
                 "SELECT session_key,slot,metadata FROM session_slots ORDER BY session_key,slot",
@@ -1116,6 +1115,15 @@ impl Home {
 
     fn query(&self) -> Query {
         Query::new(self.options.clone())
+    }
+
+    fn semantic_publisher_connection(&self) -> rusqlite::Connection {
+        let config = self.options.source.config(&self.options.cache).unwrap();
+        crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection()
     }
 }
 
@@ -3551,8 +3559,7 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
         )
         .unwrap();
         let archive = selected_archive(&home, 0);
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
+        let db = home.semantic_publisher_connection();
         let generation = catalog_generation(&home);
         let indexes = crate::events::FILE_READS.with(std::cell::Cell::get);
         if damaged == "observation" {
@@ -3560,7 +3567,7 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
         } else {
             assert!(
                 db.execute(
-                    "DELETE FROM meta WHERE key GLOB 'native_source_chunks:*'",
+                    "DELETE FROM meta WHERE namespace=semon_meta_scope(key) AND key GLOB 'native_source_chunks:*'",
                     []
                 )
                 .unwrap()
@@ -5082,8 +5089,7 @@ fn published_catalog_tools_match_native_facts_without_decoding_history() {
             .all(|row| row.get("query").is_none()),
         "internal Query observations must not enter Catalog transport"
     );
-    let db =
-        rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache)).unwrap();
+    let db = home.semantic_publisher_connection();
     // No question body is persisted in the exact summary publication.
     let question_text:Option<String> = db.query_row("SELECT json_extract(metadata,'$.query.rows.asker.summary.open_question.text') FROM session_catalog WHERE session_key='asker'",[],|row|row.get(0)).unwrap();
     assert_eq!(question_text, None);
@@ -5177,9 +5183,7 @@ fn catalog_query_work_stays_fixed_with_unrelated_old_sessions_and_turns() {
     let mut prior_unrelated = 0;
     for unrelated in [0, 1, 2048] {
         if unrelated > 0 {
-            let mut db =
-                rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-                    .unwrap();
+            let mut db = home.semantic_publisher_connection();
             let original: String = db
                 .query_row(
                     "SELECT metadata FROM session_catalog WHERE session_key='selected'",
@@ -5196,19 +5200,19 @@ fn catalog_query_work_stays_fixed_with_unrelated_old_sessions_and_turns() {
                 metadata["last"] = json!(old);
                 metadata["query"]["last"] = json!(old);
                 metadata["query"]["state"] = json!("done");
-                tx.execute("INSERT INTO session_catalog(session_key,harness,repo,last_ms,parent_key,lifecycle,metadata) SELECT ?1,harness,repo,?2,parent_key,lifecycle,?3 FROM session_catalog WHERE session_key='selected'",rusqlite::params![id,old,metadata.to_string()]).unwrap();
+                tx.execute("INSERT INTO session_catalog(namespace,session_key,harness,repo,last_ms,parent_key,lifecycle,metadata) SELECT semon_namespace(),?1,harness,repo,?2,parent_key,lifecycle,?3 FROM session_catalog WHERE namespace=semon_namespace() AND session_key='selected'",rusqlite::params![id,old,metadata.to_string()]).unwrap();
                 for turn in 0..16 {
                     let turn_id = format!("old-turn-{n}-{turn}");
                     let turn = json!({"at":old,"last":false,"start":null,"sent":[]});
                     tx.execute(
-                        "INSERT INTO session_trace_turns VALUES(?1,?2,NULL,?3)",
+                        "INSERT INTO session_trace_turns(namespace,session_key,turn_id,start_id,metadata) VALUES(semon_namespace(),?1,?2,NULL,?3)",
                         rusqlite::params![id, turn_id, turn.to_string()],
                     )
                     .unwrap();
                 }
                 let edge = json!({"from":id,"to":"you","at":old,"done":old,"status":"done"});
                 tx.execute(
-                    "INSERT INTO session_trace_edges VALUES(?1,?2,?3)",
+                    "INSERT INTO session_trace_edges(namespace,session_key,edge_id,metadata) VALUES(semon_namespace(),?1,?2,?3)",
                     rusqlite::params![id, format!("old-edge-{n}"), edge.to_string()],
                 )
                 .unwrap();
