@@ -5609,9 +5609,8 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         ("a".into(), first_options.clone(), first_config.clone()),
         ("b".into(), second_options.clone(), second_config.clone()),
     ];
-    let configured_sources = || {
-        Arc::new(SessionSources::with_configured_machines(configured_machines.clone()).unwrap())
-    };
+    let configured_sources =
+        || Arc::new(SessionSources::with_configured_machines(configured_machines.clone()).unwrap());
     // Keep the native oracle on the semantic producer path. Configured
     // machines below supply the separately admitted Catalog reader snapshots.
     let mut native = Query::from_sources(Arc::new(SessionSources::with_machines(
