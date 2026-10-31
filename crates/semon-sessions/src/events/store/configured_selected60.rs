@@ -616,7 +616,25 @@ fn configured_semantic_selected65_private_witness_is_bound_independently_of_rows
     let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     let host = HostSourceBinding { source_key: "source-a".into(), snapshot: lease.snapshot().clone() };
     let selected = lease.open_selected(options, &host, &crate::SelectedReadControl::default()).unwrap();
-    assert_eq!(selected.witness.observations.runtime.as_deref(), model.prepared().rows[0].query.as_ref().unwrap()["runtime"].as_str());
+    let query_binding = cache.query_runtime_binding().unwrap().unwrap();
+    let operation_runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+    let expected_operation_runtime = query_binding.witness(&operation_runtime).unwrap();
+    assert_eq!(
+        selected.witness.observations.runtime.as_deref(),
+        Some(expected_operation_runtime.as_str()),
+        "presentation binds the operation-wide runtime input"
+    );
+    let prepared_row = &model.prepared().rows[0];
+    let cwds = cache.runtime_source_cwds(&prepared_row.sources).unwrap();
+    let scoped_runtime = crate::native_evidence::RuntimeObservations::new(options)
+        .scope(prepared_row, &cwds)
+        .unwrap();
+    let expected_row_runtime = query_binding.witness(&scoped_runtime).unwrap();
+    assert_eq!(
+        prepared_row.query.as_ref().unwrap()["runtime"].as_str(),
+        Some(expected_row_runtime.as_str()),
+        "Query runtime binds this owner's dependency scope"
+    );
     let stored: String = db.query_row("SELECT metadata FROM storage_proof_presentations WHERE namespace='source-a' AND id=?1 AND session_key=?2", params![id.0, key], |row| row.get(0)).unwrap();
     assert!(serde_json::from_str::<Value>(&stored).unwrap().get("observations").is_none(), "shared observations must be stored once per publication");
     for name in ["catalog_generation", "catalog_completeness", "catalog_observed_at"] {
