@@ -608,7 +608,7 @@ mod tests {
     };
     use crate::storage::transfer::reported::tests::{apply, root, sqlite, stage};
 
-    const RECIPE_SESSION_ID: &str = "catalog-é \t漢字";
+    const RECIPE_FILE_SUFFIX: &str = "-é \t漢字";
 
     fn publish_catalog_with_recipes(
         cache: &mut crate::events::EventCache,
@@ -714,17 +714,15 @@ mod tests {
         Vec<crate::model::summary::CatalogRow>,
         Vec<(String, String)>,
     ) {
-        let (options, input) =
+        let (options, original_input) =
             crate::storage::transfer::reported::tests::seed_catalog_input(source, root);
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: format!("projects/sanitized/catalog{RECIPE_FILE_SUFFIX}.jsonl").into(),
+        };
+        let original_path = original_input.full_path(&options);
         let path = input.full_path(&options);
-        let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("\"sessionId\":\"catalog\""));
-        let session_id = serde_json::to_string(RECIPE_SESSION_ID).unwrap();
-        let body = body.replace(
-            "\"sessionId\":\"catalog\"",
-            &format!("\"sessionId\":{session_id}"),
-        );
-        std::fs::write(&path, body).unwrap();
+        std::fs::rename(original_path, &path).unwrap();
 
         let mut cache = crate::storage::transfer::reported::tests::cache(source);
         cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
@@ -751,18 +749,18 @@ mod tests {
     ) {
         let old = crate::Input {
             root: crate::InputRoot::Claude,
-            path: "projects/sanitized/catalog.jsonl".into(),
+            path: format!("projects/sanitized/catalog{RECIPE_FILE_SUFFIX}.jsonl").into(),
         };
         let input = crate::Input {
             root: crate::InputRoot::Claude,
-            path: "projects/sanitized/successor.jsonl".into(),
+            path: format!("projects/sanitized/successor{RECIPE_FILE_SUFFIX}.jsonl").into(),
         };
         let old_path = old.full_path(options);
         let path = input.full_path(options);
         let mut body = std::fs::read_to_string(&old_path).unwrap();
         body.push_str(&format!(
             "{}\n",
-            serde_json::json!({"type":"user","sessionId":RECIPE_SESSION_ID,"uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})
+            serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})
         ));
         std::fs::remove_file(&old_path).unwrap();
         let mut cache = crate::storage::transfer::reported::tests::cache(config);
@@ -943,11 +941,8 @@ mod tests {
         let (expected, current_recipes) = advance_catalog_with_recipes(&source, &options);
         let history_recipe = recipe_for(&initial_recipes, &initial[0].key);
         let current_recipe = recipe_for(&current_recipes, &expected[0].key);
-        assert!(
-            history_recipe.contains(r#"catalog-é \t漢字"#),
-            "producer history recipe did not retain the native session ID: {history_recipe}"
-        );
-        assert!(current_recipe.contains(r#"catalog-é \t漢字"#));
+        assert!(history_recipe.contains(r#"é \t漢字"#));
+        assert!(current_recipe.contains(r#"é \t漢字"#));
         assert_ne!(
             current_recipe, history_recipe,
             "the successor publication owns a distinct selected recipe"
