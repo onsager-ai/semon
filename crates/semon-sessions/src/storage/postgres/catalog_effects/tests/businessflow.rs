@@ -4137,6 +4137,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         appended_offset(&append_current_identity),
         "PG Current consumes the same-length continuation as the SQLite oracle"
     );
+    let mut current_parent_digest = sha2::Sha256::new();
+    current_parent_digest.update(&raw[0]);
+    current_parent_digest.update(append.as_bytes());
+    let current_parent_prefix: [u8; 32] = current_parent_digest.finalize().into();
+    assert_eq!(
+        current_parent_ref.prefix_sha256, current_parent_prefix,
+        "PG Current parent reference authenticates the actual continued bytes"
+    );
     let retained_parent_ref = append_history_identity
         .source_refs
         .iter()
