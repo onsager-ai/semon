@@ -79,6 +79,28 @@ jobs:
         with:
           name: semantic-rejection-tests
           path: ${{ runner.temp }}/semantic-rejection-tests.log
+      - name: Namespace key reservation and physical fixture contracts
+        id: namespace_fixtures
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/namespace-fixture-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/namespace-fixture-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/namespace-fixture-case.log" >> "$RUNNER_TEMP/namespace-fixture-tests.log"
+            echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/namespace-fixture-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/namespace-fixture-tests.log"
+          exit "$result"
+      - name: Retain namespace key reservation and fixture results
+        if: ${{ !cancelled() && steps.namespace_fixtures.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: namespace-fixture-tests
+          path: ${{ runner.temp }}/namespace-fixture-tests.log
       - name: Configured header ownership and copied-usage fixture contracts
         id: ownership_fixtures
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
