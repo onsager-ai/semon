@@ -6567,7 +6567,7 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
             |row| row.get(0),
         )
         .unwrap();
-    let mut original: Value = serde_json::from_str(&text).unwrap();
+    let original: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(original["parent"], "session-00000");
     assert_eq!(original["query"]["state"], state);
     let save = |row: &Value| {
