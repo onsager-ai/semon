@@ -1938,6 +1938,18 @@ impl Stage {
             .expected_stream_epoch
             .as_deref()
             .ok_or_else(|| refuse("semantic_stream_epoch"))?;
+        // An outgoing owner may have a direct Catalog capture instead of an
+        // immutable proof. Retained History keeps only that exact prior grant.
+        for row in &prepared.relationships.retired_owners {
+            super::proof_generations::reconcile_native_observation_owners(
+                &tx,
+                ns,
+                &row.key,
+                self.source.admission,
+                stream,
+            )
+            .map_err(StoreError::Configured)?;
+        }
         for row in prepared
             .rows
             .iter()
