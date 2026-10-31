@@ -621,32 +621,43 @@ mod tests {
             if batch.paths.is_empty() {
                 continue;
             }
-            let mut model = cache
-                .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
+            let mut model = crate::model::prepare_semantic_batch(
+                options,
+                cache,
+                inputs,
+                &batch,
+                1_790_000_000_000,
+            )
                 .unwrap();
+            let mut recipes = Vec::new();
+            if batch.phase == Phase::Publication {
+                assert!(
+                    model.prepared().rows.is_empty()
+                        || model
+                            .prepared()
+                            .transcripts
+                            .iter()
+                            .map(|projection| projection.slots.len())
+                            .sum::<usize>()
+                            > 64
+                );
+                for row in &mut model.prepared_mut_for_test().rows {
+                    let prepared = crate::query_projection::SelectedRecipe::prepare(row).unwrap();
+                    let payload = prepared
+                        .query_recipe
+                        .expect("fixture row has a producer-authored selected recipe");
+                    let compact: crate::model::summary::CatalogRow =
+                        serde_json::from_str(&prepared.metadata).unwrap();
+                    row.query = compact.query;
+                    recipes.push((row.key.clone(), payload));
+                }
+            }
+            assert_eq!(
+                cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                crate::events::Outcome::Written
+            );
             if batch.phase != Phase::Publication {
                 continue;
-            }
-            assert!(
-                model.prepared().rows.is_empty()
-                    || model
-                        .prepared()
-                        .transcripts
-                        .iter()
-                        .map(|projection| projection.slots.len())
-                        .sum::<usize>()
-                        > 64
-            );
-            let mut recipes = Vec::new();
-            for row in &mut model.prepared_mut_for_test().rows {
-                let prepared = crate::query_projection::SelectedRecipe::prepare(row).unwrap();
-                let payload = prepared
-                    .query_recipe
-                    .expect("fixture row has a producer-authored selected recipe");
-                let compact: crate::model::summary::CatalogRow =
-                    serde_json::from_str(&prepared.metadata).unwrap();
-                row.query = compact.query;
-                recipes.push((row.key.clone(), payload));
             }
             let mut published = false;
             for _ in 0..256 {
@@ -836,6 +847,8 @@ mod tests {
         let selected: crate::model::summary::CatalogRow =
             serde_json::from_str(&metadata).unwrap();
         let _observation = query_recipe_observation(&tx, &binding, owner, &selected).unwrap();
+        crate::storage::proof_codec::validate_query_recipe_cell(&metadata, Some(payload)).unwrap();
+        crate::query_projection::SelectedRecipe::decode(&selected, payload).unwrap();
         assert_eq!(
             tx.execute(
                 &format!("UPDATE main.{table} SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4"),
