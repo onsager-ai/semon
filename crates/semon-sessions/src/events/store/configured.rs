@@ -3384,6 +3384,10 @@ mod tests {
 
     fn shared_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
         let db = f.db();
+        database_state(&db)
+    }
+
+    fn database_state(db: &Connection) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
         let tables=db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 129").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(tables.len() <= 128);
         tables
@@ -10076,6 +10080,17 @@ mod tests {
                 inputs: &[crate::Input],
                 frontier_kind: Option<&str>,
             ) -> Progress {
+                finish_observing(cache, f, options, inputs, frontier_kind, |_, _, _| {})
+            }
+
+            pub(super) fn finish_observing(
+                cache: &mut EventCache,
+                f: &Fixture,
+                options: &crate::Options,
+                inputs: &[crate::Input],
+                frontier_kind: Option<&str>,
+                mut published: impl FnMut(&EventCache, &Batch, &crate::model::PreparedSources),
+            ) -> Progress {
                 let mut progress = Progress::default();
                 let mut stale_checked = false;
                 for _ in 0..1024 {
@@ -10279,6 +10294,7 @@ mod tests {
                     let acknowledged: Vec<String> = f.db().prepare("SELECT source_path FROM catalog_semantic_sources WHERE namespace='source-a' AND ack_done=1 ORDER BY source_path").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
                     assert_eq!(acknowledged, expected, "only exact group sources are ACKed");
                     assert!(!f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s WHERE s.namespace='source-a' AND s.ack_done=1 AND (EXISTS(SELECT 1 FROM catalog_semantic_owner_sources p JOIN catalog_semantic_endpoints o USING(namespace,session_key) WHERE p.namespace=s.namespace AND p.source_path=s.source_path AND o.published=0) OR EXISTS(SELECT 1 FROM catalog_semantic_prior_sources p JOIN catalog_semantic_prior_owners o USING(namespace,session_key) WHERE p.namespace=s.namespace AND p.source_path=s.source_path AND o.published=0)))", [], |r| r.get::<_, bool>(0)).unwrap(), "every original and replacement effect precedes source ACK");
+                    published(cache, &batch, model.prepared());
                     progress.publications += 1;
                 }
                 panic!("bounded physical groups failed to finish");
@@ -12915,11 +12931,8 @@ mod tests {
                 "all foreign table rows remain byte-identical"
             );
         }
-        #[test]
-        fn configured_semantic_domain81_filename_peer_pages_to_bounded_publications() {
-            let (f, _, options, _) = model_sources();
-            let options = &options[1];
-            let mut inputs = peer_inputs(options, 66, "peer81-target");
+        fn filename_peer_inputs(options: &crate::Options, copies: usize) -> Vec<crate::Input> {
+            let mut inputs = peer_inputs(options, copies, "peer81-target");
             for (i, input) in inputs.iter_mut().enumerate().skip(1) {
                 let old = input.full_path(options);
                 input.path = format!("projects/peer81-{i}/peer81-target.jsonl");
@@ -12927,19 +12940,126 @@ mod tests {
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::rename(old, path).unwrap();
             }
+            inputs
+        }
+
+        #[test]
+        fn configured_semantic_domain81_filename_owner_source_budget_refuses_atomically() {
+            for configured in [false, true] {
+                let (f, _, options, _) = model_sources();
+                let options = &options[1];
+                let inputs = filename_peer_inputs(options, 66);
+                let mut cache = if configured {
+                    open(&f.config)
+                } else {
+                    EventCache::open_scoped(&options.cache, &options.source).unwrap()
+                };
+                claude_ingest(&mut cache, options, &inputs);
+                let db = if configured {
+                    f.db()
+                } else {
+                    Connection::open(options.cache.with_extension("sqlite3")).unwrap()
+                };
+                let predicate = if configured { "WHERE namespace='source-a'" } else { "" };
+                let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
+                let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+                cache.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap();
+                let mut paged = false;
+                let mut refused = false;
+                for _ in 0..256 {
+                    let before = database_state(&db);
+                    match cache.semantic_batch(64) {
+                        Err(error) => {
+                            assert_eq!(error.to_string(), "semantic_physical_owner_source_budget");
+                            assert_eq!(database_state(&db), before, "failed owner transaction is byte-identical; configured={configured}");
+                            refused = true;
+                            break;
+                        }
+                        Ok(Some(batch)) => {
+                            paged |= db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier {predicate} {} kind='claudeid' AND after_key<>'' AND done=0)", if configured { "AND" } else { "WHERE" }), [], |r| r.get::<_, bool>(0)).unwrap();
+                            assert_ne!(batch.phase, Phase::Publication);
+                            if batch.paths.is_empty() {
+                                continue;
+                            }
+                            let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                            assert_eq!(selected.len(), batch.paths.len());
+                            cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                        }
+                        Ok(None) => panic!("filename owner stage disappeared"),
+                    }
+                }
+                assert!(paged && refused, "filename cursor precedes actual owner capacity refusal; configured={configured}");
+                let histogram = db.prepare(&format!("SELECT native_id,count(*) FROM catalog_semantic_inputs {predicate} GROUP BY native_id ORDER BY native_id")).unwrap().query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert_eq!(histogram, vec![("claude72-0".to_owned(), 1), ("peer81-target".to_owned(), 65)]);
+                let links = db.prepare(&format!("SELECT links FROM files {predicate} ORDER BY path")).unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert_eq!(links.len(), 66);
+                for links in links {
+                    assert_eq!(serde_json::from_str::<crate::events::Links>(&links).unwrap(), crate::events::Links::default());
+                }
+                assert_eq!(db.query_row(&format!("SELECT count(*) FROM session_catalog {predicate} {} lifecycle='current'", if configured { "AND" } else { "WHERE" }), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                assert_eq!(db.query_row(&format!("SELECT count(*) FROM catalog_semantic_sources {predicate} {} ack_done=1", if configured { "AND" } else { "WHERE" }), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+                assert!(database_state(&db).into_iter().filter(|(table, _)| table.starts_with("storage_proof_") || table == "storage_semantic_publications").all(|(_, rows)| rows.is_empty()), "capacity refusal creates no proof or publication");
+            }
+        }
+
+        #[test]
+        fn configured_semantic_domain81_filename_peer_pages_to_bounded_publications() {
+            let (f, _, options, _) = model_sources();
+            let options = &options[1];
+            // Filename is native Claude identity. These are two owners with
+            // one and 64 sources, not 65 distinct owners named by sessionId.
+            let inputs = filename_peer_inputs(options, 65);
+            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+            let mut expected = crate::model::prepare_sources(options, &mut ordinary, &inputs, 1_790_000_000_000).unwrap();
+            assert_eq!(expected.rows.len(), 2);
+            let mut source_counts = expected.rows.iter().map(|row| row.sources.len()).collect::<Vec<_>>();
+            source_counts.sort();
+            assert_eq!(source_counts, [1, 64]);
             let mut admitted = open(&f.config);
             claude_ingest(&mut admitted, options, &inputs);
+            let binding = admitted.query_runtime_binding().unwrap().unwrap();
+            let observations = crate::native_evidence::RuntimeObservations::new(options);
+            for row in &mut expected.rows {
+                let cwds = admitted.runtime_source_cwds(&row.sources).unwrap();
+                let scoped = observations.scope(row, &cwds).unwrap();
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(expected_source_runtime_witness(binding.namespace.as_str(), binding.admission, binding.stream_epoch.as_str(), &scoped));
+            }
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             admitted
                 .begin_semantic_stage_with_journal(std::slice::from_ref(&seed), &runtime, true)
                 .unwrap();
-            let progress =
-                physical_groups::finish(&mut admitted, &f, options, &inputs, Some("claudeid"));
+            let mut actual_rows = BTreeMap::new();
+            let mut actual_relations = BTreeMap::new();
+            let mut actual_slots = BTreeMap::new();
+            let mut acknowledged = BTreeSet::new();
+            let progress = physical_groups::finish_observing(
+                &mut admitted, &f, options, &inputs, Some("claudeid"),
+                |_, batch, prepared| {
+                    for row in &prepared.rows {
+                        let reference = expected.rows.iter().find(|expected| expected.key == row.key).unwrap();
+                        assert_eq!(serde_json::to_value(row).unwrap(), serde_json::to_value(reference).unwrap());
+                        let sources = row.sources.iter().map(|source| source.path.to_string_lossy().into_owned()).collect::<BTreeSet<_>>();
+                        assert_eq!(sources, batch.paths.iter().cloned().collect(), "complete physical owner is published atomically");
+                        actual_rows.insert(row.key.clone(), serde_json::to_value(row).unwrap());
+                    }
+                    for (id, relation) in &prepared.relationships.relations {
+                        actual_relations.insert(id.clone(), serde_json::to_value(relation).unwrap());
+                    }
+                    for projection in &prepared.transcripts {
+                        actual_slots.insert(projection.key.clone(), serde_json::to_value(&projection.slots).unwrap());
+                    }
+                    acknowledged.extend(batch.paths.iter().cloned());
+                    assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND ack_done=1", [], |r| r.get::<_, i64>(0)).unwrap(), acknowledged.len() as i64);
+                },
+            );
             assert!(progress.frontier_paged && progress.restarted_frontier);
             assert!(progress.publications >= 2 && progress.restarted_between_groups);
-            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 66);
-            let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+            assert_eq!(acknowledged, inputs.iter().map(|input| input.full_path(options).to_string_lossy().into_owned()).collect());
+            assert_eq!(actual_rows, expected.rows.iter().map(|row| (row.key.clone(), serde_json::to_value(row).unwrap())).collect());
+            assert_eq!(actual_relations, expected.relationships.relations.iter().map(|(id, relation)| (id.clone(), serde_json::to_value(relation).unwrap())).collect());
+            assert_eq!(actual_slots, expected.transcripts.iter().map(|projection| (projection.key.clone(), serde_json::to_value(&projection.slots).unwrap())).collect());
+            assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
             claude_ingest(&mut ordinary, options, &inputs);
             ordinary
                 .begin_semantic_stage_with_journal(&[seed], &runtime, true)

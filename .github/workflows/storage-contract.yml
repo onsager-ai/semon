@@ -134,6 +134,8 @@ jobs:
         run: |
           result=0
           for test in \
+            events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
+            events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications \
             events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result \
             events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace \
             events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches \
@@ -146,6 +148,7 @@ jobs:
             events::store::tests::recovery_witness_requalifies_mutable_source_journal_rows; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/namespace-fixture-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/namespace-fixture-case.log"; then case_result=1; fi
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/namespace-fixture-case.log"; then case_result=1; fi
             cat "$RUNNER_TEMP/namespace-fixture-case.log" >> "$RUNNER_TEMP/namespace-fixture-tests.log"
             echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/namespace-fixture-tests.log"
