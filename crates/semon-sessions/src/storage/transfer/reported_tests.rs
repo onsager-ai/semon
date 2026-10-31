@@ -587,6 +587,7 @@ pub(crate) fn finish_catalog(
 
 #[test]
 fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
+    use crate::storage::query::QueryCatalogStore;
     use crate::storage::sqlite::proof_generations::{
         CatalogObservationOwner, observation_binding, observation_binding_with_observations,
         prepare_repriced_observation,
@@ -647,8 +648,8 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     assert!(
         crate::storage::sqlite::catalog::runtime_source_cwds_if_current(&db, &original.sources)
             .unwrap()
-            .is_none(),
-        "the imported Current row has no matching local Index ledger"
+            .is_some(),
+        "the real transfer includes the original Current row's matching Index ledger"
     );
     assert!(
         observation_binding(&db, &binding, original).is_ok(),
@@ -664,36 +665,6 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         "the imported proof could satisfy the captured global runtime fence"
     );
     assert!(imported_observations.runtime_for(original).is_some());
-    let mut target_options = options.clone();
-    target_options.source = options.source.clone().with_store(target.clone()).unwrap();
-    let mut query = crate::Query::with_machines(vec![("target".into(), target_options)]);
-    crate::events::FILE_READS.with(|reads| reads.set(0));
-    crate::events::HASHED_BYTES.with(|reads| reads.set(0));
-    crate::source_chunks::READ_BYTES.with(|reads| reads.set(0));
-    let query_key = original.key.clone();
-    let query_error = query
-        .call_selected(
-            "target",
-            &query_key,
-            "get_session",
-            &serde_json::json!({"id":query_key.clone()}),
-            None,
-            crate::SessionSourceReadMode::LocalOrPinnedProvider,
-        )
-        .unwrap_err();
-    assert_eq!(query_error.code, "unavailable");
-    assert_eq!(
-        query_error.message,
-        crate::storage::StorageError::ScopeChanged.to_string(),
-        "the imported Current row must retain its prior stale-ledger refusal"
-    );
-    assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
-    assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
-    assert_eq!(
-        crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
-        0
-    );
-    drop(query);
     let before: String = db
         .query_row(
             "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
@@ -763,6 +734,85 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         "an imported preimage cannot mint a local owner grant"
     );
     assert!(observation_binding(&db, &binding, original).is_ok());
+
+    // Move only the destination's Index through its admitted native writer,
+    // after the imported repricing authority checks above have completed.
+    let mut raw = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"import-index-ahead","parentUuid":"price-answer","timestamp":"2026-10-01T00:02:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized destination append"}})).unwrap();
+    drop(raw);
+    let mut destination = cache(&target);
+    let receipt = destination.ingest(&"a".repeat(64), &path, "claude").unwrap();
+    destination.flush_cold_writes().unwrap();
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.consumed_bytes, std::fs::metadata(&path).unwrap().len());
+    assert!(
+        crate::storage::sqlite::catalog::runtime_source_cwds_if_current(&db, &original.sources)
+            .unwrap()
+            .is_none(),
+        "the admitted native append advances Index beyond the imported Current row"
+    );
+    assert!(crate::storage::sqlite::proof_generations::imported_catalog(&db, &binding).unwrap());
+    let (ahead_binding, ahead_observations) =
+        observation_binding_with_observations(&db, &binding, original).unwrap();
+    let ahead_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    assert_eq!(ahead_runtime, current_runtime);
+    let ahead_global = ahead_binding.witness(&ahead_runtime).unwrap();
+    assert_eq!(
+        ahead_observations.runtime.as_deref(),
+        Some(ahead_global.as_str()),
+        "the imported proof's live global runtime fence survives the Index append"
+    );
+    assert_eq!(
+        ahead_observations.runtime_for(original),
+        imported_observations.runtime_for(original)
+    );
+    let pending: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=?1 AND source_path=?2)",
+            rusqlite::params![target.namespace.as_str(), path.to_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(pending, "native ingest durably queues Catalog catch-up");
+    assert_eq!(receipts(&db), original_receipts);
+    let indexed_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![target.namespace.as_str(), original.key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(indexed_metadata, before);
+
+    // The real dirty claim refuses the cohort before row runtime admission.
+    // This does not dynamically qualify the imported stale-ledger guard after
+    // that publication fence, nor the separate selected transcript read route.
+    let mut target_options = options.clone();
+    target_options.source = options.source.clone().with_store(target.clone()).unwrap();
+    let query = crate::storage::sqlite::query::SqliteQueryCatalog {
+        options: target_options,
+        binding: crate::storage::NativeReaderBinding::Semantic(owner.clone()),
+    };
+    crate::events::FILE_READS.with(|reads| reads.set(0));
+    crate::events::HASHED_BYTES.with(|reads| reads.set(0));
+    crate::source_chunks::READ_BYTES.with(|reads| reads.set(0));
+    let mut bytes_left = 64 * 1024 * 1024;
+    let query_error = query
+        .read_cohort(&target.namespace, 1_790_000_000_000, &mut bytes_left)
+        .err()
+        .expect("the admitted native append leaves Catalog catch-up pending");
+    assert_eq!(query_error.code, "unavailable");
+    assert_eq!(query_error.message, "Native Catalog publication is incomplete");
+    assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
+    assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
+    assert_eq!(
+        crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
+        0
+    );
+    drop(destination);
     drop(db);
     drop(producer);
     std::fs::remove_dir_all(root).unwrap();
