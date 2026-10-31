@@ -96,6 +96,41 @@ pub(super) struct PreparedPresentations<'a> {
     pub(super) rows: &'a [(String, String)],
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static PREPARED_QUERY_RECIPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Qualify an inactive payload writer in one fixture's ordinary publication.
+/// The guard changes no authority and never escapes the calling thread.
+#[cfg(test)]
+pub(crate) fn with_prepared_query_recipe_for_test<T>(publish: impl FnOnce() -> T) -> T {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PREPARED_QUERY_RECIPE.with(|enabled| enabled.set(self.0));
+        }
+    }
+    let _restore = Restore(PREPARED_QUERY_RECIPE.with(|enabled| enabled.replace(true)));
+    publish()
+}
+
+#[cfg(test)]
+fn prepared_query_recipe_for_test(
+    row: &CatalogRow,
+    metadata: &str,
+) -> Result<Option<String>, StorageError> {
+    if !PREPARED_QUERY_RECIPE.with(std::cell::Cell::get) {
+        return Ok(None);
+    }
+    let recipe = row.query_recipe.as_ref().ok_or(StorageError::ScopeChanged)?;
+    let payload = serde_json::to_string(recipe).map_err(|_| StorageError::Unavailable)?;
+    proof_codec::validate_query_recipe_cell(metadata, Some(&payload))?;
+    crate::query_projection::SelectedRecipe::decode(row, &payload)
+        .map_err(|_| StorageError::ScopeChanged)?;
+    Ok(Some(payload))
+}
+
 pub(super) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
@@ -129,9 +164,13 @@ pub(super) fn publish(
             prefix,
         };
         // These values came directly from the prepared model in this owner
-        // transaction. Decode only persisted input, not this freshly encoded row.
+        // transaction. Production does not decode this freshly encoded row.
+        #[cfg(not(test))]
+        let query_recipe: Option<String> = None;
+        #[cfg(test)]
+        let query_recipe = prepared_query_recipe_for_test(row, &record.metadata)?;
         tx.execute(
-            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 namespace,
                 record.id.0,
@@ -142,7 +181,8 @@ pub(super) fn publish(
                 record.stream,
                 record.metadata,
                 record.slots,
-                record.prefix
+                record.prefix,
+                query_recipe
             ],
         )
         .map_err(failed)?;
