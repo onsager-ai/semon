@@ -4,7 +4,7 @@ use crate::storage::sqlite::catalog::{
     SQL_STEPS, rows, runtime_source_cwds, runtime_source_cwds_if_current,
 };
 use crate::{Refresh, ViewerCore};
-use rusqlite::{Connection, types::Value as SqlValue};
+use rusqlite::{Connection, OptionalExtension, types::Value as SqlValue};
 use std::time::Duration;
 use std::{
     fs,
@@ -158,8 +158,7 @@ fn family_owner_phase_diagnostic(fixture: &Fixture, phase: &'static str, key: &s
             .unwrap()
             .flatten();
         let normalized_digest = metadata.as_deref().and_then(|metadata| {
-            let mut row: crate::model::summary::CatalogRow =
-                serde_json::from_str(metadata).ok()?;
+            let mut row: crate::model::summary::CatalogRow = serde_json::from_str(metadata).ok()?;
             row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
             let normalized = serde_json::to_string(&row).ok()?;
             Some(crate::storage::proof_codec::digest(normalized.as_bytes()))
@@ -6849,7 +6848,11 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
 
     fs::remove_file(child_source).unwrap();
     if state == "work" {
-        family_owner_phase_diagnostic(&fixture, "extent_before_retirement_publish", "session-00001");
+        family_owner_phase_diagnostic(
+            &fixture,
+            "extent_before_retirement_publish",
+            "session-00001",
+        );
     }
     fixture.publish_existing();
     if state == "work" {
