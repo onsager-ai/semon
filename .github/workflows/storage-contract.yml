@@ -63,6 +63,31 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Retained row authority diagnostic (not qualification)
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        env:
+          SEMON_BUILD_TIMING: "1"
+        run: |
+          cargo test --locked -p semon-sessions --lib configured_semantic_real_model_claude_replacement_rollback_stale_and_history -- --nocapture > "$RUNNER_TEMP/retained-authority.log" 2>&1 || true
+          python3 - <<'PYSAFE'
+          import os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          prefixes = (
+              'semon sessions native: observation_direct_grant_',
+              'semon sessions native: observation_stage_refused ',
+              'test result:',
+          )
+          with (root / 'retained-authority.log').open() as source:
+              lines = [line.rstrip()[:1024] for line in source if line.startswith(prefixes)]
+          (root / 'retained-authority-diagnostic.txt').write_text('\n'.join(lines[:30]))
+          PYSAFE
+      - name: Retain bounded row authority diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: retained-authority-diagnostic
+          path: ${{ runner.temp }}/retained-authority-diagnostic.txt
       - name: Selected recovery range authority reconciliation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
