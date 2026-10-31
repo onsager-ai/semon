@@ -1309,11 +1309,13 @@ mod tests {
         };
         // Real native progress records grow the second observation beyond one
         // proof page without adding transcript slots or admitting another source.
-        let mut progress = serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":""}})
-            .to_string();
+        let mut progress =
+            serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":""}})
+                .to_string();
         let padding = "x".repeat(crate::source_chunks::SIZE - progress.len() - 1);
-        progress = serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":padding}})
-            .to_string();
+        progress =
+            serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":padding}})
+                .to_string();
         assert_eq!(progress.len() + 1, crate::source_chunks::SIZE);
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         for _ in 0..PAGE {
@@ -1393,7 +1395,9 @@ mod tests {
             .unwrap();
         let history: crate::model::summary::CatalogRow = serde_json::from_str(&history).unwrap();
         assert_eq!(
-            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&history.sources[0])),
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
+                &history.sources[0]
+            )),
             original_digest,
             "publishing C must preserve original History A"
         );
