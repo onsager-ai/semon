@@ -3060,8 +3060,7 @@ mod tests {
                 i % 2 == 1,
             );
         }
-        let error = owner_closure_with(&OrdinaryOwnerPlan(&db), "overflow/source-00")
-            .unwrap_err();
+        let error = owner_closure_with(&OrdinaryOwnerPlan(&db), "overflow/source-00").unwrap_err();
         match error {
             rusqlite::Error::ToSqlConversionFailure(source) => {
                 assert_eq!(source.to_string(), "semantic_physical_owner_source_budget");
