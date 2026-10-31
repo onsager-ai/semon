@@ -987,6 +987,113 @@ fn pg_catalog127_history_changed_witness_and_oversize_refuse_without_effects() {
 }
 
 #[test]
+fn pg_catalog124_search_counts_follow_scoped_documents() {
+    use crate::storage::catalog::SearchPublicationStore;
+    use std::collections::BTreeMap;
+
+    let data = build_oracle(false, false);
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("catalog124-search-count-scopes");
+    pool.transaction(
+        &namespace,
+        TxnKind::Write,
+        &PgCancellation::default(),
+        |tx| {
+            stage(tx, L1, &data.publication())?;
+            let ns = tx.namespace.as_str().as_bytes().to_vec();
+            let generation = L1.as_bytes();
+            let current = crate::catalog_search::scope_key(crate::CatalogReadScope::Current)
+                .as_bytes();
+            let history = crate::catalog_search::scope_key(
+                crate::CatalogReadScope::RetainedHistory,
+            )
+            .as_bytes();
+            let selected = tx
+                .driver
+                .query_one(
+                    "SELECT session_key FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND complete ORDER BY session_key LIMIT 1",
+                    &[&ns, &generation, &current],
+                )
+                .map_err(sqlstate::error)?
+                .get::<_, Vec<u8>>(0);
+            assert_eq!(
+                tx.driver
+                    .execute(
+                        "DELETE FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 AND key_digest=sha256($4::bytea) AND session_key=$4",
+                        &[&ns, &generation, &current, &selected],
+                    )
+                    .map_err(sqlstate::error)?,
+                1
+            );
+            tx.driver
+                .execute(
+                    "DELETE FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3",
+                    &[&ns, &generation, &current],
+                )
+                .map_err(sqlstate::error)?;
+
+            let effects = super::Effects {
+                tx: std::cell::RefCell::new(tx),
+                generation: L1,
+            };
+            SearchPublicationStore::counts(&effects, crate::CatalogReadScope::Current)?;
+            SearchPublicationStore::counts(
+                &effects,
+                crate::CatalogReadScope::RetainedHistory,
+            )?;
+            let tx = effects.tx.into_inner();
+
+            let counts = |scope: &[u8]| -> Result<BTreeMap<Vec<u8>, i64>, StorageError> {
+                let rows = tx
+                    .driver
+                    .query(
+                        "SELECT gram,members FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND scope=$3 ORDER BY gram",
+                        &[&ns, &generation, &scope],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok(rows
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.get::<_, Vec<u8>>(0),
+                            row.get::<_, i64>(1),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>())
+            };
+            let expected = |scope: &[u8]| -> Result<BTreeMap<Vec<u8>, i64>, StorageError> {
+                let rows = tx
+                    .driver
+                    .query(
+                        "SELECT m.gram,count(*) FROM semon_pg_native_catalog_search_memberships m JOIN semon_pg_native_catalog_search_documents d ON d.namespace_digest=m.namespace_digest AND d.namespace=m.namespace AND d.generation=m.generation AND d.key_digest=m.key_digest AND d.session_key=m.session_key WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND d.scope=$3 GROUP BY m.gram ORDER BY m.gram",
+                        &[&ns, &generation, &scope],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok(rows
+                    .iter()
+                    .map(|row| {
+                        (
+                            row.get::<_, Vec<u8>>(0),
+                            row.get::<_, i64>(1),
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>())
+            };
+            let current_counts = counts(current)?;
+            let history_counts = counts(history)?;
+            assert_eq!(current_counts, expected(current)?);
+            assert_eq!(history_counts, expected(history)?);
+            assert_ne!(
+                current_counts, history_counts,
+                "a History-only document must not add members to Current counts"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
 fn pg_catalog124_real_sqlite_producer_recipe_parity_and_immutable_generations() {
     let data = build_oracle(false, false);
     let (pool, factory) = fixture(|_| {});
