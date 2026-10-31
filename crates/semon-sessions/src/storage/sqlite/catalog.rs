@@ -445,6 +445,17 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
                     .witness(runtime)
                     .inspect_err(|error| diagnose("captured_current_global_witness", error))?;
                 if current_global != captured_global {
+                    #[cfg(test)]
+                    eprintln!(
+                        "catalog_runtime_capture_comparison raw_matches={} captured_binding_matches={}",
+                        observations.source_runtime.as_deref() == Some(runtime),
+                        observations
+                            .source_runtime
+                            .as_deref()
+                            .and_then(|raw| binding.witness(raw).ok())
+                            .as_deref()
+                            == Some(captured_global)
+                    );
                     if cfg!(test) || crate::native_timing::enabled() {
                         eprintln!(
                             "catalog_runtime_refused stage=captured_global_equality error_class=scope_changed equal=false"

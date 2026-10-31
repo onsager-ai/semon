@@ -85,7 +85,14 @@ jobs:
         shell: bash
         run: |
           result=0
-          for test in events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches; do
+          for test in \
+            events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result \
+            events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace \
+            events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches \
+            events::store::tests::cached_statements_recheck_external_schema_and_parser_changes \
+            events::store::tests::selected_role_proofs_fence_ledger_sidecar_and_parser_without_event_loads \
+            events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba \
+            events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/namespace-fixture-case.log" 2>&1 || case_result=$?
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/namespace-fixture-case.log"; then case_result=1; fi
@@ -107,7 +114,7 @@ jobs:
         shell: bash
         run: |
           result=0
-          for test in query::tests::catalog_search_admits_only_selected_archives_before_its_stop_boundary query::tests::catalog_search_qualifies_multi_machine_order_and_conflicts query::tests::the_window_bounds_what_is_read_and_says_where_it_starts; do
+          for test in query::tests::catalog_search_admits_only_selected_archives_before_its_stop_boundary query::tests::catalog_search_qualifies_multi_machine_order_and_conflicts query::tests::the_window_bounds_what_is_read_and_says_where_it_starts query::tests::selected_query_refuses_changed_bytes_generations_and_revocation; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/query-fixture-case.log" 2>&1 || case_result=$?
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/query-fixture-case.log"; then case_result=1; fi
@@ -430,8 +437,6 @@ jobs:
           cargo test --locked -p semon-sessions --lib events::store::tree_state::namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
           SEMON_TEST_NOW=1795000000000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::configured::tests::selected57::selected60::configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_before_raw -- --exact --nocapture
-          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
-          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_two_source_publication_ack_finish_and_head -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_competing_publisher_and_begin_zero_writes -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_faults_rollback_ack_proof_and_hints -- --exact --nocapture
