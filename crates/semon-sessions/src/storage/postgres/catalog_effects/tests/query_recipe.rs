@@ -9,11 +9,7 @@ use crate::storage::{
 // A completed semantic publication schedules bounded cleanup. A Written
 // begin may only advance that cleanup; establish an actual stage before the
 // shared publication fixture starts consuming batches.
-fn begin_fixture_stage(
-    cache: &mut crate::events::EventCache,
-    options: &Options,
-    paths: &[String],
-) {
+fn begin_fixture_stage(cache: &mut crate::events::EventCache, options: &Options, paths: &[String]) {
     let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
     for _ in 0..256 {
         assert_eq!(
@@ -55,7 +51,11 @@ fn advance_imported_fixture(
             &crate::facts::MachineFacts::Local,
         )
         .unwrap();
-    begin_fixture_stage(&mut cache, options, &[old_path.to_str().unwrap().to_owned()]);
+    begin_fixture_stage(
+        &mut cache,
+        options,
+        &[old_path.to_str().unwrap().to_owned()],
+    );
     assert!(
         crate::storage::transfer::reported::tests::finish_catalog(
             &mut cache,
@@ -293,7 +293,9 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
 #[test]
 fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt() {
     use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
-    use crate::storage::transfer::reported::tests::{apply, root, seed_catalog_input, sqlite, stage};
+    use crate::storage::transfer::reported::tests::{
+        apply, root, seed_catalog_input, sqlite, stage,
+    };
     use rusqlite::OptionalExtension;
     let root = root();
     let source = sqlite(&root, "query-recipe-import");
