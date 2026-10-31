@@ -33,6 +33,27 @@ fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
     value
 }
 
+fn native_proof_tuple(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    source: &CatalogSource,
+) -> Result<(Vec<u8>, i64, bool), StorageError> {
+    let proof = super::super::selected_reader::native_proof(tx, generation, source)?;
+    let row = tx
+        .driver
+        .query_one(
+            "SELECT page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND page_generation=$4",
+            &[
+                &tx.namespace.as_str().as_bytes(),
+                &generation.as_bytes(),
+                &super::super::path(source)?.as_bytes(),
+                &proof.id.0.as_bytes(),
+            ],
+        )
+        .map_err(sqlstate::error)?;
+    Ok((row.get(0), row.get(1), row.get(2)))
+}
+
 fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::PreparedSources {
     crate::model::PreparedSources {
         base_generation: saved.base_generation.clone(),
@@ -822,6 +843,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut copy = copied_records.to_vec();
     copy.push(serde_json::json!({"type":"user","sessionId":"copy203-resumed","uuid":"copy203-new","parentUuid":"copy203-result","timestamp":"2026-10-01T00:00:03Z","message":{"role":"user","content":"sanitized resumed203 input"}}));
     for (path, records) in [(original, old), (resumed, copy)] {
+        fs::write(
+            path,
+            records
+                .iter()
+                .map(|record| format!("{record}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+    }
+    // A fresh same-harness owner with two unchanged sources exercises missing
+    // source composition without an earlier original History owner.
+    let composite_key = "fresh-composite";
+    let composite_a_path = options
+        .claude_home
+        .join("projects/project/fresh-composite-a.jsonl");
+    let composite_b_path = options
+        .claude_home
+        .join("projects/project/fresh-composite-b.jsonl");
+    for (path, records) in [
+        (
+            &composite_a_path,
+            [
+                serde_json::json!({"type":"user","sessionId":composite_key,"uuid":"fresh-a-user","timestamp":"2026-10-01T00:00:05Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized fresh composite A"}}),
+                serde_json::json!({"type":"assistant","sessionId":composite_key,"uuid":"fresh-a-answer","parentUuid":"fresh-a-user","timestamp":"2026-10-01T00:00:06Z","message":{"id":"fresh-a-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized fresh composite A reply"}]}}),
+            ],
+        ),
+        (
+            &composite_b_path,
+            [
+                serde_json::json!({"type":"user","sessionId":composite_key,"uuid":"fresh-b-user","timestamp":"2026-10-01T00:00:07Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized fresh composite B"}}),
+                serde_json::json!({"type":"assistant","sessionId":composite_key,"uuid":"fresh-b-answer","parentUuid":"fresh-b-user","timestamp":"2026-10-01T00:00:08Z","message":{"id":"fresh-b-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized fresh composite B reply"}]}}),
+            ],
+        ),
+    ] {
         fs::write(
             path,
             records
@@ -2378,6 +2433,35 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
+    let pid_owner_key = prepared
+        .rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.native_ids.iter().any(|id| id == "one"))
+        .unwrap()
+        .key
+        .clone();
+    let (pid_original_source, pid_original_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            |snapshot| {
+                let original = snapshot
+                    .catalog(&pid_owner_key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let source = original
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let proof = native_proof_tuple(&mut tx, &generation, &source)?;
+                Ok((source, proof))
+            },
+        )
+        .unwrap();
     assert!(!pg.note_catalog_audit(Some("stale"), 1790812802000).unwrap());
     assert!(
         pg.note_catalog_audit(Some(&generation), 1790812802000)
@@ -4733,10 +4817,37 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     crate::model::summary::CatalogLifecycle::Current
                 );
                 let history = snapshot.owner(&pid_owner.key)?.is_some();
+                assert!(history, "the PID owner keeps its original History source");
                 let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let history_source = row
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(
+                    history_source == &pid_original_source,
+                    "History keeps the exact original source ledger"
+                );
+                let current_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?;
+                let history_proof =
+                    native_proof_tuple(&mut tx, &moved_store.generation, history_source)?;
+                let current_proof =
+                    native_proof_tuple(&mut tx, &moved_store.generation, current_source)?;
+                assert!(
+                    history_proof == pid_original_proof,
+                    "History keeps the complete original Native proof tuple"
+                );
+                assert!(
+                    history_proof != current_proof,
+                    "a different Current proof cannot substitute for History"
+                );
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(
                         &mut tx,
@@ -5438,6 +5549,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .unwrap();
     let agent = claude_agent.to_str().unwrap().to_owned();
     let agent_removal = vec![(agent.clone(), store.ledger(&agent).unwrap())];
+    let composite_b = composite_b_path.to_str().unwrap().to_owned();
+    let composite_b_removal =
+        vec![(composite_b.clone(), store.ledger(&composite_b).unwrap())];
     let gone = bulk[1].full_path(&facts_options);
     let gone_path = gone.to_str().unwrap().to_owned();
     let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
@@ -5644,6 +5758,43 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let qualified = store.session_catalog_generation().unwrap();
+    let (composite_current_source, composite_withdrawn_source, composite_old_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            qualified.as_deref().unwrap(),
+            |snapshot| {
+                assert!(
+                    snapshot.owner(composite_key)?.is_none(),
+                    "the fresh owner has no History before Source B is withdrawn"
+                );
+                let current = snapshot
+                    .catalog(composite_key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(current.sources.len(), 2);
+                let current_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.path.to_str() == composite_a_path.to_str())
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let withdrawn_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.path.to_str() == composite_b_path.to_str())
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let proof = native_proof_tuple(
+                    &mut tx,
+                    qualified.as_deref().unwrap(),
+                    &withdrawn_source,
+                )?;
+                Ok((current_source, withdrawn_source, proof))
+            },
+        )
+        .unwrap();
     fs::rename(&claude_agent, oracle.root.join("retained-agent180.jsonl")).unwrap();
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
@@ -5674,8 +5825,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(store.session_catalog_generation().unwrap(), qualified);
+    fs::rename(
+        &composite_b_path,
+        oracle.root.join("retained-fresh-composite-b.jsonl"),
+    )
+    .unwrap();
+    assert_eq!(
+        store.remove_files(&composite_b_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(store.session_catalog_generation().unwrap(), qualified);
     // The ordinary semantic catch-up claims the `removed` invalidations and
-    // republishes the connected parent without the withdrawn Sources.
+    // republishes connected owners without the withdrawn Sources.
     let mut catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let connected = [
@@ -5690,6 +5851,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::Input {
             root: crate::InputRoot::Claude,
             path: "projects/project/one/subagents/agent-related191.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/fresh-composite-a.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/fresh-composite-b.jsonl".into(),
         },
     ];
     let paths = connected
@@ -5760,6 +5929,102 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let caught = ack.1.unwrap();
     assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
+    let (composite_history_source, history_b_proof, current_a_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &caught,
+            |snapshot| {
+                assert!(snapshot.owner(composite_key)?.is_some());
+                let current = snapshot
+                    .catalog(composite_key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let (history, _, _) = snapshot
+                    .selected(composite_key, true, 0, 1)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let history_a = history
+                    .sources
+                    .iter()
+                    .find(|source| source.path == composite_current_source.path)
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(history_a, &composite_current_source);
+                let history_b = history
+                    .sources
+                    .iter()
+                    .find(|source| source.path == composite_withdrawn_source.path)
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                assert_eq!(history_b, composite_withdrawn_source);
+                assert!(
+                    current.sources.contains(&composite_current_source),
+                    "the unchanged same-harness Source A stays Current"
+                );
+                assert!(
+                    !current.sources.contains(&composite_withdrawn_source),
+                    "the same-harness Source B is withdrawn from Current"
+                );
+                assert_eq!(
+                    current.sources,
+                    vec![composite_current_source.clone()],
+                    "Current is exactly Source A after the withdrawal"
+                );
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let original: bool = tx
+                    .driver
+                    .query_one(
+                        "SELECT original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                        &[
+                            &namespace.as_str().as_bytes(),
+                            &caught.as_bytes(),
+                            &composite_key.as_bytes(),
+                        ],
+                    )
+                    .map_err(sqlstate::error)?
+                    .get(0);
+                assert!(!original, "this is a new composite History owner");
+                let stored_history_sources: Vec<Vec<u8>> = tx
+                    .driver
+                    .query(
+                        "SELECT s.source_path FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_sources s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3 ORDER BY s.source_path",
+                        &[
+                            &namespace.as_str().as_bytes(),
+                            &caught.as_bytes(),
+                            &composite_key.as_bytes(),
+                        ],
+                    )
+                    .map_err(sqlstate::error)?
+                    .iter()
+                    .map(|row| row.get(0))
+                    .collect();
+                assert_eq!(
+                    stored_history_sources,
+                    vec![
+                        super::super::path(&composite_withdrawn_source)?
+                            .as_bytes()
+                            .to_vec()
+                    ],
+                    "History stores only the missing Source B; Current owns A's staged proof"
+                );
+                let history_b_proof = native_proof_tuple(&mut tx, &caught, &history_b)?;
+                let current_a_proof =
+                    native_proof_tuple(&mut tx, &caught, &composite_current_source)?;
+                Ok((history_b, history_b_proof, current_a_proof))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        composite_history_source, composite_withdrawn_source,
+        "composite History retains the exact withdrawn Source B"
+    );
+    assert_eq!(
+        history_b_proof, composite_old_proof,
+        "composite History carries Source B's complete old Native proof tuple"
+    );
+    assert_ne!(
+        history_b_proof, current_a_proof,
+        "Current Source A's proof cannot substitute for retained Source B"
+    );
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
