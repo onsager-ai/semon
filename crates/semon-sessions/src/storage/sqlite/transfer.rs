@@ -4,6 +4,8 @@ mod native;
 mod pages;
 mod rows;
 mod source;
+#[cfg(all(test, feature = "postgres"))]
+pub(crate) use catalog::tests::seed_large_presentation;
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,

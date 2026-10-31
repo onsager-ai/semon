@@ -1182,7 +1182,6 @@ pub(crate) fn seed_codex_usage(config: &StoreConfig, path: &Path) {
     drop(cache);
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) mod selected_receipts {
     use super::*;
     #[derive(Clone, Default)]
@@ -1222,6 +1221,7 @@ pub(crate) mod selected_receipts {
         }
     }
 
+    #[cfg(feature = "postgres")]
     pub(crate) fn selected_receipts(
         config: &StoreConfig,
         options: &crate::Options,

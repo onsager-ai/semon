@@ -625,7 +625,8 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_real_large_presentation_reverse_and_final_rollback() {
-        use catalog_rows::tests::{assert_provider_transcript, seed_large_presentation};
+        use catalog_rows::tests::assert_provider_transcript;
+        use crate::storage::sqlite::transfer::seed_large_presentation;
         let root = root();
         let source = sqlite(&root, "pg-real-large-source");
         let reverse = sqlite(&root, "pg-real-large-reverse");
@@ -635,7 +636,10 @@ mod tests {
         let (pool, _) = super::super::super::tests::fixture(|_| {});
         let control = PgCancellation::default();
         let target = StoreConfig {
-            backend: crate::storage::StoreBackend::Postgres { pool: pool.clone(), control: control.clone() },
+            backend: crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            },
             namespace: source.namespace.clone(),
             expected_stream_epoch: source.expected_stream_epoch.clone(),
         };
@@ -644,24 +648,33 @@ mod tests {
         let manifest = stage(&source, &target, &[180; 32]);
         std::fs::remove_dir_all(&options.claude_home).unwrap();
         let mut injected = false;
-        for sequence in 1..=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence {
-            let page = source.transfer_inbox().staged_page(&manifest, sequence).unwrap();
+        for sequence in 1..=source
+            .transfer_inbox()
+            .checkpoint(&manifest)
+            .unwrap()
+            .sequence
+        {
+            let page = source
+                .transfer_inbox()
+                .staged_page(&manifest, sequence)
+                .unwrap();
             assert!(page.encoded().unwrap().len() <= transfer::MAX_PAGE_BYTES);
             let final_presentation = page.records.iter().any(|record| matches!(record,
                 TransferRecord::CatalogRow { kind: CatalogRowKind::Presentation, key, part, parts, .. }
                     if key[0].as_str() == Some(id.as_str()) && part + 1 == *parts
             ));
             if final_presentation {
-                let failure: Result<(), StorageError> = transaction(&target, &pool, &control, |tx| {
-                    let apply = transfer::reported::prepare_apply(tx, &manifest, sequence)?;
-                    assert!(!apply.replayed);
-                    for fragment in &apply.records {
-                        super::apply(tx, fragment, &manifest.identity())?;
-                    }
-                    // Fail after complete authenticated row insertion and
-                    // fragment cleanup, before its page receipt can commit.
-                    Err(StorageError::Conflict)
-                });
+                let failure: Result<(), StorageError> =
+                    transaction(&target, &pool, &control, |tx| {
+                        let apply = transfer::reported::prepare_apply(tx, &manifest, sequence)?;
+                        assert!(!apply.replayed);
+                        for fragment in &apply.records {
+                            super::apply(tx, fragment, &manifest.identity())?;
+                        }
+                        // Fail after complete authenticated row insertion and
+                        // fragment cleanup, before its page receipt can commit.
+                        Err(StorageError::Conflict)
+                    });
                 assert_eq!(failure, Err(StorageError::Conflict));
                 transaction(&target, &pool, &control, |tx| {
                     let ns = target.namespace.as_str().as_bytes();
@@ -676,18 +689,33 @@ mod tests {
                 }).unwrap();
                 injected = true;
             }
-            let applied = target.transfer_inbox().apply_page(&manifest, sequence).unwrap();
-            assert_eq!(target.transfer_inbox().apply_page(&manifest, sequence).unwrap(), applied);
+            let applied = target
+                .transfer_inbox()
+                .apply_page(&manifest, sequence)
+                .unwrap();
+            assert_eq!(
+                target
+                    .transfer_inbox()
+                    .apply_page(&manifest, sequence)
+                    .unwrap(),
+                applied
+            );
         }
         assert!(injected);
-        target.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), &manifest, &options).unwrap();
+        target
+            .transfer_inbox()
+            .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
+            .unwrap();
         {
             let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
             assert_provider_transcript(&target, &options, &host, &key);
         }
         let reversed = stage(&target, &reverse, &[181; 32]);
         apply(&reverse, &reversed);
-        reverse.transfer_inbox().admit_catalog_from(&target.transfer_inbox(), &reversed, &options).unwrap();
+        reverse
+            .transfer_inbox()
+            .admit_catalog_from(&target.transfer_inbox(), &reversed, &options)
+            .unwrap();
         assert_provider_transcript(&reverse, &options, &host, &key);
         std::fs::remove_dir_all(root).unwrap();
     }
