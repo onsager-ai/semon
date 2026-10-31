@@ -91,7 +91,7 @@ jobs:
         shell: bash
         run: |
           result=0
-          for group in configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody configured_semantic_domain61_late_child_restarts_complete_native_cohort configured_semantic_selected65_private_witness_is_bound_independently_of_rows configured_semantic_real_model_claude_replacement_rollback_stale_and_history archived_event_index_survives_absence_without_current_membership retained_projection_falls_back_to_history_only_when_main_omits_path transcript_snapshot_keeps_original_recipes_during_an_active_append; do
+          for group in configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody configured_semantic_domain61_late_child_restarts_complete_native_cohort configured_semantic_selected65_private_witness_is_bound_independently_of_rows configured_semantic_real_model_claude_replacement_rollback_stale_and_history archived_event_index_survives_absence_without_current_membership retained_projection_falls_back_to_history_only_when_main_omits_path transcript_snapshot_keeps_original_recipes_during_an_active_append retained_history_list_keeps_indexed_fields_and_positions_across_append; do
             group_result=0
             cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/retained-contract-case.log" 2>&1 || group_result=$?
             if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/retained-contract-case.log"; then group_result=1; fi
@@ -140,7 +140,7 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           result=0
-          for test in recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key recovery_stage_only_preimage_authenticates_before_inserting_current_grant recovery_query_row_and_grant_roll_back_when_grant_update_fails recovery_tampered_preimage_refuses_before_producer_reads_or_writes recovery_selected_repair_cancellation_rolls_back_publication recovery_index_ahead_repriced_get_session_uses_bound_global_runtime; do
+          for test in recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key recovery_stage_only_preimage_authenticates_before_inserting_current_grant recovery_query_row_and_grant_roll_back_when_grant_update_fails recovery_tampered_preimage_refuses_before_producer_reads_or_writes recovery_selected_repair_cancellation_rolls_back_publication recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "query::tests::recovery_tests::$test" -- --exact --nocapture > "$RUNNER_TEMP/recovery-owner-case.log" 2>&1 || case_result=$?
             if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/recovery-owner-case.log"; then case_result=1; fi
