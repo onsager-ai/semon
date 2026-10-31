@@ -5341,7 +5341,31 @@ impl<'a> Builder<'a> {
         };
         let origin = |turn: &Turn| {
             turn.start.as_deref().and_then(|start| placed(start, Place::In)).map(|at| recipe(at, "prompt"))
-                .or_else(|| tx.slots.iter().find(|slot| slot.turn.as_deref()==Some(&turn.id) && matches!(slot.kind, SlotKind::U)).and_then(|slot| slot.file.as_ref().and_then(|file| file.path.to_str().map(|path|decorate(serde_json::json!({"path":path,"offset":slot.offset,"block":slot.block,"kind":"prompt"}))))))
+                .or_else(|| {
+                    tx.slots
+                        .iter()
+                        .find(|slot| {
+                            slot.turn.as_deref() == Some(&turn.id)
+                                && matches!(slot.kind, SlotKind::U)
+                        })
+                        .and_then(|slot| {
+                            let file = slot.file.as_ref()?;
+                            let path = file.path.to_str()?;
+                            let mut sources =
+                                self.files.iter().filter(|source| source.path == file.path);
+                            let source = sources.next()?;
+                            if sources.next().is_some() {
+                                return None;
+                            }
+                            Some(decorate(serde_json::json!({
+                                "path": path,
+                                "offset": slot.offset,
+                                "block": slot.block,
+                                "kind": "prompt",
+                                "source": summary::source(source)
+                            })))
+                        })
+                })
         };
         let mut events = serde_json::Map::new();
         for h in self.handoffs.iter().filter(|h| {

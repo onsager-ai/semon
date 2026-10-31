@@ -1866,6 +1866,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     let prepared =
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
+    let parent_row = prepared
+        .rows
+        .iter()
+        .find(|row| row.native_ids.iter().any(|id| id == "one"))
+        .unwrap();
+    let parent_path = claude_parent.to_str().unwrap();
+    let origin = parent_row.query.as_ref().unwrap()["selected"]["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| {
+            edge["query"]["from"] == "one"
+                && edge["query"]["to"] == "related154"
+                && edge["query_content"]["origin"]["kind"] == "prompt"
+                && edge["query_content"]["origin"]["path"] == parent_path
+        })
+        .map(|edge| &edge["query_content"]["origin"])
+        .expect("initial user-turn origin keeps its exact native recipe");
+    assert_eq!(origin["offset"], 0);
+    assert_eq!(origin["block"], 0);
+    let origin_source: crate::model::summary::CatalogSource =
+        serde_json::from_value(origin["source"].clone()).unwrap();
+    assert_eq!(&origin_source.path, &claude_parent);
+    assert!(parent_row.sources.contains(&origin_source));
     assert_eq!(prepared.rows.len(), oracle.rows.len());
     assert_eq!(producer_rows(&prepared.rows), producer_rows(&oracle.rows));
     let copied = prepared
