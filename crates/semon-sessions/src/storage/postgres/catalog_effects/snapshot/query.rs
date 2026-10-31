@@ -86,7 +86,9 @@ fn cohort_page(
     for row in page {
         let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
         let key = row.get::<_, Vec<u8>>(0);
-        *bytes_left = bytes_left.checked_sub(64 + key.len() + bytes.len()).ok_or(StorageError::Busy)?;
+        *bytes_left = bytes_left
+            .checked_sub(64 + key.len() + bytes.len())
+            .ok_or(StorageError::Busy)?;
         crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
         let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&bytes)
             .map_err(|_| cohort_scope_changed("page_metadata_invalid"))?;
@@ -114,18 +116,32 @@ fn finite_history_page(
     let page = finite_history_page_rows(snapshot, cutoff, active, after, *bytes_left)?;
     let mut output = Vec::new();
     for record in page {
-        let key = record.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        let metadata = record.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
-        *bytes_left = bytes_left.checked_sub(64 + key.len() + metadata.len()).ok_or(StorageError::Busy)?;
+        let key = record
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or(StorageError::Busy)?;
+        let metadata = record
+            .get::<_, Option<Vec<u8>>>(1)
+            .ok_or(StorageError::Busy)?;
+        *bytes_left = bytes_left
+            .checked_sub(64 + key.len() + metadata.len())
+            .ok_or(StorageError::Busy)?;
         let row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
             .map_err(|_| cohort_scope_changed("finite_history_metadata_invalid"))?;
         let key_digest = record.get::<_, Vec<u8>>(3);
         if row.key.as_bytes() != key || digest(row.key.as_bytes()) != key_digest {
             return Err(cohort_scope_changed("finite_history_identity_mismatch"));
         }
-        output.push((row, record.get::<_, Option<i64>>(2).unwrap_or(0), key_digest));
+        output.push((
+            row,
+            record.get::<_, Option<i64>>(2).unwrap_or(0),
+            key_digest,
+        ));
     }
-    snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?.check()?;
+    snapshot
+        .tx
+        .lock()
+        .map_err(|_| StorageError::Unavailable)?
+        .check()?;
     Ok(output)
 }
 
@@ -136,19 +152,37 @@ fn finite_history_page_rows(
     after: Option<&(i64, Vec<u8>)>,
     bytes_left: usize,
 ) -> Result<Vec<tokio_postgres::Row>, StorageError> {
-    snapshot.require_current().map_err(|_| cohort_scope_changed("snapshot_not_current"))?;
+    snapshot
+        .require_current()
+        .map_err(|_| cohort_scope_changed("snapshot_not_current"))?;
     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
     tx.check()?;
     let request_budget = i64::try_from(bytes_left).map_err(|_| StorageError::Busy)?;
     let predicate = match (active, after.is_some()) {
-        (true, false) => "query_active=true AND $5::bytea IS NULL AND $3::bigint IS NOT NULL AND $4::bigint IS NULL",
-        (true, true) => "query_active=true AND key_digest>$5 AND $3::bigint IS NOT NULL AND $4::bigint IS NULL",
+        (true, false) => {
+            "query_active=true AND $5::bytea IS NULL AND $3::bigint IS NOT NULL AND $4::bigint IS NULL"
+        }
+        (true, true) => {
+            "query_active=true AND key_digest>$5 AND $3::bigint IS NOT NULL AND $4::bigint IS NULL"
+        }
         (false, false) => "query_activity>=$3 AND $4::bigint IS NULL AND $5::bytea IS NULL",
         (false, true) => "query_activity>=$3 AND (query_activity,key_digest)>($4,$5)",
     };
-    let order = if active { "key_digest" } else { "query_activity,key_digest" };
-    let after_activity = if active { None } else { after.map(|cursor| cursor.0) };
-    let output_order = if active { "p.key_digest" } else { "p.query_activity,p.key_digest" };
+    let order = if active {
+        "key_digest"
+    } else {
+        "query_activity,key_digest"
+    };
+    let after_activity = if active {
+        None
+    } else {
+        after.map(|cursor| cursor.0)
+    };
+    let output_order = if active {
+        "p.key_digest"
+    } else {
+        "p.query_activity,p.key_digest"
+    };
     let after_key = after.map(|cursor| cursor.1.as_slice());
     let page = tx.driver.query(&format!(
         "WITH page AS MATERIALIZED (
@@ -182,7 +216,9 @@ fn charge_catalog_row(
     bytes_left: &mut usize,
 ) -> Result<(), StorageError> {
     let metadata = serde_json::to_vec(row).map_err(|_| StorageError::ScopeChanged)?;
-    *bytes_left = bytes_left.checked_sub(64 + row.key.len() + metadata.len()).ok_or(StorageError::Busy)?;
+    *bytes_left = bytes_left
+        .checked_sub(64 + row.key.len() + metadata.len())
+        .ok_or(StorageError::Busy)?;
     Ok(())
 }
 
@@ -1149,18 +1185,21 @@ mod tests {
         super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
             let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
             assert_eq!(rows.len(), 65);
-            assert!(rows
-                .iter()
-                .all(|row| row.get::<_, Option<Vec<u8>>>(0).is_none()));
-            assert!(rows
-                .iter()
-                .all(|row| row.get::<_, Option<Vec<u8>>>(1).is_none()));
+            assert!(
+                rows.iter()
+                    .all(|row| row.get::<_, Option<Vec<u8>>>(0).is_none())
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| row.get::<_, Option<Vec<u8>>>(1).is_none())
+            );
             assert_eq!(
                 finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
                 Some(StorageError::Busy)
             );
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
             let ns = namespace.as_str().as_bytes();
@@ -1186,6 +1225,7 @@ mod tests {
                 Some(StorageError::Busy)
             );
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 }

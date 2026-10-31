@@ -238,13 +238,22 @@ fn read(
             .query(rusqlite::params_from_iter(cutoff))
             .map_err(unavailable)?;
         while let Some(record) = records.next().map_err(unavailable)? {
-            let key = record.get_ref(0).map_err(unavailable)?.as_str().map_err(unavailable)?;
+            let key = record
+                .get_ref(0)
+                .map_err(unavailable)?
+                .as_str()
+                .map_err(unavailable)?;
             spend(bytes_left, 64 + key.len())?;
             candidates.insert(key.to_owned());
         }
         drop(records);
         #[cfg(test)]
-        measured(0, 0, 0, statement.get_status(rusqlite::StatementStatus::VmStep));
+        measured(
+            0,
+            0,
+            0,
+            statement.get_status(rusqlite::StatementStatus::VmStep),
+        );
     }
     let mut keep = BTreeSet::new();
     let mut selected_rows = BTreeMap::new();
@@ -274,7 +283,9 @@ fn read(
                 }
             }
         }
-        if (current_eligible || cutoff.is_none()) && let Some(row) = current {
+        if (current_eligible || cutoff.is_none())
+            && let Some(row) = current
+        {
             selected_rows.insert(key.clone(), (row, false));
             keep.insert(key);
         }

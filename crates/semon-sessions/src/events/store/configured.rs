@@ -3722,7 +3722,13 @@ mod tests {
         crate::model::relation_stage::Batch,
         crate::model::SemanticModelBatch,
     ) {
-        model_ready_many(fixture, cache, options, std::slice::from_ref(input), runtime)
+        model_ready_many(
+            fixture,
+            cache,
+            options,
+            std::slice::from_ref(input),
+            runtime,
+        )
     }
 
     fn model_ready_many(
@@ -3776,12 +3782,7 @@ mod tests {
                 assert_eq!(shared_state(fixture), before);
             }
             let model = cache
-                .prepare_semantic_model_batch(
-                    options,
-                    inputs,
-                    &batch,
-                    1_790_000_000_000,
-                )
+                .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 return (batch, model);
@@ -4394,19 +4395,31 @@ mod tests {
             current_content_generation.as_ref(),
             current_projection_generation.as_ref(),
         ) {
-            assert_ne!(content, projection, "Home content and slot projection generations are distinct");
+            assert_ne!(
+                content, projection,
+                "Home content and slot projection generations are distinct"
+            );
         }
         if query_row.lifecycle == crate::model::summary::CatalogLifecycle::Retained {
-            assert!(part.witnesses.iter().any(|(key, _, history)| {
-                key == &query_row.key && *history
-            }), "all-time retained Query uses its selected History source");
-            assert!(!part.content.contains_key(&query_row.key), "History has no overview content hint without its saved summary");
+            assert!(
+                part.witnesses
+                    .iter()
+                    .any(|(key, _, history)| { key == &query_row.key && *history }),
+                "all-time retained Query uses its selected History source"
+            );
+            assert!(
+                !part.content.contains_key(&query_row.key),
+                "History has no overview content hint without its saved summary"
+            );
             let summary = &part.rows[&query_row.key]["summary"];
             assert!(
                 summary["alive"].is_null(),
                 "retained rows have no live process state"
             );
-            assert!(summary["run"].is_null(), "retained rows have no live run state");
+            assert!(
+                summary["run"].is_null(),
+                "retained rows have no live run state"
+            );
             assert!(
                 summary["open_question"].is_null(),
                 "retained rows have no live question"
@@ -4985,17 +4998,34 @@ mod tests {
         fs::write(peer_path.with_extension("meta.json"), "{\"toolUseId\":\"toolu-peer\",\"description\":\"peer\",\"agentType\":\"general-purpose\"}").unwrap();
         let mut cache = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap();
-        cache.ingest(&"b".repeat(64), &owner_path, "claude").unwrap();
+        )
+        .unwrap();
+        cache
+            .ingest(&"b".repeat(64), &owner_path, "claude")
+            .unwrap();
         cache.ingest(&"b".repeat(64), &peer_path, "claude").unwrap();
         let mut inputs = vec![inputs[1].clone(), peer_input];
         inputs.sort();
-        let (batch, model) = model_ready_many(&fixture, &mut cache, options, &inputs, "history-only");
-        cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+        let (batch, model) =
+            model_ready_many(&fixture, &mut cache, options, &inputs, "history-only");
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
         cache.finish_semantic_stage(batch.epoch).unwrap();
-        let owner = model.prepared().rows.iter().find(|row| row.key == "model-1").unwrap();
+        let owner = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key == "model-1")
+            .unwrap();
         let cutoff = owner.query.as_ref().unwrap()["last"].as_i64().unwrap() + 1;
-        assert!(!matches!(owner.query.as_ref().unwrap()["state"].as_str(), Some("work" | "wait")), "the saved edge alone must admit the old owner");
+        assert!(
+            !matches!(
+                owner.query.as_ref().unwrap()["state"].as_str(),
+                Some("work" | "wait")
+            ),
+            "the saved edge alone must admit the old owner"
+        );
         let window = crate::storage::query::history_window(owner, Some(cutoff)).unwrap();
         assert!(window.member && !window.edges.is_empty());
 
@@ -5005,15 +5035,27 @@ mod tests {
         let source = crate::storage::sqlite::semantic::AdmittedSource::native(source_owner.clone());
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap().into_test_connection();
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let history = crate::storage::sqlite::history::OriginalHistory::admitted(&db, &source).unwrap();
+        let history =
+            crate::storage::sqlite::history::OriginalHistory::admitted(&db, &source).unwrap();
         for row in &model.prepared().rows {
             assert!(preserve_original(&history, row).unwrap());
-            db.execute("DELETE FROM session_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), row.key]).unwrap();
+            db.execute(
+                "DELETE FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), row.key],
+            )
+            .unwrap();
             crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-                &db, config.namespace.as_str(), &row.key, source_owner.admission(), config.expected_stream_epoch.as_deref().unwrap(),
-            ).unwrap();
+                &db,
+                config.namespace.as_str(),
+                &row.key,
+                source_owner.admission(),
+                config.expected_stream_epoch.as_deref().unwrap(),
+            )
+            .unwrap();
         }
         db.execute_batch("COMMIT").unwrap();
         let mut finite = options.clone();
@@ -5021,7 +5063,10 @@ mod tests {
         finite.since = std::time::Duration::from_millis(1);
         let port = crate::storage::sqlite::query::SqliteQueryCatalog {
             options: finite,
-            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap().reader_binding().unwrap(),
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&config)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
         };
         let now = cutoff + 1;
         let mut baseline = None::<(_, _, _, _, crate::storage::query::Work)>;
@@ -5038,15 +5083,35 @@ mod tests {
             assert!(part.rows.values().all(|row| row["summary"]["alive"].is_null() && row["summary"]["run"].is_null()));
             port.validate(&config.namespace, &part).unwrap();
             if let Some((rows, edges, turns, spent, initial)) = &baseline {
-                assert_eq!((&part.rows, &part.edges, &part.turns, &(8 * 1024 * 1024 - left)), (rows, edges, turns, spent));
+                assert_eq!(
+                    (
+                        &part.rows,
+                        &part.edges,
+                        &part.turns,
+                        &(8 * 1024 * 1024 - left)
+                    ),
+                    (rows, edges, turns, spent)
+                );
                 assert_eq!(work.metadata, initial.metadata);
-                assert!(work.vm_steps <= initial.vm_steps + 64, "expired History changed indexed work: {initial:?} -> {work:?}");
+                assert!(
+                    work.vm_steps <= initial.vm_steps + 64,
+                    "expired History changed indexed work: {initial:?} -> {work:?}"
+                );
             } else {
-                baseline = Some((part.rows, part.edges, part.turns, 8 * 1024 * 1024 - left, work));
+                baseline = Some((
+                    part.rows,
+                    part.edges,
+                    part.turns,
+                    8 * 1024 * 1024 - left,
+                    work,
+                ));
             }
         }
         let mut left = 64;
-        let error = port.read_cohort(&config.namespace, now, &mut left).err().expect("eligible candidate keys must charge before materialization");
+        let error = port
+            .read_cohort(&config.namespace, now, &mut left)
+            .err()
+            .expect("eligible candidate keys must charge before materialization");
         assert!(error.to_string().contains("budget"));
     }
 
@@ -5203,14 +5268,18 @@ mod tests {
             .iter()
             .find(|row| row.key != expected.key)
             .expect("appended Claude subagent peer");
-        assert!(current.query.as_ref().unwrap()["selected"]["edges"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|edge| {
-                (edge["query"]["from"] == expected.key && edge["query"]["to"] == peer.key)
-                    || (edge["query"]["to"] == expected.key && edge["query"]["from"] == peer.key)
-            }), "the appended Current graph records its new peer");
+        assert!(
+            current.query.as_ref().unwrap()["selected"]["edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|edge| {
+                    (edge["query"]["from"] == expected.key && edge["query"]["to"] == peer.key)
+                        || (edge["query"]["to"] == expected.key
+                            && edge["query"]["from"] == peer.key)
+                }),
+            "the appended Current graph records its new peer"
+        );
         let retained_source_generation =
             crate::retention::source_generation(&expected.sources).unwrap();
         let current_source_generation =
@@ -5232,7 +5301,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(retained_header_source_generation, retained_source_generation);
+        assert_eq!(
+            retained_header_source_generation,
+            retained_source_generation
+        );
         assert_eq!(current_header_source_generation, current_source_generation);
         // Query's all-time retained-history preference remains exact after
         // replacement; the finite-window Current selection follows below.
@@ -5261,9 +5333,8 @@ mod tests {
         let finite_cutoff = history_last + 1;
         let mut finite_options = options[1].clone();
         finite_options.all = false;
-        finite_options.since = std::time::Duration::from_millis(
-            u64::try_from(finite_now - finite_cutoff).unwrap(),
-        );
+        finite_options.since =
+            std::time::Duration::from_millis(u64::try_from(finite_now - finite_cutoff).unwrap());
         let finite_port = crate::storage::sqlite::query::SqliteQueryCatalog {
             options: finite_options,
             binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&b)
@@ -5280,10 +5351,17 @@ mod tests {
             finite_part.rows[&current.key], current_facts,
             "a finite cutoff selects Current when only Current is recent"
         );
-        assert!(finite_part.rows.contains_key(&peer.key), "Current relationship context includes its new peer");
-        assert!(finite_part.witnesses.iter().any(|(key, _, history)| {
-            key == &current.key && !history
-        }), "finite selection binds the recent Current Query facts");
+        assert!(
+            finite_part.rows.contains_key(&peer.key),
+            "Current relationship context includes its new peer"
+        );
+        assert!(
+            finite_part
+                .witnesses
+                .iter()
+                .any(|(key, _, history)| { key == &current.key && !history }),
+            "finite selection binds the recent Current Query facts"
+        );
         finite_port.validate(&b.namespace, &finite_part).unwrap();
 
         let facts_path = options[1].facts.as_ref().unwrap();

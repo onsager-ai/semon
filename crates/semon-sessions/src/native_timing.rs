@@ -1255,9 +1255,7 @@ impl ColdDiscoveryProgress {
     }
 }
 
-pub(crate) struct Phase(
-    Option<(String, &'static str, Instant, Option<ThreadCpuTimeNs>)>,
-);
+pub(crate) struct Phase(Option<(String, &'static str, Instant, Option<ThreadCpuTimeNs>)>);
 
 impl Phase {
     pub(crate) fn new(cache: &Path, name: &'static str) -> Self {

@@ -134,8 +134,8 @@ impl ContextLookup for Snapshot<'_, '_> {
                     break;
                 }
                 let parent_digest = digest(parent.as_bytes());
-                let limit = i64::try_from(remaining)
-                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                let limit =
+                    i64::try_from(remaining).map_err(|_| io::Error::other(StorageError::Busy))?;
                 let visited_bytes = known
                     .iter()
                     .chain(next.iter())
@@ -149,8 +149,7 @@ impl ContextLookup for Snapshot<'_, '_> {
                     .collect::<Vec<_>>();
                 let byte_limit = crate::selected_read::max_dynamic_bytes(64, remaining)
                     .and_then(|bytes| {
-                        i64::try_from(bytes)
-                            .map_err(|_| io::Error::other(StorageError::Busy))
+                        i64::try_from(bytes).map_err(|_| io::Error::other(StorageError::Busy))
                     })
                     .map_err(|_| io::Error::other(StorageError::Busy))?;
                 let rows = tx
