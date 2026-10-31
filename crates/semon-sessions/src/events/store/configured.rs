@@ -4756,6 +4756,24 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_history_activity_profile_refuses_without_adoption() {
+        for change in [
+            "DROP INDEX session_history_query_activity",
+            "DROP INDEX session_history_query_active",
+            "DROP INDEX session_history_query_activity; ALTER TABLE session_history_catalog DROP COLUMN query_activity",
+        ] {
+            let (fixture, _, _, _) = model_sources();
+            fixture.db().execute_batch(change).unwrap();
+            let before = shared_state(&fixture);
+            assert!(matches!(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config),
+                Err(StorageError::NamespaceUpgradePending)
+            ));
+            assert_eq!(shared_state(&fixture), before);
+        }
+    }
+
+    #[test]
     fn configured_semantic_unsupported_trace_profile_refuses_without_adoption() {
         let (a, _, _, _) = model_sources();
         // This is a current-format but unsupported physical profile containing
@@ -4941,6 +4959,95 @@ mod tests {
             proofs,
             "original Stage receipts, proof rows and references are immutable"
         );
+    }
+
+    #[test]
+    fn configured_semantic_finite_history_only_saved_edge_is_indexed_and_bounded() {
+        use crate::storage::{catalog::preserve_original, query::QueryCatalogStore};
+        let (fixture, config, options, inputs) = model_sources();
+        let options = &options[1];
+        let owner_path = inputs[1].full_path(options);
+        fs::write(&owner_path, concat!(
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"first\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"cwd\":\"/sanitized\",\"message\":{\"role\":\"user\",\"content\":\"parent prompt\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"spawn\",\"parentUuid\":\"first\",\"timestamp\":\"2026-10-01T00:00:30Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu-peer\",\"name\":\"Task\",\"input\":{\"description\":\"peer\",\"subagent_type\":\"general-purpose\"}}]}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"answer\",\"parentUuid\":\"spawn\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"parent finished\"}]}}\n"
+        )).unwrap();
+        let peer_input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/model-1/subagents/agent-peer.jsonl".into(),
+        };
+        let peer_path = peer_input.full_path(options);
+        fs::create_dir_all(peer_path.parent().unwrap()).unwrap();
+        fs::write(&peer_path, concat!(
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:04:00Z\",\"message\":{\"role\":\"user\",\"content\":\"peer prompt\"}}\n",
+            "{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-done\",\"parentUuid\":\"peer-first\",\"timestamp\":\"2026-10-01T00:05:00Z\",\"message\":{\"role\":\"assistant\",\"stop_reason\":\"end_turn\",\"content\":[{\"type\":\"text\",\"text\":\"peer finished\"}]}}\n"
+        )).unwrap();
+        fs::write(peer_path.with_extension("meta.json"), "{\"toolUseId\":\"toolu-peer\",\"description\":\"peer\",\"agentType\":\"general-purpose\"}").unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        ).unwrap();
+        cache.ingest(&"b".repeat(64), &owner_path, "claude").unwrap();
+        cache.ingest(&"b".repeat(64), &peer_path, "claude").unwrap();
+        let mut inputs = vec![inputs[1].clone(), peer_input];
+        inputs.sort();
+        let (batch, model) = model_ready_many(&fixture, &mut cache, options, &inputs, "history-only");
+        cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        let owner = model.prepared().rows.iter().find(|row| row.key == "model-1").unwrap();
+        let cutoff = owner.query.as_ref().unwrap()["last"].as_i64().unwrap() + 1;
+        assert!(!matches!(owner.query.as_ref().unwrap()["state"].as_str(), Some("work" | "wait")), "the saved edge alone must admit the old owner");
+        let window = crate::storage::query::history_window(owner, Some(cutoff)).unwrap();
+        assert!(window.member && !window.edges.is_empty());
+
+        // Use the real custody copier and its exact native recipes, then
+        // exercise the missing-Current case through the actual Query adapter.
+        let source_owner = NativeOwnership::restore(&config).unwrap();
+        let source = crate::storage::sqlite::semantic::AdmittedSource::native(source_owner.clone());
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        ).unwrap().into_test_connection();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let history = crate::storage::sqlite::history::OriginalHistory::admitted(&db, &source).unwrap();
+        for row in &model.prepared().rows {
+            assert!(preserve_original(&history, row).unwrap());
+            db.execute("DELETE FROM session_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), row.key]).unwrap();
+            crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+                &db, config.namespace.as_str(), &row.key, source_owner.admission(), config.expected_stream_epoch.as_deref().unwrap(),
+            ).unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let mut finite = options.clone();
+        finite.all = false;
+        finite.since = std::time::Duration::from_millis(1);
+        let port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: finite,
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap().reader_binding().unwrap(),
+        };
+        let now = cutoff + 1;
+        let mut baseline = None::<(_, _, _, _, crate::storage::query::Work)>;
+        for unrelated in [1, 20_001] {
+            db.execute("WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<?2) INSERT OR IGNORE INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) SELECT ?1,'expired-'||i,'{}',0,0 FROM n", params![config.namespace.as_str(), unrelated]).unwrap();
+            crate::storage::query::WORK.with(|work| work.set(Default::default()));
+            let mut left = 8 * 1024 * 1024;
+            let part = port.read_cohort(&config.namespace, now, &mut left).unwrap();
+            let work = crate::storage::query::WORK.with(std::cell::Cell::get);
+            assert!(part.rows.contains_key(&owner.key));
+            assert!(part.witnesses.iter().all(|(_, _, history)| *history));
+            assert!(window.edges.is_subset(&part.edges));
+            assert!(window.turns.is_subset(&part.turns));
+            assert!(part.rows.values().all(|row| row["summary"]["alive"].is_null() && row["summary"]["run"].is_null()));
+            port.validate(&config.namespace, &part).unwrap();
+            if let Some((rows, edges, turns, spent, initial)) = &baseline {
+                assert_eq!((&part.rows, &part.edges, &part.turns, &(8 * 1024 * 1024 - left)), (rows, edges, turns, spent));
+                assert_eq!(work.metadata, initial.metadata);
+                assert!(work.vm_steps <= initial.vm_steps + 64, "expired History changed indexed work: {initial:?} -> {work:?}");
+            } else {
+                baseline = Some((part.rows, part.edges, part.turns, 8 * 1024 * 1024 - left, work));
+            }
+        }
+        let mut left = 64;
+        let error = port.read_cohort(&config.namespace, now, &mut left).err().expect("eligible candidate keys must charge before materialization");
+        assert!(error.to_string().contains("budget"));
     }
 
     #[test]

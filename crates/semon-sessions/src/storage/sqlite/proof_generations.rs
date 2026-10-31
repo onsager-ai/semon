@@ -1148,14 +1148,21 @@ pub(crate) struct PreparedObservationUpdate {
     admission: i64,
     stream: String,
     existing_slot: bool,
+    history_activity: (Option<i64>, bool),
 }
 
 impl PreparedObservationUpdate {
     pub(crate) fn publish(self, db: &Transaction<'_>) -> rusqlite::Result<()> {
-        let changed = db.execute(
-            &format!("UPDATE main.{} SET metadata=?3 WHERE namespace=?1 AND session_key=?2 AND metadata=?4", self.owner.table()),
-            params![self.namespace, self.key, self.metadata, self.stored],
-        )?;
+        let changed = match self.owner {
+            CatalogObservationOwner::History => db.execute(
+                "UPDATE main.session_history_catalog SET metadata=?3,query_activity=?5,query_active=?6 WHERE namespace=?1 AND session_key=?2 AND metadata=?4",
+                params![self.namespace, self.key, self.metadata, self.stored, self.history_activity.0, self.history_activity.1],
+            ),
+            CatalogObservationOwner::Catalog => db.execute(
+                "UPDATE main.session_catalog SET metadata=?3 WHERE namespace=?1 AND session_key=?2 AND metadata=?4",
+                params![self.namespace, self.key, self.metadata, self.stored],
+            ),
+        }?;
         if changed != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
@@ -1306,6 +1313,7 @@ fn prepare_observation_update(
         admission,
         stream: current.stream_epoch.clone(),
         existing_slot: owner_slot.is_some(),
+        history_activity: crate::storage::query::history_activity(repaired),
     })
 }
 

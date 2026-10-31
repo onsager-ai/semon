@@ -7,9 +7,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE session_history_catalog (
  namespace TEXT NOT NULL, session_key TEXT NOT NULL, metadata TEXT NOT NULL,
+ query_activity INTEGER, query_active INTEGER NOT NULL DEFAULT 0 CHECK(query_active IN (0,1)),
  PRIMARY KEY(namespace,session_key)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX session_history_query_last ON session_history_catalog(namespace,json_extract(metadata,'$.query.last'),session_key);
+CREATE INDEX session_history_query_activity ON session_history_catalog(namespace,query_activity,session_key);
+CREATE INDEX session_history_query_active ON session_history_catalog(namespace,query_active,session_key);
 CREATE TABLE session_history_projections (
  namespace TEXT NOT NULL, session_key TEXT NOT NULL, generation TEXT NOT NULL,
  source_generation TEXT NOT NULL, version INTEGER NOT NULL, total INTEGER NOT NULL,
@@ -152,7 +154,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         complete: bool,
     ) -> rusqlite::Result<()> {
         let key = &row.key;
-        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",params![self.namespace,key,metadata])?;
+        let (activity, active) = crate::storage::query::history_activity(row);
+        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5)",params![self.namespace,key,metadata,activity,active])?;
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_original_header:{key}"),original_header])?;
         if let Some((generation, version, sources, total)) = header {
             self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![self.namespace,key,generation,sources.as_deref().unwrap_or_default(),version,total,!complete])?;
@@ -265,7 +268,9 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     ) -> rusqlite::Result<()> {
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed=self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
-        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata])?;
+        let row: CatalogRow = serde_json::from_str(metadata).map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
+        let (activity, active) = crate::storage::query::history_activity(&row);
+        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
         if changed > 0 {
             self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
             self.db.execute(

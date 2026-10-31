@@ -40,7 +40,7 @@ impl History<'_, '_> {
         let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
-        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
+        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model,query_activity,query_active FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model AND semon_pg_native_catalog_history_owners.query_activity IS NOT DISTINCT FROM excluded.query_activity AND semon_pg_native_catalog_history_owners.query_active=excluded.query_active", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
         if changed != 1 {
             return Err(StorageError::ScopeChanged);
         }
@@ -122,6 +122,7 @@ impl History<'_, '_> {
         if row.key != key {
             return Err(StorageError::ScopeChanged);
         }
+        let (activity, active) = crate::storage::query::history_activity(&row);
         self.effects.put(
             "semon_pg_native_catalog_history_headers",
             &[
@@ -138,6 +139,8 @@ impl History<'_, '_> {
                 "harness",
                 "repo",
                 "model",
+                "query_activity",
+                "query_active",
             ],
             "key_digest",
             &[
@@ -154,6 +157,8 @@ impl History<'_, '_> {
                 &row.harness.as_bytes(),
                 &row.repo.as_deref().unwrap_or("").as_bytes(),
                 &row.model.as_bytes(),
+                &activity,
+                &active,
             ],
         )?;
         self.link(key, self.effects.generation, original.is_some())
