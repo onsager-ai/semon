@@ -8791,6 +8791,14 @@ mod tests {
                 )
                 .unwrap();
                 if batch.phase == Phase::Publication {
+                    // Persist the exact prepared model before fault injection,
+                    // as the admitted producer does before publication.
+                    assert_eq!(
+                        cache
+                            .record_semantic_batch(&batch, prepared.prepared())
+                            .unwrap(),
+                        Outcome::Written
+                    );
                     let user_version: i64 = store
                         .connection_for_test()
                         .pragma_query_value(None, "user_version", |row| row.get(0))
