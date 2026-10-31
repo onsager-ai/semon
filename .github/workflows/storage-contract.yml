@@ -500,7 +500,7 @@ jobs:
       - name: SQLite adapter and reusable metadata conformance
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
-          cargo test --locked -p semon-sessions --lib events::store::tests::catalog_commit_boundaries_match_real_semantic_publication -- --exact --nocapture
+          SEMON_TEST_NOW=1790294400000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::tests::catalog_commit_boundaries_match_real_semantic_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::catalog_original_transfer_progresses_across_restart_and_unrelated_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture

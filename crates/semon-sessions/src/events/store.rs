@@ -8907,6 +8907,22 @@ mod tests {
     #[test]
     fn catalog_commit_boundaries_match_real_semantic_publication() {
         use crate::model::relation_stage::Phase;
+        const FIXED_TEST_NOW: i64 = 1_790_294_400_000;
+
+        // This exact semantic proof parity case pins the clock input embedded
+        // in authenticated presentations; it does not claim parity across
+        // different clock observations. The ordinary Catalog publisher and
+        // diagnostic timing case above retains its existing non-test-clock CI
+        // invocation.
+        let configured_now = std::env::var("SEMON_TEST_NOW")
+            .expect("requires SEMON_TEST_NOW=1790294400000 and the test-clock feature");
+        assert_eq!(configured_now, "1790294400000");
+        assert_eq!(
+            crate::model::now_ms(),
+            FIXED_TEST_NOW,
+            "the test-clock feature must apply the configured publication clock"
+        );
+
         let root = scratch("catalog-commit-boundary-semantic");
         let (options, rows, _) = catalog_native_fixture(&root, 4, false);
         let paths = rows
@@ -9008,7 +9024,6 @@ mod tests {
                 &scoped_options.source,
             )
             .unwrap();
-            let stage_before = crate::model::now_ms();
             let config = scoped_options.source.config(&scoped_options.cache).unwrap();
             let mut store = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -9171,15 +9186,65 @@ mod tests {
                         .unwrap();
 
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
-                    let before = crate::model::now_ms();
                     let outcome = store.publish(&batch, prepared.prepared()).unwrap();
                     assert_eq!(outcome.0, Outcome::Written);
+                    let published_generation = outcome
+                        .1
+                        .as_deref()
+                        .expect("successful semantic publication returns a generation");
+                    let presentation_rows = {
+                        let mut statement = store
+                            .connection_for_test()
+                            .prepare(
+                                "SELECT p.session_key,p.metadata
+                                 FROM storage_proof_presentations p
+                                 JOIN storage_proof_generations g
+                                   ON g.namespace=p.namespace AND g.id=p.id
+                                   AND g.session_key=p.session_key
+                                 WHERE g.namespace=semon_namespace() AND g.publication=?1
+                                 ORDER BY p.session_key",
+                            )
+                            .unwrap();
+                        statement
+                            .query_map([published_generation], |row| {
+                                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                            })
+                            .unwrap()
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .unwrap()
+                    };
+                    let expected_keys = prepared
+                        .prepared()
+                        .rows
+                        .iter()
+                        .map(|row| row.key.as_str())
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(
+                        presentation_rows.len(),
+                        expected_keys.len(),
+                        "every real publication row has an authenticated presentation"
+                    );
+                    assert_eq!(
+                        presentation_rows
+                            .iter()
+                            .map(|(key, _)| key.as_str())
+                            .collect::<BTreeSet<_>>(),
+                        expected_keys,
+                        "presentations cover exactly the real rows in this publication"
+                    );
+                    let expected_observed_at = FIXED_TEST_NOW.to_string();
+                    for (key, metadata) in &presentation_rows {
+                        let witness: serde_json::Value = serde_json::from_str(metadata).unwrap();
+                        assert_eq!(
+                            witness["catalog"]["catalog_observed_at"].as_str(),
+                            Some(expected_observed_at.as_str()),
+                            "authenticated presentation for {key} uses the fixed publication clock"
+                        );
+                    }
                     let replay_generation = outcome.1.clone();
                     written.push(outcome);
-                    publication_states.push(catalog_commit_success_state(
+                    publication_states.push(crate::native_timing::cleanup_tests::snapshot(
                         store.connection_for_test(),
-                        before,
-                        crate::model::now_ms(),
                     ));
                     crate::native_timing::catalog_commit_tests::assert_written(timing);
                     drop(recording);
@@ -9223,10 +9288,8 @@ mod tests {
                     .unwrap(),
                 0
             );
-            publication_states.push(catalog_commit_success_state(
+            publication_states.push(crate::native_timing::cleanup_tests::snapshot(
                 store.connection_for_test(),
-                stage_before,
-                crate::model::now_ms(),
             ));
             outcomes.push(written);
             states.push(publication_states);
