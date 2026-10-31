@@ -6541,16 +6541,11 @@ mod tests {
         // A new durable recovery intent committed by a peer must invalidate the
         // previous complete pass before the next discovery publication.
         let namespace = fixture_namespace();
-        let peer_source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
-        let mut peer = qualified_event_writer_connection_for_test(&path, &peer_source).unwrap();
-        peer.create_scalar_function(
-            "semon_semantic_publisher",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(1_i64),
+        let mut peer = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .into_test_connection();
         let transaction = peer
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
