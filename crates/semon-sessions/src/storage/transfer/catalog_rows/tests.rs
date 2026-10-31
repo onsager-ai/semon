@@ -74,7 +74,9 @@ fn current_transfer225_catalog_one_part_and_incomplete_manifest_refusal() {
     let records = fragments([7; 32], small.clone()).unwrap();
     assert_eq!(records.len(), 1);
     let mut inbox = MemoryInbox::default();
-    let complete = apply_fragment(&mut inbox, &records[0], &[7; 32]).unwrap().unwrap();
+    let complete = apply_fragment(&mut inbox, &records[0], &[7; 32])
+        .unwrap()
+        .unwrap();
     assert_eq!(complete.values, small.values);
     require_complete(&mut inbox, &[7; 32]).unwrap();
 
@@ -83,10 +85,16 @@ fn current_transfer225_catalog_one_part_and_incomplete_manifest_refusal() {
     let before = inbox.0.clone();
     let final_page = reported::ApplyPage {
         checkpoint: TransferCheckpoint {
-            snapshot: [7; 32], sequence: 1, digest: [0; 32],
-            rows: vec![0; Category::ALL.len()], digests: vec![[0; 32]; Category::ALL.len()],
+            snapshot: [7; 32],
+            sequence: 1,
+            digest: [0; 32],
+            rows: vec![0; Category::ALL.len()],
+            digests: vec![[0; 32]; Category::ALL.len()],
         },
-        records: vec![], replayed: false, first: false, complete: true,
+        records: vec![],
+        replayed: false,
+        first: false,
+        complete: true,
     };
     assert!(reported::acknowledge_apply(&mut inbox, &final_page).is_err());
     assert_eq!(inbox.0, before);

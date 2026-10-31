@@ -10,6 +10,7 @@ pub(crate) const IMPORTED_GENERATION: &str = "native_transfer_v1:catalog-content
 // JSON escapes each input byte to at most six bytes (e.g. NUL -> \u0000).
 // The fixed typed envelope, numeric cells and punctuation fit in 4 KiB.
 const MAX_CATALOG_CELLS: usize = 10;
+const MAX_PRESENTATION_BYTES: usize = 8 * MAX_PAGE_BYTES;
 pub(crate) const MAX_CATALOG_ROW_BYTES: usize = MAX_CATALOG_CELLS * MAX_PAGE_BYTES * 6 + 4096;
 pub(crate) const CATALOG_ROW_FRAGMENT_BYTES: usize = 64 * 1024;
 
@@ -282,6 +283,9 @@ pub(crate) fn validate_row(row: &CatalogRowData) -> Result<(), StorageError> {
                 &metadata,
                 query_recipe.as_deref(),
             )?;
+            if slots.len() > MAX_PAGE_BYTES {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
             let _: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(bad)?;
             let _: Option<Vec<crate::slot_projection::SavedSlot>> =
@@ -290,6 +294,9 @@ pub(crate) fn validate_row(row: &CatalogRowData) -> Result<(), StorageError> {
         Presentation => {
             let (_, _, metadata): (String, String, String) =
                 serde_json::from_value(v).map_err(bad)?;
+            if metadata.len() > MAX_PRESENTATION_BYTES {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
             let _: serde_json::Value = serde_json::from_str(&metadata).map_err(bad)?;
         }
         ProofSource => {
@@ -903,10 +910,10 @@ mod row_validation_tests {
 
     #[test]
     fn current_transfer225_proof_metadata_and_slots_exact_independent_bounds() {
-        let mut metadata = metadata(String::new());
-        metadata.push_str(&" ".repeat(MAX_PAGE_BYTES - metadata.len()));
+        let mut metadata_text = metadata(String::new());
+        metadata_text.push_str(&" ".repeat(MAX_PAGE_BYTES - metadata_text.len()));
         let slots = format!("[]{}", " ".repeat(MAX_PAGE_BYTES - 2));
-        let mut row = proof_generation_record(metadata, None);
+        let mut row = proof_generation_record(metadata_text, None);
         row.values[8] = slots.clone().into();
         let expected = row.values.clone();
         let parts = fragments([12; 32], row).unwrap();
@@ -918,5 +925,28 @@ mod row_validation_tests {
             result = apply_fragment(&mut inbox, &part, &[12; 32]).unwrap();
         }
         assert_eq!(result.unwrap().values, expected);
+        let mut over = proof_generation_record(metadata(String::new()), None);
+        over.values[8] = format!("[]{}", " ".repeat(MAX_PAGE_BYTES - 1)).into();
+        assert!(matches!(
+            fragments([12; 32], over),
+            Err(StorageError::HistoryRetentionBounds)
+        ));
+    }
+
+    #[test]
+    fn current_transfer225_catalog_presentation_rejects_unsupported_cell_bound() {
+        let row = CatalogRowData {
+            generation: "a".repeat(64),
+            kind: CatalogRowKind::Presentation,
+            values: vec![
+                "f".repeat(64).into(),
+                "key".into(),
+                format!("null{}", " ".repeat(MAX_PRESENTATION_BYTES - 3)).into(),
+            ],
+        };
+        assert!(matches!(
+            fragments([12; 32], row),
+            Err(StorageError::HistoryRetentionBounds)
+        ));
     }
 }

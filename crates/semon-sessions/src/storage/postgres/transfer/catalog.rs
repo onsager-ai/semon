@@ -625,8 +625,8 @@ mod tests {
 
     #[test]
     fn pg_current_transfer225_real_large_presentation_reverse_and_final_rollback() {
-        use catalog_rows::tests::assert_provider_transcript;
         use crate::storage::sqlite::transfer::seed_large_presentation;
+        use catalog_rows::tests::assert_provider_transcript;
         let root = root();
         let source = sqlite(&root, "pg-real-large-source");
         let reverse = sqlite(&root, "pg-real-large-reverse");
