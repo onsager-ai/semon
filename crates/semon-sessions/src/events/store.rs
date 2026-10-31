@@ -10055,7 +10055,11 @@ mod tests {
                 );
                 let path = store.path.clone();
                 drop(store);
-                store = current_test_store(&path, &fixture_namespace());
+                store = current_test_store_with_epoch(
+                    &path,
+                    &config.namespace,
+                    config.expected_stream_epoch.as_deref().unwrap(),
+                );
                 assert!(steps <= count.div_ceil(64));
             }
             assert_eq!(steps, count.div_ceil(64));
