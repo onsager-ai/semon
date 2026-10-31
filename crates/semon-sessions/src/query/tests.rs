@@ -3701,10 +3701,10 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
             assert!(!error.message.contains("revoked"));
             assert!(!error.message.contains("Permission denied"));
         } else {
-            // Prompt parsing tolerates the provider read error, but its sticky
-            // failure makes finish() retain the pre-R5 generic refusal.
+            // Provider generation and revocation failures share the current
+            // authorized-read refusal without exposing provider details.
             assert_eq!(
-                error.message, "native query source generation unavailable",
+                error.message, "Authorized native transcript read failed",
                 "fault={fault}"
             );
             assert!(!error.message.contains("revoked"));
