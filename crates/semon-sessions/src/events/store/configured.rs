@@ -4357,6 +4357,22 @@ mod tests {
             part.rows[&query_row.key], expected,
             "ordinary Query port reads exact persisted facts"
         );
+        if query_row.lifecycle == crate::model::summary::CatalogLifecycle::Retained {
+            let summary = &part.rows[&query_row.key]["summary"];
+            assert!(
+                summary["alive"].is_null(),
+                "retained rows have no live process state"
+            );
+            assert!(summary["run"].is_null(), "retained rows have no live run state");
+            assert!(
+                summary["open_question"].is_null(),
+                "retained rows have no live question"
+            );
+            assert!(!matches!(
+                summary["state"].as_str(),
+                Some("working" | "waiting-question")
+            ));
+        }
         for row in &prepared.rows {
             let trace = row.trace.as_ref().expect("real model trace");
             let witness: serde_json::Value =
@@ -4715,7 +4731,7 @@ mod tests {
 
     #[test]
     fn configured_semantic_real_model_claude_replacement_rollback_stale_and_history() {
-        use crate::storage::native_events::NativeEventStore;
+        use crate::storage::{native_events::NativeEventStore, query::QueryCatalogStore};
         use std::io::Write;
         let (a, b, options, inputs) = model_sources();
         let mut caches: Vec<_> = [&a.config, &b]
@@ -4820,8 +4836,38 @@ mod tests {
         expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let retained: String = a.db().query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-b' AND session_key=?1",[&expected.key],|r|r.get(0)).unwrap();
         assert_eq!(retained, serde_json::to_string(&expected).unwrap());
-        // Query's existing retained-history preference remains exact after
-        // replacement; Current metadata and recipes above are checked separately.
+        let current = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key == expected.key)
+            .cloned()
+            .expect("replacement Current row");
+        let retained_source_generation =
+            crate::retention::source_generation(&expected.sources).unwrap();
+        let current_source_generation =
+            crate::retention::source_generation(&current.sources).unwrap();
+        assert_ne!(retained_source_generation, current_source_generation);
+        let retained_header_source_generation: String = a
+            .db()
+            .query_row(
+                "SELECT source_generation FROM session_history_projections WHERE namespace='source-b' AND session_key=?1",
+                [&expected.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let current_header_source_generation: String = a
+            .db()
+            .query_row(
+                "SELECT source_generation FROM session_trace_headers WHERE namespace='source-b' AND session_key=?1",
+                [&expected.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(retained_header_source_generation, retained_source_generation);
+        assert_eq!(current_header_source_generation, current_source_generation);
+        // Query's all-time retained-history preference remains exact after
+        // replacement; the finite-window Current selection follows below.
         assert_stored_model(&a, &b, &options[1], model.prepared(), &expected);
         assert_eq!(namespace_state(&a, "source-a"), foreign);
         let before = shared_state(&a);
@@ -4835,6 +4881,62 @@ mod tests {
         );
         assert_eq!(shared_state(&a), before);
         assert_eq!(publication_snapshot_digest(&a), digest);
+
+        let history_last = expected.query.as_ref().unwrap()["last"]
+            .as_i64()
+            .expect("retained Query timestamp");
+        let current_last = current.query.as_ref().unwrap()["last"]
+            .as_i64()
+            .expect("Current Query timestamp");
+        assert!(history_last < current_last);
+        let finite_now = current_last + 1;
+        let finite_cutoff = history_last + 1;
+        let mut finite_options = options[1].clone();
+        finite_options.all = false;
+        finite_options.since = std::time::Duration::from_millis(
+            u64::try_from(finite_now - finite_cutoff).unwrap(),
+        );
+        let finite_port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: finite_options,
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&b)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
+        };
+        let mut finite_budget = 8 * 1024 * 1024;
+        let finite_part = finite_port
+            .read_cohort(&b.namespace, finite_now, &mut finite_budget)
+            .unwrap();
+        let current_facts = current.query.as_ref().unwrap()["rows"][&current.key].clone();
+        assert_eq!(
+            finite_part.rows[&current.key], current_facts,
+            "a finite cutoff selects Current when only Current is recent"
+        );
+        finite_port.validate(&b.namespace, &finite_part).unwrap();
+
+        let facts_path = options[1].facts.as_ref().unwrap();
+        let mut changed_facts = crate::read_facts(facts_path).unwrap();
+        changed_facts.hostname = "changed-after-current-query-read".into();
+        crate::write_facts(facts_path, &changed_facts, &options[1].source).unwrap();
+        assert!(
+            finite_port.validate(&b.namespace, &finite_part).is_err(),
+            "Current Query facts are stale after runtime changes"
+        );
+        let invalidated_source = inputs[1]
+            .full_path(&options[1])
+            .to_string_lossy()
+            .into_owned();
+        a.db().execute(
+            "INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'changed',0)",
+            params![b.namespace.as_str(), invalidated_source],
+        ).unwrap();
+        let mut invalidated_budget = 8 * 1024 * 1024;
+        assert!(
+            finite_port
+                .read_cohort(&b.namespace, finite_now, &mut invalidated_budget)
+                .is_err(),
+            "Current Query reads refuse catalog invalidation"
+        );
     }
 
     #[test]
