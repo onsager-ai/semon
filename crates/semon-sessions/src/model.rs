@@ -8087,6 +8087,7 @@ enum BuildSelection<'a> {
         files: Vec<SourceFile>,
         skipped: BTreeSet<String>,
         records: &'a crate::overview_repair::NativeRecords<'a>,
+        runtime_binding: Option<crate::storage::QueryRuntimeBinding>,
     },
 }
 
@@ -8096,9 +8097,17 @@ pub(crate) fn prepare_history(
     options: &Options,
     rows: &[summary::CatalogRow],
     records: &crate::overview_repair::NativeRecords,
+    runtime_binding: &crate::storage::QueryRuntimeBinding,
     now: i64,
 ) -> io::Result<PreparedSources> {
-    match prepare_history_inner(options, rows, records, now, BuildTarget::Sources)? {
+    match prepare_history_inner(
+        options,
+        rows,
+        records,
+        Some(runtime_binding),
+        now,
+        BuildTarget::Sources,
+    )? {
         BuildOutput::Sources(prepared) => Ok(*prepared),
         _ => Err(io::Error::other(
             "Qualified producer did not capture metadata",
@@ -8114,7 +8123,7 @@ pub(crate) fn query_history(
     records: &crate::overview_repair::NativeRecords,
     now: i64,
 ) -> io::Result<QueryData> {
-    match prepare_history_inner(options, rows, records, now, BuildTarget::Query)? {
+    match prepare_history_inner(options, rows, records, None, now, BuildTarget::Query)? {
         BuildOutput::Query(data) => Ok(*data),
         _ => Err(io::Error::other(
             "Qualified producer did not derive query evidence",
@@ -8126,6 +8135,7 @@ fn prepare_history_inner(
     options: &Options,
     rows: &[summary::CatalogRow],
     records: &crate::overview_repair::NativeRecords,
+    runtime_binding: Option<&crate::storage::QueryRuntimeBinding>,
     now: i64,
     target: BuildTarget,
 ) -> io::Result<BuildOutput> {
@@ -8297,6 +8307,7 @@ fn prepare_history_inner(
             files,
             skipped,
             records,
+            runtime_binding: runtime_binding.cloned(),
         },
         target,
     )
@@ -8353,8 +8364,14 @@ fn build_sources_inner(
         1,
         crate::native_evidence::query_runtime_generation(options)?
     );
-    let runtime_binding =
-        archive_read_diagnostic!("query_runtime_binding", cache.query_runtime_binding())?;
+    let runtime_binding = match &selection {
+        // Selected repair derives fresh scopes from qualified originals, then
+        // publishes them in the same runtime domain as the admitted producer.
+        BuildSelection::History {
+            runtime_binding, ..
+        } => runtime_binding.clone(),
+        _ => archive_read_diagnostic!("query_runtime_binding", cache.query_runtime_binding())?,
+    };
     let runtime_observations = measured!(
         "runtime_observations",
         1,
@@ -8433,6 +8450,7 @@ fn build_sources_inner(
             files,
             skipped,
             records,
+            ..
         } => (
             Some([].as_slice()),
             Some(records),

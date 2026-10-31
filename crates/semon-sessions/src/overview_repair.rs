@@ -992,7 +992,13 @@ pub fn repair_session_overview_with_control(
     producer_options.all = true;
     producer_options.scan_window = false;
     let prepared = with_records(options, &rows, provider, mode, tx, |native| {
-        crate::model::prepare_history(&producer_options, &rows, native, crate::model::now_ms())
+        crate::model::prepare_history(
+            &producer_options,
+            &rows,
+            native,
+            &preimage_binding,
+            crate::model::now_ms(),
+        )
     })?;
     let transcripts = prepared.transcripts;
     let mut repaired = Vec::new();
