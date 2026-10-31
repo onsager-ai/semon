@@ -187,6 +187,21 @@ absence or a retained projection does not itself revoke current native authority
 Current identity still independently requires the recorded native selection;
 history read intent never grants native control authority.
 
+When a retained-history list row has a same-key, same-harness History projection,
+its filter fields, displayed summary metrics and page position remain from the
+selected Catalog index row. The retained lifecycle and source references come
+from the stored History row, which remains the identity used for source and
+observation checks. Exact `sid` history selection returns the qualified stored
+History row and its embedded recipes. An older History timestamp or repo/model
+value cannot change list membership or move a continuation cursor, and the
+producer never rewrites History metadata to match Current. Exact retained reads
+expose trace details only when source-generation-matched metadata is available;
+their `live_observation` value is false.
+
+When a viewer key is reused by a different harness, list rendering keeps the
+selected Current row and its source references. An exact `sid` history selection
+can return the qualified History identity for the earlier harness.
+
 A fixed one-item current page with 1 versus 20,001 unrelated retained rows returns
 the same item with equal SQLite VM work. The focused catalog tests also verify
 that retained-history pagination exposes retained rows and that an exact current

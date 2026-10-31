@@ -284,10 +284,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         if request.limit > 64 {
             return unavailable();
         }
-        // In retained scope a proof-owned composite history replaces the
-        // current header for the same key, including a still-current parent
-        // with withdrawn children. Both sides filter and keyset on indexed
-        // columns (owners carry the header's), and the decode re-checks them.
+        // Retained lists use the latest Current row's indexed fields when it
+        // exists, matching SQLite's Catalog index. History-only keys fall
+        // back to their proof-owned header. The shared renderer overlays the
+        // immutable History source context for same-key rows.
         let history = request.scope == crate::CatalogReadScope::RetainedHistory;
         let tx = self
             .tx
@@ -311,11 +311,6 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 SELECT session_key,metadata,last_ms,harness,repo,model,false AS retained
                 FROM semon_pg_native_catalog_rows r
                 WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
-                  AND (NOT $11 OR NOT EXISTS (
-                    SELECT 1 FROM semon_pg_native_catalog_history_owners o
-                    WHERE o.namespace_digest=r.namespace_digest AND o.namespace=r.namespace
-                      AND o.generation=r.generation AND o.key_digest=r.key_digest
-                      AND o.session_key=r.session_key))
                 UNION ALL
                 SELECT o.session_key,h.metadata,o.last_ms,o.harness,o.repo,o.model,true
                 FROM semon_pg_native_catalog_history_owners o
@@ -324,6 +319,11 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                  AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
                  AND h.session_key=o.session_key
                 WHERE $11 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+                  AND NOT EXISTS (
+                    SELECT 1 FROM semon_pg_native_catalog_rows r
+                    WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
+                      AND r.generation=o.generation AND r.key_digest=o.key_digest
+                      AND r.session_key=o.session_key)
              ), page AS MATERIALIZED (
                 SELECT session_key,metadata,last_ms,harness,repo,model,retained
                 FROM visible
@@ -467,9 +467,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                     .map_err(io::Error::other)?;
                 Ok((row.get(0), fields))
             },
-            // As the SQLite reader, retained history wins per key over the
-            // current row. The lifecycle is the chosen proof-owned source's,
-            // which the shared reducer compares with the decoded metadata.
+            // The retained search document follows the latest indexed row
+            // when it is still Current. A history-only owner supplies the
+            // fallback candidate and its retained lifecycle.
             |key, budget| {
                 let rows = run(
                     "WITH live AS (
@@ -486,10 +486,10 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         WHERE $5 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1
                           AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3
                      ), chosen AS (
-                        SELECT metadata,last_ms,harness,repo,false AS is_live FROM retained
+                        SELECT metadata,last_ms,harness,repo,true AS is_live FROM live
                         UNION ALL
-                        SELECT metadata,last_ms,harness,repo,true FROM live
-                        WHERE NOT EXISTS (SELECT 1 FROM retained)
+                        SELECT metadata,last_ms,harness,repo,false FROM retained
+                        WHERE NOT EXISTS (SELECT 1 FROM live)
                      ) SELECT octet_length(metadata)::bigint,CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END,
                          last_ms,harness,repo,is_live FROM chosen",
                     &[&ns, &generation, &key.as_bytes(), &(budget as i64), &history],

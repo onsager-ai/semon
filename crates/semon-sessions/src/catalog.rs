@@ -973,6 +973,10 @@ pub(crate) fn read_page_snapshot_with_search(
     } else {
         (transaction.rows(request)?, None, None)
     };
+    let mut indexed_display = vec![None; selected.len()];
+    let next_position = selected
+        .get(request.limit.saturating_sub(1))
+        .map(|row| (row.last.unwrap_or(0), row.key.clone()));
     measurements.record("catalog_selected_rows", selected_started, selected.len());
     let history_started = measurements.start();
     let mut partial_history = std::collections::BTreeSet::new();
@@ -983,16 +987,17 @@ pub(crate) fn read_page_snapshot_with_search(
     }
 
     if request.scope == CatalogReadScope::RetainedHistory {
-        for current in &mut selected {
+        for (index, current) in selected.iter_mut().enumerate() {
             if let Some(metadata) = transaction.history_catalog(&current.key)? {
                 let history: CatalogRow = serde_json::from_str(&metadata)?;
+                if history.key != current.key {
+                    return Err(io::Error::other("history catalog context changed").into());
+                }
                 if history.harness != current.harness {
                     // Only explicit History identity reads can select the
                     // original harness behind a reused Current viewer key.
                     // Lists retain Current's indexed filters and ordering.
-                    if request.sid.as_deref() == Some(current.key.as_str())
-                        && history.key == current.key
-                    {
+                    if request.sid.as_deref() == Some(current.key.as_str()) {
                         if !transaction.history_qualified(&history)? {
                             return Ok(error(
                                 503,
@@ -1005,20 +1010,30 @@ pub(crate) fn read_page_snapshot_with_search(
                     }
                     continue;
                 }
-                // History extends source context only; current indexed fields
-                // remain the list ordering/filter and native selection oracle.
-                let key_equal = history.key == current.key;
-                let harness_equal = history.harness == current.harness;
-                let last_equal = history.last == current.last;
-                let repo_equal = history.repo == current.repo;
-                let model_equal = history.model == current.model;
-                if !key_equal || !harness_equal || !last_equal || !repo_equal || !model_equal {
-                    if crate::native_timing::enabled() {
-                        eprintln!(
-                            "semon sessions native: catalog_page_refused reason=history_catalog_context_changed key_equal={key_equal} harness_equal={harness_equal} last_equal={last_equal} repo_equal={repo_equal} model_equal={model_equal}"
-                        );
+                if request.sid.as_deref() == Some(current.key.as_str()) {
+                    if !transaction.history_qualified(&history)? {
+                        return Ok(error(
+                            503,
+                            "catalog_unavailable",
+                            "The original retained history projection is incomplete.",
+                            true,
+                        ));
                     }
-                    return Err(io::Error::other("history catalog context changed").into());
+                } else {
+                    // List membership, filter display and summary fields stay
+                    // anchored to the indexed row. The retained row below is
+                    // still the exact stored identity used for source checks.
+                    indexed_display[index] = Some(json!({
+                        "key": &current.key,
+                        "name": &current.name,
+                        "harness": &current.harness,
+                        "repo": &current.repo,
+                        "branch": &current.branch,
+                        "model": &current.model,
+                        "last": &current.last,
+                        "tokens": &current.tokens,
+                        "cost": &current.cost,
+                    }));
                 }
                 *current = history;
             }
@@ -1067,6 +1082,7 @@ pub(crate) fn read_page_snapshot_with_search(
     let more = selected.len() > request.limit;
     if more {
         selected.pop();
+        indexed_display.pop();
     }
     let next = if let Some(position) = search_next {
         Some(serde_json::to_string(&Cursor {
@@ -1083,9 +1099,8 @@ pub(crate) fn read_page_snapshot_with_search(
             key: position.key,
         })?)
     } else if more {
-        selected
-            .last()
-            .map(|row| {
+        next_position
+            .map(|(last, key)| {
                 serde_json::to_string(&Cursor {
                     inclusive: false,
                     scope: request.scope,
@@ -1096,8 +1111,8 @@ pub(crate) fn read_page_snapshot_with_search(
                     repo: request.repo.clone(),
                     model: request.model.clone(),
                     q: request.q.clone(),
-                    last: row.last.unwrap_or(0),
-                    key: row.key.clone(),
+                    last,
+                    key,
                 })
             })
             .transpose()?
@@ -1166,7 +1181,7 @@ pub(crate) fn read_page_snapshot_with_search(
     };
     let mut items = Vec::with_capacity(selected.len());
     let item_loop_started = measurements.start();
-    for row in selected {
+    for (index, row) in selected.into_iter().enumerate() {
         let mut retired_native = false;
         let mut refs = Vec::new();
         let mut states = Vec::new();
@@ -1294,7 +1309,16 @@ pub(crate) fn read_page_snapshot_with_search(
             facts_known,
             retired_native,
         )?;
+        let current_lifecycle = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
         let mut item = serde_json::to_value(row)?;
+        if let Some(indexed) = indexed_display[index].take() {
+            for field in [
+                "key", "name", "harness", "repo", "branch", "model", "last", "tokens",
+                "cost",
+            ] {
+                item[field] = indexed[field].clone();
+            }
+        }
         item["status"] = observation;
         // Exact Query facts and runtime fences are internal publication data.
         // The Catalog transport retains its stable description allowlist.
@@ -1308,6 +1332,8 @@ pub(crate) fn read_page_snapshot_with_search(
             item["details"] = details.clone();
             item["details"]["live_observation"] = json!(
                 details["live_observation"] == true
+                    && request.scope == CatalogReadScope::Current
+                    && current_lifecycle
                     && facts_known
                     && !retired_native
                     && state == "cached"
