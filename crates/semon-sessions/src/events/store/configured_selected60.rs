@@ -346,6 +346,35 @@ fn configured_semantic_selected60_facts_change_preserves_leased_bytes_and_fresh_
     facts.offline_since = Some(1_790_000_100_000);
     crate::facts::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
     assert_eq!(bytes(&lease, options, &host, &query), original);
+    let provider = ProviderCounter(std::sync::atomic::AtomicUsize::new(0));
+    let drifted = crate::session_transcript_range_with_mode(
+        &oracle_options,
+        "source-a",
+        &query,
+        Some(&provider),
+        SessionSourceReadMode::ProviderOnly,
+    );
+    assert_eq!(drifted.status, 503);
+    assert_eq!(provider.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    // A new ordinary publication qualifies today's Facts without changing the
+    // independently leased observation or rebuilding it from live inputs.
+    let fresh_prepared = crate::model::prepare_sources(
+        &oracle_options,
+        &mut ordinary,
+        std::slice::from_ref(input),
+        1_790_000_000_001,
+    )
+    .unwrap();
+    ordinary
+        .publish_catalog_projection(
+            &crate::slot_projection::Publication {
+                rows: &fresh_prepared.rows,
+                transcripts: Some(&fresh_prepared.transcripts),
+                observations: fresh_prepared.presentation_observations(),
+            },
+            fresh_prepared.base_generation.as_deref(),
+        )
+        .unwrap();
     let current = body(crate::session_transcript_range_with_mode(&oracle_options, "source-a", &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
     assert_eq!(current["identity"]["machine_label"], "independent-facts-change");
     assert_ne!(before["identity"]["facts_observation"], current["identity"]["facts_observation"]);
