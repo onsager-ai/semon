@@ -3741,10 +3741,23 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("index.sqlite3");
-        let connection = super::super::current_search_test_connection(
-            &path,
-            &crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap(),
-        );
+        let namespace =
+            crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap();
+        // Keep the ordinary on-disk catalog setup, then reopen with the real
+        // semantic owner so the fixture writes pass its connection-local guard.
+        drop(super::super::current_search_test_connection(&path, &namespace));
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.clone(),
+            },
+            namespace,
+            expected_stream_epoch: Some("a".repeat(64)),
+        };
+        let connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         connection.execute("INSERT INTO main.catalog_semantic_stage(namespace,singleton,epoch,phase,runtime,revision) VALUES(semon_namespace(),1,7,'indexing','runtime',0)",[]).unwrap();
         for harness in ["claude", "codex"] {
             connection
