@@ -6283,13 +6283,8 @@ mod tests {
                     .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
                     .unwrap();
             } else {
-                let changed = external
-                    .execute(
-                        "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
-                        [(CACHE_VERSION + 1).to_string()],
-                    )
+                change_parser_version_for_test(&external, &(CACHE_VERSION + 1).to_string())
                     .unwrap();
-                assert_eq!(changed, 1, "only the global parser version is updated");
             }
             assert_eq!(
                 store
@@ -6391,14 +6386,8 @@ mod tests {
             .unwrap();
         top.native_role = Some(serde_json::json!({"Top":{"slug":"project"}}));
         assert!(selected_roles_current(&store.connection, &[top.clone()]).unwrap());
-        let changed = store
-            .connection
-            .execute(
-                "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
-                [(CACHE_VERSION + 1).to_string()],
-            )
+        change_parser_version_for_test(&store.connection, &(CACHE_VERSION + 1).to_string())
             .unwrap();
-        assert_eq!(changed, 1);
         assert!(!selected_roles_current(&store.connection, &[top]).unwrap());
         assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
         drop(store);
@@ -6457,6 +6446,48 @@ mod tests {
         let store = current_test_store(path, &fixture_namespace());
         let loaded = store.load().unwrap();
         (store, loaded)
+    }
+
+    fn change_parser_version_for_test(
+        connection: &Connection,
+        version: &str,
+    ) -> rusqlite::Result<()> {
+        // Parser-version upgrades belong to physical-store setup. Temporarily
+        // remove only the UPDATE guards so the fixture can model that external
+        // contract change, then restore the exact installed trigger SQL.
+        let transaction = connection.unchecked_transaction()?;
+        let mut guards = Vec::new();
+        for name in [
+            "storage_event_guard_meta_UPDATE",
+            "storage_owned_guard_meta_UPDATE",
+        ] {
+            let sql = transaction.query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
+                [name],
+                |row| row.get::<_, String>(0),
+            )?;
+            transaction.execute_batch(&format!("DROP TRIGGER main.{name};"))?;
+            guards.push((name, sql));
+        }
+        let changed = transaction.execute(
+            "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
+            [version],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        for (name, guard) in guards {
+            transaction.execute_batch(&guard)?;
+            let restored = transaction.query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
+                [name],
+                |row| row.get::<_, String>(0),
+            )?;
+            if restored != guard {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        }
+        transaction.commit()
     }
 
     #[test]
@@ -6615,7 +6646,7 @@ mod tests {
 
         // A trigger cannot smuggle changed contract metadata into a newly
         // armed witness. The whole discovery transaction must roll back.
-        store.connection.execute_batch("CREATE TEMP TRIGGER corrupt_discovery_contract AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/corrupt-contract.jsonl' BEGIN UPDATE meta SET value='unsupported' WHERE key='cache_version'; END;").unwrap();
+        store.connection.execute_batch("CREATE TEMP TRIGGER corrupt_discovery_contract AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/corrupt-contract.jsonl' BEGIN UPDATE main.meta SET value='unsupported' WHERE namespace='' AND key='cache_version'; END;").unwrap();
         assert!(store.discover_recovery_sources().unwrap());
         assert!(
             store
@@ -6637,7 +6668,7 @@ mod tests {
         // rollback; an unsupported committed incarnation cannot use the cache.
         store
             .connection
-            .execute_batch("BEGIN IMMEDIATE; ALTER TABLE meta ADD COLUMN transient TEXT;")
+            .execute_batch("BEGIN IMMEDIATE; ALTER TABLE main.meta ADD COLUMN transient TEXT;")
             .unwrap();
         assert!(store.discover_catalog_sources(&next, false).is_err());
         store.connection.execute_batch("ROLLBACK;").unwrap();
@@ -6709,30 +6740,36 @@ mod tests {
 
     #[test]
     fn cold_discovery_cached_witness_preserves_contract_and_namespace_refusals() {
-        for sql in [
-            "ALTER TABLE meta ADD COLUMN unexpected TEXT;",
-            "DROP TABLE meta;",
-            "UPDATE main.storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='fixture-source';",
-            "UPDATE meta SET value='unsupported' WHERE key='cache_version';",
+        for mutation in [
+            Some("ALTER TABLE main.meta ADD COLUMN unexpected TEXT;"),
+            Some("DROP TABLE main.meta;"),
+            Some("UPDATE main.storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='fixture-source';"),
+            None,
         ] {
             let root = scratch("cold-discovery-refusal");
             let (mut store, _) = opened(&root.join("index.sqlite3"));
             let inputs = vec!["/accepted.jsonl".into()];
             assert!(store.discover_recovery_sources().unwrap());
             store.discover_catalog_sources(&inputs, false).unwrap();
-            store.connection.execute_batch(sql).unwrap();
+            match mutation {
+                Some(sql) => store.connection.execute_batch(sql).unwrap(),
+                None => change_parser_version_for_test(&store.connection, "unsupported").unwrap(),
+            }
             let before = store.connection.total_changes();
-            assert!(store.discover_recovery_sources().is_err(), "{sql}");
+            assert!(
+                store.discover_recovery_sources().is_err(),
+                "{mutation:?}"
+            );
             assert!(
                 store
                     .discover_catalog_sources(&["/refused.jsonl".into()], false)
                     .is_err(),
-                "{sql}"
+                "{mutation:?}"
             );
             assert_eq!(
                 store.connection.total_changes(),
                 before,
-                "refusal must precede writes: {sql}"
+                "refusal must precede writes: {mutation:?}"
             );
             drop(store);
             fs::remove_dir_all(root).unwrap();
@@ -8881,10 +8918,14 @@ mod tests {
         rows[4].parent = None;
         rows[5].name = "Updated native description".into();
         // Shared source paths must preserve last-writer dependency order.
+        // Change only dependency rows; keep the prepared Query envelope and
+        // selected trace recipes required by the publisher.
         let shared_source = rows[7].sources[0].clone();
         rows[6].sources.push(shared_source);
-        rows[6].query = Some(serde_json::json!({"rows":{"runtime":{"summary":{"pid":101}}}}));
-        rows[7].query = Some(serde_json::json!({"rows":{"runtime":{"summary":{"pid":202}}}}));
+        rows[6].query.as_mut().expect("prepared query envelope")["rows"] =
+            serde_json::json!({"runtime":{"summary":{"pid":101}}});
+        rows[7].query.as_mut().expect("prepared query envelope")["rows"] =
+            serde_json::json!({"runtime":{"summary":{"pid":202}}});
         let shared = rows[7].sources[0].path.clone();
         let feed_before: i64 = batch
             .connection
