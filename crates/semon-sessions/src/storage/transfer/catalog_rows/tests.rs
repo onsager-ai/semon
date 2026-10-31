@@ -68,6 +68,43 @@ fn row() -> CatalogRowData {
 }
 
 #[test]
+fn current_transfer225_catalog_content_digest_survives_independent_capture() {
+    let mut original = row();
+    original.values[1] = "null".into();
+    let capture = |snapshot_id, row: CatalogRowData| {
+        let mut manifest = super::super::tests::manifest();
+        manifest.snapshot_id = snapshot_id;
+        let index = Category::ALL
+            .iter()
+            .position(|category| *category == row.kind.category())
+            .unwrap();
+        manifest.categories[index].rows = 1;
+        manifest.seal().unwrap();
+        let mut page = TransferPage {
+            snapshot: manifest.identity(),
+            sequence: 1,
+            operation: snapshot_id,
+            previous: [0; 32],
+            category: row.kind.category(),
+            records: fragments(manifest.identity(), row).unwrap(),
+            digest: [0; 32],
+        };
+        page.seal().unwrap();
+        let checkpoint = TransferCheckpoint::initial(&manifest)
+            .advance(&manifest, &page)
+            .unwrap();
+        (page.digest, checkpoint.digests)
+    };
+    let first = capture([7; 32], original.clone());
+    let second = capture([8; 32], original.clone());
+    assert_ne!(first.0, second.0, "page binds its capture identity");
+    assert_eq!(first.1, second.1, "content survives reverse capture");
+    original.values[1] = "true".into();
+    let changed = capture([8; 32], original);
+    assert_ne!(second.1, changed.1, "category binds exact row bytes");
+}
+
+#[test]
 fn current_transfer225_catalog_one_part_and_incomplete_manifest_refusal() {
     let mut small = row();
     small.values[1] = "null".into();

@@ -199,7 +199,10 @@ publication receipts, proof generations and presentations. These mappings remain
 partially qualified; physical row IDs are adapter-local.
 Current transfer format 3 carries every logical Catalog row in ordered 64-KiB
 byte fragments, including one-part rows. The existing encoded page limits remain
-64 records and 1 MiB; category counts/digests count those fragment records. Each
+64 records and 1 MiB; category counts/digests count those fragment records.
+Category digests exclude the snapshot coordinate so identical content remains
+comparable across captures; page digests bind the complete snapshot-bound wire
+records. Each
 fragment binds the snapshot (and thus namespace/stream), Catalog generation,
 kind, typed key, part ordinal/count, encoded row length and whole-row SHA-256.
 Capture checkpoints retain the typed row key and next part atomically with the
