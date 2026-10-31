@@ -1490,7 +1490,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let appended_key = oracle
         .rows
         .iter()
-        .find(|row| row.sources.iter().any(|source| source.path == appended_path))
+        .find(|row| {
+            row.sources
+                .iter()
+                .any(|source| source.path == appended_path)
+        })
         .expect("SQLite prefix oracle owns the appended Claude source")
         .key
         .clone();
@@ -1514,7 +1518,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite same-append prefix publication");
     let prefix_ids = prefix_list["sessions"].as_array().unwrap();
-    assert_eq!(prefix_ids.len(), 1, "append oracle is the original parent only");
+    assert_eq!(
+        prefix_ids.len(),
+        1,
+        "append oracle is the original parent only"
+    );
     let append_oracle_key = prefix_ids[0]["id"].as_str().unwrap();
     let append_prefix_body = append_oracle_query
         .call_at(
@@ -1524,8 +1532,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .expect("SQLite same-append original prefix body");
     assert_eq!(
-        append_prefix_body,
-        expected_bodies[&appended_key]["body"],
+        append_prefix_body, expected_bodies[&appended_key]["body"],
         "isolated SQLite prefix agrees with the full-source oracle"
     );
     let mut append_oracle_file = fs::OpenOptions::new()
@@ -3318,8 +3325,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "PG History-selected body must match SQLite after the same append"
     );
     assert_eq!(
-        next_bodies[&appended_key]["body"],
-        expected_bodies[&appended_key]["body"],
+        next_bodies[&appended_key]["body"], expected_bodies[&appended_key]["body"],
         "PG History-selected body must preserve the original exact prefix"
     );
     let (history_harness, current_harness) = super::super::snapshot::with_admitted_snapshot(
@@ -3376,12 +3382,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     fs::remove_file(&pid_session).unwrap();
     fs::remove_file(&pid_stat).unwrap();
-    let error = history_runtime_drift.expect_err(
-        "History-selected read must refuse when its same-harness PID runtime drifts",
-    );
+    let error = history_runtime_drift
+        .expect_err("History-selected read must refuse when its same-harness PID runtime drifts");
     assert!(
-        error.code == "unavailable"
-            && error.message == StorageError::ScopeChanged.to_string(),
+        error.code == "unavailable" && error.message == StorageError::ScopeChanged.to_string(),
         "History runtime drift must refuse with ScopeChanged: {error:?}"
     );
     let recovered_history_body = restarted_query
@@ -3437,10 +3441,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 return Err(StorageError::ScopeChanged);
             }
             let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
-            let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
-                saved["transcript_observation"].clone(),
-            )
-            .map_err(|_| StorageError::ScopeChanged)?;
+            let observation: crate::slot_projection::QueryObservation =
+                serde_json::from_value(saved["transcript_observation"].clone())
+                    .map_err(|_| StorageError::ScopeChanged)?;
             if !observation.valid(total) {
                 return Err(StorageError::ScopeChanged);
             }
@@ -3490,9 +3493,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &page,
             )
             .map_err(|_| StorageError::ScopeChanged)?;
-            records
-                .finish()
-                .map_err(|_| StorageError::ScopeChanged)?;
+            records.finish().map_err(|_| StorageError::ScopeChanged)?;
             if crate::native_evidence::query_runtime_generation(&options)
                 .map_err(|_| StorageError::ScopeChanged)?
                 != runtime

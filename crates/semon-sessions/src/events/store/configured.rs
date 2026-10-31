@@ -4521,8 +4521,7 @@ mod tests {
         }
         for (id, row) in &part.rows {
             let mut expected = row["summary"].clone();
-            expected["children"] =
-                serde_json::json!(children.get(id).cloned().unwrap_or_default());
+            expected["children"] = serde_json::json!(children.get(id).cloned().unwrap_or_default());
             assert!(
                 summaries.contains(&expected),
                 "existing Query preserves every persisted summary field and rebuilds children from the output cohort"
@@ -5131,9 +5130,7 @@ mod tests {
                 .0,
             Outcome::Written
         );
-        cache
-            .finish_semantic_stage(retirement_batch.epoch)
-            .unwrap();
+        cache.finish_semantic_stage(retirement_batch.epoch).unwrap();
         let mut finite = options.clone();
         finite.all = false;
         finite.since = std::time::Duration::from_millis(1);
