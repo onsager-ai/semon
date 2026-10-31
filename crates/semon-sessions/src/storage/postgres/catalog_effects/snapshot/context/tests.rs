@@ -303,7 +303,7 @@ fn pg_selected_family_bounds_candidate_bytes_and_charges_visited_binds() {
             &pool,
             &namespace,
             &generation,
-            &budget_parent,
+            budget_parent,
             2 * 1024 * 1024,
         ),
         Err(StorageError::Busy)

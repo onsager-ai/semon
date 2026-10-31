@@ -961,7 +961,9 @@ mod tests {
 
     fn proof_metadata(connection: &Connection) -> Vec<(String, Option<String>)> {
         connection
-            .prepare("SELECT key,value FROM main.meta WHERE namespace=semon_namespace() ORDER BY key")
+            .prepare(
+                "SELECT key,value FROM main.meta WHERE namespace=semon_namespace() ORDER BY key",
+            )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
@@ -1403,11 +1405,10 @@ mod tests {
             &root.join(name),
             &crate::events::store::fixture_namespace(),
         );
-        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
-            store.owner.clone(),
-        )
-        .connection()
-        .unwrap();
+        store.connection =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                .connection()
+                .unwrap();
         store
     }
 
@@ -1862,9 +1863,11 @@ mod tests {
         assert!(read(&connection, path, &changed).unwrap().is_none());
         let key = format!("{}0000000000", prefix(path));
         let encoded: String = connection
-            .query_row("SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1", [&key], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+                [&key],
+                |row| row.get(0),
+            )
             .unwrap();
         let mut page: Page = serde_json::from_str(&encoded).unwrap();
         page.hashes[0][0] ^= 1;
