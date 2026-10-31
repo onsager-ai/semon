@@ -4694,20 +4694,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &moved_store.generation,
             |snapshot| {
+                let current = snapshot.catalog(&pid_owner.key, false)?.unwrap();
                 assert_eq!(
-                    snapshot.catalog(&pid_owner.key, false)?.unwrap().lifecycle,
+                    current.lifecycle,
                     crate::model::summary::CatalogLifecycle::Current
                 );
                 let history = snapshot.owner(&pid_owner.key)?.is_some();
                 let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
+                assert_eq!(row.key, current.key);
+                assert_eq!(row.harness, current.harness);
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(
                         &mut tx,
-                        &row.sources,
+                        &current.sources,
                     )?
                     .is_some(),
-                    "the PID owner must qualify through its exact selected Index ledgers"
+                    "the PID owner must qualify through its exact Current Index ledgers"
                 );
                 Ok(())
             },
@@ -5089,15 +5092,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(repeated.removed, 0);
         assert_eq!(repeated.compacted_through, compacted.compacted_through);
     }
-    let facts_host = body_host(&facts_options, &facts_rows);
-    let factory_options = facts_options.clone();
+    let mut facts_host = body_host(&facts_options, &facts_rows);
+    facts_host.0.extend(retained_host.0.iter().cloned());
+    let factory_host = facts_host.clone();
     let factory_rows = facts_rows.clone();
     let factory_namespace = namespace.clone();
     let facts_readers =
         move |source: &str, key: &str| -> std::io::Result<Box<dyn crate::SessionSourceReader>> {
             assert_eq!(source, factory_namespace.as_str());
             assert!(factory_rows.iter().any(|row| row.key == key));
-            Ok(Box::new(body_host(&factory_options, &factory_rows)))
+            Ok(Box::new(factory_host.clone()))
         };
     for row in &facts_rows {
         for tool in ["read_transcript", "get_session"] {
