@@ -33,9 +33,11 @@ fn advance_imported_fixture(
         root: crate::InputRoot::Claude,
         path: "projects/sanitized/catalog.jsonl".into(),
     };
+    // Claude session identity follows the filename; relocate the source while
+    // preserving that identity for the native successor.
     let input = crate::Input {
         root: crate::InputRoot::Claude,
-        path: "projects/sanitized/successor.jsonl".into(),
+        path: "projects/relocated/catalog.jsonl".into(),
     };
     let old_path = old.full_path(options);
     let path = input.full_path(options);
@@ -64,6 +66,7 @@ fn advance_imported_fixture(
         )
         .is_empty()
     );
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, body).unwrap();
     cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
