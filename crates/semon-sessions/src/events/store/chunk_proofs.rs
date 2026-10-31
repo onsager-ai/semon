@@ -1170,20 +1170,6 @@ mod tests {
         root
     }
 
-    fn published_metadata(ledger: &Ledger) -> String {
-        serde_json::json!({
-            "key":"owner","name":"Synthetic owner","harness":"codex","kind":"Codex",
-            "native_ids":["owner"],"model":"unknown","tokens":[0,0,0],
-            "cost":{"pricing_fingerprint":"","usd":null,"unpriced_models":[],
-                "split_unknown_messages":0,"by_model":{},"by_day":{}},
-            "sources":[{"path":"original","native_id":"owner", "dev":ledger.stat.dev,
-                "ino":ledger.stat.ino,"size":ledger.stat.size,"modified_ns":ledger.stat.modified_ns,
-                "changed_ns":ledger.stat.changed_ns,"offset":ledger.offset,
-                "prefix_sha256":ledger.prefix,"tail_sha256":ledger.tail}]
-        })
-        .to_string()
-    }
-
     fn proof_catalog_tables(connection: &Connection) {
         // Low-level proof tests use an in-memory metadata database. Keep the tables
         // queried by published::preserve present, as they are after a real
@@ -1205,153 +1191,247 @@ mod tests {
     }
 
     #[test]
-    fn oversized_published_owner_refuses_mutation_without_collecting_its_proofs() {
+    fn oversized_catalog_publication_refuses_without_changing_published_proofs() {
+        use crate::storage::transfer::reported::tests::seed_catalog;
+
         let root = cleanup_root();
-        let path = root.join("index.sqlite3");
+        let database = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
-        let (old, index) = cleanup_proof(1, 0);
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
-        tx.execute(
-            "INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)",
-            [published_metadata(&old)],
+        let (_, mut rows) = seed_catalog(store.owner.config(), &root);
+        let source = rows[0].sources[0].path.to_str().unwrap().to_owned();
+        let ledger = crate::source_carrier::ledger(&rows[0].sources[0]);
+        let (_, index) = store.load_file(&source).unwrap().unwrap();
+        let bytes = index
+            .source_chunks
+            .as_ref()
+            .unwrap()
+            .read(&mut fs::File::open(&source).unwrap(), 0)
+            .unwrap();
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
         )
-        .unwrap();
-        tx.execute(
-            "INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')",
-            [],
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        let mut next = old.clone();
-        next.stat.modified_ns += 1;
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &next, index.source_chunks.as_deref()).unwrap();
-        tx.commit().unwrap();
-        let mut owner: serde_json::Value = serde_json::from_str(&published_metadata(&old)).unwrap();
-        owner["name"] = serde_json::Value::String("x".repeat(1024 * 1024));
-        store
+        .unwrap()
+        .into_test_connection();
+        let generation: String = store
             .connection
-            .execute(
-                "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
-                [owner.to_string()],
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
             )
             .unwrap();
-        let key = format!("{}header", prefix("original"));
-        let before: String = store
-            .connection
-            .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
+        let (outcome, generation) = store
+            .publish_catalog_with_generation(
+                &crate::slot_projection::Publication {
+                    rows: &rows,
+                    transcripts: None,
+                    observations: None,
+                },
+                Some(&generation),
+                None,
+                false,
+                None,
+            )
             .unwrap();
-        next.stat.modified_ns += 1;
-        let tx = store.connection.transaction().unwrap();
-        assert!(write(&tx, "original", &next, index.source_chunks.as_deref()).is_err());
-        drop(tx);
-        let after: String = store
-            .connection
-            .query_row(NATIVE_METADATA_VALUE, [&key], |row| row.get(0))
-            .unwrap();
-        assert_eq!(
-            before, after,
-            "failed preservation must not advance the live proof"
+        assert_eq!(outcome, crate::events::Outcome::Written);
+        let generation = generation.unwrap();
+        rows[0].name = "x".repeat(1024 * 1024);
+        let metadata = vec![serde_json::to_string(&rows[0]).unwrap()];
+        assert!(metadata[0].len() > 1024 * 1024);
+        // Batch eligibility is only an optimization. The actual publisher's
+        // search/owner bounds refuse this row before an oversized Current can
+        // become reachable by the later Index preservation/collection path.
+        assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_none());
+        let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+        assert!(
+            store
+                .publish_catalog_with_generation(
+                    &crate::slot_projection::Publication {
+                        rows: &rows,
+                        transcripts: None,
+                        observations: None,
+                    },
+                    Some(&generation),
+                    None,
+                    false,
+                    None,
+                )
+                .is_err()
         );
-        assert!(Focused::open(&path, "original", &old).is_ok());
+        assert_eq!(
+            crate::native_timing::cleanup_tests::snapshot(&store.connection),
+            before,
+            "refused publication must roll back Catalog, proof, receipt and grant state"
+        );
+        Focused::open(&database, &source, &ledger)
+            .unwrap()
+            .verify(0, &bytes)
+            .unwrap();
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop() {
+        use crate::storage::native_events::NativeEventStore;
+        use crate::storage::transfer::reported::tests::{cache, finish_catalog, seed_catalog};
+        use std::io::Write;
+
         let root = cleanup_root();
-        let path = root.join("index.sqlite3");
+        let database = root.join("index.sqlite3");
         let mut store = cleanup_store(&root, "index.sqlite3");
-        let bytes = vec![b'x'; crate::source_chunks::SIZE];
-        let hash: [u8; 32] = Sha256::digest(&bytes).into();
-        let (old, mut index) = cleanup_proof(PAGE + 1, 0);
-        index.source_chunks = Some(Arc::new(Chunks {
-            offset: old.offset,
-            hashes: vec![hash; PAGE + 1],
-            resume: None,
-        }));
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &old, index.source_chunks.as_deref()).unwrap();
-        tx.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('owner',0,'codex',?1)", [published_metadata(&old)]).unwrap();
-        tx.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('owner','codex','owner','original')", []).unwrap();
-        tx.execute(
-            "INSERT INTO session_history_catalog(session_key,metadata) VALUES('owner',?1)",
-            [published_metadata(&old)],
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        let live_reader = Focused::open(&path, "original", &old).unwrap();
+        let config = store.owner.config().clone();
+        let (options, first) = seed_catalog(&config, &root);
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/catalog.jsonl".into(),
+        };
+        let path = input.full_path(&options);
+        let source = path.to_str().unwrap();
+        let original = crate::source_carrier::ledger(&first[0].sources[0]);
+        let (_, original_index) = store.load_file(source).unwrap().unwrap();
+        let original_bytes = original_index
+            .source_chunks
+            .as_ref()
+            .unwrap()
+            .read(&mut fs::File::open(&path).unwrap(), 0)
+            .unwrap();
+        let mut producer = cache(&config);
+        let publish = |producer: &mut crate::events::EventCache| {
+            assert_eq!(
+                producer
+                    .begin_semantic_stage_with_journal(
+                        &[source.to_owned()],
+                        "published-proof-fixture",
+                        true,
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            finish_catalog(producer, &options, std::slice::from_ref(&input))
+        };
+        // Real native progress records grow the second observation beyond one
+        // proof page without adding transcript slots or admitting another source.
+        let mut progress = serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":""}})
+            .to_string();
+        let padding = "x".repeat(crate::source_chunks::SIZE - progress.len() - 1);
+        progress = serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":padding}})
+            .to_string();
+        assert_eq!(progress.len() + 1, crate::source_chunks::SIZE);
+        let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for _ in 0..PAGE {
+            writeln!(raw, "{progress}").unwrap();
+        }
+        drop(raw);
+        producer.ingest(&"8".repeat(64), &path, "claude").unwrap();
+        producer.flush_cold_writes().unwrap();
+        let second = publish(&mut producer);
+        let selected = crate::source_carrier::ledger(&second[0].sources[0]);
+        let (_, selected_index) = store.load_file(source).unwrap().unwrap();
+        let chunks = selected_index.source_chunks.as_ref().unwrap();
+        assert_eq!(chunks.hashes.len(), PAGE + 1);
+        let bytes = chunks
+            .read(&mut fs::File::open(&path).unwrap(), PAGE)
+            .unwrap();
+        let live_reader = Focused::open(&database, source, &selected).unwrap();
         let owned_snapshot = Arc::downgrade(&live_reader.db);
-        let mut latest = old.clone();
-        // Index leads an unchanged Catalog through several observations.
+        let retained_digests = |db: &Connection| {
+            db.prepare("SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key LIKE 'native_published_chunks:%:header'")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|text| {
+                    let header: Header = serde_json::from_str(&text.unwrap()).unwrap();
+                    crate::source_carrier::ledger_digest_value(&header.ledger)
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let original_digest = crate::source_carrier::ledger_digest(&original);
+        let selected_digest = crate::source_carrier::ledger_digest(&selected);
+        let referenced =
+            std::collections::BTreeSet::from([original_digest.clone(), selected_digest.clone()]);
+        // Index leads an unchanged Current B and original History A through
+        // several real observations. Only those two referenced digests survive.
         for at in 1..=4 {
-            latest.stat.modified_ns += 1;
-            let tx = store.connection.transaction().unwrap();
-            write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
-            tx.commit().unwrap();
-            let count: i64 = store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
-                    [],
-                    |r| r.get(0),
-                )
+            let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(raw, "{{\"type\":\"progress\",\"data\":{{\"type\":\"bash_progress\",\"output\":\"{at}\"}}}}").unwrap();
+            drop(raw);
+            producer
+                .ingest(&format!("{at:064x}"), &path, "claude")
                 .unwrap();
-            assert_eq!(count, 1, "unbounded retained versions at mutation {at}");
-            Focused::open(&path, "original", &old)
+            producer.flush_cold_writes().unwrap();
+            assert_eq!(
+                retained_digests(&store.connection),
+                referenced,
+                "unbounded retained versions at mutation {at}"
+            );
+            Focused::open(&database, source, &selected)
                 .unwrap()
                 .verify(PAGE, &bytes)
                 .unwrap();
         }
-        let retained_reader = Focused::open(&path, "original", &old).unwrap();
+        let retained_reader = Focused::open(&database, source, &selected).unwrap();
+        let retained_snapshot = Arc::downgrade(&retained_reader.db);
         assert!(
             retained_reader
                 .prefix
                 .starts_with("native_published_chunks:")
         );
-        // Both current and history references count. Publishing a different
-        // Current alone must not collect the original retained observation.
-        store
-            .connection
-            .execute(
-                "UPDATE session_catalog SET metadata=?1 WHERE session_key='owner'",
-                [published_metadata(&latest)],
-            )
-            .unwrap();
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
-        tx.commit().unwrap();
-        Focused::open(&path, "original", &old)
-            .unwrap()
-            .verify(PAGE, &bytes)
-            .unwrap();
-        store
-            .connection
-            .execute(
-                "DELETE FROM session_history_catalog WHERE session_key='owner'",
-                [],
-            )
-            .unwrap();
-        latest.stat.modified_ns += 1;
-        let tx = store.connection.transaction().unwrap();
-        write(&tx, "original", &latest, index.source_chunks.as_deref()).unwrap();
-        tx.commit().unwrap();
-        assert!(Focused::open(&path, "original", &old).is_err());
-        // Uncached current pages remain verifiable in each pinned snapshot
-        // after the original publication has been collected.
-        live_reader.verify(PAGE, &bytes).unwrap();
-        retained_reader.verify(PAGE, &bytes).unwrap();
-        let count: i64 = store
+        let third = publish(&mut producer);
+        let latest = crate::source_carrier::ledger(&third[0].sources[0]);
+        let latest_digest = crate::source_carrier::ledger_digest(&latest);
+        let references =
+            crate::storage::sqlite::proof_generations::referenced(&store.connection, source)
+                .unwrap();
+        assert!(references.contains(&original_digest));
+        assert!(references.contains(&latest_digest));
+        assert!(!references.contains(&selected_digest));
+        let history: String = store
             .connection
             .query_row(
-                "SELECT count(*) FROM meta WHERE key LIKE 'native_published_chunks:%:header'",
-                [],
-                |r| r.get(0),
+                "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [&first[0].key],
+                |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        let history: crate::model::summary::CatalogRow = serde_json::from_str(&history).unwrap();
+        assert_eq!(
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&history.sources[0])),
+            original_digest,
+            "publishing C must preserve original History A"
+        );
+        // Current C and History A leave intermediate B genuinely unreferenced.
+        // The next proof mutation collects B without deleting original custody.
+        let (_, latest_index) = store.load_file(source).unwrap().unwrap();
+        assert_eq!(
+            latest_index.source_chunks.as_ref().unwrap().hashes.len(),
+            PAGE + 1
+        );
+        let tx = store.connection.transaction().unwrap();
+        write(&tx, source, &latest, latest_index.source_chunks.as_deref()).unwrap();
+        tx.commit().unwrap();
+        assert!(Focused::open(&database, source, &selected).is_err());
+        live_reader.verify(PAGE, &bytes).unwrap();
+        retained_reader.verify(PAGE, &bytes).unwrap();
+        Focused::open(&database, source, &original)
+            .unwrap()
+            .verify(0, &original_bytes)
+            .unwrap();
+        let latest_bytes = latest_index
+            .source_chunks
+            .as_ref()
+            .unwrap()
+            .read(&mut fs::File::open(&path).unwrap(), PAGE)
+            .unwrap();
+        Focused::open(&database, source, &latest)
+            .unwrap()
+            .verify(PAGE, &latest_bytes)
+            .unwrap();
+        assert_eq!(
+            retained_digests(&store.connection),
+            std::collections::BTreeSet::from([original_digest, latest_digest])
+        );
+        drop(producer);
         store
             .connection
             .busy_timeout(Duration::from_millis(10))
@@ -1365,7 +1445,13 @@ mod tests {
         assert_eq!(checkpoint(&store.connection), 1, "request must pin WAL");
         drop(live_reader);
         assert!(owned_snapshot.upgrade().is_none());
+        assert_eq!(
+            checkpoint(&store.connection),
+            1,
+            "retained reader still pins WAL"
+        );
         drop(retained_reader);
+        assert!(retained_snapshot.upgrade().is_none());
         assert_eq!(
             checkpoint(&store.connection),
             0,
