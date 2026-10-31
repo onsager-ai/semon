@@ -43,8 +43,9 @@ Same-source History qualifies independently; divergent cohorts retain their
 original metadata. Missing or mismatched authority leaves an observation unchanged.
 Imported receipts alone cannot authorize repricing or mint local grants, even
 when producer and destination admission counters coincide. Original Stage proofs
-remain immutable; a SQLite grant-write failure rolls back metadata and pricing
-progress together.
+remain immutable; a SQLite preparation-read or grant-write failure rolls back
+metadata and pricing progress together. SQL failures remain distinct from
+unavailable evidence and leave the failed owner retryable.
 Forward and reverse reads with authorized
 originals and absent local Raw remain subject to exact-revision CI qualification.
 

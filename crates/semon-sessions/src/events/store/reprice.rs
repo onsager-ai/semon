@@ -3,7 +3,7 @@
 use super::*;
 use crate::pricing::{Cost, CostBuild, EffectiveTable};
 use crate::storage::sqlite::proof_generations::{
-    CatalogObservationOwner, prepare_repriced_observation,
+    CatalogObservationOwner, ObservationPreparationError, prepare_repriced_observation,
 };
 use std::sync::Arc;
 
@@ -148,6 +148,13 @@ pub(crate) fn drain_for_store_test(
 
 fn owner_error(error: crate::storage::StorageError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn preparation_error(error: ObservationPreparationError) -> rusqlite::Error {
+    match error {
+        ObservationPreparationError::Evidence(error) => owner_error(error),
+        ObservationPreparationError::Sql(error) => error,
+    }
 }
 
 fn idle(connection: &Connection, fingerprint: &str) -> rusqlite::Result<bool> {
@@ -630,7 +637,7 @@ fn catalog_step(
         &cost,
         row.query.as_ref(),
     )
-    .map_err(owner_error)?
+    .map_err(preparation_error)?
     .publish(tx)?;
     // Same-generation history publications can share the recomputation. An
     // older/different history cohort remains at its original price fingerprint.
@@ -651,10 +658,12 @@ fn catalog_step(
                 history.query.as_ref(),
             ) {
                 Ok(prepared) => prepared.publish(tx)?,
-                Err(crate::storage::StorageError::ScopeChanged
+                Err(ObservationPreparationError::Evidence(
+                    crate::storage::StorageError::ScopeChanged
                     | crate::storage::StorageError::Unavailable
-                    | crate::storage::StorageError::HistoryRetentionBounds) => {}
-                Err(error) => return Err(owner_error(error)),
+                    | crate::storage::StorageError::HistoryRetentionBounds,
+                )) => {}
+                Err(error) => return Err(preparation_error(error)),
             }
         }
     }
