@@ -6689,7 +6689,7 @@ mod tests {
         for sql in [
             "ALTER TABLE meta ADD COLUMN unexpected TEXT;",
             "DROP TABLE meta;",
-            "CREATE TABLE storage_namespaces(namespace TEXT PRIMARY KEY);",
+            "UPDATE main.storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='fixture-source';",
             "UPDATE meta SET value='unsupported' WHERE key='cache_version';",
         ] {
             let root = scratch("cold-discovery-refusal");
