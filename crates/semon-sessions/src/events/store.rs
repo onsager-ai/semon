@@ -8923,7 +8923,11 @@ mod tests {
         // from its committed state so their complete authority rows match.
         let indexed_path = crate::events::EventCache::path(&options.cache)
             .with_file_name("semantic_indexed.sqlite3");
-        fs::copy(crate::events::EventCache::path(&options.cache), &indexed_path).unwrap();
+        fs::copy(
+            crate::events::EventCache::path(&options.cache),
+            &indexed_path,
+        )
+        .unwrap();
         let indexed_options = crate::Options {
             cache: indexed_path.with_extension("json"),
             ..options.clone()
@@ -8938,7 +8942,10 @@ mod tests {
                 cache.begin_semantic_stage(&paths, &runtime).unwrap(),
                 Outcome::Written
             );
-            let config = indexed_options.source.config(&indexed_options.cache).unwrap();
+            let config = indexed_options
+                .source
+                .config(&indexed_options.cache)
+                .unwrap();
             let mut store = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
             )
