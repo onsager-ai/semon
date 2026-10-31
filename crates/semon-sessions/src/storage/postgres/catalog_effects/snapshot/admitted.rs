@@ -60,11 +60,7 @@ impl Snapshot<'_, '_> {
                 Ok(stored)
             })
             .transpose()?;
-        let physical_metadata = physical
-            .as_ref()
-            .map(encoded)
-            .transpose()
-            .map_err(failed)?;
+        let physical_metadata = physical.as_ref().map(encoded).transpose().map_err(failed)?;
         let history_owner = if owner == Some(CatalogObservationOwner::History) {
             if !self.history_qualified(row)? {
                 return Err(failed(StorageError::ScopeChanged));

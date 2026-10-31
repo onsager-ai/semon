@@ -1,6 +1,6 @@
-use super::*;
-use super::super::{observations, snapshot};
 use super::super::super::native_keys;
+use super::super::{observations, snapshot};
+use super::*;
 use crate::events::{EventCache, Outcome};
 use crate::storage::{catalog::CatalogSnapshot, native_events::NativeEventStore};
 use sha2::Digest;
@@ -11,9 +11,16 @@ pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> S
     writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":row.native_ids[0],"uuid":operation,"timestamp":"2026-10-01T00:01:00Z","cwd":"/synthetic/project","message":{"role":"user","content":operation}})).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-    cache.ingest(&format!("{:x}", Sha256::digest(operation.as_bytes())), path, "claude").unwrap();
+    cache
+        .ingest(
+            &format!("{:x}", Sha256::digest(operation.as_bytes())),
+            path,
+            "claude",
+        )
+        .unwrap();
     let input = crate::native_evidence::catalog_input(path, options).unwrap();
-    let prepared = crate::model::prepare_sources(options, &mut cache, &[input], 1790812860000).unwrap();
+    let prepared =
+        crate::model::prepare_sources(options, &mut cache, &[input], 1790812860000).unwrap();
     for _ in 0..256 {
         let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
         if let Some(generation) = generation {
@@ -42,23 +49,30 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         all: true,
         ..Default::default()
     };
-    let (original_generation, rows) = bind_custody_fixture(
-        &pool, &namespace, &options, &data.rows, &data.projections,
-    );
-    let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
-        pool: pool.clone(), control: control.clone(),
-    }).unwrap();
+    let (original_generation, rows) =
+        bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
+    let config = options
+        .source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
     options.source = options.source.with_store(config.clone()).unwrap();
     let original = &rows[0];
     let host = super::businessflow::body_host(&options, &rows);
     let second = advance(&options, original, "native-history-second");
-    let (history, owner, continued) = snapshot::with_generation(
-        &pool, &namespace, &control, &second, |snapshot| {
+    let (history, owner, continued) =
+        snapshot::with_generation(&pool, &namespace, &control, &second, |snapshot| {
             let history = snapshot.catalog(&original.key, true)?.unwrap();
             snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)?;
-            Ok((history, snapshot.owner(&original.key)?.unwrap(), snapshot.catalog(&original.key, false)?.unwrap()))
-        },
-    ).unwrap();
+            Ok((
+                history,
+                snapshot.owner(&original.key)?.unwrap(),
+                snapshot.catalog(&original.key, false)?.unwrap(),
+            ))
+        })
+        .unwrap();
     assert_eq!(history.sources, original.sources);
     assert_ne!(history.sources, continued.sources);
     let latest = advance(&options, &continued, "native-history-third");
@@ -72,17 +86,31 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         Ok(reference)
     }).unwrap();
     snapshot::with_generation(&pool, &namespace, &control, &latest, |snapshot| {
-        assert_eq!(snapshot.owner(&original.key)?.as_deref(), Some(owner.as_str()));
+        assert_eq!(
+            snapshot.owner(&original.key)?.as_deref(),
+            Some(owner.as_str())
+        );
         snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
-    }).unwrap();
+    })
+    .unwrap();
     let store = snapshot::query::QueryCatalog {
-        captured: false, pool: pool.clone(), namespace: namespace.clone(),
-        control: control.clone(), generation: latest.clone(), options: options.clone(),
+        captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: latest.clone(),
+        options: options.clone(),
     };
-    let fields = crate::Query::new(options.clone()).call_bound_selected_at(
-        "get_session", &serde_json::json!({"id":original.key}), 1790812860000,
-        &store, &host, None,
-    ).unwrap();
+    let fields = crate::Query::new(options.clone())
+        .call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":original.key}),
+            1790812860000,
+            &store,
+            &host,
+            None,
+        )
+        .unwrap();
     assert!(fields.to_string().contains("sanitized"));
 
     snapshot::with_admitted_snapshot(&pool, &namespace, &control, &latest, |_| {
@@ -98,7 +126,16 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         Ok(())
     }).unwrap();
 
-    for fault in ["missing_reference", "admission", "stream", "version", "original_operation", "custodian_operation", "header", "source_generation"] {
+    for fault in [
+        "missing_reference",
+        "admission",
+        "stream",
+        "version",
+        "original_operation",
+        "custodian_operation",
+        "header",
+        "source_generation",
+    ] {
         let mut checked = false;
         let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
             let ns = namespace.as_str().as_bytes();
@@ -140,15 +177,33 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         assert!(checked, "{fault}");
         snapshot::with_generation(&pool, &namespace, &control, &latest, |snapshot| {
             snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
-        }).unwrap();
+        })
+        .unwrap();
     }
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         let saved: observations::HistoryReference = serde_json::from_slice(&reference).unwrap();
-        observations::issue_history(tx, &owner, &serde_json::to_vec(&history).unwrap(), saved.lifecycle, saved.receipt)?;
-        let mut changed: observations::HistoryReference = serde_json::from_slice(&reference).unwrap();
+        observations::issue_history(
+            tx,
+            &owner,
+            &serde_json::to_vec(&history).unwrap(),
+            saved.lifecycle,
+            saved.receipt,
+        )?;
+        let mut changed: observations::HistoryReference =
+            serde_json::from_slice(&reference).unwrap();
         changed.receipt.0 += 1;
-        assert_eq!(observations::issue_history(tx, &owner, &serde_json::to_vec(&history).unwrap(), changed.lifecycle, changed.receipt), Err(StorageError::ScopeChanged));
+        assert_eq!(
+            observations::issue_history(
+                tx,
+                &owner,
+                &serde_json::to_vec(&history).unwrap(),
+                changed.lifecycle,
+                changed.receipt
+            ),
+            Err(StorageError::ScopeChanged)
+        );
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     fs::remove_dir_all(data.root).unwrap();
 }

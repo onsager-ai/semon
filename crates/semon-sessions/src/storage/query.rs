@@ -111,12 +111,8 @@ fn edge_source_needs(
         }
         if let Some(children) = summary.get("children").and_then(Value::as_array) {
             for child in children {
-                endpoint_owners.insert(
-                    child
-                        .as_str()
-                        .ok_or(StorageError::ScopeChanged)?
-                        .to_owned(),
-                );
+                endpoint_owners
+                    .insert(child.as_str().ok_or(StorageError::ScopeChanged)?.to_owned());
             }
         }
     }

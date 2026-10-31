@@ -95,6 +95,7 @@
     "pricing/runtime.rs",
     "query/tests.rs",
     "query/tests/recovery_tests.rs",
+    "query/tests/retained_context_tests.rs",
     "query/transcript.rs",
     "query_projection.rs",
     "query_source.rs",
