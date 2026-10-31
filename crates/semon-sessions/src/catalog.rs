@@ -1313,8 +1313,7 @@ pub(crate) fn read_page_snapshot_with_search(
         let mut item = serde_json::to_value(row)?;
         if let Some(indexed) = indexed_display[index].take() {
             for field in [
-                "key", "name", "harness", "repo", "branch", "model", "last", "tokens",
-                "cost",
+                "key", "name", "harness", "repo", "branch", "model", "last", "tokens", "cost",
             ] {
                 item[field] = indexed[field].clone();
             }
