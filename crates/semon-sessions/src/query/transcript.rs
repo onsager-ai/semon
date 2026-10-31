@@ -19,6 +19,21 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("io", error.to_string())
 }
 
+fn runtime_observation_failure(error: io::Error) -> QueryError {
+    let scope_changed = error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+        .is_some_and(|error| matches!(error, crate::storage::StorageError::ScopeChanged));
+    if scope_changed {
+        QueryError::new(
+            "unavailable",
+            "Native Query runtime observations changed during the query",
+        )
+    } else {
+        unavailable(error)
+    }
+}
+
 fn proof_unavailable(error: &io::Error) -> QueryError {
     if crate::source_carrier::FailureStage::of(error).is_some()
         || error
@@ -394,7 +409,7 @@ fn virtual_read(
         };
         let row_runtime = runtime_snapshot
             .runtime_observation(options, row, observation_owner, &runtime)
-            .map_err(unavailable)?;
+            .map_err(runtime_observation_failure)?;
         if !crate::model::summary::query_observation_matches(
             query,
             &row.sources,
@@ -833,7 +848,7 @@ fn read_inner(
                     },
                     &runtime,
                 )
-                .map_err(unavailable)?;
+                .map_err(runtime_observation_failure)?;
             (Some(runtime), observed)
         } else {
             // Retained custody still requires the original publication binding,
