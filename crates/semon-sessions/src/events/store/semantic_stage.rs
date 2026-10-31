@@ -3237,8 +3237,7 @@ mod tests {
         String,
         i64,
     ) {
-        let (root, store, mut stage, path, batch, prepared) =
-            current_header_repair_batch(name);
+        let (root, store, mut stage, path, batch, prepared) = current_header_repair_batch(name);
         assert_eq!(
             stage.record_semantic_batch(&batch, &prepared).unwrap(),
             Outcome::Written
@@ -3416,8 +3415,7 @@ mod tests {
     }
 
     fn assert_current_header_repair_batch_records(name: &str) {
-        let (root, store, mut stage, _path, batch, prepared) =
-            current_header_repair_batch(name);
+        let (root, store, mut stage, _path, batch, prepared) = current_header_repair_batch(name);
         assert_eq!(
             stage.record_semantic_batch(&batch, &prepared).unwrap(),
             Outcome::Written,
@@ -3462,10 +3460,20 @@ mod tests {
 
     #[test]
     fn semantic_rejection_checks_configured_claims_ledgers_generation_and_busy() {
-        for case in ["prepared_claim", "source_claim", "ledger", "catalog_generation"] {
+        for case in [
+            "prepared_claim",
+            "source_claim",
+            "ledger",
+            "catalog_generation",
+        ] {
             assert_current_header_repair_batch_records(&format!("{case}-baseline"));
         }
-        for case in ["prepared_claim", "source_claim", "ledger", "catalog_generation"] {
+        for case in [
+            "prepared_claim",
+            "source_claim",
+            "ledger",
+            "catalog_generation",
+        ] {
             let (root, store, mut stage, path, batch, mut prepared) =
                 current_header_repair_batch(case);
             match case {
@@ -3516,8 +3524,7 @@ mod tests {
         }
 
         assert_current_header_repair_batch_records("busy-baseline");
-        let (root, store, mut stage, _path, batch, prepared) =
-            current_header_repair_batch("busy");
+        let (root, store, mut stage, _path, batch, prepared) = current_header_repair_batch("busy");
         let before = configured_stage_snapshot(&store);
         let blocker = rusqlite::Connection::open(&store.path).unwrap();
         blocker.busy_timeout(std::time::Duration::ZERO).unwrap();

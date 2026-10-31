@@ -7553,19 +7553,12 @@ mod tests {
             )
             .unwrap();
             cache
-                .ingest(
-                    &"a".repeat(64),
-                    &input.full_path(options),
-                    "codex",
-                )
+                .ingest(&"a".repeat(64), &input.full_path(options), "codex")
                 .unwrap();
             let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
             assert_eq!(batch.phase, Phase::Publication);
 
-            let unrelated = format!(
-                "{}.unrelated",
-                input.full_path(options).to_string_lossy()
-            );
+            let unrelated = format!("{}.unrelated", input.full_path(options).to_string_lossy());
             let mut journal = SourceJournal::owned(NativeOwnership::admit(&f.config).unwrap());
             let expected = journal.claims(std::slice::from_ref(&unrelated)).unwrap();
             let operation = SourceOperation::capture(
