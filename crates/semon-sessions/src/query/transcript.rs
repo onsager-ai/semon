@@ -383,8 +383,9 @@ fn virtual_read(
         let Some(query) = &row.query else {
             return Ok(None);
         };
+        let observation_owner = if scope == crate::CatalogReadScope::RetainedHistory && crate::history_projection::catalog(&tx, &row.key).map_err(unavailable)?.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
         let row_runtime = runtime_snapshot
-            .runtime_observation(options, row, &runtime)
+            .runtime_observation(options, row, observation_owner, &runtime)
             .map_err(unavailable)?;
         if !crate::model::summary::query_observation_matches(
             query,
@@ -814,7 +815,7 @@ fn read_inner(
         if current {
             let runtime = snapshot.runtime_generation(options).map_err(unavailable)?;
             let observed = snapshot
-                .runtime_observation(options, &row, &runtime)
+                .runtime_observation(options, &row, if history.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &runtime)
                 .map_err(unavailable)?;
             (Some(runtime), observed)
         } else {

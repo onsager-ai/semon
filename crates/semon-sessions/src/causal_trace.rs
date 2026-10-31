@@ -403,7 +403,7 @@ fn selected_family(
     crate::storage::selected::selected_family(
         &crate::storage::sqlite::selected::Context::owned(tx),
         key,
-        relative_status,
+        &mut |row, _owner| relative_status(row),
     )
     .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
@@ -723,9 +723,9 @@ pub(crate) fn session_causal_trace_with_gate(
                 },
                 None => TraceParticipantActivity::Unavailable,
             };
-            let metadata = crate::history_projection::catalog(&tx, &sid)
-                .map_err(|_| 503u16)?
-                .or(tx
+            let history_metadata = crate::history_projection::catalog(&tx, &sid).map_err(|_| 503u16)?;
+            let observation_owner = if history_metadata.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
+            let metadata = history_metadata.or(tx
                     .query_row(
                         "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                         [&sid],
@@ -752,7 +752,7 @@ pub(crate) fn session_causal_trace_with_gate(
                     .as_deref()
                     .and_then(|runtime| {
                         snapshot
-                            .runtime_observation(options, &row, runtime)
+                            .runtime_observation(options, &row, observation_owner, runtime)
                             .ok()
                             .flatten()
                     })

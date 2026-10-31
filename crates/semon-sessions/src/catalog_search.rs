@@ -593,7 +593,7 @@ pub(crate) struct Position {
     pub(crate) key: String,
 }
 pub(crate) struct Selection {
-    pub(crate) rows: Vec<CatalogRow>,
+    pub(crate) rows: Vec<crate::storage::catalog::SelectedCatalogRow>,
     pub(crate) next: Option<Position>,
     pub(crate) report: Report,
 }
@@ -663,6 +663,7 @@ fn read_filtered(
             let found = metadata
                 .query_row(params![key, budget as i64], |row| {
                     Ok(Candidate {
+                        owner: crate::storage::catalog::CatalogObservationOwner::Catalog,
                         length: row.get(0)?,
                         encoded: row.get(1)?,
                         last: row.get(2)?,
@@ -681,6 +682,7 @@ fn read_filtered(
 
 /// One candidate's stored Catalog metadata, bounded by the remaining scan bytes.
 pub(crate) struct Candidate {
+    pub(crate) owner: crate::storage::catalog::CatalogObservationOwner,
     pub(crate) length: i64,
     pub(crate) encoded: Option<String>,
     pub(crate) last: i64,
@@ -742,6 +744,7 @@ pub(crate) fn select<E>(
             continue;
         }
         let Some(Candidate {
+            owner,
             length,
             encoded,
             last,
@@ -812,7 +815,10 @@ pub(crate) fn select<E>(
             });
         }
         checked = Some(position.clone());
-        selected.push(row);
+        selected.push(crate::storage::catalog::SelectedCatalogRow {
+            row,
+            owner: Some(owner),
+        });
     }
     let partial = partial || more;
     if partial && checked.is_none() {
@@ -1497,6 +1503,7 @@ mod sqlite_tests {
         assert_eq!(found.rows.len(), 1);
         assert_eq!(found.rows[0].name, "Harbor queue");
         assert_eq!(found.rows[0].lifecycle, CatalogLifecycle::Retained);
+        assert_eq!(found.rows[0].owner, Some(crate::storage::catalog::CatalogObservationOwner::Catalog));
         // An absent retained source is not a readable current fallback.
         connection
             .execute("DELETE FROM main.session_history_catalog", [])
@@ -1547,8 +1554,8 @@ mod sqlite_tests {
             vec!["target-00000", "target-00001"]
         );
         assert_eq!(changed, baseline);
-        let first_bytes = serde_json::to_vec(&first.rows).unwrap();
-        assert_eq!(serde_json::to_vec(&grown.rows).unwrap(), first_bytes);
+        let first_bytes = serde_json::to_vec(&first.rows.iter().map(|selected| &selected.row).collect::<Vec<_>>()).unwrap();
+        assert_eq!(serde_json::to_vec(&grown.rows.iter().map(|selected| &selected.row).collect::<Vec<_>>()).unwrap(), first_bytes);
         eprintln!(
             "metadata q fixed-two-row SQL VM {baseline}->{changed}; single in-memory read {first_micros}->{grown_micros}us; response {} bytes; unrelated rows0->20000 (not a restart or browser journey)",
             first_bytes.len()

@@ -527,6 +527,7 @@ fn read(
                             db,
                             admitted_binding,
                             &row,
+                            crate::storage::catalog::CatalogObservationOwner::Catalog,
                         )
                         .map_err(unavailable)?;
                     let current_global = binding.witness(&runtime).map_err(unavailable)?;
