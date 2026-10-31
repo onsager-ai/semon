@@ -3430,8 +3430,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .is_err()
     );
+    // Later old-generation checks use the immutable captured proof route; the
+    // separate live Current refusal is asserted above.
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
+        captured_bodies(&pool),
         expected_bodies
     );
     drop(cache);
@@ -3446,7 +3448,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::events::Outcome::Written
     );
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
+        captured_bodies(&pool),
         expected_bodies,
         "withdrawal preserves authorized old body after reopen"
     );
@@ -3538,7 +3540,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(fs::read(&archived).unwrap(), codex_bytes);
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
+        captured_bodies(&pool),
         expected_bodies,
         "old authorized body survives native relocation"
     );
@@ -3758,8 +3760,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap();
     assert!(appended.rows.iter().any(|r| r.key == moved_owner.key));
     assert_eq!(
-        read_bodies(&mut query, &query_store, &retained_host),
-        expected_bodies
+        captured_bodies(&pool),
+        expected_bodies,
+        "old captured bodies survive relocation append"
     );
     let (_cache, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
