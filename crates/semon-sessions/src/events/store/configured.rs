@@ -7568,6 +7568,60 @@ mod tests {
         }
 
         #[test]
+        fn configured_semantic_codex_producer_publishes_through_relations() {
+            let (f, _, options, inputs) = model_sources();
+            let options = &options[0];
+            let input = &inputs[0];
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            cache
+                .ingest(&"a".repeat(64), &input.full_path(options), "codex")
+                .unwrap();
+            // The shared helpers exercise actual record/publication faults and
+            // their whole-store rollback before the successful producer path.
+            let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            assert_eq!(model.prepared().rows.len(), 1);
+            assert_eq!(model.prepared().rows[0].harness, "codex");
+            assert!(
+                f.db()
+                    .query_row(
+                        "SELECT relation_done FROM catalog_semantic_sources WHERE namespace='source-a' AND source_path=?1",
+                        [input.full_path(options).to_string_lossy().as_ref()],
+                        |r| r.get::<_, bool>(0),
+                    )
+                    .unwrap(),
+                "the real Codex source completed its Relations cursor"
+            );
+            publish(&mut cache, &f, &batch, &model);
+            assert_eq!(
+                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND session_key='model-0' AND harness='codex' AND lifecycle='current'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT count(*) FROM session_catalog_invalidations WHERE namespace='source-a'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+
+        #[test]
         fn semantic_rejection_real_publication_revision_refuses_without_writes() {
             use crate::storage::source_observations::{
                 SourceMutationReceipt, SourceObservationStore, SourceOperation,

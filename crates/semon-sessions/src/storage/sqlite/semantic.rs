@@ -3070,34 +3070,36 @@ impl Stage {
                 }
             }
         };
-        let relation_cursor = if claude {
+        let relation_cursor = if result_phase == Phase::Relations && !paths.is_empty() {
             let selected = paths[0].clone();
             let cursor = relation_page(&tx, ns, &selected, &mut context).map_err(error)?;
-            let mut actors = context
-                .matching_locations
-                .iter()
-                .flatten()
-                .map(|location| location.source.path.to_string_lossy().into_owned())
-                .collect::<std::collections::BTreeSet<_>>();
-            actors.insert(selected.clone());
-            let mut companions = std::collections::BTreeSet::new();
-            for actor in &actors {
-                companions.extend(
-                    crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
-                        .map_err(error)?,
-                );
+            if claude {
+                let mut actors = context
+                    .matching_locations
+                    .iter()
+                    .flatten()
+                    .map(|location| location.source.path.to_string_lossy().into_owned())
+                    .collect::<std::collections::BTreeSet<_>>();
+                actors.insert(selected.clone());
+                let mut companions = std::collections::BTreeSet::new();
+                for actor in &actors {
+                    companions.extend(
+                        crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
+                            .map_err(error)?,
+                    );
+                }
+                let companion_context = crate::events::store::semantic_stage::context_with(
+                    &physical,
+                    &companions.iter().cloned().collect::<Vec<_>>(),
+                    result_phase,
+                    epoch,
+                )
+                .map_err(error)?;
+                context.endpoints.extend(companion_context.endpoints);
+                companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
+                paths = vec![selected.clone()];
+                paths.extend(companions.into_iter().filter(|path| path != &selected));
             }
-            let companion_context = crate::events::store::semantic_stage::context_with(
-                &physical,
-                &companions.iter().cloned().collect::<Vec<_>>(),
-                result_phase,
-                epoch,
-            )
-            .map_err(error)?;
-            context.endpoints.extend(companion_context.endpoints);
-            companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
-            paths = vec![selected.clone()];
-            paths.extend(companions.into_iter().filter(|path| path != &selected));
             if paths.len() > 64
                 || serde_json::to_vec(&context)
                     .map_err(|e| StoreError::Data(e.to_string()))?
