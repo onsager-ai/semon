@@ -83,6 +83,25 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         eprintln!("catalog_history_probe method=original_header");
         self.db.query_row("SELECT generation,version,source_generation,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2", params![self.namespace,key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()
     }
+    fn query_recipe(&self, row: &CatalogRow) -> rusqlite::Result<Option<String>> {
+        let (metadata, payload): (String, Option<String>) = self.db.query_row(
+            "SELECT CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+            params![self.namespace, row.key],
+            |record| Ok((record.get(0)?, record.get(1)?)),
+        )?;
+        let stored: CatalogRow = serde_json::from_str(&metadata)
+            .map_err(<Self as OriginalHistoryStore>::data)?;
+        if serde_json::to_value(&stored).map_err(<Self as OriginalHistoryStore>::data)?
+            != serde_json::to_value(row).map_err(<Self as OriginalHistoryStore>::data)?
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if let Some(payload) = &payload {
+            crate::query_projection::SelectedRecipe::decode(row, payload)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
+        Ok(payload)
+    }
     fn transfer(&self, key: &str) -> rusqlite::Result<Option<String>> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=original_transfer");
@@ -168,6 +187,7 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         &self,
         row: &CatalogRow,
         metadata: &str,
+        query_recipe: Option<&str>,
         original_header: &str,
         header: Option<&OriginalHeader>,
         complete: bool,
@@ -176,7 +196,7 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         eprintln!("catalog_history_probe method=original_complete");
         let key = &row.key;
         let (activity, active) = crate::storage::query::history_activity(row);
-        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5)",params![self.namespace,key,metadata,activity,active])?;
+        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_recipe,query_activity,query_active) VALUES(?1,?2,?3,?4,?5,?6)",params![self.namespace,key,metadata,query_recipe,activity,active])?;
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_original_header:{key}"),original_header])?;
         if let Some((generation, version, sources, total)) = header {
             self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![self.namespace,key,generation,sources.as_deref().unwrap_or_default(),version,total,!complete])?;
@@ -310,7 +330,7 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         let row: CatalogRow = serde_json::from_str(metadata)
             .map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
-        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
+        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_recipe=NULL,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata OR session_history_catalog.query_recipe IS NOT NULL",params![self.namespace,key,metadata,activity,active])?;
         if changed > 0 {
             self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
             self.db.execute(

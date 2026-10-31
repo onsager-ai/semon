@@ -104,17 +104,21 @@ impl History<'_, '_> {
         &self,
         key: &str,
         metadata: &str,
+        query_recipe: Option<&str>,
         header: Option<&OriginalHeader>,
         incomplete: bool,
         original: Option<&str>,
     ) -> Result<(), StorageError> {
-        if metadata.len() > MAX || original.is_some_and(|value| value.len() > MAX) {
+        if metadata.len().saturating_add(query_recipe.map_or(0, str::len)) > MAX
+            || original.is_some_and(|value| value.len() > MAX)
+        {
             return Err(StorageError::Busy);
         }
         let empty = (String::new(), 0, None, 0);
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
         let original = original.map(|value| value.as_bytes().to_vec());
+        let query_recipe = query_recipe.map(|value| value.as_bytes().to_vec());
         // Header columns mirror catalog_rows so retained history filters,
         // family traversal and keysets in SQL; the reader re-checks them
         // against the metadata.
@@ -139,6 +143,7 @@ impl History<'_, '_> {
                 "total",
                 "incomplete",
                 "metadata",
+                "query_recipe",
                 "original_header",
                 "last_ms",
                 "harness",
@@ -158,6 +163,7 @@ impl History<'_, '_> {
                 total,
                 &incomplete,
                 &metadata.as_bytes(),
+                &query_recipe,
                 &original,
                 &row.last.unwrap_or(0),
                 &row.harness.as_bytes(),
@@ -205,6 +211,29 @@ impl OriginalHistoryStore for History<'_, '_> {
             return Ok(true);
         }
         Ok(false)
+    }
+    fn query_recipe(&self, row: &CatalogRow) -> Result<Option<String>, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let records = tx.driver.query("SELECT session_key=$4,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.previous.as_bytes(), &digest(row.key.as_bytes()), &row.key.as_bytes()]).map_err(sqlstate::error)?;
+        let record = records.first().ok_or(StorageError::ScopeChanged)?;
+        if !record.get::<_, bool>(0) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let metadata: CatalogRow = serde_json::from_slice(
+            &record.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
+        if encoded(&metadata)? != encoded(row)? {
+            return Err(StorageError::ScopeChanged);
+        }
+        let payload = record.get::<_, Option<Vec<u8>>>(2).map(text).transpose()?;
+        if let Some(payload) = &payload {
+            crate::query_projection::SelectedRecipe::decode(row, payload)
+                .map_err(|_| StorageError::ScopeChanged)?;
+        }
+        Ok(payload)
     }
     fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {
         let previous = self.metadata("semon_pg_native_catalog_rows", self.previous, &row.key)?;
@@ -310,6 +339,7 @@ impl OriginalHistoryStore for History<'_, '_> {
         &self,
         row: &CatalogRow,
         metadata: &str,
+        query_recipe: Option<&str>,
         original_header: &str,
         header: Option<&OriginalHeader>,
         complete: bool,
@@ -317,7 +347,14 @@ impl OriginalHistoryStore for History<'_, '_> {
         for source in &row.sources {
             self.retain_source(row, source)?;
         }
-        self.write_header(&row.key, metadata, header, !complete, Some(original_header))?;
+        self.write_header(
+            &row.key,
+            metadata,
+            query_recipe,
+            header,
+            !complete,
+            Some(original_header),
+        )?;
         if !complete {
             return Ok(());
         }
@@ -531,7 +568,7 @@ impl CompositeHistoryStore for History<'_, '_> {
             Some(sources.to_owned()),
             texts.len() as i64,
         );
-        self.write_header(key, metadata, Some(&header), incomplete, None)?;
+        self.write_header(key, metadata, None, Some(&header), incomplete, None)?;
         for (slot, metadata) in texts.iter().enumerate() {
             self.put_slot(key, slot as i64, metadata)?;
         }

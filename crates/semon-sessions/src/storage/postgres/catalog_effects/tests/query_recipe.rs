@@ -145,7 +145,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             Ok(token)
         })
         .unwrap();
-    let payload = compact.query_recipe.unwrap();
+    let payload = format!("{}\n", compact.query_recipe.unwrap());
     // The only physical seam supplies the nullable payload, after normal
     // publication authenticated the exact compact metadata and native receipt.
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -253,15 +253,13 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             let token = view
                 .query_recipe_observation(Owner::History, &history)
                 .unwrap();
-            assert!(matches!(
-                view.load_query_recipe(&token),
-                Err(Error::MissingPayload)
-            ));
+            assert_eq!(view.load_query_recipe(&token).unwrap(), Some(expected.clone()));
             Ok(token)
         })
         .unwrap();
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers h SET query_recipe=$4 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.session_key=$3 AND h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key AND h.metadata=$5", &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &row.key.as_bytes(), &payload.as_bytes(), &history_token.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let stored: Vec<u8> = tx.driver.query_one("SELECT h.query_recipe FROM semon_pg_native_catalog_history_headers h JOIN semon_pg_native_catalog_history_owners o ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.session_key=$3", &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &row.key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        assert_eq!(stored, payload.as_bytes(), "custody preserves exact payload bytes");
         Ok(())
     }).unwrap();
     let history_owner =

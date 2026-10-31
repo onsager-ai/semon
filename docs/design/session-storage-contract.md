@@ -48,11 +48,21 @@ the new SQL, isolation and presentation path is pending.
 The PG native physical contract is now v11. It includes nullable `bytea`
 `query_recipe` cells on current Catalog rows, retained History headers and
 immutable selected proof generations for typed Catalog transfer. These cells
-are inactive paired storage: production publication and read paths remain
-inline and unchanged. The v11 marker and native shape hash refuse v10 stores;
+are inactive paired storage: Current publication, rendering and repair remain
+inline. The v11 marker and native shape hash refuse v10 stores;
 there is no migration or dual-read path. Shared Catalog version 5 and PG
 publication envelope v1 remain unchanged, with no format activation in this
 prerequisite.
+
+Original History custody now carries a detached selected Query cell when one
+is present in the exact Current publication. Both adapters read metadata and
+payload under the publisher's existing transaction, qualify the pair against
+that row and its combined 1 MiB bound, and insert the original payload bytes
+with the retained header. Query-less composite History carries no selected
+payload. This custody prerequisite does not activate detached Current writers,
+renderers, repair, immutable proof publication or a new format marker; those
+hooks must change together before activation. Existing inline producer rows
+remain the current active publication contract.
 
 ## One current SQLite contract
 

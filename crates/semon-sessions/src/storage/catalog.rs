@@ -196,6 +196,8 @@ pub(crate) trait OriginalHistoryStore {
     fn data(error: serde_json::Error) -> Self::Error;
     fn retained(&self, key: &str) -> Result<bool, Self::Error>;
     fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, Self::Error>;
+    /// Read the exact Current payload under the publication's custody transaction.
+    fn query_recipe(&self, row: &CatalogRow) -> Result<Option<String>, Self::Error>;
     fn header(&self, key: &str) -> Result<Option<OriginalHeader>, Self::Error>;
     fn transfer(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn reset_transfer(&self, key: &str) -> Result<(), Self::Error>;
@@ -215,6 +217,7 @@ pub(crate) trait OriginalHistoryStore {
         &self,
         row: &CatalogRow,
         metadata: &str,
+        query_recipe: Option<&str>,
         original_header: &str,
         header: Option<&OriginalHeader>,
         complete: bool,
@@ -234,6 +237,7 @@ pub(crate) fn preserve_original<P: OriginalHistoryStore>(
     }
     let mut history = old.clone();
     history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let query_recipe = store.query_recipe(old)?;
     let header = store.header(&old.key)?;
     let metadata = serde_json::to_string(&history).map_err(P::data)?;
     let original_header = serde_json::to_string(&header).map_err(P::data)?;
@@ -323,6 +327,7 @@ pub(crate) fn preserve_original<P: OriginalHistoryStore>(
     store.complete(
         old,
         &metadata,
+        query_recipe.as_deref(),
         &original_header,
         header.as_ref(),
         transfer.complete,
@@ -639,6 +644,7 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         // A composite recipe is custody, not an exact aggregate of its native
         // records. The existing selected producer must qualify full Query facts.
         history.query = None;
+        history.query_recipe = None;
         history.sources.extend(missing.values().cloned());
         history.native_ids = history
             .sources

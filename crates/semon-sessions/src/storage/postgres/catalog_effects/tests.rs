@@ -791,6 +791,8 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
         )
         .unwrap();
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &PgCancellation::default(), |tx| {
+            let payloads: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND query_recipe IS NOT NULL", &[&namespace.as_str().as_bytes(), &L2.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(payloads, 0, "query-less composite carries no selected payload");
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_headers ORDER BY session_key", &[]).map_err(sqlstate::error)?;
             assert_eq!(custody_metadata_content(&rows.iter().map(|row| row.get::<_, Vec<u8>>(0)).collect::<Vec<_>>()), custody_metadata_content(data.composite.as_ref().expect("custody oracle")));
             let rows = tx.driver.query("SELECT metadata FROM semon_pg_native_catalog_history_slots ORDER BY session_key,slot", &[]).map_err(sqlstate::error)?;
