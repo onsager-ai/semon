@@ -478,9 +478,10 @@ fn stable_id(prefix: &str, source: &str) -> String {
 }
 
 /// Stable identity for a handoff-free turn whose first grouped event has a
-/// native record UUID. The tuple encoding keeps opaque components unambiguous.
-fn native_start_turn_id(sid: &str, uuid: &str) -> String {
-    let source = serde_json::to_string(&("native-start", sid, uuid))
+/// native record UUID. The tuple preserves the native start location while the
+/// UUID distinguishes starts at the same file and offset.
+fn native_start_turn_id(sid: &str, file_id: &str, offset: u64, uuid: &str) -> String {
+    let source = serde_json::to_string(&("native-start", sid, file_id, offset, uuid))
         .expect("native turn identity tuple is serializable");
     stable_id("t", &source)
 }
@@ -6417,7 +6418,9 @@ impl<'a> Builder<'a> {
                         .and_then(|position| entries[*position].at)
                         .and_then(|at| event(self.files, at).u.as_deref())
                         .filter(|uuid| !uuid.is_empty())
-                        .map(|uuid| native_start_turn_id(sid, uuid))
+                        .map(|uuid| {
+                            native_start_turn_id(sid, &self.files[turn.file].id, turn.offset, uuid)
+                        })
                         .unwrap_or_else(|| {
                             format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset)
                         }),

@@ -72,9 +72,14 @@ jobs:
           for test in \
             model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
-            events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications; do
+            events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications \
+            model::tests::replay_equivalence_seed_from_env; do
             case_result=0
-            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/filename-owner-case.log" 2>&1 || case_result=$?
+            if [ "$test" = "model::tests::replay_equivalence_seed_from_env" ]; then
+              SEMON_EQUIV_SEED=63 cargo test --locked -p semon-sessions --lib "$test" -- --ignored --exact --nocapture > "$RUNNER_TEMP/filename-owner-case.log" 2>&1 || case_result=$?
+            else
+              cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/filename-owner-case.log" 2>&1 || case_result=$?
+            fi
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/filename-owner-case.log"; then case_result=1; fi
             cat "$RUNNER_TEMP/filename-owner-case.log" >> "$RUNNER_TEMP/filename-owner-tests.log"
             echo "CASE name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/filename-owner-tests.log"

@@ -2862,8 +2862,8 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
             "native-start-two",
         )],
     );
-    let first_id = native_start_turn_id("shared", "native-start-one");
-    let second_id = native_start_turn_id("shared", "native-start-two");
+    let first_id = native_start_turn_id("shared", "shared", 0, "native-start-one");
+    let second_id = native_start_turn_id("shared", "shared", 0, "native-start-two");
     let anchors = |data: &QueryData| {
         data.tx["shared"]
             .slots
@@ -2911,7 +2911,7 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
             "native-start-three",
         )],
     );
-    let third_id = native_start_turn_id("shared", "native-start-three");
+    let third_id = native_start_turn_id("shared", "shared", 0, "native-start-three");
     let expanded = home.build_query();
     let expanded_turns = turns_of(&expanded, "shared");
     assert_eq!(expanded_turns.len(), 3);
