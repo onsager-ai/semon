@@ -6334,6 +6334,12 @@ fn list_status_tracks_produced_codex_current_stale_and_retained_states() {
 
 #[test]
 fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification() {
+    for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
+        family_and_unjoined_trace_extent_qualifies_state(state);
+    }
+}
+
+fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
     fs::write(
@@ -6367,6 +6373,66 @@ fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualificat
             "INSERT INTO session_trace_edges(namespace,session_key,edge_id,metadata) VALUES(semon_namespace(),'session-00000','qualified-peer-relay',?1)",
             [json!({"id":"qualified-peer-relay","kind":"relay","from":"session-00000","to":"session-00001","at":1790812800000i64,"status":"done"}).to_string()],
         ).unwrap();
+
+    let metadata: Vec<String> = db
+        .prepare(
+            "SELECT metadata FROM session_catalog WHERE lifecycle='current' ORDER BY session_key",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let mut catalog_rows: Vec<crate::model::summary::CatalogRow> = metadata
+        .iter()
+        .map(|metadata| serde_json::from_str(metadata).unwrap())
+        .collect();
+    let peer = catalog_rows
+        .iter_mut()
+        .find(|row| row.key == "session-00001")
+        .unwrap();
+    peer.parent = Some("session-00000".into());
+    peer.query.as_mut().unwrap()["state"] = json!(state);
+
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+        .unwrap();
+    let binding = cache.query_runtime_binding().unwrap();
+    let mut observations = crate::storage::selected::PresentationObservations::capture(
+        &fixture.options,
+        binding.as_ref(),
+        catalog_rows.iter(),
+    );
+    assert!(
+        observations.runtime.is_some(),
+        "global runtime witness missing"
+    );
+    for row in &catalog_rows {
+        let cwds = cache.runtime_source_cwds(&row.sources).unwrap();
+        let runtime = observations.runtime_observation(row, &cwds).unwrap();
+        observations.capture_runtime(row, &cwds, runtime).unwrap();
+    }
+    let peer = catalog_rows
+        .iter()
+        .find(|row| row.key == "session-00001")
+        .unwrap();
+    assert_eq!(
+        observations.runtime_for(peer).as_deref(),
+        peer.query.as_ref().and_then(|query| query["runtime"].as_str()),
+        "the typed row keeps its published runtime witness"
+    );
+    let generation = cache.session_catalog_generation();
+    cache
+        .publish_catalog_projection(
+            &crate::slot_projection::Publication {
+                rows: &catalog_rows,
+                transcripts: None,
+                observations: Some(&observations),
+            },
+            generation.as_deref(),
+        )
+        .unwrap();
+    drop(cache);
+
     let trace_query = format!(
         "sid=session-00000&scope=retained_history&turn={}",
         crate::viewer::percent_encode(&turn_id)
@@ -6500,10 +6566,11 @@ fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualificat
         )
         .unwrap();
     let mut original: Value = serde_json::from_str(&text).unwrap();
-    original["parent"] = json!("session-00000");
+    assert_eq!(original["parent"], "session-00000");
+    assert_eq!(original["query"]["state"], state);
     let save = |row: &Value| {
         db.execute(
-                "UPDATE session_catalog SET parent_key='session-00000',lifecycle=?1,metadata=?2 WHERE session_key='session-00001'",
+                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00001'",
                 rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
             )
             .unwrap();
@@ -6572,32 +6639,18 @@ fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualificat
         assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), reads);
         child["status"].clone()
     };
-    for state in ["work", "wait", "idle", "done", "err", "new", "read", "off"] {
-        let mut row = original.clone();
-        row["query"]["state"] = json!(state);
-        save(&row);
-        assert_eq!(status(), json!({"state":state,"observation":"current"}));
-        row["lifecycle"] = json!("retained");
-        save(&row);
-        let retained = if matches!(state, "work" | "wait") {
-            "off"
-        } else {
-            state
-        };
-        assert_eq!(status(), json!({"state":retained,"observation":"retained"}));
-    }
+    assert_eq!(status(), json!({"state":state,"observation":"current"}));
     for (field, value) in [
         ("source_generation", json!("old-source")),
         ("runtime", json!("old-runtime")),
         ("version", json!(0)),
     ] {
         let mut row = original.clone();
-        row["query"]["state"] = json!("work");
+        row["query"]["state"] = json!(state);
         row["query"][field] = value;
         save(&row);
         assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     }
-    original["query"]["state"] = json!("work");
     save(&original);
     let path = fixture.options.facts.as_ref().unwrap();
     let facts = crate::read_facts(path).unwrap();
@@ -6606,31 +6659,47 @@ fn family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualificat
     crate::write_facts(path, &changed, &crate::Options::default().source).unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     crate::write_facts(path, &facts, &crate::Options::default().source).unwrap();
-    assert_eq!(status(), json!({"state":"work","observation":"current"}));
+    assert_eq!(status(), json!({"state":state,"observation":"current"}));
     let mut changed = facts.clone();
     changed.hostname = "new-family-runtime".into();
     crate::write_facts(path, &changed, &crate::Options::default().source).unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     crate::write_facts(path, &facts, &crate::Options::default().source).unwrap();
-    assert_eq!(status(), json!({"state":"work","observation":"current"}));
+    assert_eq!(status(), json!({"state":state,"observation":"current"}));
     fs::write(path, "{}").unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     crate::write_facts(path, &facts, &crate::Options::default().source).unwrap();
     use std::io::Write;
+    let child_source = fixture
+        .options
+        .claude_home
+        .join("projects/project/session-00001.jsonl");
     writeln!(
-        fs::OpenOptions::new()
-            .append(true)
-            .open(
-                fixture
-                    .options
-                    .claude_home
-                    .join("projects/project/session-00001.jsonl")
-            )
-            .unwrap(),
+        fs::OpenOptions::new().append(true).open(&child_source).unwrap(),
         "{{}}"
     )
     .unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
+
+    fs::remove_file(child_source).unwrap();
+    fixture.publish_existing();
+    let history: String = db
+        .query_row(
+            "SELECT metadata FROM session_history_catalog WHERE session_key='session-00001'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: Value = serde_json::from_str(&history).unwrap();
+    assert_eq!(history["lifecycle"], "retained");
+    assert_eq!(history["parent"], "session-00000");
+    assert_eq!(history["query"]["state"], state);
+    let retained = if matches!(state, "work" | "wait") {
+        "off"
+    } else {
+        state
+    };
+    assert_eq!(status(), json!({"state":retained,"observation":"retained"}));
 }
 
 #[test]
