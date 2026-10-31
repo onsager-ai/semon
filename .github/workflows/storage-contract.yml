@@ -101,6 +101,28 @@ jobs:
         with:
           name: namespace-fixture-tests
           path: ${{ runner.temp }}/namespace-fixture-tests.log
+      - name: Admitted Catalog search and Query window contracts
+        id: query_fixtures
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in query::tests::catalog_search_admits_only_selected_archives_before_its_stop_boundary query::tests::catalog_search_qualifies_multi_machine_order_and_conflicts query::tests::the_window_bounds_what_is_read_and_says_where_it_starts; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/query-fixture-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/query-fixture-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/query-fixture-case.log" >> "$RUNNER_TEMP/query-fixture-tests.log"
+            echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/query-fixture-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/query-fixture-tests.log"
+          exit "$result"
+      - name: Retain admitted Catalog search and Query window results
+        if: ${{ !cancelled() && steps.query_fixtures.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: query-fixture-tests
+          path: ${{ runner.temp }}/query-fixture-tests.log
       - name: Configured header ownership and copied-usage fixture contracts
         id: ownership_fixtures
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
