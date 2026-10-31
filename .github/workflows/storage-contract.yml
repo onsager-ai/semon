@@ -308,6 +308,78 @@ jobs:
         with:
           name: retained-authority-diagnostic
           path: ${{ runner.temp }}/retained-authority-diagnostic.txt
+      - name: Current Facts refresh status diagnostic (not qualification)
+        id: current_facts_status_diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        env:
+          SEMON_BUILD_TIMING: "1"
+        run: |
+          python3 - <<'PYSAFE'
+          import os, re, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          case = 'catalog::tests::list_status_reuses_native_facts_and_rejects_runtime_or_source_changes'
+          raw = root / 'current-facts-status-case.log'
+          with raw.open('w') as output:
+              execution = subprocess.run(
+                  ['cargo', 'test', '--locked', '-p', 'semon-sessions', '--lib', case,
+                   '--', '--exact', '--nocapture'], stdout=output, stderr=subprocess.STDOUT,
+              )
+          diagnostic_prefixes = (
+              'catalog_publication_probe stage=observation_grant',
+              'catalog_runtime_refused stage=current_row_binding ',
+              'semon sessions native: observation_direct_grant_miss ',
+              'semon sessions native: observation_direct_grant_diagnostic=',
+              'semon sessions native: observation_direct_grant_fields ',
+          )
+          safe, timings, panics, results = [], [], [], []
+          diagnostic_count = timing_count = running_one = 0
+          timing_pattern = re.compile(
+              r'configured_reservation stage=[A-Za-z0-9_]+(?: [A-Za-z0-9_]+=[0-9]+)+'
+          )
+          panic_pattern = re.compile(r'panicked at (crates/[A-Za-z0-9_./-]+:[0-9]+:[0-9]+):')
+          with raw.open() as source:
+              for line in source:
+                  line = line.rstrip()
+                  running_one += line == 'running 1 test'
+                  if line.startswith(diagnostic_prefixes):
+                      diagnostic_count += 1
+                      if len(safe) < 64:
+                          safe.append(line[:512])
+                  elif timing_pattern.fullmatch(line):
+                      timing_count += 1
+                      if len(timings) < 32:
+                          timings.append(line[:256])
+                  elif match := panic_pattern.search(line):
+                      if len(panics) < 4:
+                          panics.append('panic_location=' + match.group(1))
+                  elif line.startswith('test result:') and len(results) < 2:
+                      results.append(line[:256])
+          exact_execution = running_one == 1 and len(results) == 1
+          report = [
+              f'CASE name={case} process_status={execution.returncode} '
+              f'running_one_count={running_one} result_count={len(results)} '
+              f'exact_execution={exact_execution} diagnostic_count={diagnostic_count} '
+              f'retained_diagnostic_count={len(safe)} timing_count={timing_count} '
+              f'retained_timing_count={len(timings)} panic_location_count={len(panics)}'
+          ]
+          report.extend(safe)
+          report.extend(timings)
+          report.extend(panics)
+          report.extend(results[:1])
+          text = '\n'.join(report) + '\n'
+          (root / 'current-facts-status-diagnostic.txt').write_text(text)
+          print(text, end='')
+          if not exact_execution and execution.returncode == 0:
+              raise SystemExit('Exact diagnostic case did not produce one running test and result')
+          raise SystemExit(execution.returncode)
+          PYSAFE
+      - name: Retain bounded Current Facts status diagnostic
+        if: ${{ !cancelled() && steps.current_facts_status_diagnostic.outcome != 'skipped' && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-facts-status-diagnostic
+          path: ${{ runner.temp }}/current-facts-status-diagnostic.txt
       - name: Selected recovery range authority reconciliation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
