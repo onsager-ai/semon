@@ -2,7 +2,10 @@ use super::super::{observations, snapshot};
 use super::*;
 use crate::storage::{
     catalog::CatalogSnapshot,
-    transfer::reported::tests::{advance_catalog, apply, root, seed_catalog, sqlite, stage},
+    transfer::reported::tests::{
+        advance_catalog, advance_catalog_with_retirement_observer, apply, root, seed_catalog,
+        sqlite, stage,
+    },
 };
 
 #[test]
@@ -151,9 +154,45 @@ fn pg_imported_current_handoff_preserves_its_proof_and_old_current_reads() {
         })
         .unwrap();
     let host = super::businessflow::body_host(&options, std::slice::from_ref(current));
+    let old_store = snapshot::query::QueryCatalog {
+        captured: true,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: options.clone(),
+    };
+    let old_source_path = current.sources[0].path.to_string_lossy().into_owned();
     // The ordinary producer retires this imported standalone source before
     // ingesting the same native identity from its successor path.
-    let continued = advance_catalog(&config, &options);
+    let continued = advance_catalog_with_retirement_observer(&config, &options, || {
+        let (head, pending, mutation, invalidation) = pool
+            .transaction(namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                let ns = namespace.as_str().as_bytes();
+                let row = tx
+                    .driver
+                    .query_one(
+                        "SELECT catalog_generation,semantic_pending,EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2),EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed') FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                        &[&ns, &old_source_path.as_bytes()],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok((
+                    row.get::<_, Option<String>>(0),
+                    row.get::<_, bool>(1),
+                    row.get::<_, bool>(2),
+                    row.get::<_, bool>(3),
+                ))
+            })
+            .unwrap();
+        assert_eq!(
+            head.as_deref(),
+            Some(generation.as_str()),
+            "deferred withdrawal preserves the imported Current head"
+        );
+        assert!(pending, "deferred withdrawal marks semantic catch-up pending");
+        assert!(mutation, "deferred withdrawal records the exact source intent");
+        assert!(invalidation, "deferred withdrawal records source removal");
+    });
     assert_eq!(continued.len(), 1);
     assert_eq!(continued[0].key, current.key);
     assert_ne!(continued[0].sources, current.sources);
@@ -186,14 +225,6 @@ fn pg_imported_current_handoff_preserves_its_proof_and_old_current_reads() {
         Ok(())
     })
     .unwrap();
-    let old_store = snapshot::query::QueryCatalog {
-        captured: true,
-        pool: pool.clone(),
-        namespace: namespace.clone(),
-        control: control.clone(),
-        generation: generation.clone(),
-        options: options.clone(),
-    };
     let body = crate::Query::new(options.clone())
         .call_bound_selected_at(
             "read_transcript",
