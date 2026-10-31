@@ -10,19 +10,6 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(test)]
-pub(crate) fn test_persisted_catalog_metadata(
-    options: &Options,
-    key: &str,
-) -> rusqlite::Result<String> {
-    let db = Connection::open(crate::events::EventCache::path(&options.cache))?;
-    db.query_row(
-        "SELECT metadata FROM session_catalog WHERE session_key=?1",
-        [key],
-        |row| row.get(0),
-    )
-}
-
 pub(crate) struct SqliteQueryCatalog {
     pub(crate) options: Options,
     pub(crate) binding: crate::storage::NativeReaderBinding,

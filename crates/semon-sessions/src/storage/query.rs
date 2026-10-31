@@ -555,11 +555,20 @@ mod tests {
             serde_json::to_value(&recipe).unwrap()
         );
 
-        let persisted = crate::storage::sqlite::query::test_persisted_catalog_metadata(
-            &home.options,
-            "lead",
-        )
-        .unwrap();
+        let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
+        let observation = crate::storage::navigation_store(binding)
+            .native_resolution(
+                "claude",
+                "lead",
+                crate::CatalogReadScope::Current,
+                None,
+            )
+            .unwrap();
+        assert!(observation.qualified_head().is_some());
+        assert_eq!(observation.keys, vec!["lead".to_owned()]);
+        let persisted = observation
+            .metadata
+            .expect("admitted persisted Catalog metadata");
         assert!(
             persisted.len() > 8192,
             "growing producer Catalog metadata should exceed the cell bound: {} bytes",
