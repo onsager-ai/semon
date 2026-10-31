@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [focused, regression]
+        suite: [focused, regression-catalog, regression-events, regression-query, regression-other]
     services:
       postgres:
         image: postgres:16
@@ -283,10 +283,29 @@ jobs:
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
       - name: Existing session regressions outside the focused PostgreSQL module
-        if: ${{ !cancelled() && matrix.suite == 'regression' && steps.resolve.outcome == 'success' }}
-        # The focused job runs the complete storage::postgres module above.
-        # Together the two required jobs retain the full feature-enabled suite.
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres
+        if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
+        # Disjoint name filters retain the complete feature-enabled suite and
+        # its integration tests within the unchanged 30-minute job deadline.
+        env:
+          REGRESSION_SUITE: ${{ matrix.suite }}
+        shell: bash
+        run: |
+          args=(--skip storage::postgres)
+          case "$REGRESSION_SUITE" in
+            regression-catalog)
+              cargo test -p semon-sessions --locked --features postgres-test-tls 'catalog::tests::' -- "${args[@]}"
+              ;;
+            regression-events)
+              cargo test -p semon-sessions --locked --features postgres-test-tls 'events::' -- "${args[@]}" --skip 'catalog::tests::'
+              ;;
+            regression-query)
+              cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
+              ;;
+            regression-other)
+              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
+              ;;
+            *) exit 1 ;;
+          esac
       - name: TLS service diagnostics
         if: failure()
         run: docker logs semon-pg-tls
@@ -296,7 +315,7 @@ jobs:
     needs: postgres-suites
     runs-on: ubuntu-latest
     steps:
-      - name: Require both Postgres suites
+      - name: Require all Postgres suites
         env:
           SUITE_RESULT: ${{ needs.postgres-suites.result }}
         run: test "$SUITE_RESULT" = success
