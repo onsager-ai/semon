@@ -469,20 +469,45 @@ fn read(
         // Retained Query rows keep their provenance checks above, but their
         // recorded summaries do not require a live runtime or source ledger.
         let row_runtime = if current_lifecycle {
-            let cwds = super::catalog::runtime_source_cwds(db, &row.sources)
+            let cwds = super::catalog::runtime_source_cwds_if_current(db, &row.sources)
                 .inspect_err(|_| {
                     if crate::native_timing::enabled() {
                         eprintln!("semon sessions native: observation_stage_refused boundary=query_current_source_cwds");
                     }
                 })
                 .map_err(unavailable)?;
-            let scoped = runtime_observations
-                .scope(&row, &cwds)
-                .map_err(unavailable)?;
-            Some(match row_binding {
-                Some(binding) => binding.witness(&scoped).map_err(unavailable)?,
-                None => scoped,
-            })
+            match cwds {
+                Some(cwds) => {
+                    let scoped = runtime_observations
+                        .scope(&row, &cwds)
+                        .map_err(unavailable)?;
+                    Some(match row_binding {
+                        Some(binding) => binding.witness(&scoped).map_err(unavailable)?,
+                        None => scoped,
+                    })
+                }
+                None => {
+                    // Index can move past a published row. Reuse its captured
+                    // observation only under the exact proof and live global fence.
+                    let (binding, observations) =
+                        super::proof_generations::observation_binding_with_observations(
+                            db,
+                            admitted_binding,
+                            &row,
+                        )
+                        .map_err(unavailable)?;
+                    let current_global = binding.witness(&runtime).map_err(unavailable)?;
+                    if observations.runtime.as_deref() != Some(current_global.as_str()) {
+                        return Err(unavailable(
+                            "Native Query runtime observations changed during the query",
+                        ));
+                    }
+                    let captured = observations
+                        .runtime_for(&row)
+                        .ok_or_else(|| unavailable("Exact Catalog query runtime is unavailable"))?;
+                    Some(captured)
+                }
+            }
         } else {
             None
         };
