@@ -33,6 +33,18 @@ pub(crate) struct SelectedRecipePublication {
     pub(crate) query_recipe: Option<String>,
 }
 
+impl SelectedRecipePublication {
+    /// Exact keyed cells recorded by the private publication coordinator.
+    pub(crate) fn coordinator_metadata(rows: &[Self]) -> serde_json::Result<String> {
+        serde_json::to_string(
+            &rows
+                .iter()
+                .map(|row| (&row.row.key, &row.metadata, &row.query_recipe))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
 impl SelectedRecipe {
     /// Custody never turns a detached reference with missing bytes into History.
     /// This does not read inactive inline producer metadata as a payload.
@@ -84,16 +96,6 @@ impl SelectedRecipe {
             metadata,
             query_recipe,
         })
-    }
-
-    /// Exact keyed cells recorded by the private publication coordinator.
-    pub(crate) fn coordinator_metadata(rows: &[Self]) -> serde_json::Result<String> {
-        serde_json::to_string(
-            &rows
-                .iter()
-                .map(|row| (&row.row.key, &row.metadata, &row.query_recipe))
-                .collect::<Vec<_>>(),
-        )
     }
 
     /// Replace selected result metadata with its exact publication reference.
