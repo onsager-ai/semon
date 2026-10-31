@@ -3480,18 +3480,10 @@ impl SqliteStore {
                                 (row, size)
                             }
                             Some(None) => {
-                                // Reuse the typed publication row when it is
-                                // available; an oversized affected neighbor
-                                // cannot be rebuilt safely within this bound.
-                                let Some((row, metadata)) =
-                                    rows.iter().zip(&metadata).find(|(row, _)| row.key == key)
-                                else {
-                                    return Err(StoreError::Data(
-                                        "scoped catalog search metadata exceeds 1 MiB for an affected row absent from the publication"
-                                            .into(),
-                                    ));
-                                };
-                                ((*row).clone(), metadata.len())
+                                return Err(StoreError::Data(
+                                    "scoped catalog search metadata exceeds 1 MiB for an affected row"
+                                        .into(),
+                                ));
                             }
                             None => continue,
                         };
@@ -8803,14 +8795,24 @@ mod tests {
         let new_key = rows[0].key.clone();
         let parent_only = rows[1].key.clone();
         let retained = rows[2].key.clone();
-        for store in [&batch, &row_wise] {
-            store
+        for store in [&mut batch, &mut row_wise] {
+            let transaction = store
                 .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            transaction
+                .execute(
+                    "DELETE FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'",
+                    [&new_key],
+                )
+                .unwrap();
+            transaction
                 .execute(
                     "DELETE FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                     [&new_key],
                 )
                 .unwrap();
+            transaction.commit().unwrap();
             // Metadata unchanged, but the indexed parent must still repair.
             store
                 .connection
@@ -8929,16 +8931,22 @@ mod tests {
             catalog_write_pair(&mut batch, &mut row_wise, rows, &projections, scoped);
         }
         let mut oversized = rows[..2].to_vec();
-        oversized[1].name = "x".repeat(1_048_576);
         // Adding row 0's real source preserves row 1's original recipe through
         // OriginalHistory. Keep both sources in the incoming publication so
         // catalog_write claims every affected owner's current source.
         oversized[1].sources.extend(rows[0].sources.iter().cloned());
+        // Fill one row's metadata budget exactly. Each row remains admissible,
+        // while their combined metadata exceeds the batch writer's budget.
+        oversized[1].name.clear();
+        let overhead = json(&oversized[1]).unwrap().len();
+        oversized[1].name = "x".repeat(1_048_576 - overhead);
         let metadata = oversized
             .iter()
             .map(json)
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        assert!(metadata.iter().all(|value| value.len() <= 1_048_576));
+        assert!(metadata.iter().map(String::len).sum::<usize>() > 1_048_576);
         assert!(catalog_batch_bytes(&oversized, &metadata, CatalogWriter::Auto).is_none());
         catalog_write_pair(&mut batch, &mut row_wise, &oversized, &projections, true);
         for store in [&batch, &row_wise] {
@@ -9013,10 +9021,25 @@ mod tests {
         affected_without_row
             .sources
             .extend(rows[1].sources.iter().cloned());
+        // A genuine publication cannot exceed the per-row custody bound.
+        // Inject only over-bound Current metadata after custody and search
+        // publication; History and producer grants keep their published rows.
+        let mut oversized_neighbor = oversized[1].clone();
+        oversized_neighbor.name.push('x');
+        let oversized_metadata = json(&oversized_neighbor).unwrap();
+        assert!(oversized_metadata.len() > 1_048_576);
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
             (&mut row_wise, CatalogWriter::RowWise),
         ] {
+            let updated = store
+                .connection
+                .execute(
+                    "UPDATE main.session_catalog SET metadata=?1 WHERE namespace=semon_namespace() AND session_key=?2 AND lifecycle='current'",
+                    params![&oversized_metadata, &oversized_neighbor.key],
+                )
+                .unwrap();
+            assert_eq!(updated, 1);
             let before = catalog_state(&store.connection);
             let error = catalog_write(
                 store,
@@ -9030,7 +9053,7 @@ mod tests {
                 matches!(
                     &error,
                     StoreError::Data(message)
-                        if message == "scoped catalog search metadata exceeds 1 MiB for an affected row absent from the publication"
+                        if message == "scoped catalog search metadata exceeds 1 MiB for an affected row"
                 ),
                 "oversized affected metadata without an incoming row must refuse explicitly: {error}"
             );
