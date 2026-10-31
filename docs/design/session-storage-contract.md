@@ -66,8 +66,12 @@ update the matching native observation grant in the same transaction.
 Private SQLite model coordinators bind keyed compact metadata/payload cells plus
 the complete model witness under the unchanged 2 MiB limit. PostgreSQL retains the
 unchanged 1 MiB whole-Stage limit. Source, transcript, relation and trace evidence
-remain complete. Exact SQLite replay is scoped to the retained publication stage;
-finish removes both stage and model witness, and later publication with that batch
+remain complete.
+Generated projection, trace and model witnesses are structured JSON; exact stored
+metadata and payload cells remain byte-preserving strings within that structure.
+The semantic staging recipe is `recorded-origin-turn-selected-recipe-cells-structured-v8`.
+Exact SQLite replay is scoped to the retained publication stage; finish removes
+both stage and model witness, and later publication with that batch
 conflicts before effects. SQLite schema, PostgreSQL schema, Catalog and semantic
 recipe admission markers advance together; unsupported stores are refused without
 resetting custody or native facts. Public PostgreSQL factory admission stays closed.

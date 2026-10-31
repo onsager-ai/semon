@@ -696,7 +696,7 @@ mod tests {
     fn retained_row(query: Value) -> crate::model::summary::CatalogRow {
         let recipe = query
             .get("selected")
-            .and_then(|selected| serde_json::from_value(selected.clone()).ok());
+            .map(|selected| serde_json::from_value(selected.clone()).unwrap());
         let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "lifecycle":"retained",
             "key":"owner",
@@ -838,13 +838,13 @@ mod tests {
     fn history_activity_matches_window_eligibility() {
         let mut row = retained_row(json!({
             "last":null,"state":"idle",
-            "selected":{"edges":[
+            "selected":{"session":{},"edges":[
                 {"query":{"at":100,"done":950,"status":"done"}},
                 {"query":{"at":null,"status":"new"}}
             ],"turns":[{"query":{"at":2000,"last":true}}]}
         }));
         assert_eq!(history_activity(&row), (Some(950), true));
-        row.query.as_mut().unwrap()["selected"]["edges"][1]["query"]["status"] = json!("done");
+        row.query_recipe.as_mut().unwrap().edges[1]["query"]["status"] = json!("done");
         assert_eq!(
             history_activity(&row),
             (Some(950), false),
@@ -871,6 +871,7 @@ mod tests {
                 "expired-peer":summary("expired-peer")
             },
             "selected":{
+                "session":{},
                 "edges":[
                     {"id":"expired-edge","query":{"at":100,"status":"done","from":"owner","to":"expired-peer"}},
                     {"id":"recent-edge","query":{"at":950,"status":"done","from":"owner","to":"recent-peer"}},

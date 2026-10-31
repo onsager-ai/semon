@@ -29,9 +29,13 @@ impl Projection {
             .as_ref()
             .map(|query| query.selected_recipe(summary))
     }
-    pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> String {
-        String::from_utf8(generation_bytes(&publication_session(row, self), self))
-            .expect("JSON trace publication witness")
+    pub(crate) fn publication_witness(&self, row: &crate::model::summary::CatalogRow) -> Value {
+        json!((
+            publication_session(row, self),
+            &self.turns,
+            &self.edges,
+            &self.bookmarks,
+        ))
     }
     /// Reuse the producer's recorded edge ownership; never infer a parent turn
     /// from timing, session order or a body scan in a read request.
@@ -1131,6 +1135,11 @@ mod generation_tests {
                 .map(crate::overview::content_generation)
         );
         let expected = format!("{:x}", Sha256::digest(legacy_bytes(&session, &projection)));
+        assert_eq!(
+            serde_json::to_vec(&projection.publication_witness(&row)).unwrap(),
+            generation_bytes(&session, &projection),
+            "structured witness retains the complete published trace bytes"
+        );
         let root = std::env::temp_dir().join(format!(
             "semon-trace-publication-{}-{}",
             std::process::id(),

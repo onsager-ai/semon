@@ -7625,7 +7625,11 @@ impl PreparedSources {
     /// Bind private model inputs separately from the ordinary row/projection
     /// oracle. Record and publish compare this exact durable witness.
     pub(crate) fn staged_model_witness(&self) -> io::Result<String> {
-        serde_json::to_string(&(
+        serde_json::to_string(&self.staged_model_value()?).map_err(io::Error::other)
+    }
+
+    fn staged_model_value(&self) -> io::Result<Value> {
+        serde_json::to_value(&(
             self.staged_projection_witness()?,
             self.presentation_observations(),
         ))
@@ -7647,15 +7651,22 @@ impl PreparedSources {
     #[cfg(feature = "postgres")]
     pub(crate) fn staged_publication_witness(&self) -> io::Result<String> {
         let publications = self.selected_publications()?;
-        let metadata =
-            crate::query_projection::SelectedRecipePublication::coordinator_metadata(&publications)
-                .map_err(io::Error::other)?;
-        serde_json::to_string(&(metadata, self.staged_model_witness()?)).map_err(io::Error::other)
+        let cells = publications
+            .iter()
+            .map(|publication| {
+                (
+                    &publication.row.key,
+                    &publication.metadata,
+                    &publication.query_recipe,
+                )
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&(cells, self.staged_model_value()?)).map_err(io::Error::other)
     }
 
     /// Exact content-free publication witness shared by staging and publish.
-    pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
-        serde_json::to_string(&(
+    pub(crate) fn staged_projection_witness(&self) -> io::Result<Value> {
+        serde_json::to_value(&(
             self.transcripts
                 .iter()
                 .map(|p| (&p.key, &p.slots, p.repair))

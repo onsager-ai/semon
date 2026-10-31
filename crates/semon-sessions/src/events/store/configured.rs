@@ -4667,6 +4667,55 @@ mod tests {
             );
             let inline = serde_json::to_string(&model.prepared().rows).unwrap();
             let old_model_witness = model.prepared().staged_model_witness().unwrap();
+            let structured: Value = serde_json::from_str(&old_model_witness).unwrap();
+            assert!(structured[0].is_array());
+            assert_eq!(
+                structured[0][6],
+                serde_json::to_value(&model.prepared().relationships.endpoints).unwrap(),
+                "structured witness retains complete native endpoint evidence"
+            );
+            assert_eq!(
+                structured[1],
+                serde_json::to_value(model.prepared().presentation_observations()).unwrap(),
+                "structured witness retains presentation authority"
+            );
+            let endpoint = model
+                .prepared_mut_for_test()
+                .relationships
+                .endpoints
+                .values_mut()
+                .next()
+                .unwrap();
+            endpoint.busy = !endpoint.busy;
+            assert_ne!(
+                model.prepared().staged_model_witness().unwrap(),
+                old_model_witness
+            );
+            let unchanged = shared_state(&a);
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&a),
+                unchanged,
+                "changed native endpoint evidence refuses before effects"
+            );
+            let endpoint = model
+                .prepared_mut_for_test()
+                .relationships
+                .endpoints
+                .values_mut()
+                .next()
+                .unwrap();
+            endpoint.busy = !endpoint.busy;
+            assert_eq!(
+                model.prepared().staged_model_witness().unwrap(),
+                old_model_witness
+            );
             let recipe = model.prepared().rows[0].query_recipe.clone().unwrap();
             model.prepared_mut_for_test().rows[0]
                 .query_recipe
@@ -5191,9 +5240,10 @@ mod tests {
             Outcome::Written
         );
         cache.finish_semantic_stage(batch.epoch).unwrap();
-        let mut retained = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0])
-            .unwrap()
-            .row;
+        let mut retained =
+            crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0])
+                .unwrap()
+                .row;
         retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"model-1","uuid":"reprice-successor","parentUuid":"answer","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"retained price cohort"}})).unwrap();

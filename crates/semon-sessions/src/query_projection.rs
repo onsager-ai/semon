@@ -142,7 +142,9 @@ impl SelectedRecipe {
     /// A digest is integrity evidence, never namespace or source authority.
     pub(crate) fn decode(row: &CatalogRow, text: &str) -> std::io::Result<Self> {
         let metadata = serde_json::to_vec(row).map_err(std::io::Error::other)?;
-        if metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX {
+        if metadata.len() > 8192
+            || metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX
+        {
             return Err(std::io::Error::other(
                 "Selected Query metadata budget exceeded",
             ));
