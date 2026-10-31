@@ -5929,14 +5929,16 @@ fn pinned_provider_keeps_each_carrier_fixed_after_its_first_bytes() {
 #[test]
 fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them() {
     let fixture = Fixture::new();
-    fixture.publish(2);
-    fs::remove_file(
-        fixture
-            .options
-            .claude_home
-            .join("projects/project/session-00001.jsonl"),
-    )
-    .unwrap();
+    fixture.publish(4);
+    for session in ["session-00001", "session-00002", "session-00003"] {
+        fs::remove_file(
+            fixture
+                .options
+                .claude_home
+                .join(format!("projects/project/{session}.jsonl")),
+        )
+        .unwrap();
+    }
     fixture.publish_existing();
     let connection = fixture.db();
     SQL_STEPS.with(|steps| steps.set(0));
@@ -5951,6 +5953,12 @@ fn current_page_excludes_retained_rows_with_bounded_work_and_history_keeps_them(
     assert_eq!(status, 200);
     assert_eq!(after["items"], before["items"]);
     assert_eq!(SQL_STEPS.with(|steps| steps.get()), baseline);
+    connection
+        .execute(
+            "DELETE FROM session_catalog WHERE session_key GLOB 'retained-[0-9][0-9][0-9][0-9][0-9]'",
+            [],
+        )
+        .unwrap();
     let (status, history) = fixture.body("scope=retained_history&limit=2");
     assert_eq!(status, 200);
     assert_eq!(history["items"].as_array().unwrap().len(), 2);
@@ -6704,7 +6712,9 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child]));
     facts.codex_locks.insert("family-child".into(), 77);
     facts.proc_starts.insert(77, 777);
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
     crate::write_facts(path, &facts, &fixture.options.source).unwrap();
+    facts_write.complete().unwrap();
     fixture.publish_existing();
     let status = || {
         let (code, body) = fixture.body("sid=family-parent");
@@ -6713,7 +6723,9 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     };
     assert_eq!(status(), json!({"state":"work","observation":"current"}));
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent]));
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
     crate::write_facts(path, &facts, &fixture.options.source).unwrap();
+    facts_write.complete().unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     fixture.publish_existing();
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
