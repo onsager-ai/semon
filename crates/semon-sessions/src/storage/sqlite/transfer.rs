@@ -4,13 +4,13 @@ mod native;
 mod pages;
 mod rows;
 mod source;
-#[cfg(all(test, feature = "postgres"))]
-pub(crate) use catalog::tests::seed_large_presentation;
 use super::failed;
 use crate::storage::{
     StorageError, StoreConfig,
     transfer::{self, InboxTransaction, SnapshotManifest, TransferCheckpoint, TransferPage},
 };
+#[cfg(all(test, feature = "postgres"))]
+pub(crate) use catalog::tests::seed_large_presentation;
 use native::{apply_native, capture_native};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::time::{Duration, Instant};
