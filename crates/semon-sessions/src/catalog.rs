@@ -1123,7 +1123,7 @@ pub(crate) fn read_page_snapshot_with_search(
         selected
             .first()
             .map(|row| {
-                transaction.selected_details(&row.key, &row.sources, &mut |relative| {
+                let details = transaction.selected_details(&row.key, &row.sources, &mut |relative| {
                     let expected = runtime
                         .as_deref()
                         .map(|runtime| {
@@ -1143,6 +1143,10 @@ pub(crate) fn read_page_snapshot_with_search(
                         ),
                         Err(_) => json!({"state":null,"observation":"unavailable"}),
                     }
+                });
+                details.inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("catalog_selected_read_failed stage=selected_details");
                 })
             })
             .transpose()?
@@ -1154,11 +1158,15 @@ pub(crate) fn read_page_snapshot_with_search(
         selected
             .first()
             .map(|row| {
-                transaction.transcript_observation(
+                let observation = transaction.transcript_observation(
                     &row.key,
                     &generation,
                     request.scope == CatalogReadScope::RetainedHistory,
-                )
+                );
+                observation.inspect_err(|_| {
+                    #[cfg(test)]
+                    eprintln!("catalog_selected_read_failed stage=transcript_observation");
+                })
             })
             .transpose()?
             .flatten()

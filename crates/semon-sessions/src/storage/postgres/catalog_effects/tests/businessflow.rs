@@ -5282,7 +5282,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &exact_history_request,
                 snapshot,
             )
-            .map_err(|_| StorageError::ScopeChanged)
+            .map_err(|error| {
+                eprintln!("pg_exact_history_page_failed: {error}");
+                StorageError::ScopeChanged
+            })
         },
     )
     .unwrap();
