@@ -970,11 +970,22 @@ fn archived_event_index_survives_absence_without_current_membership() {
             "ordinary disappearance still removes unmarked indexes"
         );
         assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
+        let (main_after, history_after) = projection_cohorts();
+        let before_metadata: Value = serde_json::from_str(&main_before.0).unwrap();
+        let mut after_metadata: Value = serde_json::from_str(&main_after.0).unwrap();
+        assert_eq!(before_metadata["lifecycle"], "current");
+        assert_eq!(after_metadata["lifecycle"], "retained");
+        after_metadata["lifecycle"] = before_metadata["lifecycle"].clone();
         assert_eq!(
-            projection_cohorts(),
-            (main_before.clone(), history_before.clone()),
-            "retirement and restart leave both Catalog cohorts unchanged"
+            after_metadata, before_metadata,
+            "retirement changes only the main Catalog lifecycle"
         );
+        assert_eq!(
+            (&main_after.1, main_after.2, &main_after.3),
+            (&main_before.1, main_before.2, &main_before.3),
+            "retirement keeps the main slot header unchanged"
+        );
+        assert_eq!(history_after, history_before, "History remains immutable");
     }
     let retained_marker: String = connection
         .query_row(
