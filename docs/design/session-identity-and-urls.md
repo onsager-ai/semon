@@ -14,6 +14,31 @@ UUID; their Catalog keys distinguish source-local recordings. Workspace B cannot
 use workspace A's source keys to read its recordings. An installation or workspace
 move needs an explicit future migration policy; labels do not provide continuity.
 
+## Turn IDs
+
+Turn IDs used by transcript anchors and trace routes are opaque model IDs, not
+public session keys. A turn that starts at a handoff keeps that handoff ID. A
+handoff-free turn uses the nonempty native UUID (`Event.u`) on its first grouped
+event when present. That ID is a domain-separated stable hash of the structured
+tuple `("native-start", canonical session key, native file ID, byte offset,
+UUID)`, preserving the prior file-and-offset discriminators while adding the
+UUID. JSON tuple encoding keeps opaque values and delimiters unambiguous. The
+current hash is the existing 64-bit FNV-1a stable ID encoding (`t` followed by
+16 lowercase hexadecimal digits); as with any fixed-width hash, collisions
+remain possible. If the first grouped event has no nonempty UUID, the existing
+`<session key>:<native file ID>:<byte offset>` ID remains. The turn's `file` and
+`offset` fields continue to identify its native start location.
+
+Starts at the same native file ID and byte offset within one canonical session
+need distinct native UUIDs for distinct IDs. The same UUID at different native
+locations remains distinct by file ID and offset. Repeated UUIDs at the same
+location are not merged or disambiguated and can violate turn or trace
+uniqueness. UUID-less turns can still collide when starts share a native file
+ID and offset. Paths are not identity inputs. These repeated-UUID and colliding
+UUID-less cases have no qualified unique-ID contract. UUID-bearing handoff-free
+IDs change under this contract update; old Semon versions' IDs are not retained
+as a compatibility format.
+
 ## Grammar
 
 The disjoint `/session/` prefix is available in the standalone tiny_http shell and

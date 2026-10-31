@@ -477,6 +477,15 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+/// Stable identity for a handoff-free turn whose first grouped event has a
+/// native record UUID. The tuple preserves the native start location while the
+/// UUID distinguishes starts at the same file and offset.
+fn native_start_turn_id(sid: &str, file_id: &str, offset: u64, uuid: &str) -> String {
+    let source = serde_json::to_string(&("native-start", sid, file_id, offset, uuid))
+        .expect("native turn identity tuple is serializable");
+    stable_id("t", &source)
+}
+
 /// The prefix of an ask's id: your message to a session. No other handoff
 /// id starts with it.
 const ASK_PREFIX: &str = "a";
@@ -6403,7 +6412,18 @@ impl<'a> Builder<'a> {
             turns.push(Turn {
                 id: match turn.start {
                     Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
+                    None => turn
+                        .entries
+                        .first()
+                        .and_then(|position| entries[*position].at)
+                        .and_then(|at| event(self.files, at).u.as_deref())
+                        .filter(|uuid| !uuid.is_empty())
+                        .map(|uuid| {
+                            native_start_turn_id(sid, &self.files[turn.file].id, turn.offset, uuid)
+                        })
+                        .unwrap_or_else(|| {
+                            format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset)
+                        }),
                 },
                 sid: sid.clone(),
                 start: turn
