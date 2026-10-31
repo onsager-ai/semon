@@ -536,11 +536,25 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --nocapture
       - name: Native Claude name and owned member replay qualification
+        id: native_name_work
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
-        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-name-work.log"
+      - name: Retain native name physical-work diagnostics
+        if: ${{ !cancelled() && steps.native_name_work.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-name-work
+          path: ${{ runner.temp }}/native-name-work.log
       - name: Native frontier physical-work qualification
+        id: native_frontier_work
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
-        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-frontier-work.log"
+      - name: Retain native frontier physical-work diagnostics
+        if: ${{ !cancelled() && steps.native_frontier_work.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-frontier-work
+          path: ${{ runner.temp }}/native-frontier-work.log
       - name: Current native store admission and nonmutation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
