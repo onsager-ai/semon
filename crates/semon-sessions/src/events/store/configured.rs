@@ -3756,12 +3756,25 @@ mod tests {
             if batch.paths.is_empty() {
                 continue;
             }
+            let batch_inputs = batch
+                .paths
+                .iter()
+                .map(|path| {
+                    inputs
+                        .iter()
+                        .find(|input| {
+                            input.full_path(options).to_string_lossy().as_ref() == path.as_str()
+                        })
+                        .cloned()
+                        .expect("every staged path has its native test input")
+                })
+                .collect::<Vec<_>>();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 let before_prepare = shared_state(fixture);
                 let prepared = crate::model::prepare_semantic_batch(
                     options,
                     cache,
-                    inputs,
+                    &batch_inputs,
                     &batch,
                     1_790_000_000_000,
                 )
@@ -3782,7 +3795,7 @@ mod tests {
                 assert_eq!(shared_state(fixture), before);
             }
             let model = cache
-                .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
+                .prepare_semantic_model_batch(options, &batch_inputs, &batch, 1_790_000_000_000)
                 .unwrap();
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 return (batch, model);
