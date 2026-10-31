@@ -6759,10 +6759,7 @@ mod tests {
             .unwrap();
         assert!(done);
         assert!(
-            !store
-                .observation_journal
-                .recovery_is_current()
-                .unwrap(),
+            !store.observation_journal.recovery_is_current().unwrap(),
             "an ACK trigger's marker must prevent a completed recovery witness"
         );
         drop(store);
