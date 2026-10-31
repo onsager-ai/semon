@@ -447,10 +447,26 @@ impl TransferCheckpoint {
             // digest and receiver still bind each fragment to its snapshot.
             next.digests[index] = match record {
                 TransferRecord::CatalogRow {
-                    generation, kind, key, part, parts, total_bytes, row_digest, bytes, ..
+                    generation,
+                    kind,
+                    key,
+                    part,
+                    parts,
+                    total_bytes,
+                    row_digest,
+                    bytes,
+                    ..
                 } => hash(&(
-                    next.digests[index], "catalog_row", generation, kind, key,
-                    part, parts, total_bytes, row_digest, bytes,
+                    next.digests[index],
+                    "catalog_row",
+                    generation,
+                    kind,
+                    key,
+                    part,
+                    parts,
+                    total_bytes,
+                    row_digest,
+                    bytes,
                 ))?,
                 _ => hash(&(next.digests[index], record))?,
             };
