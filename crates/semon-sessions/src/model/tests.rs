@@ -2871,7 +2871,11 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
             .filter_map(|slot| {
                 matches!(slot.kind, SlotKind::U).then(|| {
                     (
-                        slot.file.as_ref().expect("source prompt has a file").path.clone(),
+                        slot.file
+                            .as_ref()
+                            .expect("source prompt has a file")
+                            .path
+                            .clone(),
                         slot.turn.clone().expect("source prompt has a turn"),
                     )
                 })
@@ -2886,9 +2890,11 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
     let built = home.build_query();
     let turns = turns_of(&built, "shared");
     assert_eq!(turns.len(), 2);
-    assert!(turns.iter().all(|turn| {
-        turn.file == "shared" && turn.offset == 0 && turn.start.is_none()
-    }));
+    assert!(
+        turns
+            .iter()
+            .all(|turn| { turn.file == "shared" && turn.offset == 0 && turn.start.is_none() })
+    );
     assert_eq!(
         turns
             .iter()
@@ -2918,11 +2924,7 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
     );
     assert_eq!(
         anchors(&expanded),
-        BTreeMap::from([
-            (first, first_id),
-            (second, second_id),
-            (third, third_id),
-        ])
+        BTreeMap::from([(first, first_id), (second, second_id), (third, third_id),])
     );
 }
 

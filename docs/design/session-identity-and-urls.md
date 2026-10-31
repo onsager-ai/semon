@@ -28,8 +28,8 @@ nonempty UUID, the existing `<session key>:<native file ID>:<byte offset>` ID
 remains. The turn's `file` and `offset` fields continue to identify its native
 start location.
 
-Distinct handoff-free turn starts within one canonical session need distinct
-native UUIDs for distinct IDs. Repeated start UUIDs are not merged or
+Distinct UUID-bearing handoff-free turn starts within one canonical session
+need distinct native UUIDs for distinct IDs. Repeated start UUIDs are not merged or
 disambiguated and can violate turn or trace uniqueness. UUID-less turns can
 still collide when physical files share a native file ID and starting offset.
 Paths are not identity inputs. These repeated-UUID and colliding UUID-less
