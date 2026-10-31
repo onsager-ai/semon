@@ -22,6 +22,22 @@ pub struct SourceProjectionReady {
     pub lifecycle: String,
 }
 
+struct ProjectionCohort {
+    metadata: Option<String>,
+    metadata_bytes: Option<i64>,
+    version: Option<u32>,
+    generation: Option<String>,
+    source_generation: Option<String>,
+}
+
+struct ProjectionCandidate {
+    session_key: String,
+    mapping_harness: String,
+    mapping_native_id: String,
+    main: ProjectionCohort,
+    history: ProjectionCohort,
+}
+
 pub(crate) fn source_generation(sources: &[CatalogSource]) -> Result<String, serde_json::Error> {
     Ok(format!(
         "{:x}",
@@ -39,6 +55,8 @@ pub(crate) fn source_generation(sources: &[CatalogSource]) -> Result<String, ser
 /// Current observation mappings take precedence over retained mappings. Within
 /// the selected lifecycle, every candidate must have a supported, source-bound
 /// recipe header and the same source reference; ambiguity returns not-ready.
+/// Retained mappings use the main Catalog/header when its row contains the path,
+/// falling back to the matching immutable History pair only when it omits it.
 /// No prefix/record or complete transcript is loaded. The containing session's
 /// metadata is necessary relationship context, bounded to at most eight owners.
 pub fn source_projection_ready(
@@ -110,35 +128,60 @@ fn projection_ready(
     }
     for lifecycle in ["current", "retained"] {
         let history = lifecycle == "retained" && transaction.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='session_history_catalog')",[],|row|row.get::<_,bool>(0)).map_err(|_|Unavailable)?;
-        let tables = if history {
-            "LEFT JOIN session_history_catalog USING(session_key) LEFT JOIN session_history_projections USING(session_key)"
-        } else {
-            "LEFT JOIN session_slot_projections USING(session_key)"
-        };
-        let metadata = if history {
-            "coalesce(session_history_catalog.metadata,session_catalog.metadata)"
-        } else {
-            "session_catalog.metadata"
-        };
-        let header = if history {
-            "CASE WHEN session_history_projections.incomplete=1 THEN NULL ELSE coalesce(session_history_projections.version,session_slot_projections.version) END,coalesce(session_history_projections.generation,session_slot_projections.generation),coalesce(session_history_projections.source_generation,session_slot_projections.source_generation)"
-        } else {
-            "session_slot_projections.version,session_slot_projections.generation,session_slot_projections.source_generation"
-        };
-        let current_header = if history {
-            "LEFT JOIN session_slot_projections USING(session_key)"
+        let history_joins = if history {
+            "LEFT JOIN main.session_history_catalog h
+                ON h.namespace=s.namespace AND h.session_key=s.session_key
+             LEFT JOIN main.session_history_projections hp
+                ON hp.namespace=s.namespace AND hp.session_key=s.session_key"
         } else {
             ""
         };
-        let mut statement=transaction.prepare(&format!("SELECT CASE WHEN octet_length({metadata})<=1048576 THEN {metadata} ELSE NULL END,{header} FROM main.session_catalog_sources INDEXED BY session_catalog_current_source_path JOIN session_catalog USING(session_key) {tables} {current_header} WHERE session_catalog_sources.namespace=semon_namespace() AND session_catalog_sources.lifecycle=?1 AND source_path=?2 ORDER BY session_catalog_sources.session_key LIMIT 9")).map_err(|_|Unavailable)?;
+        let history_cohort = if history {
+            "CASE WHEN octet_length(h.metadata)<=1048576 THEN h.metadata END,
+             octet_length(h.metadata),
+             CASE WHEN hp.incomplete=0 THEN hp.version END,
+             CASE WHEN hp.incomplete=0 THEN hp.generation END,
+             CASE WHEN hp.incomplete=0 THEN hp.source_generation END"
+        } else {
+            "NULL,NULL,NULL,NULL,NULL"
+        };
+        let sql = format!(
+            "SELECT s.session_key,s.harness,s.native_id,
+                    CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata END,
+                    octet_length(c.metadata),p.version,p.generation,p.source_generation,
+                    {history_cohort}
+             FROM main.session_catalog_sources s
+                INDEXED BY session_catalog_current_source_path
+             JOIN main.session_catalog c
+                ON c.namespace=s.namespace AND c.session_key=s.session_key
+             LEFT JOIN main.session_slot_projections p
+                ON p.namespace=s.namespace AND p.session_key=s.session_key
+             {history_joins}
+             WHERE s.namespace=semon_namespace() AND s.lifecycle=?1 AND s.source_path=?2
+             ORDER BY s.session_key LIMIT 9"
+        );
+        let mut statement = transaction.prepare(&sql).map_err(|_| Unavailable)?;
         let candidates = statement
             .query_map([lifecycle, full], |row| {
-                Ok((
-                    row.get::<_, Option<String>>(0)?,
-                    row.get::<_, Option<u32>>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
+                Ok(ProjectionCandidate {
+                    session_key: row.get(0)?,
+                    mapping_harness: row.get(1)?,
+                    mapping_native_id: row.get(2)?,
+                    main: ProjectionCohort {
+                        metadata: row.get(3)?,
+                        metadata_bytes: row.get(4)?,
+                        version: row.get(5)?,
+                        generation: row.get(6)?,
+                        source_generation: row.get(7)?,
+                    },
+                    history: ProjectionCohort {
+                        metadata: row.get(8)?,
+                        metadata_bytes: row.get(9)?,
+                        version: row.get(10)?,
+                        generation: row.get(11)?,
+                        source_generation: row.get(12)?,
+                    },
+                })
             })
             .map_err(|_| Unavailable)?
             .collect::<Result<Vec<_>, _>>()
@@ -150,15 +193,55 @@ fn projection_ready(
             return Ok(None);
         }
         let mut result: Option<SourceProjectionReady> = None;
-        for (metadata, version, generation, source_hash) in candidates {
-            let Some(metadata) = metadata else {
+        for candidate in candidates {
+            if !candidate
+                .main
+                .metadata_bytes
+                .is_some_and(|bytes| bytes <= 1_048_576)
+            {
+                return Ok(None);
+            }
+            let Some(main_metadata) = candidate.main.metadata.as_deref() else {
                 return Ok(None);
             };
-            let Ok(row) = serde_json::from_str::<CatalogRow>(&metadata) else {
+            let Ok(main_row) = serde_json::from_str::<CatalogRow>(main_metadata) else {
                 return Ok(None);
             };
-            if row.sources.len() > 64
+            let main_represents_path = main_row
+                .sources
+                .iter()
+                .any(|source| source.path.to_str() == Some(full));
+            let (row, cohort) = if main_represents_path {
+                (main_row, &candidate.main)
+            } else if lifecycle == "retained" && history {
+                if !candidate
+                    .history
+                    .metadata_bytes
+                    .is_some_and(|bytes| bytes <= 1_048_576)
+                {
+                    return Ok(None);
+                }
+                let Some(history_metadata) = candidate.history.metadata.as_deref() else {
+                    return Ok(None);
+                };
+                let Ok(history_row) = serde_json::from_str::<CatalogRow>(history_metadata) else {
+                    return Ok(None);
+                };
+                if !history_row
+                    .sources
+                    .iter()
+                    .any(|source| source.path.to_str() == Some(full))
+                {
+                    return Ok(None);
+                }
+                (history_row, &candidate.history)
+            } else {
+                return Ok(None);
+            };
+            if row.key != candidate.session_key
+                || row.sources.len() > 64
                 || row.harness != root
+                || candidate.mapping_harness != row.harness
                 || (lifecycle == "current" && row.lifecycle.as_str() != lifecycle)
             {
                 return Ok(None);
@@ -170,6 +253,9 @@ fn projection_ready(
             else {
                 return Ok(None);
             };
+            if source.native_id != candidate.mapping_native_id {
+                return Ok(None);
+            }
             // A recipe can still describe a coherent old prefix while a newer
             // source observation awaits publication. Preserve it for history,
             // but do not qualify another local eviction during that interval.
@@ -184,12 +270,12 @@ fn projection_ready(
                 }
             }
             let expected = source_generation(&row.sources).map_err(|_| Unavailable)?;
-            if version != Some(crate::slot_projection::VERSION)
-                || source_hash.as_deref() != Some(expected.as_str())
+            if cohort.version != Some(crate::slot_projection::VERSION)
+                || cohort.source_generation.as_deref() != Some(expected.as_str())
             {
                 return Ok(None);
             }
-            let Some(generation) = generation.filter(|value| {
+            let Some(generation) = cohort.generation.as_deref().filter(|value| {
                 value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
             }) else {
                 return Ok(None);
@@ -213,7 +299,7 @@ fn projection_ready(
                 result = Some(SourceProjectionReady {
                     source: reference,
                     projection_version: crate::slot_projection::VERSION,
-                    projection_generation: generation,
+                    projection_generation: generation.to_owned(),
                     lifecycle: lifecycle.into(),
                 });
             }
