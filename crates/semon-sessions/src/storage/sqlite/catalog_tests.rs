@@ -2303,6 +2303,16 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
     let original_identity = session_catalog_identity(&fixture.options, "source", "session-00000")
         .unwrap()
         .unwrap();
+    let session_path = fixture
+        .options
+        .claude_home
+        .join("projects/project/session-00000.jsonl");
+    let original_provider = PinnedOriginal {
+        source: original_identity.source_refs[0].source.clone(),
+        bytes: fs::read(&session_path).unwrap(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        change_at: None,
+    };
     let original_selected = fixture.body("sid=session-00000").1;
     let original_transcript = crate::session_transcript_range(
         &fixture.options,
@@ -2346,10 +2356,6 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         "2026-10-01T00:01:30Z",
         "middle-current-model",
     );
-    let session_path = fixture
-        .options
-        .claude_home
-        .join("projects/project/session-00000.jsonl");
     let appended_bytes = fs::read(&session_path).unwrap();
     fixture.publish_existing();
     assert_eq!(fs::read(&session_path).unwrap(), appended_bytes);
@@ -2471,17 +2477,34 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         selected["items"][0]["details"]["content_generation"],
         original_selected["items"][0]["details"]["content_generation"]
     );
-    let retained_transcript = crate::session_transcript_range(
+    let retained_local = crate::session_transcript_range(
         &fixture.options,
         "source",
         "sid=session-00000&scope=retained_history&limit=100",
         None,
     );
+    assert_eq!(retained_local.status, 409);
+    let retained_local: Value = serde_json::from_slice(&retained_local.body).unwrap();
+    assert_eq!(retained_local["fence_reason"], "local_source_revision");
+    assert_eq!(retained_local["local_revision_reason"], "size_grew");
+    assert!(retained_local.get("entries").is_none());
+
+    let retained_transcript = crate::session_transcript_range(
+        &fixture.options,
+        "source",
+        "sid=session-00000&scope=retained_history&limit=100",
+        Some(&original_provider),
+    );
     assert_eq!(retained_transcript.status, 200);
+    assert!(original_provider.calls.load(Ordering::Relaxed) > 0);
     let retained_transcript: Value = serde_json::from_slice(&retained_transcript.body).unwrap();
     assert_eq!(
         retained_transcript["projection"],
         original_transcript["projection"]
+    );
+    assert_eq!(
+        retained_transcript["entries"],
+        original_transcript["entries"]
     );
     assert_eq!(
         retained_transcript["entries"].as_array().unwrap().len(),
