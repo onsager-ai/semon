@@ -1978,8 +1978,11 @@ impl Stage {
             let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
+        // Negative effects change the publication even without replacement rows.
         let repeat = unchanged
             && projections_unchanged
+            && retired.is_empty()
+            && prepared.withdrawals.is_empty()
             && previous.is_some()
             && prepared.claims.iter().all(|(_, claim)| claim.is_none());
         let old_epoch = old_epoch

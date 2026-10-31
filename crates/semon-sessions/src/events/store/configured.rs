@@ -8209,7 +8209,13 @@ mod tests {
             )
             .unwrap();
             let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            let previous = batch.base_generation.clone().unwrap();
             publish(&mut cache, &f, &batch, &model);
+            assert_ne!(
+                cache.session_catalog_generation().unwrap(),
+                previous,
+                "withdrawal publication must advance the original Catalog generation"
+            );
             let db = f.db();
             assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
             let retained:String=db.query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='model-0'",[],|r|r.get(0)).unwrap();
