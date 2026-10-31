@@ -1537,6 +1537,120 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         append_prefix_body, expected_bodies[&appended_key]["body"],
         "isolated SQLite prefix agrees with the full-source oracle"
     );
+    // Keep the full response for whole-JSON parity below. The retained-history
+    // check itself uses the explicitly scoped range API and a saved source prefix.
+    let append_history_body = append_prefix_body.clone();
+    struct SavedPrefix(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
+    impl crate::SessionSourceReader for SavedPrefix {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            let (saved, bytes) = self
+                .0
+                .iter()
+                .find(|(saved, _)| saved == source)
+                .ok_or_else(|| std::io::Error::other("saved prefix denied"))?;
+            let generation: String = saved
+                .prefix_sha256
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            let end = offset
+                .checked_add(max as u64)
+                .filter(|end| *end <= saved.offset)
+                .and_then(|end| usize::try_from(end).ok())
+                .ok_or_else(|| std::io::Error::other("saved prefix range"))?;
+            let start = usize::try_from(offset).map_err(std::io::Error::other)?;
+            if expected.is_some_and(|expected| expected != generation)
+                || saved.offset > bytes.len() as u64
+            {
+                return Err(std::io::Error::other("saved prefix changed"));
+            }
+            Ok(crate::SessionSourceRange {
+                generation,
+                length: saved.offset,
+                offset,
+                bytes: bytes
+                    .get(start..end)
+                    .ok_or_else(|| std::io::Error::other("saved prefix range"))?
+                    .to_vec()
+                    .into(),
+                cached: true,
+            })
+        }
+    }
+    let append_history_identity = crate::session_catalog_history_identity(
+        &append_oracle_options,
+        recent_machine,
+        &appended_key,
+    )
+    .unwrap()
+    .expect("SQLite append oracle has a retained-history identity");
+    assert_eq!(
+        append_history_identity.read_scope,
+        crate::CatalogReadScope::RetainedHistory
+    );
+    let saved_prefixes = append_history_identity
+        .source_refs
+        .iter()
+        .map(|observation| {
+            let source = observation.source.clone();
+            let root = match source.root.as_str() {
+                "claude" => &append_oracle_options.claude_home,
+                "codex" => &append_oracle_options.codex_home,
+                "copilot" => &append_oracle_options.copilot_home,
+                other => panic!("unexpected native source root: {other}"),
+            };
+            let bytes = fs::read(root.join(&source.path)).unwrap();
+            let prefix_len = usize::try_from(source.offset).unwrap();
+            assert!(prefix_len <= bytes.len());
+            use sha2::Digest;
+            let digest: [u8; 32] = sha2::Sha256::digest(&bytes[..prefix_len]).into();
+            assert_eq!(digest, source.prefix_sha256);
+            let bytes: std::sync::Arc<[u8]> = bytes[..prefix_len].to_vec().into();
+            (source, bytes)
+        })
+        .collect::<Vec<_>>();
+    let append_relative_path = append_oracle_path
+        .strip_prefix(&append_oracle_options.claude_home)
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(saved_prefixes.iter().any(|(source, _)| {
+        source.root == "claude" && source.path == append_relative_path
+    }));
+    let append_history_reader = SavedPrefix(saved_prefixes);
+    let append_history_query = format!(
+        "sid={}&scope=retained_history&after=0&limit=100",
+        crate::viewer::percent_encode(append_oracle_key)
+    );
+    let append_history_prefix = crate::session_transcript_range_with_mode(
+        &append_oracle_options,
+        recent_machine,
+        &append_history_query,
+        Some(&append_history_reader),
+        crate::SessionSourceReadMode::ProviderOnly,
+    );
+    assert_eq!(
+        append_history_prefix.status,
+        200,
+        "SQLite retained-history prefix: {}",
+        String::from_utf8_lossy(&append_history_prefix.body)
+    );
+    let append_history_prefix: serde_json::Value =
+        serde_json::from_slice(&append_history_prefix.body).unwrap();
+    assert_eq!(
+        append_history_prefix["identity"]["read_scope"],
+        "retained_history"
+    );
+    assert_eq!(
+        append_history_prefix["content_observation"]["state"],
+        "cached"
+    );
     let mut append_oracle_file = fs::OpenOptions::new()
         .append(true)
         .open(&append_oracle_path)
@@ -1549,15 +1663,46 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     append_oracle_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812803000)
         .expect("SQLite same-append successor publication");
-    let append_history_body = append_oracle_query
-        .call_at(
-            "read_transcript",
-            &serde_json::json!({"id":append_oracle_key,"limit":100}),
-            1790812802000,
-        )
-        .expect("SQLite same-append retained body");
+    let append_history_after = crate::session_transcript_range_with_mode(
+        &append_oracle_options,
+        recent_machine,
+        &append_history_query,
+        Some(&append_history_reader),
+        crate::SessionSourceReadMode::ProviderOnly,
+    );
     assert_eq!(
-        append_history_body, append_prefix_body,
+        append_history_after.status,
+        200,
+        "SQLite retained-history successor: {}",
+        String::from_utf8_lossy(&append_history_after.body)
+    );
+    let append_history_after: serde_json::Value =
+        serde_json::from_slice(&append_history_after.body).unwrap();
+    assert_eq!(
+        append_history_after["identity"]["read_scope"],
+        "retained_history"
+    );
+    assert_eq!(
+        append_history_after["identity"]["source_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reference| reference["source"].clone())
+            .collect::<Vec<_>>(),
+        append_history_prefix["identity"]["source_refs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reference| reference["source"].clone())
+            .collect::<Vec<_>>(),
+        "SQLite History keeps the original source prefix after append"
+    );
+    assert_eq!(
+        append_history_after["projection"], append_history_prefix["projection"],
+        "SQLite History keeps the original projection after append"
+    );
+    assert_eq!(
+        append_history_after["entries"], append_history_prefix["entries"],
         "SQLite History keeps the original exact source prefix after append"
     );
     drop(append_oracle_query);
