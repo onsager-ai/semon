@@ -6682,8 +6682,7 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         json!({"state":null,"observation":"unavailable"})
     );
     assert_eq!(
-        body["items"][0]["facts_observation"]["state"],
-        "cached",
+        body["items"][0]["facts_observation"]["state"], "cached",
         "an invalid Query runtime cannot change independently qualified Facts freshness"
     );
     for private in ["query", "details", "transcript"] {
