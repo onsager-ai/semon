@@ -852,9 +852,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .unwrap();
     }
-    // A fresh same-harness owner with two unchanged sources exercises missing
-    // source composition without an earlier original History owner.
-    let composite_key = "fresh-composite";
+    // A fresh native /clear lineage with two unchanged sources exercises
+    // missing source composition without an earlier original History owner.
+    let composite_key = "fresh-composite-a";
     let composite_a_path = options
         .claude_home
         .join("projects/project/fresh-composite-a.jsonl");
@@ -872,8 +872,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         (
             &composite_b_path,
             [
-                serde_json::json!({"type":"user","sessionId":composite_key,"uuid":"fresh-b-user","timestamp":"2026-10-01T00:00:07Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized fresh composite B"}}),
-                serde_json::json!({"type":"assistant","sessionId":composite_key,"uuid":"fresh-b-answer","parentUuid":"fresh-b-user","timestamp":"2026-10-01T00:00:08Z","message":{"id":"fresh-b-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized fresh composite B reply"}]}}),
+                serde_json::json!({"type":"user","sessionId":"fresh-composite-b","session_id":composite_key,"uuid":"fresh-b-user","timestamp":"2026-10-01T00:00:07Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized fresh composite B"}}),
+                serde_json::json!({"type":"assistant","sessionId":"fresh-composite-b","uuid":"fresh-b-answer","parentUuid":"fresh-b-user","timestamp":"2026-10-01T00:00:08Z","message":{"id":"fresh-b-answer","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized fresh composite B reply"}]}}),
             ],
         ),
     ] {
@@ -921,6 +921,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let expected =
         crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
             .unwrap();
+    assert_eq!(
+        expected
+            .rows
+            .iter()
+            .filter(|row| {
+                row.sources.iter().any(|source| {
+                    source.path == composite_a_path || source.path == composite_b_path
+                })
+            })
+            .map(|row| {
+                (
+                    row.key.as_str(),
+                    row.sources
+                        .iter()
+                        .map(|source| &source.path)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(composite_key, vec![&composite_a_path, &composite_b_path])],
+        "SQLite native lineage has exactly one canonical owner with Sources A and B"
+    );
     assert_eq!(
         expected
             .rows
@@ -1921,6 +1943,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     let prepared =
         crate::model::prepare_sources(&options, &mut pg, &inputs, 1790812802000).unwrap();
+    assert_eq!(
+        prepared
+            .rows
+            .iter()
+            .filter(|row| {
+                row.sources.iter().any(|source| {
+                    source.path == composite_a_path || source.path == composite_b_path
+                })
+            })
+            .map(|row| {
+                (
+                    row.key.as_str(),
+                    row.sources
+                        .iter()
+                        .map(|source| &source.path)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(composite_key, vec![&composite_a_path, &composite_b_path])],
+        "PG native lineage has exactly one canonical owner with Sources A and B"
+    );
     let parent_row = prepared
         .rows
         .iter()
@@ -5764,32 +5808,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             qualified.as_deref().unwrap(),
             |snapshot| {
                 assert!(
-                    snapshot.owner(composite_key)?.is_none(),
+                    snapshot
+                        .owner(composite_key)
+                        .expect("prewithdrawal composite History owner lookup")
+                        .is_none(),
                     "the fresh owner has no History before Source B is withdrawn"
                 );
                 let current = snapshot
-                    .catalog(composite_key, false)?
-                    .ok_or(StorageError::ScopeChanged)?;
+                    .catalog(composite_key, false)
+                    .expect("prewithdrawal composite Current catalog lookup")
+                    .expect("prewithdrawal composite canonical Current owner exists");
                 assert_eq!(current.sources.len(), 2);
                 let current_source = current
                     .sources
                     .iter()
                     .find(|source| source.path.to_str() == composite_a_path.to_str())
-                    .ok_or(StorageError::ScopeChanged)?
+                    .expect("prewithdrawal composite Current contains Source A")
                     .clone();
                 let withdrawn_source = current
                     .sources
                     .iter()
                     .find(|source| source.path.to_str() == composite_b_path.to_str())
-                    .ok_or(StorageError::ScopeChanged)?
+                    .expect("prewithdrawal composite Current contains Source B")
                     .clone();
-                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let mut tx = snapshot
+                    .tx
+                    .lock()
+                    .expect("prewithdrawal composite snapshot transaction lock");
                 let proof =
-                    native_proof_tuple(&mut tx, qualified.as_deref().unwrap(), &withdrawn_source)?;
+                    native_proof_tuple(&mut tx, qualified.as_deref().unwrap(), &withdrawn_source)
+                        .expect("prewithdrawal composite Source B Native proof tuple");
                 Ok((current_source, withdrawn_source, proof))
             },
         )
-        .unwrap();
+        .expect("prewithdrawal composite admitted snapshot");
     fs::rename(&claude_agent, oracle.root.join("retained-agent180.jsonl")).unwrap();
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
