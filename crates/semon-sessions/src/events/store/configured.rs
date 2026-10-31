@@ -6962,12 +6962,20 @@ mod tests {
                 tx.rollback().unwrap();
                 semantic_stage::stage_layout(&db).unwrap();
             }
-            let tx = db.transaction().unwrap();
-            tx.execute_batch("DROP INDEX catalog_semantic_message;")
-                .unwrap();
-            assert!(semantic_stage::stage_layout(&tx).is_err());
-            tx.rollback().unwrap();
-            semantic_stage::stage_layout(&db).unwrap();
+            for ddl in [
+                "DROP INDEX catalog_semantic_message;",
+                "CREATE INDEX unexpected_stage_index ON catalog_semantic_events(namespace) WHERE copied=1;",
+                "DROP INDEX catalog_semantic_message; CREATE INDEX catalog_semantic_message ON catalog_semantic_events(namespace,msg_id,kind,copied,qualified,source_path,native_seq) WHERE copied=1;",
+                "DROP TABLE catalog_semantic_names; CREATE TABLE catalog_semantic_names(namespace TEXT NOT NULL CHECK(namespace<>''),name TEXT NOT NULL,session_key TEXT NOT NULL,PRIMARY KEY(namespace,name,session_key)) STRICT, WITHOUT ROWID;",
+            ] {
+                let tx = db.transaction().unwrap();
+                tx.execute_batch(ddl).unwrap();
+                let before = tx.total_changes();
+                assert!(semantic_stage::stage_layout(&tx).is_err(), "{ddl}");
+                assert_eq!(tx.total_changes(), before);
+                tx.rollback().unwrap();
+                semantic_stage::stage_layout(&db).unwrap();
+            }
         }
     }
 
