@@ -1,9 +1,9 @@
 //! Private admitted-Source staging and bounded initial Current publication.
 //! Public and complete-domain publication qualifications remain closed.
-#[path = "semantic_owners.rs"]
-mod owners;
 #[path = "semantic_origin.rs"]
 pub(crate) mod origin;
+#[path = "semantic_owners.rs"]
+mod owners;
 use super::source_journal::SourceJournal;
 use super::{failed, namespace};
 use crate::events::{Ledger, Outcome, StoreError};
@@ -2300,20 +2300,33 @@ impl Stage {
 
     /// The caller received Written from the fallible, held-origin publisher.
     /// This updates only its local expected head; every later write rechecks CAS.
-    pub(crate) fn acknowledge_origin_publication(&mut self, expected: Option<&str>, generation: &str, token: &crate::model::relation_stage::OriginPublication) {
+    pub(crate) fn acknowledge_origin_publication(
+        &mut self,
+        expected: Option<&str>,
+        generation: &str,
+        token: &crate::model::relation_stage::OriginPublication,
+    ) {
         if self.epoch == Some(token.held_epoch) && self.source.generation.as_deref() == expected {
             self.source.generation = Some(generation.to_owned());
         }
     }
 
     pub(crate) fn origin_pending(&self) -> Result<bool, StoreError> {
-        self.source.validate(&self.db).map_err(StoreError::Configured)?;
+        self.source
+            .validate(&self.db)
+            .map_err(StoreError::Configured)?;
         origin::pending(&self.db, self.source.namespace()).map_err(error)
     }
 
-    pub(crate) fn origin_publication(&self) -> Result<Option<crate::model::relation_stage::OriginPublication>, StoreError> {
-        self.source.validate(&self.db).map_err(StoreError::Configured)?;
-        self.source.owner.as_ref()
+    pub(crate) fn origin_publication(
+        &self,
+    ) -> Result<Option<crate::model::relation_stage::OriginPublication>, StoreError> {
+        self.source
+            .validate(&self.db)
+            .map_err(StoreError::Configured)?;
+        self.source
+            .owner
+            .as_ref()
             .map(|owner| origin::publication(&self.db, owner, self.epoch).map_err(error))
             .unwrap_or(Ok(None))
     }
@@ -2412,12 +2425,13 @@ impl Stage {
             if phase == "discovering" {
                 return Ok(Outcome::Conflict);
             }
-            if !paths.is_empty() || self.source.owner.is_none() || self.source.generation.is_some() {
+            if !paths.is_empty() || self.source.owner.is_none() || self.source.generation.is_some()
+            {
                 return Ok(Outcome::Conflict);
             }
             let binding: bool = tx.query_row(
                 "SELECT origin_admission=?2 AND origin_stream=?3 FROM main.catalog_semantic_stage WHERE namespace=?1",
-                params![ns, self.source.admission, self.source.config.expected_stream_epoch], |row| row.get(0),
+                params![ns, i64::try_from(self.source.admission).map_err(|_| refuse("semantic_admission_range"))?, self.source.config.expected_stream_epoch], |row| row.get(0),
             ).map_err(error)?;
             if !binding || (bound && old_runtime != runtime) {
                 return Ok(Outcome::Conflict);
@@ -2428,7 +2442,13 @@ impl Stage {
                 }
                 tx.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1),runtime=?2,origin_runtime_bound=1 WHERE namespace=?1 AND origin_phase='sealed'", params![ns,runtime]).map_err(error)?;
             }
-            let epoch = tx.query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |row| row.get(0)).map_err(error)?;
+            let epoch = tx
+                .query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
             tx.commit().map_err(error)?;
             self.epoch = Some(epoch);
             self.begun = true;

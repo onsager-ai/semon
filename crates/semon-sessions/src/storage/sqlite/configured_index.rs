@@ -257,19 +257,35 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        let origin = self.semantic.as_ref().map(|stage| stage.origin_publication()).transpose()?.flatten();
+        let origin = self
+            .semantic
+            .as_ref()
+            .map(|stage| stage.origin_publication())
+            .transpose()?
+            .flatten();
         let result = self
             .native
-            .publish_catalog_with_origin(publication, expected_generation, Some(claims), false, origin.as_ref())
+            .publish_catalog_with_origin(
+                publication,
+                expected_generation,
+                Some(claims),
+                false,
+                origin.as_ref(),
+            )
             .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
-        if let (Some(token), (Outcome::Written, Some(generation)), Some(stage)) = (origin.as_ref(), &result, self.semantic.as_mut()) {
+        if let (Some(token), (Outcome::Written, Some(generation)), Some(stage)) =
+            (origin.as_ref(), &result, self.semantic.as_mut())
+        {
             stage.acknowledge_origin_publication(expected_generation, generation, token);
         }
         self.acknowledge_publication(expected_generation, Some(&result));
         Ok(result)
     }
     fn semantic_origin_pending(&self) -> Result<bool, StoreError> {
-        self.semantic.as_ref().map(|stage| stage.origin_pending()).unwrap_or(Ok(false))
+        self.semantic
+            .as_ref()
+            .map(|stage| stage.origin_pending())
+            .unwrap_or(Ok(false))
     }
     fn publish_closed_catalog_fenced(
         &mut self,

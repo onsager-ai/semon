@@ -8566,12 +8566,24 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
     }
     let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
-    evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
     let db = fixture.db();
     let mut published = false;
     for _ in 0..16 {
-        assert!(!evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap());
-        let count: i64 = db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current'", [], |row| row.get(0)).unwrap();
+        assert!(
+            !evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        );
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_catalog WHERE lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         if count != 0 {
             assert_eq!(count, 64);
             published = true;
@@ -8580,21 +8592,74 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
     }
     assert!(published);
     assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1 AND origin_claim IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 81);
-    assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_origin_owners", [], |row| row.get::<_, i64>(0)).unwrap(), 64);
-    assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_origin_sources WHERE acknowledged=1", [], |row| row.get::<_, i64>(0)).unwrap(), 64);
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(), 17);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_owners",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        64
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_sources WHERE acknowledged=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        64
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        17
+    );
     assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_origin_sources accepted JOIN catalog_semantic_sources admitted USING(namespace,source_path) WHERE accepted.accepted_claim>admitted.origin_claim)", [], |row| row.get::<_, bool>(0)).unwrap(), "initial indexing claim advancement was not captured");
     assert!(db.query_row("SELECT origin_phase='draining' AND origin_first_generation=generation AND origin_epoch<epoch FROM catalog_semantic_stage", [], |row| row.get::<_, bool>(0)).unwrap());
     // Later ordinary discovery is allowed but cannot expand the sealed origin.
     use crate::storage::source_observations::{SourceObservationStore, SourceOperation};
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
     let mut journal = crate::storage::sqlite::source_journal::SourceJournal::owned_origin(owner);
-    let extra = vec![fixture.source("origin-after-seal").to_string_lossy().into_owned()];
-    let operation = SourceOperation::capture(config.namespace.as_str(), "discover", &serde_json::to_vec(&(&extra, true)).unwrap());
+    let extra = vec![
+        fixture
+            .source("origin-after-seal")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    let operation = SourceOperation::capture(
+        config.namespace.as_str(),
+        "discover",
+        &serde_json::to_vec(&(&extra, true)).unwrap(),
+    );
     journal.discover(&operation, &extra, true).unwrap();
-    assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1", [], |row| row.get::<_, i64>(0)).unwrap(), 81);
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(), 18);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        81
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        18
+    );
     drop(work);
     evidence.retire();
 }
@@ -8602,29 +8667,44 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
 #[test]
 fn cold_origin_committed_response_loss_reopens_and_replays_exact_facade_request() {
     let fixture = Fixture::new();
-    let inputs = (0..81).map(|n| {
-        let id = format!("origin-replay-{n:03}");
-        fixture.source(&id);
-        crate::Input {
-            root: crate::InputRoot::Claude,
-            path: format!("projects/project/{id}.jsonl"),
-        }
-    }).collect::<Vec<_>>();
+    let inputs = (0..81)
+        .map(|n| {
+            let id = format!("origin-replay-{n:03}");
+            fixture.source(&id);
+            crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/{id}.jsonl"),
+            }
+        })
+        .collect::<Vec<_>>();
     let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
-    evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
     let mut cache = work.events.take().unwrap();
     drop(work);
     evidence.retire();
-    cache.discover_catalog_sources(&fixture.options, &inputs[..64], false).unwrap();
-    cache.discover_catalog_sources(&fixture.options, &inputs[64..], true).unwrap();
+    cache
+        .discover_catalog_sources(&fixture.options, &inputs[..64], false)
+        .unwrap();
+    cache
+        .discover_catalog_sources(&fixture.options, &inputs[64..], true)
+        .unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
-    assert_eq!(cache.begin_semantic_stage(&[], &runtime).unwrap(), crate::events::Outcome::Written);
+    assert_eq!(
+        cache.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
     // The caller retains the actual immutable first request across producer
     // teardown. Re-running model preparation is a new request, not an exact retry.
     let mut prepared = crate::model::prepare_sources(
-        &fixture.options, &mut cache, &inputs[..64], crate::model::now_ms(),
-    ).unwrap();
+        &fixture.options,
+        &mut cache,
+        &inputs[..64],
+        crate::model::now_ms(),
+    )
+    .unwrap();
     assert_eq!(prepared.rows.len(), 64);
     assert_eq!(prepared.claims.len(), 64);
     assert!(prepared.base_generation.is_none());
@@ -8634,49 +8714,95 @@ fn cold_origin_committed_response_loss_reopens_and_replays_exact_facade_request(
     // Discard the successful producer and its response-side state. Only the
     // caller's exact request and the committed receipt survive this boundary.
     drop(cache);
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let mut resumed = EventCache::open_semantic(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     // Exercise normal takeover too: replay must find the original receipt's
     // held epoch even after the live stage's held epoch has advanced.
-    assert_eq!(resumed.begin_semantic_stage(&[], &runtime).unwrap(), crate::events::Outcome::Written);
+    assert_eq!(
+        resumed.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
     let db = fixture.db();
     assert!(db.query_row("SELECT stage.epoch>receipt.held_epoch FROM catalog_semantic_stage stage JOIN catalog_semantic_origin_publications receipt USING(namespace,origin_epoch)", [], |row| row.get::<_, bool>(0)).unwrap());
     let tables = [
-        "catalog_semantic_stage", "catalog_semantic_sources", "catalog_semantic_frontier",
-        "catalog_semantic_origin_owners", "catalog_semantic_origin_sources",
-        "catalog_semantic_origin_publications", "session_catalog_invalidations",
-        "session_catalog", "session_catalog_sources", "storage_proof_refs",
-        "storage_catalog_native_observation_grants", "files", "storage_source_journal",
+        "catalog_semantic_stage",
+        "catalog_semantic_sources",
+        "catalog_semantic_frontier",
+        "catalog_semantic_origin_owners",
+        "catalog_semantic_origin_sources",
+        "catalog_semantic_origin_publications",
+        "session_catalog_invalidations",
+        "session_catalog",
+        "session_catalog_sources",
+        "storage_proof_refs",
+        "storage_catalog_native_observation_grants",
+        "files",
+        "storage_source_journal",
     ];
-    let snapshot = || tables.iter().map(|table| {
-        let mut statement = db.prepare(&format!("SELECT * FROM {table} ORDER BY 1,2")).unwrap();
-        let columns = statement.column_count();
-        let rows = statement.query_map([], |row| (0..columns).map(|column| row.get::<_, SqlValue>(column)).collect::<rusqlite::Result<Vec<_>>>()).unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        rows
-    }).collect::<Vec<_>>();
+    let snapshot = || {
+        tables
+            .iter()
+            .map(|table| {
+                let mut statement = db
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1,2"))
+                    .unwrap();
+                let columns = statement.column_count();
+                let rows = statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|column| row.get::<_, SqlValue>(column))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
+                rows
+            })
+            .collect::<Vec<_>>()
+    };
     let before = snapshot();
     for table in &tables {
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             db.execute_batch(&format!("CREATE TRIGGER origin_replay_no_write_{table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'exact replay must not write'); END;")).unwrap();
         }
     }
-    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap(), (crate::events::Outcome::Written, Some(generation.clone())));
-    assert_eq!(snapshot(), before, "replay changed Current, ACKs, receipts or stage progress");
+    assert_eq!(
+        resumed.publish_partial_catalog_fenced(&prepared).unwrap(),
+        (crate::events::Outcome::Written, Some(generation.clone()))
+    );
+    assert_eq!(
+        snapshot(),
+        before,
+        "replay changed Current, ACKs, receipts or stage progress"
+    );
     // A still-enrolled but different cohort cannot use the committed token.
     let original_claim = prepared.claims[0].clone();
-    prepared.claims[0].0 = inputs[64].full_path(&fixture.options).to_string_lossy().into_owned();
+    prepared.claims[0].0 = inputs[64]
+        .full_path(&fixture.options)
+        .to_string_lossy()
+        .into_owned();
     assert!(resumed.publish_partial_catalog_fenced(&prepared).is_err());
     prepared.claims[0] = original_claim;
     prepared.transcripts[0].repair = !prepared.transcripts[0].repair;
     assert!(resumed.publish_partial_catalog_fenced(&prepared).is_err());
     prepared.transcripts[0].repair = !prepared.transcripts[0].repair;
     prepared.base_generation = Some(generation.clone());
-    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap().0, crate::events::Outcome::Conflict);
+    assert_eq!(
+        resumed.publish_partial_catalog_fenced(&prepared).unwrap().0,
+        crate::events::Outcome::Conflict
+    );
     prepared.base_generation = None;
-    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap(), (crate::events::Outcome::Written, Some(generation)));
+    assert_eq!(
+        resumed.publish_partial_catalog_fenced(&prepared).unwrap(),
+        (crate::events::Outcome::Written, Some(generation))
+    );
     assert_eq!(snapshot(), before);
     // A durable receipt never substitutes for the caller's current capability.
     db.execute("UPDATE storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace=semon_namespace()", []).unwrap();
@@ -8692,44 +8818,129 @@ fn cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin() {
     }
     let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
-    evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
     let db = fixture.db();
     db.execute_batch("CREATE TRIGGER origin_receipt_fault BEFORE INSERT ON catalog_semantic_origin_owners BEGIN SELECT RAISE(ABORT,'origin receipt fault'); END;").unwrap();
     let mut failed = false;
     for _ in 0..16 {
-        if evidence.refresh_catalog(&mut work, crate::model::now_ms()).is_err() {
+        if evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .is_err()
+        {
             failed = true;
             break;
         }
     }
     assert!(failed);
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(), 81);
-    assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_origin_publications", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM storage_catalog_native_observation_grants",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        81
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_publications",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
     let (origin, held): (i64, i64) = db.query_row("SELECT origin_epoch,epoch FROM catalog_semantic_stage WHERE origin_phase='sealed' AND generation IS NULL", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
-    db.execute_batch("DROP TRIGGER origin_receipt_fault").unwrap();
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    db.execute_batch("DROP TRIGGER origin_receipt_fault")
+        .unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
-    let mut stale = crate::storage::sqlite::semantic::Stage::open(crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap()).unwrap();
-    assert_eq!(stale.begin(&[], &runtime).unwrap(), crate::events::Outcome::Written);
+    let mut stale = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stale.begin(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
     let old_token = stale.origin_publication().unwrap().unwrap();
-    let mut replacement = crate::storage::sqlite::semantic::Stage::open(crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap()).unwrap();
-    assert_eq!(replacement.begin(&[], &runtime).unwrap(), crate::events::Outcome::Written);
-    assert_eq!(stale.begin(&[], &runtime).unwrap(), crate::events::Outcome::Conflict);
+    let mut replacement = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        replacement.begin(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        stale.begin(&[], &runtime).unwrap(),
+        crate::events::Outcome::Conflict
+    );
     assert!(stale.origin_publication().unwrap().is_none());
     let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
-    assert!(crate::storage::sqlite::semantic::origin::validate_publication(&db, &owner, &old_token, &[]).is_err());
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert!(
+        crate::storage::sqlite::semantic::origin::validate_publication(
+            &db,
+            &owner,
+            &old_token,
+            &[]
+        )
+        .is_err()
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog", [], |row| row
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     drop(work);
     evidence.retire();
     let successor = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut next = crate::viewer::lock(&successor.work);
-    assert!(!successor.refresh_catalog(&mut next, crate::model::now_ms()).unwrap());
-    let (next_origin, next_held): (i64, i64) = db.query_row("SELECT origin_epoch,epoch FROM catalog_semantic_stage WHERE origin_phase='draining'", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+    assert!(
+        !successor
+            .refresh_catalog(&mut next, crate::model::now_ms())
+            .unwrap()
+    );
+    let (next_origin, next_held): (i64, i64) = db
+        .query_row(
+            "SELECT origin_epoch,epoch FROM catalog_semantic_stage WHERE origin_phase='draining'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(next_origin, origin);
     assert!(next_held > held);
-    assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE lifecycle='current'", [], |row| row.get::<_, i64>(0)).unwrap(), 64);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog WHERE lifecycle='current'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        64
+    );
     drop(next);
     successor.retire();
 }
@@ -8742,17 +8953,48 @@ fn cold_origin_head_loss_with_current_is_not_an_empty_baseline() {
     fixture.publish_existing();
     let db = fixture.db();
     let before: String = db.query_row("SELECT group_concat(metadata) FROM (SELECT metadata FROM session_catalog ORDER BY session_key)", [], |row| row.get(0)).unwrap();
-    let grants: i64 = db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get(0)).unwrap();
-    db.execute("DELETE FROM main.meta WHERE key='catalog_generation'", []).unwrap();
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let grants: i64 = db
+        .query_row(
+            "SELECT count(*) FROM storage_catalog_native_observation_grants",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    db.execute("DELETE FROM main.meta WHERE key='catalog_generation'", [])
+        .unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
     let mut journal = crate::storage::sqlite::source_journal::SourceJournal::owned_origin(owner);
     let paths = vec![fixture.source("origin-new").to_string_lossy().into_owned()];
-    let operation = SourceOperation::capture(config.namespace.as_str(), "discover", &serde_json::to_vec(&(&paths, true)).unwrap());
+    let operation = SourceOperation::capture(
+        config.namespace.as_str(),
+        "discover",
+        &serde_json::to_vec(&(&paths, true)).unwrap(),
+    );
     assert!(journal.discover(&operation, &paths, true).is_err());
     assert_eq!(db.query_row("SELECT group_concat(metadata) FROM (SELECT metadata FROM session_catalog ORDER BY session_key)", [], |row| row.get::<_, String>(0)).unwrap(), before);
-    assert_eq!(db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get::<_, i64>(0)).unwrap(), grants);
-    assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_stage WHERE origin_epoch IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM storage_catalog_native_observation_grants",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        grants
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_stage WHERE origin_epoch IS NOT NULL",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
 }
 
 #[test]
@@ -8762,13 +9004,30 @@ fn generic_discovery_cannot_allocate_a_cold_origin() {
     let path = fixture.source("generic-origin");
     let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
-    evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let paths = vec![path.to_string_lossy().into_owned()];
-    let operation = SourceOperation::capture(config.namespace.as_str(), "discover", &serde_json::to_vec(&(&paths, true)).unwrap());
+    let operation = SourceOperation::capture(
+        config.namespace.as_str(),
+        "discover",
+        &serde_json::to_vec(&(&paths, true)).unwrap(),
+    );
     let mut generic = crate::storage::sqlite::source_journal::SourceJournal(config);
     generic.discover(&operation, &paths, true).unwrap();
-    assert_eq!(fixture.db().query_row("SELECT count(*) FROM catalog_semantic_stage", [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+    assert_eq!(
+        fixture
+            .db()
+            .query_row("SELECT count(*) FROM catalog_semantic_stage", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
     drop(work);
     evidence.retire();
 }
