@@ -1518,12 +1518,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite same-append prefix publication");
     let prefix_ids = prefix_list["sessions"].as_array().unwrap();
-    assert_eq!(
-        prefix_ids.len(),
-        1,
-        "append oracle is the original parent only"
-    );
-    let append_oracle_key = prefix_ids[0]["id"].as_str().unwrap();
+    // The copied parent contains a successful SendMessage to related154, but
+    // its matching receipt lives in the omitted agent file. Query lists that
+    // relationship placeholder beside the one physical parent session.
+    let append_oracle_key = prefix_ids
+        .iter()
+        .find(|session| session["id"].as_str() == Some(appended_key.as_str()))
+        .and_then(|session| session["id"].as_str())
+        .expect("append oracle includes the original parent beside its relationship placeholder");
     let append_prefix_body = append_oracle_query
         .call_at(
             "read_transcript",
