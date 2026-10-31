@@ -2874,6 +2874,25 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
         page["items"][0].clone()
     };
+    super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            let current = snapshot
+                .catalog("one", false)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert_eq!(
+                current.lifecycle,
+                crate::model::summary::CatalogLifecycle::Current
+            );
+            assert!(snapshot.owner("one")?.is_none());
+            assert!(snapshot.catalog("one", true)?.is_none());
+            Ok(())
+        },
+    )
+    .unwrap();
     let current_parent_item = exact_catalog_item("sid=one&limit=50");
     assert_eq!(
         current_parent_item["details"]["live_observation"], true,
@@ -2881,8 +2900,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let history_parent_item = exact_catalog_item("sid=one&scope=retained_history&limit=50");
     assert_eq!(
-        history_parent_item["details"]["live_observation"], false,
-        "retained reads cannot claim a live observation for a Current PG row"
+        history_parent_item["details"]["live_observation"], true,
+        "retained-scope fallback preserves the qualified live observation for a Current PG row"
     );
     // P3: retained history over the admitted PG generation equals the SQLite
     // oracle page: exact ordered keys and full producer rows, then a keyset
@@ -6645,6 +6664,29 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>()
     };
     assert_eq!(withdrawn_rows(&caught), oracle_withdrawn);
+    let history_only_key = oracle_withdrawn
+        .first()
+        .and_then(|row| row["key"].as_str())
+        .expect("the withdrawal oracle contains a retained-only key")
+        .to_owned();
+    let history_qualified = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            let history = snapshot
+                .catalog(&history_only_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(snapshot.owner(&history_only_key)?.is_some());
+            assert!(snapshot.catalog(&history_only_key, false)?.is_none());
+            snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    assert!(history_qualified, "withdrawn key has qualified physical History");
     assert_eq!(
         claude
             .iter()
@@ -6738,6 +6780,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
         page["items"][0].clone()
     };
+    let history_only = crate::viewer::percent_encode(&history_only_key);
+    let history_only_item = selected_item(&format!(
+        "sid={history_only}&scope=retained_history&limit=50"
+    ));
+    assert_eq!(history_only_item["lifecycle"], "retained");
+    assert_eq!(history_only_item["details"]["live_observation"], false);
     let current_only = crate::viewer::percent_encode(&current_only_key);
     let current_item = selected_item(&format!("sid={current_only}&limit=50"));
     let retained_item = selected_item(&format!(
