@@ -6105,10 +6105,18 @@ mod tests {
         };
         let original_proofs = proof_state(&a.db());
         assert!(!original_proofs.is_empty());
-        for fault in ["semantic_publish_search", "semantic_publish_generation_refs", "semantic_publish_ack", "semantic_publish_head"] {
+        for fault in [
+            "semantic_publish_search",
+            "semantic_publish_generation_refs",
+            "semantic_publish_ack",
+            "semantic_publish_head",
+        ] {
             let before = shared_state(&a);
             FAIL_EFFECT.with(|point| point.set(Some(fault)));
-            assert!(store.publish_semantic_catalog(&next, &prepared).is_err(), "{fault}");
+            assert!(
+                store.publish_semantic_catalog(&next, &prepared).is_err(),
+                "{fault}"
+            );
             FAIL_EFFECT.with(|point| point.set(None));
             assert_eq!(shared_state(&a), before, "{fault}");
         }
@@ -6118,9 +6126,42 @@ mod tests {
         );
         assert_eq!(store.session_catalog_generation().unwrap(), first.1);
         assert_eq!(proof_state(&a.db()), original_proofs);
-        assert_eq!(store.publish_semantic_catalog(&next, &prepared).unwrap(), first);
+        assert_eq!(
+            store.publish_semantic_catalog(&next, &prepared).unwrap(),
+            first
+        );
         assert_eq!(proof_state(&a.db()), original_proofs);
+        assert_eq!(
+            store.finish_semantic_stage(next.epoch).unwrap(),
+            Outcome::Written
+        );
+    }
+
+    #[test]
+    fn configured_semantic_changed_observation_issues_receipt_for_identical_rows() {
+        let (a, _, _) = same_db_sources();
+        let mut store = owned_semantic(&a.config);
+        let (batch, mut prepared) = publication_ready(&mut *store, &a.raw, "original-observation");
+        let mut observations = crate::storage::selected::PresentationObservations::default();
+        observations.machine_label = Some("original machine".into());
+        prepared.relationships.presentation = Some(observations);
+        let metadata = serde_json::to_value(&prepared.rows).unwrap();
+        let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        assert_eq!(store.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+        let (next, mut prepared) = publication_ready(&mut *store, &a.raw, "changed-observation");
+        assert_eq!(serde_json::to_value(&prepared.rows).unwrap(), metadata);
+        let mut observations = crate::storage::selected::PresentationObservations::default();
+        observations.machine_label = Some("changed machine".into());
+        prepared.relationships.presentation = Some(observations);
+        let second = store.publish_semantic_catalog(&next, &prepared).unwrap();
+        assert_eq!(second.0, Outcome::Written);
+        assert_ne!(second.1, first.1);
         assert_eq!(store.finish_semantic_stage(next.epoch).unwrap(), Outcome::Written);
+        assert_eq!(a.db().query_row(
+            "SELECT count(*) FROM storage_semantic_publications WHERE namespace='source-a'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 2);
     }
 
     #[test]
@@ -6130,21 +6171,36 @@ mod tests {
             "DELETE FROM storage_proof_sources WHERE namespace='source-a'",
             "DELETE FROM meta WHERE namespace='source-a' AND key LIKE 'catalog_native_observation:%'",
             "UPDATE storage_proof_refs SET id='dangling' WHERE namespace='source-a' AND kind='current'",
+            "INSERT INTO storage_proof_refs SELECT namespace,session_key,kind,'dangling' FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",
         ] {
             let (a, _, _) = same_db_sources();
             let mut store = owned_semantic(&a.config);
             let (batch, prepared) = publication_ready(&mut *store, &a.raw, "original");
-            assert_eq!(store.publish_semantic_catalog(&batch, &prepared).unwrap().0, Outcome::Written);
-            assert_eq!(store.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+            assert_eq!(
+                store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+                Outcome::Written
+            );
+            assert_eq!(
+                store.finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
             let (next, prepared) = publication_ready(&mut *store, &a.raw, "unchanged");
             let db = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
-            ).unwrap().into_test_connection();
+            )
+            .unwrap()
+            .into_test_connection();
             db.execute(corruption, []).unwrap();
             let before = shared_state(&a);
-            assert!(store.publish_semantic_catalog(&next, &prepared).is_err(), "{corruption}");
+            assert!(
+                store.publish_semantic_catalog(&next, &prepared).is_err(),
+                "{corruption}"
+            );
             assert_eq!(shared_state(&a), before, "{corruption}");
-            assert_eq!(store.finish_semantic_stage(next.epoch).unwrap(), Outcome::Conflict);
+            assert_eq!(
+                store.finish_semantic_stage(next.epoch).unwrap(),
+                Outcome::Conflict
+            );
         }
     }
 

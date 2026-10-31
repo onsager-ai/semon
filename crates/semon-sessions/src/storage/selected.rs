@@ -445,12 +445,17 @@ impl PresentationObservations {
             && self.runtime_for(row) == requested.runtime_for(row)
             && self.runtime_cwd_fingerprints.get(&prefix)
                 == requested.runtime_cwd_fingerprints.get(&prefix)
-            && self.runtime_rows.get(&row.key).and_then(|rows| rows.get(&prefix))
-                == requested.runtime_rows.get(&row.key).and_then(|rows| rows.get(&prefix))
+            && self
+                .runtime_rows
+                .get(&row.key)
+                .and_then(|rows| rows.get(&prefix))
+                == requested
+                    .runtime_rows
+                    .get(&row.key)
+                    .and_then(|rows| rows.get(&prefix))
             && row.sources.iter().all(|source| {
-                Self::source_key(source).is_ok_and(|key| {
-                    self.sources.get(&key) == requested.sources.get(&key)
-                })
+                Self::source_key(source)
+                    .is_ok_and(|key| self.sources.get(&key) == requested.sources.get(&key))
             })
     }
 

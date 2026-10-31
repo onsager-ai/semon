@@ -896,7 +896,10 @@ pub(super) fn reusable_presentations(
     // History, relative context and source observations cannot masquerade as reuse.
     let requested = capture_presentations(tx, ns, "", prepared, 0)?;
     let mut reusable = !prepared.rows.is_empty();
-    if prepared.rows.iter().any(|row| !prepared.transcripts.iter().any(|p| p.key == row.key))
+    if prepared
+        .rows
+        .iter()
+        .any(|row| !prepared.transcripts.iter().any(|p| p.key == row.key))
         && (!prepared.pids.is_empty()
             || !prepared.lineage_dependencies.is_empty()
             || !prepared.relationships.relations.is_empty()
@@ -909,25 +912,39 @@ pub(super) fn reusable_presentations(
         reusable = false;
     }
     for (row, (_, presentation)) in prepared.rows.iter().zip(&requested) {
-        let owned: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current')",
-            params![ns, row.key],
+        let prefix = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        // Inner joins in the verifier must not hide a broken relevant ref
+        // beside a valid owner. Older, unrelated source generations can remain
+        // after an ordinary Index advance and do not qualify this selection.
+        let broken: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key LEFT JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission LEFT JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest LEFT JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND (g.id IS NULL OR (g.stream=?3 AND (g.prefix=?4 OR g.metadata=?5) AND (p.generation IS NULL OR r.digest IS NULL OR v.id IS NULL))))",
+            params![ns, row.key, current.stream_epoch, prefix, metadata],
             |row| row.get(0),
         ).map_err(failed)?;
+        if broken {
+            return Err(StorageError::ScopeChanged);
+        }
+        let owned = immutable_observation_candidate(
+            tx, ns, &row.key, "current", &prefix, &current.stream_epoch, &metadata,
+        ).map_err(ObservationPreparationError::into_storage)?;
         if !owned {
             reusable = false;
             continue;
         }
-        let prefix = crate::retention::source_generation(&row.sources)
-            .map_err(|_| StorageError::Unavailable)?;
         let verified = verify_immutable_observation(tx, current, row, "current", &prefix, false)
             .map_err(ObservationPreparationError::into_storage)?;
-        let mut sources = row.sources.iter().map(|source| {
-            (
-                source.path.to_string_lossy().into_owned(),
-                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)),
-            )
-        }).collect::<Vec<_>>();
+        let mut sources = row
+            .sources
+            .iter()
+            .map(|source| {
+                (
+                    source.path.to_string_lossy().into_owned(),
+                    crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)),
+                )
+            })
+            .collect::<Vec<_>>();
         sources.sort();
         let saved_sources = tx.prepare(
             "SELECT path,ledger FROM storage_proof_sources WHERE namespace=?1 AND id=?2 AND session_key=?3 ORDER BY path LIMIT 65",
@@ -937,11 +954,17 @@ pub(super) fn reusable_presentations(
         if sources != saved_sources {
             return Err(StorageError::ScopeChanged);
         }
-        let slots = serde_json::to_string(&prepared.transcripts.iter()
-            .find(|projection| projection.key == row.key).map(|projection| &projection.slots))
-            .map_err(|_| StorageError::Unavailable)?;
+        let slots = serde_json::to_string(
+            &prepared
+                .transcripts
+                .iter()
+                .find(|projection| projection.key == row.key)
+                .map(|projection| &projection.slots),
+        )
+        .map_err(|_| StorageError::Unavailable)?;
         let observations_match = match (
-            verified.observations.as_ref(), prepared.presentation_observations(),
+            verified.observations.as_ref(),
+            prepared.presentation_observations(),
         ) {
             (Some(saved), Some(requested)) => saved.same_publication_inputs_for(requested, row),
             (None, None) => true,
@@ -951,10 +974,17 @@ pub(super) fn reusable_presentations(
             let witness: Option<crate::storage::selected::PresentationWitness> =
                 serde_json::from_str(text).map_err(|_| StorageError::Unavailable)?;
             let mut value = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
-            if let Some(catalog) = value.get_mut("catalog").and_then(serde_json::Value::as_object_mut) {
+            if let Some(catalog) = value
+                .get_mut("catalog")
+                .and_then(serde_json::Value::as_object_mut)
+            {
                 // capture_presentations authors these from the publication's
                 // chosen generation/clock, rather than producer observations.
-                for key in ["catalog_generation", "slot_projection_catalog_generation", "catalog_observed_at"] {
+                for key in [
+                    "catalog_generation",
+                    "slot_projection_catalog_generation",
+                    "catalog_observed_at",
+                ] {
                     catalog.remove(key);
                 }
             }
