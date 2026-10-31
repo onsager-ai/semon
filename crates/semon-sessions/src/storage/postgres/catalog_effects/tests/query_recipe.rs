@@ -88,10 +88,17 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     })
     .unwrap();
     let port = snapshot::query::QueryCatalog {
-        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
-        generation: generation.clone(), options: options.clone(), captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: options.clone(),
+        captured: false,
     };
-    assert_eq!(crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap(), Some(expected.clone()));
+    assert_eq!(
+        crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap(),
+        Some(expected.clone())
+    );
     for fault in [
         "corrupt",
         "digest",
@@ -141,50 +148,67 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     }
     // A successor pins the old physical snapshot; a fresh History selection
     // acquires its own custody reference instead of borrowing Current's grant.
-    let successor = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |held| {
-        let next = super::native_history::advance(&options, row, "query-recipe-successor");
-        assert_eq!(
-            held.load_query_recipe(&token).unwrap(),
-            Some(expected.clone())
-        );
-        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &next, |view| {
+    let successor =
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |held| {
+            let next = super::native_history::advance(&options, row, "query-recipe-successor");
+            assert_eq!(
+                held.load_query_recipe(&token).unwrap(),
+                Some(expected.clone())
+            );
+            snapshot::with_admitted_snapshot(&pool, &namespace, &control, &next, |view| {
+                let history = view.catalog(&row.key, true)?.unwrap();
+                let history_token = view
+                    .query_recipe_observation(Owner::History, &history)
+                    .unwrap();
+                assert!(matches!(
+                    history_token.residence,
+                    QueryRecipeResidence::NativeHistory { .. }
+                ));
+                assert!(matches!(
+                    view.load_query_recipe(&token),
+                    Err(Error::ObservationChanged)
+                ));
+                Ok(())
+            })?;
+            Ok(next)
+        })
+        .unwrap();
+    let history_token =
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
             let history = view.catalog(&row.key, true)?.unwrap();
-            let history_token = view
+            let token = view
                 .query_recipe_observation(Owner::History, &history)
                 .unwrap();
             assert!(matches!(
-                history_token.residence,
-                QueryRecipeResidence::NativeHistory { .. }
-            ));
-            assert!(matches!(
                 view.load_query_recipe(&token),
-                Err(Error::ObservationChanged)
+                Err(Error::MissingPayload)
             ));
-            Ok(())
-        })?;
-        Ok(next)
-    })
-    .unwrap();
-    let history_token = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
-        let history = view.catalog(&row.key, true)?.unwrap();
-        let token = view.query_recipe_observation(Owner::History, &history).unwrap();
-        assert!(matches!(view.load_query_recipe(&token), Err(Error::MissingPayload)));
-        Ok(token)
-    }).unwrap();
+            Ok(token)
+        })
+        .unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers h SET query_recipe=$4 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.session_key=$3 AND h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key AND h.metadata=$5", &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &row.key.as_bytes(), &payload.as_bytes(), &history_token.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
         Ok(())
     }).unwrap();
-    let history_owner = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
-        assert_eq!(view.load_query_recipe(&history_token).unwrap(), Some(expected.clone()));
-        Ok(view.owner(&row.key)?.unwrap().generation)
-    }).unwrap();
-    let key = super::super::observations::history_key(&history_owner, history_token.metadata.as_bytes());
+    let history_owner =
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
+            assert_eq!(
+                view.load_query_recipe(&history_token).unwrap(),
+                Some(expected.clone())
+            );
+            Ok(view.owner(&row.key)?.unwrap().generation)
+        })
+        .unwrap();
+    let key =
+        super::super::observations::history_key(&history_owner, history_token.metadata.as_bytes());
     let mut checked = false;
     let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         super::super::super::native_keys::delete_meta(tx, key.as_bytes())?;
         snapshot::in_transaction(tx, &successor, |view| {
-            assert!(matches!(view.load_query_recipe(&history_token), Err(Error::ObservationChanged)));
+            assert!(matches!(
+                view.load_query_recipe(&history_token),
+                Err(Error::ObservationChanged)
+            ));
             Ok(())
         })?;
         checked = true;
@@ -244,7 +268,9 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             }
         }
         assert_eq!(
-            cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+            cache
+                .record_semantic_batch(&batch, model.prepared())
+                .unwrap(),
             crate::events::Outcome::Written
         );
         if batch.phase != crate::model::relation_stage::Phase::Publication {
@@ -340,12 +366,27 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     })
     .unwrap();
     let mut pg_options = options.clone();
-    pg_options.source = crate::storage::HostSource::new(namespace.clone(), config.expected_stream_epoch.clone().unwrap()).unwrap().with_store(config.clone()).unwrap();
+    pg_options.source = crate::storage::HostSource::new(
+        namespace.clone(),
+        config.expected_stream_epoch.clone().unwrap(),
+    )
+    .unwrap()
+    .with_store(config.clone())
+    .unwrap();
     let port = snapshot::query::QueryCatalog {
-        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
-        generation: generation.clone(), options: pg_options.clone(), captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: generation.clone(),
+        options: pg_options.clone(),
+        captured: false,
     };
-    assert_eq!(crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap().as_ref(), Some(expected));
+    assert_eq!(
+        crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token)
+            .unwrap()
+            .as_ref(),
+        Some(expected)
+    );
     for sql in [
         "UPDATE semon_pg_native_selected_generations SET query_recipe=NULL WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
         "UPDATE semon_pg_native_selected_generations SET query_recipe='{'::bytea WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
@@ -381,23 +422,44 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     // History, preserving its existing producer proof and detached payload.
     snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
         let selected = held.catalog(&row.key, false)?.unwrap();
-        let next = super::native_history::advance(&pg_options, &selected, "query-recipe-import-next");
-        assert_eq!(held.load_query_recipe(&token).unwrap().as_ref(), Some(expected));
+        let next =
+            super::native_history::advance(&pg_options, &selected, "query-recipe-import-next");
+        assert_eq!(
+            held.load_query_recipe(&token).unwrap().as_ref(),
+            Some(expected)
+        );
         snapshot::with_admitted_snapshot(&pool, namespace, &control, &next, |view| {
             let history = view.catalog(&row.key, true)?.unwrap();
-            let history_token = view.query_recipe_observation(Owner::History, &history).unwrap();
+            let history_token = view
+                .query_recipe_observation(Owner::History, &history)
+                .unwrap();
             match (&token.residence, &history_token.residence) {
-                (QueryRecipeResidence::Immutable { generation: original, publication: original_publication, .. }, QueryRecipeResidence::Immutable { owner: crate::storage::query::QueryRecipeOwner::History, generation: retained, publication: retained_publication }) => {
+                (
+                    QueryRecipeResidence::Immutable {
+                        generation: original,
+                        publication: original_publication,
+                        ..
+                    },
+                    QueryRecipeResidence::Immutable {
+                        owner: crate::storage::query::QueryRecipeOwner::History,
+                        generation: retained,
+                        publication: retained_publication,
+                    },
+                ) => {
                     assert_eq!(original, retained);
                     assert_eq!(original_publication, retained_publication);
                 }
                 _ => panic!("imported original lost its immutable History residence"),
             }
             assert_eq!(history_token.original, binding);
-            assert_eq!(view.load_query_recipe(&history_token).unwrap().as_ref(), Some(expected));
+            assert_eq!(
+                view.load_query_recipe(&history_token).unwrap().as_ref(),
+                Some(expected)
+            );
             Ok(())
         })?;
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     fs::remove_dir_all(root).unwrap();
 }
