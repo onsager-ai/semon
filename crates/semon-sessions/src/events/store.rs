@@ -7609,6 +7609,86 @@ mod tests {
     }
 
     #[test]
+    fn direct_catalog_reprice_preserves_exact_observation_authority() {
+        let root = scratch("direct-catalog-reprice-authority");
+        let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+        let config = options.source.config(&options.cache).unwrap();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
+        assert_eq!(
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+
+        let original = rows[0].clone();
+        let binding = crate::storage::QueryRuntimeBinding {
+            namespace: store.owner.config().namespace.clone(),
+            admission: store.owner.admission(),
+            stream_epoch: store
+                .owner
+                .config()
+                .expected_stream_epoch
+                .as_deref()
+                .unwrap()
+                .to_owned(),
+        };
+        assert!(
+            crate::storage::sqlite::proof_generations::observation_binding(
+                &store.connection,
+                &binding,
+                &original,
+            )
+            .is_ok(),
+            "the direct Catalog publication grants its exact Current row"
+        );
+
+        let mut fixture: Value = serde_json::from_slice(include_bytes!(
+            "../pricing/fixtures/models-dev.json"
+        ))
+        .unwrap();
+        fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] =
+            Value::from(300.0);
+        let table = std::sync::Arc::new(
+            crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap(),
+        );
+        crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).unwrap();
+
+        let encoded: String = store
+            .connection
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                rusqlite::params![binding.namespace.as_str(), original.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let repriced: crate::model::summary::CatalogRow =
+            serde_json::from_str(&encoded).unwrap();
+        assert_eq!(repriced.cost.pricing_fingerprint, table.fingerprint);
+        assert_ne!(
+            repriced.cost.usd, original.cost.usd,
+            "the actual pricing producer must change the retained cost"
+        );
+        assert_ne!(encoded, serde_json::to_string(&original).unwrap());
+        assert!(
+            crate::storage::sqlite::proof_generations::observation_binding(
+                &store.connection,
+                &binding,
+                &repriced,
+            )
+            .is_ok(),
+            "repricing must preserve authority for the exact Current metadata it publishes"
+        );
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn direct_catalog_history_grants_preserve_only_existing_producer_metadata() {
         let root = scratch("direct-catalog-history-grant");
         let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
