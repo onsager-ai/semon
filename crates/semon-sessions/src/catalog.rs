@@ -4,6 +4,7 @@
 use crate::{
     Options,
     model::summary::{CATALOG_VERSION, CatalogRow, CatalogSource},
+    storage::catalog::CatalogObservationOwner,
     viewer::{ViewerReply, decoded, query_value},
 };
 use serde::{Deserialize, Serialize};
@@ -1378,7 +1379,7 @@ pub(crate) fn read_page_snapshot_with_search(
             item["details"] = details.clone();
             item["details"]["live_observation"] = json!(
                 details["live_observation"] == true
-                    && request.scope == CatalogReadScope::Current
+                    && owner == Some(CatalogObservationOwner::Catalog)
                     && current_lifecycle
                     && facts_known
                     && !retired_native
