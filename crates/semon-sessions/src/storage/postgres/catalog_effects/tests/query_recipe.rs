@@ -18,7 +18,6 @@ fn pg_selected_recipe_large_fixture_measurement() {
         expected_stream_epoch: Some("a".repeat(64)),
     };
     config.create_native_store().unwrap();
-    crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
     let root = crate::storage::transfer::reported::tests::root();
     crate::storage::transfer::reported::tests::large_catalog::measure(&config, &root);
     fs::remove_dir_all(root).unwrap();

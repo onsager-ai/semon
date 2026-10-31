@@ -9,11 +9,22 @@ pub(crate) fn measure(config: &StoreConfig, root: &std::path::Path) {
     let (options, initial_input) = seed_catalog_input(config, root);
     let initial_path = initial_input.full_path(&options);
     let mut initial_cache = cache(config);
-    initial_cache.ingest(&"7".repeat(64), &initial_path, "claude").unwrap();
+    initial_cache
+        .ingest(&"7".repeat(64), &initial_path, "claude")
+        .unwrap();
     initial_cache.flush_cold_writes().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
-    begin_active_catalog(&mut initial_cache, &[initial_path.to_str().unwrap().to_owned()], &runtime, true);
-    let initial = finish_measured(&mut initial_cache, &options, std::slice::from_ref(&initial_input));
+    begin_active_catalog(
+        &mut initial_cache,
+        &[initial_path.to_str().unwrap().to_owned()],
+        &runtime,
+        true,
+    );
+    let initial = finish_measured(
+        &mut initial_cache,
+        &options,
+        std::slice::from_ref(&initial_input),
+    );
     assert_eq!(initial[0].repo.as_deref(), Some("facts-transfer-repo"));
     drop(initial_cache);
     let old_input = crate::Input {
@@ -141,49 +152,161 @@ pub(crate) fn measure(config: &StoreConfig, root: &std::path::Path) {
     begin_active_catalog(&mut cache, &paths, &runtime, true);
     let rows = finish_measured(&mut cache, &options, &inputs);
     assert_eq!(rows.len(), CHILDREN + 1);
-    assert_eq!(rows.iter().flat_map(|row| &row.sources).map(|source| &source.path).collect::<std::collections::BTreeSet<_>>().len(), CHILDREN + 1);
-    assert_eq!(rows.iter().map(|row| row.cost.by_day.len()).sum::<usize>(), CHILDREN * USAGE_REPORTS);
+    assert_eq!(
+        rows.iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| &source.path)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        CHILDREN + 1
+    );
+    assert_eq!(
+        rows.iter().map(|row| row.cost.by_day.len()).sum::<usize>(),
+        CHILDREN * USAGE_REPORTS
+    );
 }
 
-fn finish_measured(cache: &mut crate::events::EventCache, options: &crate::Options, inputs: &[crate::Input]) -> Vec<crate::model::summary::CatalogRow> {
+fn finish_measured(
+    cache: &mut crate::events::EventCache,
+    options: &crate::Options,
+    inputs: &[crate::Input],
+) -> Vec<crate::model::summary::CatalogRow> {
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
-        if batch.paths.is_empty() { continue; }
-        let batch_inputs = batch.paths.iter().map(|path| inputs.iter().find(|input| input.full_path(options).to_string_lossy().as_ref() == path.as_str()).cloned().expect("each staged path is a declared native fixture input")).collect::<Vec<_>>();
-        if batch.paths.len() == 17 {
-            eprintln!("selected_large_fixture prepare_phase={:?} paths={}", batch.phase, batch.paths.len());
+        if batch.paths.is_empty() {
+            continue;
         }
-        let model = crate::model::prepare_semantic_batch(options, cache, &batch_inputs, &batch, 1_790_000_000_000).unwrap_or_else(|error| panic!("native large fixture prepare phase={:?}: {error}", batch.phase));
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| {
+                inputs
+                    .iter()
+                    .find(|input| {
+                        input.full_path(options).to_string_lossy().as_ref() == path.as_str()
+                    })
+                    .cloned()
+                    .expect("each staged path is a declared native fixture input")
+            })
+            .collect::<Vec<_>>();
+        if batch.paths.len() == 17 {
+            eprintln!(
+                "selected_large_fixture prepare_phase={:?} paths={}",
+                batch.phase,
+                batch.paths.len()
+            );
+        }
+        let model = crate::model::prepare_semantic_batch(
+            options,
+            cache,
+            &batch_inputs,
+            &batch,
+            1_790_000_000_000,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "native large fixture prepare phase={:?}: {error}",
+                batch.phase
+            )
+        });
         if batch.paths.len() == 17 {
             let prepared = model.prepared();
             let mut cells = Vec::new();
             for row in &prepared.rows {
                 let mut compact = row.clone();
-                let payload = crate::query_projection::SelectedRecipe::detach(&mut compact).unwrap();
-                cells.push((row.key.clone(), serde_json::to_string(&compact).unwrap(), payload));
+                let payload =
+                    crate::query_projection::SelectedRecipe::detach(&mut compact).unwrap();
+                cells.push((
+                    row.key.clone(),
+                    serde_json::to_string(&compact).unwrap(),
+                    payload,
+                ));
             }
-            let metadata_bytes = cells.iter().map(|(_, metadata, _)| metadata.len()).sum::<usize>();
-            let payload_bytes = cells.iter().map(|(_, _, payload)| payload.as_ref().map_or(0, String::len)).sum::<usize>();
-            let maximum_pair = cells.iter().map(|(_, metadata, payload)| metadata.len() + payload.as_ref().map_or(0, String::len)).max().unwrap_or(0);
+            let metadata_bytes = cells
+                .iter()
+                .map(|(_, metadata, _)| metadata.len())
+                .sum::<usize>();
+            let payload_bytes = cells
+                .iter()
+                .map(|(_, _, payload)| payload.as_ref().map_or(0, String::len))
+                .sum::<usize>();
+            let maximum_pair = cells
+                .iter()
+                .map(|(_, metadata, payload)| {
+                    metadata.len() + payload.as_ref().map_or(0, String::len)
+                })
+                .max()
+                .unwrap_or(0);
             let coordinator_bytes = serde_json::to_vec(&cells).unwrap().len();
             let witness_bytes = prepared.staged_model_witness().unwrap().len();
-            eprintln!("selected_large_fixture phase={:?} paths={} rows={} children=16 usage_reports_per_child=1000 cost_bytes={} cost_quote_count={} transcripts={} transcript_slots={} producer_metadata_bytes={} compact_metadata_bytes={} payload_bytes={} maximum_pair_bytes={} coordinator_bytes={} witness_bytes={} sqlite_context_bytes={}", batch.phase, batch.paths.len(), prepared.rows.len(), prepared.rows.iter().map(|row| serde_json::to_vec(&row.cost).unwrap().len()).sum::<usize>(), prepared.rows.iter().map(|row| row.cost.by_day.len()).sum::<usize>(), prepared.transcripts.len(), prepared.transcripts.iter().map(|projection| projection.slots.len()).sum::<usize>(), prepared.rows.iter().map(|row| serde_json::to_vec(row).unwrap().len()).sum::<usize>(), metadata_bytes, payload_bytes, maximum_pair, coordinator_bytes, witness_bytes, coordinator_bytes + witness_bytes);
+            eprintln!(
+                "selected_large_fixture phase={:?} paths={} rows={} children=16 usage_reports_per_child=1000 cost_bytes={} cost_quote_count={} transcripts={} transcript_slots={} producer_metadata_bytes={} compact_metadata_bytes={} payload_bytes={} maximum_pair_bytes={} coordinator_bytes={} witness_bytes={} sqlite_context_bytes={}",
+                batch.phase,
+                batch.paths.len(),
+                prepared.rows.len(),
+                prepared
+                    .rows
+                    .iter()
+                    .map(|row| serde_json::to_vec(&row.cost).unwrap().len())
+                    .sum::<usize>(),
+                prepared
+                    .rows
+                    .iter()
+                    .map(|row| row.cost.by_day.len())
+                    .sum::<usize>(),
+                prepared.transcripts.len(),
+                prepared
+                    .transcripts
+                    .iter()
+                    .map(|projection| projection.slots.len())
+                    .sum::<usize>(),
+                prepared
+                    .rows
+                    .iter()
+                    .map(|row| serde_json::to_vec(row).unwrap().len())
+                    .sum::<usize>(),
+                metadata_bytes,
+                payload_bytes,
+                maximum_pair,
+                coordinator_bytes,
+                witness_bytes,
+                coordinator_bytes + witness_bytes
+            );
             #[cfg(feature = "postgres")]
-            eprintln!("selected_large_fixture phase={:?} pg_model_witness_bytes={:?}", batch.phase, prepared.staged_publication_witness().map(|witness| witness.len()));
+            eprintln!(
+                "selected_large_fixture phase={:?} pg_model_witness_bytes={:?}",
+                batch.phase,
+                prepared
+                    .staged_publication_witness()
+                    .map(|witness| witness.len())
+            );
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 assert_eq!(prepared.rows.len(), 17);
-                assert_eq!(prepared.rows.iter().map(|row| row.cost.by_day.len()).sum::<usize>(), 16000);
+                assert_eq!(
+                    prepared
+                        .rows
+                        .iter()
+                        .map(|row| row.cost.by_day.len())
+                        .sum::<usize>(),
+                    16000
+                );
             }
         }
         let recorded = cache.record_semantic_batch(&batch, model.prepared());
         if batch.paths.len() == 17 {
-            eprintln!("selected_large_fixture record_phase={:?} result={recorded:?} rejection={:?}", batch.phase, cache.semantic_rejection());
+            eprintln!(
+                "selected_large_fixture record_phase={:?} result={recorded:?} rejection={:?}",
+                batch.phase,
+                cache.semantic_rejection()
+            );
         }
         assert_eq!(recorded.unwrap(), crate::events::Outcome::Written);
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             for _ in 0..256 {
                 let result = cache.publish_semantic_catalog(&batch, model.prepared());
-                if batch.paths.len() == 17 { eprintln!("selected_large_fixture publish_result={result:?}"); }
+                if batch.paths.len() == 17 {
+                    eprintln!("selected_large_fixture publish_result={result:?}");
+                }
                 match result.unwrap() {
                     (crate::events::Outcome::Deferred, None) => continue,
                     (crate::events::Outcome::Written, Some(_)) => {
