@@ -2150,8 +2150,7 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
         // than the physical source records a bounded parser checkpoint.
         let bounded = ledger.is_some_and(|(offset, _)| offset < physical_size);
         eprintln!(
-            "archive_offset_diagnostic step={refresh_step} ready={ready} pending_sources={} bounded={bounded} physical_size={physical_size} ledger_offset={:?} ledger_stat_size={:?} catalog_offset={:?} catalog_size={:?} pending_claims={pending_claims} pending_revision={pending_revision:?}",
-            work.pending_sources,
+            "archive_offset_diagnostic step={refresh_step} ready={ready} bounded={bounded} physical_size={physical_size} ledger_offset={:?} ledger_stat_size={:?} catalog_offset={:?} catalog_size={:?} pending_claims={pending_claims} pending_revision={pending_revision:?}",
             ledger.map(|(offset, _)| offset),
             ledger.map(|(_, size)| size),
             catalog_source.map(|(offset, _)| offset),
