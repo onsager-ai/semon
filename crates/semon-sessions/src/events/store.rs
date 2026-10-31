@@ -6540,8 +6540,33 @@ mod tests {
 
         // A new durable recovery intent committed by a peer must invalidate the
         // previous complete pass before the next discovery publication.
-        let peer = Connection::open(&path).unwrap();
-        peer.execute_batch("BEGIN IMMEDIATE; INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('recover','claude','recover','/recovered.jsonl'); INSERT INTO meta(key,value) VALUES('catalog_recovery_after',''); COMMIT;").unwrap();
+        let namespace = fixture_namespace();
+        let peer_source = crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
+        let mut peer = qualified_event_writer_connection_for_test(&path, &peer_source).unwrap();
+        peer.create_scalar_function(
+            "semon_semantic_publisher",
+            0,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+            |_| Ok(1_i64),
+        )
+        .unwrap();
+        let transaction = peer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'recover','current','claude','recover','/recovered.jsonl')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(?1,'catalog_recovery_after','')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
         assert!(!store.discover_recovery_sources().unwrap());
         let records = crate::native_timing::take_discovery_records();
         assert_eq!(records.last().unwrap().1.skipped, 0);
@@ -6563,7 +6588,14 @@ mod tests {
 
         // A recovery marker introduced by discovery itself must not be hidden
         // when a completed witness is advanced across known owner writes.
-        store.observation_journal.connection_for_test().unwrap().execute_batch("CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON main.catalog_backfill_sources WHEN NEW.namespace=semon_namespace() AND NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(NEW.namespace,'catalog_recovery_after',''); END;",
+            )
+            .unwrap();
         assert!(store.discover_recovery_sources().unwrap());
         store
             .discover_catalog_sources(&["/trigger-intent.jsonl".into()], false)
@@ -6624,7 +6656,14 @@ mod tests {
         // A failed publication rolls back both membership and claims. It cannot
         // arm a successful no-op witness or advance the recovery witness.
         let next = vec!["/fault-source.jsonl".to_owned()];
-        store.observation_journal.connection_for_test().unwrap().execute_batch("CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON session_catalog_invalidations WHEN NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;").unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON main.session_catalog_invalidations WHEN NEW.namespace=semon_namespace() AND NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;",
+            )
+            .unwrap();
         assert!(store.discover_catalog_sources(&next, false).is_err());
         assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/fault-source.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         store
@@ -6727,10 +6766,12 @@ mod tests {
         let root = scratch("recovery-witness-ack-marker");
         let path = root.join("index.sqlite3");
         let (mut store, _) = opened(&path);
+        let namespace = fixture_namespace();
         store
             .connection
-            .execute_batch(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after','');",
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(?1,'catalog_recovery_after','')",
+                [namespace.as_str()],
             )
             .unwrap();
         let cursor = store.observation_journal.recovery_cursor().unwrap();
@@ -6750,7 +6791,7 @@ mod tests {
             .observation_journal
             .connection_for_test()
             .unwrap()
-            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON main.source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;")
+            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON main.source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(OLD.namespace,'catalog_recovery_after',''); END;")
             .unwrap();
 
         let (_, done) = store
