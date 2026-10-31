@@ -89,7 +89,10 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         json!(history_source_generation)
     );
     let query_generation_of = |row: &CatalogRow| {
-        format!("{:x}", Sha256::digest(serde_json::to_vec(&row.query).unwrap()))
+        format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&row.query).unwrap())
+        )
     };
     assert_eq!(
         query_generation_of(&history_parent),
@@ -147,6 +150,23 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
                 .flatten()
                 .and_then(|encoded| serde_json::from_str::<Value>(&encoded).ok())
         };
+        let current_query_header_has_trace_generation = history || {
+            let trace_generation: String = tx
+                .query_row(
+                    "SELECT generation FROM session_trace_headers WHERE session_key=?1",
+                    [&candidate.key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            current_query_header
+                .as_ref()
+                .and_then(|header| header["trace"].as_str())
+                == Some(trace_generation.as_str())
+        };
+        assert!(
+            current_query_header_has_trace_generation,
+            "retained Current Query header must reference its current Trace generation"
+        );
         let current_query_header_is_present = history || current_query_header.is_some();
         assert!(
             current_query_header_is_present,
@@ -162,9 +182,10 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         );
         let current_query_header_has_source_generation = history
             || current_query_header.as_ref().is_some_and(|header| {
-                candidate.query.as_ref().is_some_and(|query| {
-                    header["source_generation"] == query["source_generation"]
-                })
+                candidate
+                    .query
+                    .as_ref()
+                    .is_some_and(|query| header["source_generation"] == query["source_generation"])
             });
         assert!(
             current_query_header_has_source_generation,
@@ -283,6 +304,10 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         read_bytes: AtomicU64::new(0),
         fault: 0,
     };
+    let mut expected_query = Query::from_sources(admitted(home.options.clone()));
+    let expected_child_transcript = expected_query
+        .call_at("read_transcript", &json!({"id":"child"}), NOW)
+        .unwrap();
     fs::remove_file(&source.path).unwrap();
     publish();
     let retained = load("child", true);
@@ -329,7 +354,39 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
                     && handoff["brief"] == "Review the parser"
             })
     );
-    assert!(archive.calls.load(Ordering::Relaxed) > 0);
+    assert_eq!(
+        archive.calls.load(Ordering::Relaxed),
+        0,
+        "retained child endpoint metadata should come from its Query projection"
+    );
+    let provider_calls_before = archive.calls.load(Ordering::Relaxed);
+    let mut transcript_query = Query::from_sources(admitted(home.options.clone()));
+    let transcript = transcript_query
+        .call_selected_at(
+            "local",
+            "child",
+            "read_transcript",
+            &json!({"id":"child"}),
+            Some(&archive),
+            crate::SessionSourceReadMode::ProviderOnly,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        transcript["entries"], expected_child_transcript["entries"],
+        "retained child transcript entries should match the original source"
+    );
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"] == "Parser reviewed")
+    );
+    assert!(
+        archive.calls.load(Ordering::Relaxed) > provider_calls_before,
+        "retained child transcript body should use the supplied archive"
+    );
 
     // The saved dependency cannot borrow a different parent generation, nor
     // can a path-keyed reader admit two generations under one path.
