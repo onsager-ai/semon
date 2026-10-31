@@ -2353,7 +2353,10 @@ fn recovery_ordinary_index_advance_supersedes_the_old_semantic_source() {
             path: "projects/-work-proj/first.jsonl".into(),
         },
     );
-    assert_eq!(recovery_catalog_metadata(&db, "session_catalog", "first"), direct_metadata);
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        direct_metadata
+    );
     assert_ne!(recovery_proof_snapshot(&db, "first"), old_refs);
     let direct_capture: Option<String> = db.query_row(
         "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
