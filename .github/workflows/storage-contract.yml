@@ -63,6 +63,32 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Configured header ownership and copied-usage fixture contracts
+        id: ownership_fixtures
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for group in current_header_repair_ events::store::tests::usage_delete_; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/ownership-fixture-case.log" 2>&1 || case_result=$?
+            case "$group" in
+              current_header_repair_) expected=4 ;;
+              *) expected=3 ;;
+            esac
+            if ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$RUNNER_TEMP/ownership-fixture-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/ownership-fixture-case.log" >> "$RUNNER_TEMP/ownership-fixture-tests.log"
+            echo "CASE group=$group expected=$expected status=$case_result" >> "$RUNNER_TEMP/ownership-fixture-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/ownership-fixture-tests.log"
+          exit "$result"
+      - name: Retain header ownership and copied-usage fixture results
+        if: ${{ !cancelled() && steps.ownership_fixtures.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ownership-fixture-tests
+          path: ${{ runner.temp }}/ownership-fixture-tests.log
       - name: Authenticated published proof rollback and reader lifetime
         id: published_proofs
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
