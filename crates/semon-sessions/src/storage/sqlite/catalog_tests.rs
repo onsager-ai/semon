@@ -4660,9 +4660,12 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     let mut facts = crate::read_facts(facts_path).unwrap();
     facts.hostname = "changed-without-publication".into();
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
-    assert!(
-        read().unwrap().is_none(),
-        "history selection must not bypass a live Current runtime refusal"
+    let refused =
+        read().expect_err("history selection must not bypass a live Current runtime refusal");
+    assert_eq!(refused.code, "io");
+    assert_eq!(
+        refused.message,
+        crate::storage::StorageError::ScopeChanged.to_string()
     );
 
     fs::remove_file(
