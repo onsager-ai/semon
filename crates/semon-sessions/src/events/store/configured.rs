@@ -993,7 +993,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_native_publication','catalog_observed_at','catalog_completeness','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_native_publication','catalog_observed_at','catalog_completeness','catalog_semantic_gc','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -7569,7 +7569,7 @@ mod tests {
 
         #[test]
         fn configured_semantic_codex_producer_publishes_through_relations() {
-            let (f, _, options, inputs) = model_sources();
+            let (f, foreign_config, options, inputs) = model_sources();
             let options = &options[0];
             let input = &inputs[0];
             let mut cache = EventCache::open_semantic(
@@ -7595,10 +7595,65 @@ mod tests {
                 "the real Codex source completed its Relations cursor"
             );
             publish(&mut cache, &f, &batch, &model);
+            let ordinary = connection(&f.config).unwrap();
+            let foreign = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&foreign_config).unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
+            for (writer, publisher) in [(&ordinary, false), (&foreign, true)] {
+                assert_eq!(
+                    writer
+                        .query_row("SELECT semon_semantic_publisher()=1", [], |r| {
+                            r.get::<_, bool>(0)
+                        })
+                        .unwrap(),
+                    publisher
+                );
+                let before = shared_state(&f);
+                let refused = writer.execute("INSERT INTO main.meta(namespace,key,value) VALUES('source-a','catalog_semantic_gc','1')", []).unwrap_err();
+                assert_eq!(
+                    refused.sqlite_error_code(),
+                    Some(ErrorCode::ConstraintViolation)
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "ordinary and foreign writers cannot create the GC marker"
+                );
+            }
             assert_eq!(
                 cache.finish_semantic_stage(batch.epoch).unwrap(),
                 Outcome::Written
             );
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        "SELECT value FROM main.meta WHERE namespace='source-a' AND key='catalog_semantic_gc'",
+                        [],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "1"
+            );
+            for writer in [&ordinary, &foreign] {
+                for sql in [
+                    "UPDATE main.meta SET value='0' WHERE namespace='source-a' AND key='catalog_semantic_gc'",
+                    "DELETE FROM main.meta WHERE namespace='source-a' AND key='catalog_semantic_gc'",
+                ] {
+                    let before = shared_state(&f);
+                    let refused = writer.execute(sql, []).unwrap_err();
+                    assert_eq!(
+                        refused.sqlite_error_code(),
+                        Some(ErrorCode::ConstraintViolation)
+                    );
+                    assert_eq!(
+                        shared_state(&f),
+                        before,
+                        "ordinary and foreign writers cannot change the GC marker"
+                    );
+                }
+            }
             assert_eq!(
                 f.db()
                     .query_row(
