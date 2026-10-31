@@ -184,10 +184,16 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        crate::events::store::current_test_store(
+        let mut store = crate::events::store::current_test_store(
             &root.join(name),
             &crate::events::store::fixture_namespace(),
+        );
+        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
+            store.owner.clone(),
         )
+        .connection()
+        .unwrap();
+        store
     }
 
     fn cleanup_proof(count: usize, version: u8) -> (Ledger, FileIndex) {
@@ -288,7 +294,7 @@ mod tests {
                     .unwrap();
             }
             store.connection.execute_batch(&format!(
-                "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER preserve_header BEFORE DELETE ON meta WHEN OLD.key='{}header' BEGIN SELECT RAISE(ABORT,'launch-header-exemption'); END;",
+                "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER preserve_header BEFORE DELETE ON main.meta WHEN OLD.namespace=semon_namespace() AND OLD.key='{}header' BEGIN SELECT RAISE(ABORT,'launch-header-exemption'); END;",
                 prefix(path)
             )).unwrap();
         }
@@ -308,7 +314,7 @@ mod tests {
                     store
                         .connection
                         .execute(
-                            "INSERT INTO meta VALUES(?1,'invalid')",
+                            "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'invalid')",
                             [format!("{}{suffix}", prefix(path))],
                         )
                         .unwrap();
@@ -392,14 +398,14 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES(?1,'untouched-malformed')",
+                    "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'untouched-malformed')",
                     [format!("{}bad", prefix(unrelated))],
                 )
                 .unwrap();
             // The real parent has returned the cleanup statement to its cache.
             // Actual main DDL and TEMP triggers now invalidate that warm SQL.
             store.connection.execute_batch(&format!(
-                "CREATE INDEX cleanup_meta_value ON meta(value); CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON meta BEGIN INSERT INTO audit VALUES(OLD.key); END; CREATE TEMP TRIGGER preserve_headers BEFORE DELETE ON meta WHEN OLD.key IN ('{}header','{}header') BEGIN SELECT RAISE(ABORT,'alternating-header-exemption'); END;",
+                "CREATE INDEX cleanup_meta_value ON meta(value); CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON main.meta WHEN OLD.namespace=semon_namespace() BEGIN INSERT INTO audit VALUES(OLD.key); END; CREATE TEMP TRIGGER preserve_headers BEFORE DELETE ON main.meta WHEN OLD.namespace=semon_namespace() AND OLD.key IN ('{}header','{}header') BEGIN SELECT RAISE(ABORT,'alternating-header-exemption'); END;",
                 prefix(paths[0]), prefix(paths[1])
             )).unwrap();
         }
@@ -430,7 +436,7 @@ mod tests {
                     store
                         .connection
                         .execute(
-                            "INSERT INTO meta VALUES(?1,'invalid')",
+                            "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'invalid')",
                             [format!("{}{suffix}", prefix(path))],
                         )
                         .unwrap();
@@ -438,7 +444,7 @@ mod tests {
                 if step == 3 {
                     // Replace both main and TEMP schema objects after further
                     // reuse; the new trigger must run on the cached statement.
-                    store.connection.execute_batch("DROP INDEX cleanup_meta_value; CREATE INDEX cleanup_meta_key_value ON meta(key,value); DROP TRIGGER temp.cleanup_audit; CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON meta BEGIN INSERT INTO audit VALUES('reprepared:' || OLD.key); END;").unwrap();
+                    store.connection.execute_batch("DROP INDEX cleanup_meta_value; CREATE INDEX cleanup_meta_key_value ON meta(key,value); DROP TRIGGER temp.cleanup_audit; CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON main.meta WHEN OLD.namespace=semon_namespace() BEGIN INSERT INTO audit VALUES('reprepared:' || OLD.key); END;").unwrap();
                 }
             }
             let (current, index) = cleanup_proof(count, (step + 2) as u8);
@@ -519,7 +525,7 @@ mod tests {
                 let untouched: String = store
                     .connection
                     .query_row(
-                        "SELECT value FROM meta WHERE key=?1",
+                        "SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
                         [format!("{}bad", prefix(unrelated))],
                         |row| row.get(0),
                     )
@@ -568,7 +574,8 @@ mod tests {
                 )
                 .unwrap();
                 store.connection.execute_batch(&format!(
-                    "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER prior_page AFTER UPDATE ON meta WHEN NEW.key='{p}0000000000' BEGIN INSERT INTO audit VALUES('page-written'); END; CREATE TEMP TRIGGER cleanup_failure BEFORE {event} ON meta WHEN {}.key='{key}' AND EXISTS(SELECT 1 FROM audit) BEGIN SELECT RAISE(ABORT,'{label}'); END;",
+                    "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER prior_page AFTER UPDATE ON main.meta WHEN NEW.namespace=semon_namespace() AND NEW.key='{p}0000000000' BEGIN INSERT INTO audit VALUES('page-written'); END; CREATE TEMP TRIGGER cleanup_failure BEFORE {event} ON main.meta WHEN {}.namespace=semon_namespace() AND {}.key='{key}' AND EXISTS(SELECT 1 FROM audit) BEGIN SELECT RAISE(ABORT,'{label}'); END;",
+                    if event == "DELETE" { "OLD" } else { "NEW" },
                     if event == "DELETE" { "OLD" } else { "NEW" }
                 )).unwrap();
                 // Reuse after ABORT must reset the cached statement without
@@ -611,8 +618,13 @@ mod tests {
     fn native_launch_pages_are_bounded_generation_bound_and_repairable() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection
-            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            .execute_batch(crate::events::store::metadata_schema())
             .unwrap();
+        crate::storage::sqlite::catalog_namespace::register(
+            &connection,
+            &crate::events::store::fixture_namespace(),
+        )
+        .unwrap();
         let path = "/native/[private]*é.jsonl";
         let mut index = Index::default();
         let mut offset = 0;
@@ -648,12 +660,12 @@ mod tests {
         );
         assert_eq!(
             connection
-                .query_row::<i64, _, _>("SELECT count(*) FROM meta", [], |row| row.get(0))
+                .query_row::<i64, _, _>("SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()", [], |row| row.get(0))
                 .unwrap(),
             4
         );
         let values: Vec<String> = connection
-            .prepare("SELECT value FROM meta")
+            .prepare("SELECT value FROM main.meta WHERE namespace=semon_namespace()")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
@@ -667,29 +679,29 @@ mod tests {
             match mutation {
                 0 => {
                     connection
-                        .execute("DELETE FROM meta WHERE key=?1", [&page])
+                        .execute("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1", [&page])
                         .unwrap();
                 }
                 1 => {
                     connection
-                        .execute("UPDATE meta SET value='{' WHERE key=?1", [&page])
+                        .execute("UPDATE main.meta SET value='{' WHERE namespace=semon_meta_scope(?1) AND key=?1", [&page])
                         .unwrap();
                 }
                 2 => {
                     connection
                         .execute(
-                            "UPDATE meta SET value=json_set(value,'$.version',99) WHERE key=?1",
+                            "UPDATE main.meta SET value=json_set(value,'$.version',99) WHERE namespace=semon_meta_scope(?1) AND key=?1",
                             [&page],
                         )
                         .unwrap();
                 }
                 3 => {
-                    connection.execute("UPDATE meta SET value=json_set(value,'$.calls[0].time',1) WHERE key=?1", [&page]).unwrap();
+                    connection.execute("UPDATE main.meta SET value=json_set(value,'$.calls[0].time',1) WHERE namespace=semon_meta_scope(?1) AND key=?1", [&page]).unwrap();
                 }
                 _ => {
                     connection
                         .execute(
-                            "INSERT INTO meta(key,value) VALUES(?1,'{}')",
+                            "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'{}')",
                             [format!("{}junk", prefix(path))],
                         )
                         .unwrap();
@@ -714,7 +726,7 @@ mod tests {
         );
         assert_eq!(
             connection
-                .query_row::<i64, _, _>("SELECT count(*) FROM meta", [], |row| row.get(0))
+                .query_row::<i64, _, _>("SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()", [], |row| row.get(0))
                 .unwrap(),
             1
         );
