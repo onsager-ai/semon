@@ -7,8 +7,9 @@ use std::time::Duration;
 use std::{
     fs,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
 };
+use std::sync::Arc;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
@@ -8571,12 +8572,63 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
         .unwrap();
     let db = fixture.db();
     let mut published = false;
-    for _ in 0..16 {
-        assert!(
-            !evidence
-                .refresh_catalog(&mut work, crate::model::now_ms())
-                .unwrap()
-        );
+    let mut saw_identity_gate = false;
+    let facade_calls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..128 {
+        let facade_calls_for_hook = Arc::clone(&facade_calls);
+        crate::events::BEFORE_CATALOG_PUBLICATION.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                facade_calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            }));
+        });
+        match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
+            Ok(complete) => assert!(!complete),
+            Err(error) => {
+                assert!(!saw_identity_gate, "unexpected second cold-origin error: {error}");
+                assert_eq!(
+                    db.query_row(
+                        "SELECT phase,origin_phase,origin_runtime_bound=1 FROM catalog_semantic_stage WHERE singleton=1",
+                        [],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+                    )
+                    .unwrap(),
+                    ("indexing".to_owned(), Some("sealed".to_owned()), true),
+                    "the first ordinary projection must wait for a complete identity index"
+                );
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM meta WHERE key='catalog_generation'", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0,
+                    "identity refusal must not move the catalog head"
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM session_catalog", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM catalog_semantic_origin_publications", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT (SELECT count(*) FROM catalog_semantic_origin_owners)+(SELECT count(*) FROM catalog_semantic_origin_sources)", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE ack_done=1", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    81,
+                    "identity refusal must not consume any invalidation claim"
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get::<_, i64>(0)).unwrap(),
+                    0
+                );
+                saw_identity_gate = true;
+            }
+        }
         let count: i64 = db
             .query_row(
                 "SELECT count(*) FROM session_catalog WHERE lifecycle='current'",
@@ -8590,7 +8642,13 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
             break;
         }
     }
+    assert!(saw_identity_gate, "the cold producer skipped the identity gate");
     assert!(published);
+    assert_eq!(
+        facade_calls.load(Ordering::SeqCst),
+        2,
+        "the producer makes one pre-index refusal and one ready first-group facade attempt"
+    );
     assert_eq!(db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1 AND origin_claim IS NOT NULL", [], |row| row.get::<_, i64>(0)).unwrap(), 81);
     assert_eq!(
         db.query_row(
@@ -8619,6 +8677,17 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
         .unwrap(),
         64,
         "the initial ordinary projection ACKs only its exact paths and leaves semantic owner publication queued"
+    );
+    assert!(db.query_row("SELECT phase='relations' AND NOT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE origin_member=1 AND (index_done<>1 OR identity_done<>1)) FROM catalog_semantic_stage", [], |row| row.get::<_, bool>(0)).unwrap(), "the ready first-group handoff retains the completed durable owner index");
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_publications",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        1,
+        "exactly one ordinary first-group receipt was committed"
     );
     assert_eq!(
         db.query_row(
@@ -8675,7 +8744,207 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
 }
 
 #[test]
-fn cold_origin_group_receipts_are_selection_qualified_and_transactional() {
+fn cold_origin_fresh_shared_owner_crossing_selected_budget_is_refused_atomically() {
+    let fixture = Fixture::new();
+    let shared_id = "origin-shared-primary";
+    let primary = fixture.source(shared_id);
+    let mut inputs = vec![crate::Input {
+        root: crate::InputRoot::Claude,
+        path: format!("projects/project/{shared_id}.jsonl"),
+    }];
+    for n in 0..63 {
+        let id = format!("origin-filler-{n:03}");
+        fixture.source(&id);
+        inputs.push(crate::Input {
+            root: crate::InputRoot::Claude,
+            path: format!("projects/project/{id}.jsonl"),
+        });
+    }
+    let sibling = fixture.source("origin-shared-sibling");
+    fs::write(
+        &sibling,
+        format!(
+            "{}\n",
+            json!({
+                "type":"user",
+                "sessionId":shared_id,
+                "uuid":"origin-shared-sibling",
+                "parentUuid":null,
+                "cwd":"/synthetic/project",
+                "timestamp":"2026-10-01T00:00:00Z",
+                "message":{"role":"user","content":"shared canonical owner"}
+            })
+        ),
+    )
+    .unwrap();
+    inputs.push(crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/project/origin-shared-sibling.jsonl".into(),
+    });
+    fs::File::open(&sibling)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new().set_modified(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(3600),
+            ),
+        )
+        .unwrap();
+    assert!(
+        fs::metadata(&primary).unwrap().modified().unwrap()
+            > fs::metadata(&sibling).unwrap().modified().unwrap(),
+        "the sibling is the oldest candidate and falls outside the newest 64"
+    );
+
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
+    let db = fixture.db();
+    let mut refused = false;
+    for _ in 0..8 {
+        match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
+            Ok(complete) => assert!(!complete),
+            Err(error) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::Other);
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "the fresh owner was published without indexed closure");
+    assert_eq!(
+        db.query_row(
+            "SELECT phase,origin_phase,origin_runtime_bound=1 FROM catalog_semantic_stage WHERE singleton=1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?))
+        )
+        .unwrap(),
+        ("indexing".to_owned(), Some("sealed".to_owned()), true)
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1", [], |row| row.get::<_, i64>(0)).unwrap(),
+        65
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1 AND (index_done<>1 OR identity_done<>1)", [], |row| row.get::<_, i64>(0)).unwrap(),
+        65,
+        "the owner is deliberately unknown before the identity index is complete"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog_sources", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM meta WHERE key='catalog_generation'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_origin_publications", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT (SELECT count(*) FROM catalog_semantic_origin_owners)+(SELECT count(*) FROM catalog_semantic_origin_sources)", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE ack_done=1", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(),
+        65
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+
+    let mut identity_ready = false;
+    for _ in 0..128 {
+        let outcome = evidence.refresh_catalog(&mut work, crate::model::now_ms());
+        let phase: Option<String> = db
+            .query_row(
+                "SELECT phase FROM catalog_semantic_stage WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        if phase.as_deref() == Some("relations") {
+            if let Err(error) = outcome {
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            }
+            identity_ready = true;
+            break;
+        }
+        assert!(outcome.is_ok(), "identity progress failed before readiness");
+    }
+    assert!(identity_ready, "the producer did not finish the bounded identity phase");
+    let incomplete = crate::model::prepare_sources(
+        &fixture.options,
+        work.events.as_mut().unwrap(),
+        &inputs[..64],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    assert_eq!(incomplete.rows.len(), 64);
+    assert!(work
+        .events
+        .as_mut()
+        .unwrap()
+        .publish_partial_catalog_fenced(&incomplete)
+        .is_err());
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity index must reject the incomplete shared-owner row before Catalog writes"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog_sources", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity refusal must not write Catalog source rows"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM meta WHERE key='catalog_generation'", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity refusal must leave the Catalog head unchanged"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(),
+        65
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_sources WHERE ack_done=1", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity refusal must not acknowledge source claims"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM catalog_semantic_origin_publications", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT (SELECT count(*) FROM catalog_semantic_origin_owners)+(SELECT count(*) FROM catalog_semantic_origin_sources)", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity refusal must not write origin witnesses"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM storage_catalog_native_observation_grants", [], |row| row.get::<_, i64>(0)).unwrap(),
+        0,
+        "the ready identity refusal must not write native observation grants"
+    );
+    drop(work);
+    evidence.retire();
+}
+
+// The second receipt is injected through the internal helper and a manually
+// advanced head; this covers replay identity, not production cumulative publish.
+#[test]
+fn cold_origin_group_receipt_helper_replay_is_selection_qualified_and_transactional() {
     let fixture = Fixture::new();
     let inputs = (0..3)
         .map(|n| {
