@@ -3356,9 +3356,18 @@ mod tests {
             Outcome::Conflict
         );
         assert_eq!(f.state(), before);
+        // Reset cleanup commits a bounded page before returning producer work,
+        // even when that first page completes this one-source reset.
+        let resetting = other.semantic_batch(64).unwrap().unwrap();
+        assert!(resetting.paths.is_empty());
+        assert_eq!(
+            resetting.phase,
+            crate::model::relation_stage::Phase::Indexing
+        );
+        assert!(resetting.epoch > identity.epoch);
         let restarted = other.semantic_batch(64).unwrap().unwrap();
         assert_eq!(restarted.paths, paths);
-        assert!(restarted.epoch > identity.epoch);
+        assert_eq!(restarted.epoch, resetting.epoch);
         assert_eq!(source_claims(&*other, &paths), prepared.claims);
     }
 
