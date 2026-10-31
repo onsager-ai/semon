@@ -5513,7 +5513,6 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             NOW,
         )
         .unwrap();
-        let generation = admitted_catalog_generation(&config).expect("published Catalog");
         let args = json!({"text":"needle","limit":1});
         let configured_sources = || {
             Arc::new(
@@ -5530,6 +5529,9 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
         let expected = Query::from_sources(admitted(options.clone()))
             .call_optional_at("find", &args, NOW)
             .unwrap();
+        // The native oracle can publish its preparation. Pin the generation
+        // after it finishes so the archive read alone must leave it unchanged.
+        let generation = admitted_catalog_generation(&config).expect("published Catalog");
         let archive = Arc::new(selected_archive(&home, fault));
         for id in ["lead", "unrelated"] {
             fs::remove_file(
