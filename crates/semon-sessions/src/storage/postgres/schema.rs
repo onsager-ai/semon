@@ -8,7 +8,7 @@ use std::sync::Arc;
 #[path = "native_schema.rs"]
 mod native;
 
-pub(super) const VERSION: i32 = 10;
+pub(super) const VERSION: i32 = 11;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Binding {

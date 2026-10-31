@@ -20,7 +20,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
         ),
         ProofGeneration => (
             "storage_proof_generations",
-            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+            "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
             &[],
         ),
         Presentation => (
@@ -30,14 +30,22 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
         ),
         ProofSource => ("storage_proof_sources", "id,session_key,path,ledger", &[]),
         ProofRef => ("storage_proof_refs", "session_key,kind,id", &[]),
-        Current => ("session_catalog", "session_key,metadata", &[]),
+        Current => (
+            "session_catalog",
+            "session_key,metadata,query_recipe",
+            &[],
+        ),
         Recipe => (
             "session_slot_projections",
             "session_key,generation,source_generation,version,total",
             &[],
         ),
         Slot => ("session_slots", "session_key,slot,metadata", &[]),
-        History => ("session_history_catalog", "session_key,metadata", &[]),
+        History => (
+            "session_history_catalog",
+            "session_key,metadata,query_recipe",
+            &[],
+        ),
         HistoryRecipe => (
             "session_history_projections",
             "session_key,generation,source_generation,version,total,incomplete",
@@ -350,10 +358,11 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         let row: crate::model::summary::CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         (
-            "session_key,metadata,lifecycle,last_ms,harness,repo,parent_key",
+            "session_key,metadata,query_recipe,lifecycle,last_ms,harness,repo,parent_key",
             vec![
                 values[0].clone(),
                 values[1].clone(),
+                values[2].clone(),
                 row.lifecycle.as_str().into(),
                 row.last.unwrap_or(0).into(),
                 row.harness.into(),
@@ -367,10 +376,11 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
                 .map_err(|_| StorageError::ScopeChanged)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
         (
-            "session_key,metadata,query_activity,query_active",
+            "session_key,metadata,query_recipe,query_activity,query_active",
             vec![
                 values[0].clone(),
                 values[1].clone(),
+                values[2].clone(),
                 activity.into(),
                 active.into(),
             ],

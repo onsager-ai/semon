@@ -25,7 +25,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "selected_generations",
-        columns: "id bytea,key_digest bytea,session_key bytea,publication bytea,proof bytea,admission bigint,stream bytea,metadata bytea,slots bytea,prefix bytea",
+        columns: "id bytea,key_digest bytea,session_key bytea,publication bytea,proof bytea,admission bigint,stream bytea,metadata bytea,query_recipe bytea?,slots bytea,prefix bytea",
         key: "id,key_digest",
     },
     Table {
@@ -100,7 +100,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_headers",
-        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean,parent_key bytea?",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,query_recipe bytea?,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean,parent_key bytea?",
         key: "generation,key_digest",
     },
     Table {
@@ -160,7 +160,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_rows",
-        columns: "generation bytea,key_digest bytea,session_key bytea,parent_key bytea?,metadata bytea,last_ms bigint,harness bytea,repo bytea,model bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,parent_key bytea?,metadata bytea,query_recipe bytea?,last_ms bigint,harness bytea,repo bytea,model bytea",
         key: "generation,key_digest",
     },
     Table {
@@ -588,7 +588,7 @@ const WORKSPACE_TABLES: &[&str] = &[
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v10");
+    hash.update(b"semon-private-native-v11");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());

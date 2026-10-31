@@ -194,7 +194,7 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             super::super::proof_codec::verify_presentation_digest(&base, &manifest, &digest)?;
         }
         ProofGeneration => {
-            let (_, _, publication, proof, admission, _, metadata, slots, _): (
+            let (_, _, publication, proof, admission, _, metadata, query_recipe, slots, _): (
                 String,
                 String,
                 String,
@@ -202,12 +202,17 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
                 i64,
                 String,
                 String,
+                Option<String>,
                 String,
                 String,
             ) = serde_json::from_value(v).map_err(bad)?;
             if !hex_digest(&publication) || !hex_digest(&proof) || admission <= 0 {
                 return Err(StorageError::ScopeChanged);
             }
+            super::super::proof_codec::validate_query_recipe_cell(
+                &metadata,
+                query_recipe.as_deref(),
+            )?;
             let _: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(bad)?;
             let _: Option<Vec<crate::slot_projection::SavedSlot>> =
@@ -228,7 +233,12 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             }
         }
         Current | History => {
-            let (key, metadata): (String, String) = serde_json::from_value(v).map_err(bad)?;
+            let (key, metadata, query_recipe): (String, String, Option<String>) =
+                serde_json::from_value(v).map_err(bad)?;
+            super::super::proof_codec::validate_query_recipe_cell(
+                &metadata,
+                query_recipe.as_deref(),
+            )?;
             let row: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(bad)?;
             if row.key != key || row.sources.len() > 64 {
@@ -308,7 +318,18 @@ pub(crate) fn proof_generation(
         proof_codec::{self, ExpectedGeneration, GenerationRecord},
         proof_lifetime::ProofGenerationId,
     };
-    let (id, session_key, publication, proof, admission, stream, metadata, slots, prefix): (
+    let (
+        id,
+        session_key,
+        publication,
+        proof,
+        admission,
+        stream,
+        metadata,
+        query_recipe,
+        slots,
+        prefix,
+    ): (
         String,
         String,
         String,
@@ -316,10 +337,12 @@ pub(crate) fn proof_generation(
         u64,
         String,
         String,
+        Option<String>,
         String,
         String,
     ) = serde_json::from_value(serde_json::Value::Array(values.to_vec()))
         .map_err(|_| StorageError::ScopeChanged)?;
+    proof_codec::validate_query_recipe_cell(&metadata, query_recipe.as_deref())?;
     let id = ProofGenerationId(id);
     let record = GenerationRecord {
         namespace: namespace.to_owned(),
@@ -393,4 +416,121 @@ pub(crate) fn append(
     state.native_key =
         Some(serde_json::to_string(&cursor).map_err(|_| StorageError::ScopeChanged)?);
     reported::append_capture(tx, state, category, fitted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(name: String) -> String {
+        let row = crate::model::summary::CatalogRow {
+            overview: None,
+            trace: None,
+            query_recipe: None,
+            query: None,
+            lifecycle: Default::default(),
+            key: "key".into(),
+            name,
+            harness: "codex".into(),
+            kind: "session".into(),
+            presentation_kind: None,
+            native_ids: vec!["native".into()],
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: "model".into(),
+            effort: None,
+            start: None,
+            last: None,
+            tokens: [0.0; 3],
+            cost: Default::default(),
+            sources: vec![],
+        };
+        serde_json::to_string(&row).unwrap()
+    }
+
+    fn row_record(kind: CatalogRowKind, metadata: String, recipe: Option<&str>) -> TransferRecord {
+        TransferRecord::CatalogRow {
+            generation: "a".repeat(64),
+            kind,
+            values: vec![
+                serde_json::json!("key"),
+                serde_json::json!(metadata),
+                serde_json::json!(recipe),
+            ],
+        }
+    }
+
+    fn proof_generation_record(metadata: String, recipe: Option<&str>) -> TransferRecord {
+        TransferRecord::CatalogRow {
+            generation: "a".repeat(64),
+            kind: CatalogRowKind::ProofGeneration,
+            values: vec![
+                serde_json::json!("f".repeat(64)),
+                serde_json::json!("key"),
+                serde_json::json!("b".repeat(64)),
+                serde_json::json!("c".repeat(64)),
+                serde_json::json!(1),
+                serde_json::json!("d".repeat(64)),
+                serde_json::json!(metadata),
+                serde_json::json!(recipe),
+                serde_json::json!("[]"),
+                serde_json::json!("e".repeat(64)),
+            ],
+        }
+    }
+
+    #[test]
+    fn recipe_cells_preserve_nullable_bytes_and_combined_bound() {
+        let recipe = " \t{\"opaque\":\"漢字\"}\0\n ";
+        for kind in [CatalogRowKind::Current, CatalogRowKind::History] {
+            let record = row_record(kind, metadata(String::new()), Some(recipe));
+            validate(&record).unwrap();
+            let encoded = serde_json::to_vec(&record).unwrap();
+            let decoded: TransferRecord = serde_json::from_slice(&encoded).unwrap();
+            validate(&decoded).unwrap();
+            let TransferRecord::CatalogRow { values, .. } = decoded else {
+                unreachable!()
+            };
+            assert_eq!(values[2], serde_json::json!(recipe));
+
+            let null = row_record(kind, metadata(String::new()), None);
+            validate(&null).unwrap();
+            let TransferRecord::CatalogRow { values, .. } = null else {
+                unreachable!()
+            };
+            assert_eq!(values[2], serde_json::Value::Null);
+        }
+
+        let empty_name = metadata(String::new());
+        let recipe_len = 1;
+        let exact_name_len = crate::storage::proof_codec::METADATA_MAX
+            - empty_name.len()
+            - recipe_len;
+        let exact = row_record(
+            CatalogRowKind::Current,
+            metadata("x".repeat(exact_name_len)),
+            Some("q"),
+        );
+        validate(&exact).unwrap();
+
+        let over = row_record(
+            CatalogRowKind::Current,
+            metadata("x".repeat(exact_name_len + 1)),
+            Some("q"),
+        );
+        assert!(validate(&over).is_err());
+
+        let proof_recipe = " {\"proof\": \"exact 汉字\"}\n";
+        let proof = proof_generation_record(metadata(String::new()), Some(proof_recipe));
+        validate(&proof).unwrap();
+        let decoded: TransferRecord =
+            serde_json::from_slice(&serde_json::to_vec(&proof).unwrap()).unwrap();
+        let TransferRecord::CatalogRow { values, .. } = decoded else {
+            unreachable!()
+        };
+        assert_eq!(values[7], serde_json::json!(proof_recipe));
+        validate(&proof_generation_record(metadata(String::new()), None)).unwrap();
+    }
 }
