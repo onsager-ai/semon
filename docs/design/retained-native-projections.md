@@ -134,10 +134,12 @@ the exact removal claim and retained ledger for later reduction checks.
 
 Pending slot outcomes record the absence of a final native result, separately
 from a recorded result with unknown exit status. Recipes never store live flags
-or elapsed runtime. A current read may display an active call only when qualified
-activity identifies that exact tool and start time; after that observation ends,
-the same pending recipe reports a result not recorded. Retained history cannot
-gain runtime authority from this display metadata.
+or elapsed runtime. Read scope selects the recipe and header; the selected
+physical owner determines live display authority. A Current row may display an
+active call only when its physical owner is Catalog and qualified activity
+identifies that exact tool and start time. A History-owned or retained row cannot
+gain runtime authority from this display metadata. After that observation ends,
+the same pending recipe reports a result not recorded.
 
 Exact selected details retain Claude copied-usage evidence and Copilot shutdown
 usage with its native observation. These recorded facts remain bound to the
