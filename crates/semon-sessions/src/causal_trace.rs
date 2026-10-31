@@ -723,8 +723,13 @@ pub(crate) fn session_causal_trace_with_gate(
                 },
                 None => TraceParticipantActivity::Unavailable,
             };
-            let history_metadata = crate::history_projection::catalog(&tx, &sid).map_err(|_| 503u16)?;
-            let observation_owner = if history_metadata.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
+            let history_metadata =
+                crate::history_projection::catalog(&tx, &sid).map_err(|_| 503u16)?;
+            let observation_owner = if history_metadata.is_some() {
+                crate::storage::catalog::CatalogObservationOwner::History
+            } else {
+                crate::storage::catalog::CatalogObservationOwner::Catalog
+            };
             let metadata = history_metadata.or(tx
                     .query_row(
                         "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",

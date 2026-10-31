@@ -2108,13 +2108,17 @@ pub(super) fn capture_presentations(
                 .presentation_observations()
                 .cloned()
                 .ok_or(StorageError::Unavailable)?;
-            let context =
-                CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative, _owner| {
+            let context = CapturedContext::capture(
+                &lookup,
+                row,
+                &projection.slots,
+                &mut |relative, _owner| {
                     observations.capture_relative_status(relative, || {
                         super::catalog::runtime_source_cwds(tx, &relative.sources)
                     })
-                })
-                .map_err(|_| StorageError::Unavailable)?;
+                },
+            )
+            .map_err(|_| StorageError::Unavailable)?;
             Some(PresentationWitness {
                 header_generation,
                 version: header.1,

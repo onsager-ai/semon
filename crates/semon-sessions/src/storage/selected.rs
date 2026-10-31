@@ -13,10 +13,7 @@ pub(crate) trait ContextLookup {
         key: &str,
         source_generation: &str,
     ) -> io::Result<Option<(Option<String>, bool)>>;
-    fn relative(
-        &self,
-        key: &str,
-    ) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>>;
+    fn relative(&self, key: &str) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>>;
     fn descendants(&self, key: &str) -> io::Result<Vec<String>>;
     fn header(&self, key: &str) -> io::Result<Option<(String, bool)>>;
     fn turn(&self, key: &str, id: &str) -> io::Result<Option<String>>;
@@ -354,9 +351,9 @@ impl CapturedContext {
         row: &crate::model::summary::CatalogRow,
         slots: &[crate::slot_projection::SavedSlot],
         status: &mut impl FnMut(
-        &crate::model::summary::CatalogRow,
-        Option<CatalogObservationOwner>,
-    ) -> Value,
+            &crate::model::summary::CatalogRow,
+            Option<CatalogObservationOwner>,
+        ) -> Value,
     ) -> io::Result<Self> {
         let capture = Capture {
             source: lookup,

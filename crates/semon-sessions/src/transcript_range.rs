@@ -984,7 +984,11 @@ fn read_inner(
     if slots.len() != end.saturating_add(1).min(total) - start {
         return Ok(unavailable());
     }
-    let observation_owner = if history_row.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
+    let observation_owner = if history_row.is_some() {
+        crate::storage::catalog::CatalogObservationOwner::History
+    } else {
+        crate::storage::catalog::CatalogObservationOwner::Catalog
+    };
     let row_text: String = match history_row {
         Some(metadata) => metadata,
         None => transaction.query_row(
