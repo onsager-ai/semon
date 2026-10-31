@@ -421,10 +421,10 @@ pub(crate) fn seed_native_usage(config: &StoreConfig, path: &Path, count: usize)
     cache.flush_cold_writes().unwrap();
 }
 
-pub(crate) fn seed_catalog(
+pub(crate) fn seed_catalog_input(
     config: &StoreConfig,
     root: &Path,
-) -> (crate::Options, Vec<crate::model::summary::CatalogRow>) {
+) -> (crate::Options, crate::Input) {
     let options = crate::Options {
         source: crate::storage::HostSource::new(
             config.namespace.clone(),
@@ -468,6 +468,15 @@ pub(crate) fn seed_catalog(
     .unwrap();
     let body = (0..130).map(|i| format!("{}\n",serde_json::json!({"type":"user","sessionId":"catalog","uuid":format!("u{i}"),"parentUuid":if i==0 {None} else {Some(format!("u{}",i-1))},"timestamp":"2026-10-01T00:00:00Z","cwd":"/sanitized","message":{"role":"user","content":format!("sanitized {i}")}}))).collect::<String>();
     std::fs::write(&path, body).unwrap();
+    (options, input)
+}
+
+pub(crate) fn seed_catalog(
+    config: &StoreConfig,
+    root: &Path,
+) -> (crate::Options, Vec<crate::model::summary::CatalogRow>) {
+    let (options, input) = seed_catalog_input(config, root);
+    let path = input.full_path(&options);
     let mut cache = cache(config);
     cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
