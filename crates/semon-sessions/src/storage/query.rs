@@ -8,9 +8,19 @@ use std::collections::{BTreeMap, BTreeSet};
 /// and imported originals retain their immutable producer generation.
 #[derive(Clone, Debug)]
 pub(crate) enum QueryRecipeResidence {
+    NativeCatalog { metadata_digest: String },
+    NativeHistory { metadata_digest: String },
+    Immutable {
+        owner: QueryRecipeOwner,
+        generation: super::proof_lifetime::ProofGenerationId,
+        publication: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum QueryRecipeOwner {
     Catalog,
     History,
-    Immutable(super::proof_lifetime::ProofGenerationId),
 }
 
 /// Store-issued recipe lookup authority. Callers cannot manufacture a History
@@ -18,7 +28,6 @@ pub(crate) enum QueryRecipeResidence {
 #[derive(Clone, Debug)]
 pub(crate) struct QueryRecipeObservation {
     pub(in crate::storage) residence: QueryRecipeResidence,
-    pub(in crate::storage) publication: String,
     pub(in crate::storage) metadata: String,
     pub(in crate::storage) original: super::QueryRuntimeBinding,
     pub(in crate::storage) destination: super::QueryRuntimeBinding,
@@ -30,7 +39,6 @@ impl QueryRecipeObservation {
     /// original binding using the selected residence's existing grant/receipt.
     pub(in crate::storage) fn qualified(
         residence: QueryRecipeResidence,
-        publication: String,
         metadata: String,
         original: super::QueryRuntimeBinding,
         destination: super::QueryRuntimeBinding,
@@ -44,7 +52,7 @@ impl QueryRecipeObservation {
             return Err(super::StorageError::ScopeChanged);
         }
         let row = serde_json::from_str(&metadata).map_err(|_| super::StorageError::Unavailable)?;
-        Ok(Self { residence, publication, metadata, original, destination, row })
+        Ok(Self { residence, metadata, original, destination, row })
     }
 
     pub(crate) fn row(&self) -> &crate::model::summary::CatalogRow {
@@ -57,6 +65,9 @@ impl QueryRecipeObservation {
         &self,
         payload: &str,
     ) -> std::io::Result<crate::query_projection::SelectedRecipe> {
+        if self.metadata.len().saturating_add(payload.len()) > super::proof_codec::METADATA_MAX {
+            return Err(std::io::Error::other("Selected Query metadata budget exceeded"));
+        }
         crate::query_projection::SelectedRecipe::decode(&self.row, payload)
     }
 }

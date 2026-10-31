@@ -151,6 +151,20 @@ mod selected_recipe_tests {
     }
 
     #[test]
+    fn retained_original_recipe_cannot_be_replaced_by_current_append() {
+        let mut original = row();
+        original.query_recipe = Some(recipe());
+        let original_payload = SelectedRecipe::detach(&mut original).unwrap().unwrap();
+        let mut current = original.clone();
+        current.query_recipe.as_mut().unwrap().session["busy"] = json!([[100,200],[300,400]]);
+        let current_payload = SelectedRecipe::detach(&mut current).unwrap().unwrap();
+        original.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        assert!(SelectedRecipe::decode(&original, &original_payload).is_ok());
+        assert!(SelectedRecipe::decode(&original, &current_payload).is_err());
+        assert!(SelectedRecipe::decode(&current, &original_payload).is_err());
+    }
+
+    #[test]
     fn recipe_load_preserves_combined_catalog_record_budget() {
         let mut row = row();
         row.query_recipe = Some(recipe());
