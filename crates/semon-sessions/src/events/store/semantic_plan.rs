@@ -2,6 +2,12 @@
 //! admission, epoch fences and durable effects remain with the storage owner.
 use super::*;
 
+fn source_budget() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::other(
+        "semantic_physical_owner_source_budget",
+    )))
+}
+
 pub(crate) trait OwnerClosurePort {
     fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>>;
     fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)>;
@@ -25,7 +31,7 @@ pub(crate) fn owner_closure_with(
             continue;
         }
         if paths.len() > 64 {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(source_budget());
         }
         let (id, links) = port.links(&path)?;
         let links: super::super::super::Links = bounded(links, &mut used)?;
@@ -84,7 +90,7 @@ pub(crate) fn publication_groups_with(
             for path in port.sources(&key)? {
                 if paths.insert(path.clone()) {
                     if paths.len() > 64 {
-                        return Err(rusqlite::Error::InvalidQuery);
+                        return Err(source_budget());
                     }
                     pending.extend(port.owners(&path)?);
                 }
