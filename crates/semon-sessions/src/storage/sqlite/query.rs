@@ -19,8 +19,11 @@ pub(crate) fn selected_query_context(
     row: &crate::model::summary::CatalogRow,
     history: bool,
 ) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, crate::storage::StorageError> {
-    use crate::storage::{StorageError, catalog::CatalogSnapshot};
-    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(binding, tx)?;
+    use crate::storage::StorageError;
+    if !binding.validate(tx, &binding.config().namespace)? {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    let current = binding.runtime_binding_at(tx)?;
     for source in &row.sources {
         if crate::catalog::source_relative(options, &row.harness, source).is_none() {
             return Err(StorageError::ScopeChanged);
@@ -52,60 +55,62 @@ pub(crate) fn selected_query_context(
                 .map(Some)
                 .map_err(|_| StorageError::ScopeChanged)
         },
-        |candidate, history| {
-            if candidate.sources.is_empty() || candidate.sources.len() > 64 {
-                return Err(StorageError::ScopeChanged);
-            }
-            let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-            if !crate::model::summary::query_observation_matches(
-                saved,
-                &candidate.sources,
-                false,
-                None,
-            )
-            .map_err(|_| StorageError::ScopeChanged)?
-                || snapshot
-                    .row_runtime_binding(candidate)
-                    .map_err(|_| StorageError::Unavailable)?
-                    .is_none()
-                || candidate.sources.iter().any(|source| {
-                    crate::catalog::source_relative(options, &candidate.harness, source).is_none()
-                })
-            {
-                return Err(StorageError::ScopeChanged);
-            }
-            if history {
-                if !crate::history_projection::qualified(tx, candidate).map_err(super::failed)? {
-                    return Err(StorageError::ScopeChanged);
-                }
-            } else {
-                let header = crate::query_projection::header(
-                    tx,
-                    &crate::query_projection::identity(candidate),
-                )
+        |candidate, history| qualify_context_candidate(tx, &current, options, candidate, history),
+    )
+}
+
+pub(crate) fn qualify_context_candidate(
+    tx: &rusqlite::Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    options: &Options,
+    candidate: &crate::model::summary::CatalogRow,
+    history: bool,
+) -> Result<(), crate::storage::StorageError> {
+    use crate::storage::{StorageError, catalog::CatalogObservationOwner};
+    let owner = if history {
+        CatalogObservationOwner::History
+    } else {
+        CatalogObservationOwner::Catalog
+    };
+    if candidate.sources.is_empty() || candidate.sources.len() > 64 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+    if !crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
+        .map_err(|_| StorageError::ScopeChanged)?
+        || candidate.sources.iter().any(|source| {
+            crate::catalog::source_relative(options, &candidate.harness, source).is_none()
+        })
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    super::proof_generations::observation_binding_for_physical_owner(tx, current, candidate, owner)?;
+    if history {
+        if !crate::history_projection::qualified(tx, candidate).map_err(super::failed)? {
+            return Err(StorageError::ScopeChanged);
+        }
+    } else {
+        let header =
+            crate::query_projection::header(tx, &crate::query_projection::identity(candidate))
                 .map_err(super::failed)?
                 .ok_or(StorageError::ScopeChanged)?;
-                let header: Value =
-                    serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
-                use sha2::Digest;
-                let query_generation = format!(
-                    "{:x}",
-                    sha2::Sha256::digest(
-                        serde_json::to_vec(&candidate.query)
-                            .map_err(|_| StorageError::ScopeChanged)?
-                    )
-                );
-                if header["version"] != 1
-                    || header["complete"] != true
-                    || header["source_generation"] != saved["source_generation"]
-                    || header["query_generation"] != query_generation
-                {
-                    return Err(StorageError::ScopeChanged);
-                }
-            }
-            Ok(())
-        },
-    )
+        let header: Value = serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
+        use sha2::Digest;
+        let query_generation = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&candidate.query).map_err(|_| StorageError::ScopeChanged)?
+            )
+        );
+        if header["version"] != 1
+            || header["complete"] != true
+            || header["source_generation"] != saved["source_generation"]
+            || header["query_generation"] != query_generation
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct SqliteQueryCatalog {

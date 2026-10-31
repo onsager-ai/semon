@@ -78,7 +78,64 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
     publish();
     let continued_parent = load("lead", false);
     assert_ne!(continued_parent.sources, original_parent.sources);
-    assert_eq!(load("lead", true).sources, original_parent.sources);
+    let history_parent = load("lead", true);
+    assert_eq!(history_parent.sources, original_parent.sources);
+    for (candidate, history) in [(&history_parent, true), (&continued_parent, false)] {
+        let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+        let db = home.semantic_publisher_connection();
+        let tx = db.unchecked_transaction().unwrap();
+        let current = binding.runtime_binding_at(&tx).unwrap();
+        crate::storage::sqlite::query::qualify_context_candidate(
+            &tx,
+            &current,
+            &home.options,
+            candidate,
+            history,
+        )
+        .unwrap();
+        let (own, opposite, reference) = if history {
+            ("history", "catalog", "history")
+        } else {
+            ("catalog", "history", "current")
+        };
+        tx.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key=?1 AND owner_kind=?2",
+            rusqlite::params![candidate.key, opposite],
+        )
+        .unwrap();
+        assert_eq!(
+            tx.execute(
+                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) SELECT namespace,session_key,?3,metadata_digest,admission,stream,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key=?1 AND owner_kind=?2",
+                rusqlite::params![candidate.key, own, opposite],
+            )
+            .unwrap(),
+            1
+        );
+        tx.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key=?1 AND owner_kind=?2",
+            rusqlite::params![candidate.key, own],
+        )
+        .unwrap();
+        tx.execute(
+            "DELETE FROM storage_proof_refs WHERE namespace=semon_namespace() AND session_key=?1 AND kind=?2",
+            rusqlite::params![candidate.key, reference],
+        )
+        .unwrap();
+        // The opposite grant genuinely authenticates this exact metadata.
+        crate::storage::sqlite::proof_generations::observation_binding(&tx, &current, candidate)
+            .unwrap();
+        assert!(matches!(
+            crate::storage::sqlite::query::qualify_context_candidate(
+                &tx,
+                &current,
+                &home.options,
+                candidate,
+                history,
+            ),
+            Err(StorageError::ScopeChanged)
+        ));
+        tx.rollback().unwrap();
+    }
     let child = load("child", false);
     let source = &child.sources[0];
     let archive = SelectedArchive {

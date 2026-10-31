@@ -38,11 +38,17 @@ fn current_runtime_owner<'a>(
     })
 }
 
-fn qualify_context_candidate(
+pub(in crate::storage::postgres::catalog_effects) fn qualify_context_candidate(
     snapshot: &Snapshot<'_, '_>,
     options: &Options,
     row: &crate::model::summary::CatalogRow,
+    history: bool,
 ) -> Result<(), StorageError> {
+    let owner = if history {
+        crate::storage::catalog::CatalogObservationOwner::History
+    } else {
+        crate::storage::catalog::CatalogObservationOwner::Catalog
+    };
     if row.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
@@ -56,9 +62,22 @@ fn qualify_context_candidate(
         return Err(StorageError::ScopeChanged);
     }
     if snapshot
-        .row_runtime_binding(row)
-        .map_err(|_| StorageError::Unavailable)?
+        .row_runtime_binding_with_observations(row, Some(owner))
+        .map_err(|error| {
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<StorageError>())
+                .copied()
+                .unwrap_or(StorageError::Unavailable)
+        })?
         .is_none()
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    if history
+        && !snapshot
+            .history_qualified(row)
+            .map_err(|_| StorageError::ScopeChanged)?
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -85,7 +104,7 @@ fn selected_edge_context(
         row,
         history,
         |owner, history| snapshot.catalog(owner, history),
-        |candidate, _history| qualify_context_candidate(snapshot, options, candidate),
+        |candidate, history| qualify_context_candidate(snapshot, options, candidate, history),
     )
     .map(|context| context.into_iter().map(|(row, _history)| row).collect())
 }
