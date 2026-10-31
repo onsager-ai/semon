@@ -68,10 +68,7 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
             snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)?;
             Ok((
                 history,
-                snapshot
-                    .owner(&original.key)?
-                    .unwrap()
-                    .generation,
+                snapshot.owner(&original.key)?.unwrap().generation,
                 snapshot.catalog(&original.key, false)?.unwrap(),
             ))
         })
