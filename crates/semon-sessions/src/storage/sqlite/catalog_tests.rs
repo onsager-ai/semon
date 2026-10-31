@@ -4944,7 +4944,7 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
     for live in [false, true] {
         let fixture = Fixture::new();
         let path = fixture.source("thinking-session");
-        writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}", json!({"type":"assistant","sessionId":"thinking-session","uuid":"thinking","parentUuid":"thinking-session","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":""}]}})).unwrap();
+        writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"thinking-session","uuid":"thinking","parentUuid":"thinking-session","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":""}]}})).unwrap();
         if live {
             let facts_path = fixture.options.facts.as_ref().unwrap();
             let mut facts = crate::read_facts(facts_path).unwrap();
@@ -4970,6 +4970,40 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
         assert_eq!(entry["pending"].as_bool(), live.then_some(true));
         let earlier = read("sid=thinking-session&scope=retained_history&after=0&limit=1");
         assert!(earlier["entries"][0].get("pending").is_none());
+
+        // A second admitted publication retains the first transcript under a
+        // physical History owner. Live activity from the current Catalog row
+        // must not be borrowed by that immutable History projection.
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            json!({"type":"assistant","sessionId":"thinking-session","uuid":"progress","parentUuid":"thinking","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","content":"progress"}})
+        )
+        .unwrap();
+        fixture.publish_existing();
+        let history_metadata: String = {
+            let db = fixture.db();
+            db.query_row(
+                "SELECT metadata FROM session_history_catalog WHERE session_key='thinking-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        let history_row: CatalogRow = serde_json::from_str(&history_metadata).unwrap();
+        assert_eq!(
+            history_row.lifecycle,
+            crate::model::summary::CatalogLifecycle::Retained
+        );
+        let history = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
+        let historical_thinking = history["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["k"] == "think")
+            .unwrap();
+        assert!(historical_thinking.get("pending").is_none());
+
         let db = fixture.db();
         db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='thinking-session'", []).unwrap();
         let retired = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
@@ -6674,12 +6708,10 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
     );
     // A valid atomic facts publication restores source authority while its
     // existing complete Catalog still carries the prior runtime fence.
-    crate::write_facts(
-        facts,
-        &serde_json::from_value::<crate::Facts>(changed).unwrap(),
-        &crate::Options::default().source,
-    )
-    .unwrap();
+    let changed = serde_json::from_value::<crate::Facts>(changed).unwrap();
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &changed).unwrap();
+    crate::write_facts(facts, &changed, &fixture.options.source).unwrap();
+    facts_write.complete().unwrap();
     let (code, pending) = page("");
     assert_eq!(code, 200);
     assert_eq!(pending["completeness"]["state"], "complete");
