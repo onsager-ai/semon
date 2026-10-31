@@ -419,7 +419,7 @@ impl std::fmt::Debug for PresentationAuthority {
         f.write_str("PresentationAuthority")
     }
 }
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SourceObservation {
     relative: String,
@@ -427,6 +427,33 @@ struct SourceObservation {
     cached: bool,
 }
 impl PresentationObservations {
+    /// A publication may contain a larger cohort than the row being reused.
+    /// Compare this row's producer inputs, retaining the original scoped runtime.
+    pub(crate) fn same_publication_inputs_for(
+        &self,
+        requested: &Self,
+        row: &crate::model::summary::CatalogRow,
+    ) -> bool {
+        let Ok(prefix) = crate::retention::source_generation(&row.sources) else {
+            return false;
+        };
+        self.source_runtime == requested.source_runtime
+            && self.runtime == requested.runtime
+            && self.facts_known == requested.facts_known
+            && self.selection_known == requested.selection_known
+            && self.machine_label == requested.machine_label
+            && self.runtime_for(row) == requested.runtime_for(row)
+            && self.runtime_cwd_fingerprints.get(&prefix)
+                == requested.runtime_cwd_fingerprints.get(&prefix)
+            && self.runtime_rows.get(&row.key).and_then(|rows| rows.get(&prefix))
+                == requested.runtime_rows.get(&row.key).and_then(|rows| rows.get(&prefix))
+            && row.sources.iter().all(|source| {
+                Self::source_key(source).is_ok_and(|key| {
+                    self.sources.get(&key) == requested.sources.get(&key)
+                })
+            })
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_source_count(&self) -> usize {
         self.sources.len()
