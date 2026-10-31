@@ -3036,6 +3036,38 @@ pub(super) fn published(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::{
+        source_observations::SourceObservationStore,
+        sqlite::source_journal::SourceJournal,
+    };
+
+    fn header_repair_journal(store: &SqliteStore) -> SourceJournal {
+        SourceJournal::owned(store.owner.clone())
+    }
+
+    fn header_repair_claim(store: &SqliteStore, path: &str) -> Option<i64> {
+        let claims = header_repair_journal(store)
+            .claims(&[path.to_owned()])
+            .unwrap();
+        claims.into_iter().next().unwrap().1
+    }
+
+    fn header_repair_invalidate(store: &SqliteStore, path: &str, reason: &str) {
+        let journal = header_repair_journal(store);
+        let mut connection = journal.connection().unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        journal.validate(&transaction).unwrap();
+        crate::storage::sqlite::source_journal::invalidate(
+            &transaction,
+            journal.namespace(),
+            path,
+            reason,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    }
 
     fn header_repair_store(name: &str) -> (PathBuf, SqliteStore, String) {
         let root = std::env::temp_dir().join(format!(
@@ -3066,17 +3098,77 @@ mod tests {
                 .unwrap(),
             Outcome::Written
         );
-        // This fixture isolates repair admission, not native publication or
-        // readiness. It never manufactures a complete Catalog observation.
-        store.connection.execute("INSERT INTO session_catalog(session_key,last_ms,harness,metadata) VALUES('old',0,'codex','{}')",[]).unwrap();
-        store.connection.execute("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('old','codex','old',?1)",[&path]).unwrap();
-        store.connection.execute("INSERT INTO session_slot_projections(session_key,generation,source_generation,version,total) VALUES('old','original',NULL,?1,0)",[crate::slot_projection::VERSION]).unwrap();
-        let tx = store.connection.unchecked_transaction().unwrap();
-        invalidate_catalog_source(&tx, &path, "removed").unwrap();
-        tx.commit().unwrap();
-        let pending = claim(&store.connection, &path).unwrap();
+        let committed = store.ledger(&path).unwrap().unwrap();
+        assert_eq!(committed, captured);
+        let source = committed.source(&source, "old");
+        let row = crate::model::summary::CatalogRow {
+            overview: None,
+            trace: None,
+            query: None,
+            lifecycle: crate::model::summary::CatalogLifecycle::Current,
+            key: "old".into(),
+            name: "old".into(),
+            harness: "codex".into(),
+            kind: "session".into(),
+            presentation_kind: None,
+            native_ids: vec!["old".into()],
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: String::new(),
+            effort: None,
+            start: None,
+            last: Some(0),
+            tokens: [0.0; 3],
+            cost: crate::pricing::Cost::default(),
+            sources: vec![source],
+        };
+        let projection = crate::slot_projection::Projection {
+            key: "old".into(),
+            slots: Vec::new(),
+            repair: false,
+        };
+        assert_eq!(
+            store
+                .publish_catalog_with_generation(
+                    &crate::slot_projection::Publication {
+                        rows: std::slice::from_ref(&row),
+                        transcripts: Some(std::slice::from_ref(&projection)),
+                        observations: None,
+                    },
+                    None,
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+
+        // Simulate only the stale header under the real admitted Stage owner.
+        let config = store.owner.config().clone();
+        store.connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        assert_eq!(
+            store
+                .connection
+                .execute(
+                    "UPDATE main.session_slot_projections SET generation='original',source_generation=NULL WHERE namespace=semon_namespace() AND session_key='old'",
+                    [],
+                )
+                .unwrap(),
+            1
+        );
+
+        header_repair_invalidate(&store, &path, "removed");
+        let pending = header_repair_claim(&store, &path);
         assert!(!store.qualified_catalog().unwrap());
-        assert_eq!(claim(&store.connection, &path).unwrap(), pending);
+        assert_eq!(header_repair_claim(&store, &path), pending);
         assert_eq!(
             store
                 .semantic_begin(std::slice::from_ref(&path), "runtime")
@@ -3085,7 +3177,7 @@ mod tests {
         );
         // Install the same normalized indexed observation that semantic_record
         // captures. ACK below uses the actual source/ledger/physical fences.
-        store.connection.execute("UPDATE catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",params![path,claim(&store.connection,&path).unwrap(),ledger(&store.connection,&path).unwrap()]).unwrap();
+        store.connection.execute("UPDATE catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",params![path,header_repair_claim(&store,&path),ledger(&store.connection,&path).unwrap()]).unwrap();
         (root, store, path)
     }
 
@@ -3316,9 +3408,7 @@ mod tests {
             match reason {
                 "prepared_claim" => prepared.claims.push((path.clone(), Some(i64::MAX))),
                 "witness_claim" => {
-                    let tx = store.connection.unchecked_transaction().unwrap();
-                    invalidate_catalog_source(&tx, &path, "changed").unwrap();
-                    tx.commit().unwrap();
+                    header_repair_invalidate(&store, &path, "changed");
                 }
                 "witness_ledger" => {
                     store
@@ -3392,7 +3482,7 @@ mod tests {
             Outcome::Conflict
         );
         assert_eq!(store.semantic_rejection(), Some("withdrawal_authority"));
-        assert!(claim(&store.connection, &path).unwrap().is_some());
+        assert!(header_repair_claim(&store, &path).is_some());
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3410,7 +3500,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(observed, (None, true));
-        assert_eq!(claim(&store.connection, path).unwrap(), None);
+        assert_eq!(header_repair_claim(store, path), None);
     }
 
     #[test]
@@ -3497,7 +3587,7 @@ mod tests {
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed);
-            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed));
+            assert_eq!(header_repair_claim(&store, &path), Some(observed));
             assert_eq!(
                 store
                     .connection
@@ -3514,7 +3604,7 @@ mod tests {
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed);
-            assert_eq!(claim(&store.connection, &path).unwrap(), None);
+            assert_eq!(header_repair_claim(&store, &path), None);
         }
         let old_epoch: i64 = store
             .connection
@@ -3523,10 +3613,8 @@ mod tests {
             })
             .unwrap();
         // Ordinary source observations remain independent of projection repair.
-        let tx = store.connection.unchecked_transaction().unwrap();
-        invalidate_catalog_source(&tx, &path, "changed").unwrap();
-        tx.commit().unwrap();
-        assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+        header_repair_invalidate(&store, &path, "changed");
+        assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
         assert!(!store.qualified_catalog().unwrap());
         assert_eq!(revision(&store.connection).unwrap(), observed + 1);
         let replay = store.semantic_next(64).unwrap().unwrap();
@@ -3574,7 +3662,7 @@ mod tests {
                 "{assignment} was ignored"
             );
             assert!(!store.qualified_catalog().unwrap());
-            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+            assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed + 1);
             drop(store);
@@ -3614,7 +3702,7 @@ mod tests {
                 "{transition} lent repair ownership"
             );
             assert!(!store.qualified_catalog().unwrap());
-            assert_eq!(claim(&store.connection, &path).unwrap(), Some(observed + 1));
+            assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed + 1);
             drop(store);
