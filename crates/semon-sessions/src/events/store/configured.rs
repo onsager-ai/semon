@@ -3747,7 +3747,14 @@ mod tests {
             if outcome != Outcome::Written {
                 return Ok(outcome);
             }
-            let active: bool = fixture.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=?1)", [namespace.as_str()], |r| r.get(0)).unwrap();
+            let active: bool = fixture
+                .db()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM catalog_semantic_stage WHERE namespace=?1)",
+                    [namespace.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
             if active {
                 return Ok(outcome);
             }
@@ -3770,8 +3777,7 @@ mod tests {
             .map(|input| input.full_path(options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert_eq!(
-            begin_active_stage(cache, fixture, &paths, runtime)
-                .unwrap(),
+            begin_active_stage(cache, fixture, &paths, runtime).unwrap(),
             Outcome::Written
         );
         for _ in 0..128 {
@@ -7493,8 +7499,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             assert_eq!(
-                begin_active_stage(cache, f, &paths, &runtime)
-                    .unwrap(),
+                begin_active_stage(cache, f, &paths, &runtime).unwrap(),
                 Outcome::Written
             );
             let mut fault_hits = BTreeMap::<&str, usize>::new();
@@ -8880,8 +8885,7 @@ mod tests {
                 .collect::<Vec<_>>();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             assert_eq!(
-                begin_active_stage(cache, f, &paths, &runtime)
-                    .unwrap(),
+                begin_active_stage(cache, f, &paths, &runtime).unwrap(),
                 Outcome::Written
             );
             let before = shared_state(f);
@@ -9689,15 +9693,27 @@ mod tests {
                 pub(super) restarted_between_groups: bool,
             }
 
-            fn resume(cache: &mut EventCache, f: &Fixture, options: &crate::Options, inputs: &[crate::Input]) {
+            fn resume(
+                cache: &mut EventCache,
+                f: &Fixture,
+                options: &crate::Options,
+                inputs: &[crate::Input],
+            ) {
                 let mut successor = open(&f.config);
                 let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
                 let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
-                assert_eq!(successor.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap(), Outcome::Written);
+                assert_eq!(
+                    successor
+                        .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+                        .unwrap(),
+                    Outcome::Written
+                );
                 *cache = successor;
             }
 
-            pub(super) fn published(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+            pub(super) fn published(
+                f: &Fixture,
+            ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
                 namespace_state(f, "source-a")
                     .into_iter()
                     .filter(|(table, _)| {
@@ -9735,26 +9751,59 @@ mod tests {
                     }
                     if batch.paths.is_empty() {
                         if batch.phase == Phase::Publication {
-                            assert_eq!(cache.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+                            assert_eq!(
+                                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                                Outcome::Written
+                            );
                             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog_invalidations WHERE namespace='source-a'", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                             return progress;
                         }
                         continue;
                     }
-                    let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
-                    assert_eq!(selected.len(), batch.paths.len(), "all selected physical sources supplied");
-                    let model = cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                    let selected = inputs
+                        .iter()
+                        .filter(|input| {
+                            batch
+                                .paths
+                                .contains(&input.full_path(options).to_string_lossy().into_owned())
+                        })
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        selected.len(),
+                        batch.paths.len(),
+                        "all selected physical sources supplied"
+                    );
+                    let model = cache
+                        .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
+                        .unwrap();
                     if batch.phase != Phase::Publication {
                         continue;
                     }
                     if progress.publications == 1 && !stale_checked {
                         let mut successor = open(&f.config);
-                        let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+                        let runtime =
+                            crate::native_evidence::query_runtime_generation(options).unwrap();
                         let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
-                        assert_eq!(successor.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap(), Outcome::Written);
+                        assert_eq!(
+                            successor
+                                .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+                                .unwrap(),
+                            Outcome::Written
+                        );
                         let before = shared_state(f);
-                        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
-                        assert_eq!(shared_state(f), before, "stale group epoch cannot publish or ACK");
+                        assert_eq!(
+                            cache
+                                .publish_semantic_catalog(&batch, model.prepared())
+                                .unwrap()
+                                .0,
+                            Outcome::Conflict
+                        );
+                        assert_eq!(
+                            shared_state(f),
+                            before,
+                            "stale group epoch cannot publish or ACK"
+                        );
                         *cache = successor;
                         stale_checked = true;
                         progress.restarted_between_groups = true;
@@ -9767,16 +9816,38 @@ mod tests {
                         let before = shared_state(f);
                         match cache.publish_semantic_catalog(&batch, model.prepared()) {
                             Ok((Outcome::Deferred, None)) => {
-                                assert_eq!(FAIL_EFFECT.with(|p| p.get()), Some("semantic_publish_ack"));
+                                assert_eq!(
+                                    FAIL_EFFECT.with(|p| p.get()),
+                                    Some("semantic_publish_ack")
+                                );
                                 let after = shared_state(f);
-                                for table in ["session_catalog", "session_catalog_sources", "session_slot_projections", "session_slots", "session_search_documents", "session_search_memberships", "session_catalog_invalidations"] {
-                                    assert_eq!(after[table], before[table], "Deferred custody cannot publish or ACK {table}");
+                                for table in [
+                                    "session_catalog",
+                                    "session_catalog_sources",
+                                    "session_slot_projections",
+                                    "session_slots",
+                                    "session_search_documents",
+                                    "session_search_memberships",
+                                    "session_catalog_invalidations",
+                                ] {
+                                    assert_eq!(
+                                        after[table], before[table],
+                                        "Deferred custody cannot publish or ACK {table}"
+                                    );
                                 }
                                 assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND ack_done=1", [], |r| r.get::<_, i64>(0)).unwrap(), unselected_before.len() as i64);
                             }
                             Err(_) => {
-                                assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "actual ACK fault reached");
-                                assert_eq!(shared_state(f), before, "group effects and all ACKs roll back together");
+                                assert_eq!(
+                                    FAIL_EFFECT.with(|p| p.get()),
+                                    None,
+                                    "actual ACK fault reached"
+                                );
+                                assert_eq!(
+                                    shared_state(f),
+                                    before,
+                                    "group effects and all ACKs roll back together"
+                                );
                                 rolled_back = true;
                                 break;
                             }
@@ -9784,7 +9855,13 @@ mod tests {
                         }
                     }
                     assert!(rolled_back);
-                    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+                    assert_eq!(
+                        cache
+                            .publish_semantic_catalog(&batch, model.prepared())
+                            .unwrap()
+                            .0,
+                        Outcome::Written
+                    );
                     let mut expected = unselected_before;
                     expected.extend(batch.paths.iter().cloned());
                     expected.sort();
@@ -9803,46 +9880,117 @@ mod tests {
             let (f, foreign_config, options, _) = model_sources();
             let options = &options[0];
             let inputs = [
-                crate::Input { root: crate::InputRoot::Codex, path: "sessions/disjoint-a.jsonl".into() },
-                crate::Input { root: crate::InputRoot::Codex, path: "sessions/disjoint-b.jsonl".into() },
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/disjoint-a.jsonl".into(),
+                },
+                crate::Input {
+                    root: crate::InputRoot::Codex,
+                    path: "sessions/disjoint-b.jsonl".into(),
+                },
             ];
             let mut cache = open(&f.config);
             let _foreign = open(&foreign_config);
             for (i, input) in inputs.iter().enumerate() {
-                write(options, input, if i == 0 { "disjoint-a" } else { "disjoint-b" }, None);
-                cache.ingest(&format!("{:064x}", 5700 + i), &input.full_path(options), "codex").unwrap();
+                write(
+                    options,
+                    input,
+                    if i == 0 { "disjoint-a" } else { "disjoint-b" },
+                    None,
+                );
+                cache
+                    .ingest(
+                        &format!("{:064x}", 5700 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
             }
             let (batch, model) = ready(&mut cache, &f, options, &inputs);
             publish(&mut cache, &f, &batch, &model, &[]);
             cache.finish_semantic_stage(batch.epoch).unwrap();
             let foreign = namespace_state(&f, "source-b");
-            let original = inputs.iter().enumerate().map(|(i, input)| (if i == 0 { "disjoint-a" } else { "disjoint-b" }.to_owned(), input.full_path(options).to_string_lossy().into_owned())).collect::<Vec<_>>();
+            let original = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, input)| {
+                    (
+                        if i == 0 { "disjoint-a" } else { "disjoint-b" }.to_owned(),
+                        input.full_path(options).to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<Vec<_>>();
             for (i, input) in inputs.iter().enumerate() {
-                write(options, input, if i == 0 { "disjoint-b" } else { "disjoint-a" }, None);
-                cache.ingest(&format!("{:064x}", 5800 + i), &input.full_path(options), "codex").unwrap();
+                write(
+                    options,
+                    input,
+                    if i == 0 { "disjoint-b" } else { "disjoint-a" },
+                    None,
+                );
+                cache
+                    .ingest(
+                        &format!("{:064x}", 5800 + i),
+                        &input.full_path(options),
+                        "codex",
+                    )
+                    .unwrap();
             }
             let (batch, model) = ready(&mut cache, &f, options, &inputs);
-            assert_eq!(batch.paths.len(), 2, "original and disjoint replacement memberships form one physical group");
+            assert_eq!(
+                batch.paths.len(),
+                2,
+                "original and disjoint replacement memberships form one physical group"
+            );
             let prior: Vec<(String, String)> = f.db().prepare("SELECT session_key,source_path FROM catalog_semantic_prior_sources WHERE namespace='source-a' ORDER BY session_key,source_path").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-            assert_eq!(prior, original, "prior membership is captured before any publication");
+            assert_eq!(
+                prior, original,
+                "prior membership is captured before any publication"
+            );
             let mut partial = batch.clone();
             partial.paths.truncate(1);
             let before = shared_state(&f);
-            assert_eq!(cache.record_semantic_batch(&partial, model.prepared()).unwrap(), Outcome::Conflict);
-            assert_eq!(cache.publish_semantic_catalog(&partial, model.prepared()).unwrap().0, Outcome::Conflict);
-            assert_eq!(shared_state(&f), before, "a partial original/replacement group has zero effects and zero ACKs");
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&partial, model.prepared())
+                    .unwrap(),
+                Outcome::Conflict
+            );
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&partial, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                before,
+                "a partial original/replacement group has zero effects and zero ACKs"
+            );
             let progress = physical_groups::finish(&mut cache, &f, options, &inputs, None);
-            assert_eq!(progress.publications, 1, "both disjoint reassignments commit together");
+            assert_eq!(
+                progress.publications, 1,
+                "both disjoint reassignments commit together"
+            );
             let prior: Vec<(String, String)> = f.db().prepare("SELECT session_key,source_path FROM catalog_semantic_prior_sources WHERE namespace='source-a' ORDER BY session_key,source_path").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-            assert_eq!(prior, original, "moving publication head does not rewrite original membership");
+            assert_eq!(
+                prior, original,
+                "moving publication head does not rewrite original membership"
+            );
             let current: Vec<(String, String)> = f.db().prepare("SELECT session_key,source_path FROM session_catalog_sources WHERE namespace='source-a' AND lifecycle='current' ORDER BY session_key,source_path").unwrap().query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-            assert_eq!(current, vec![(original[0].0.clone(), original[1].1.clone()), (original[1].0.clone(), original[0].1.clone())]);
+            assert_eq!(
+                current,
+                vec![
+                    (original[0].0.clone(), original[1].1.clone()),
+                    (original[1].0.clone(), original[0].1.clone())
+                ]
+            );
             assert_eq!(namespace_state(&f, "source-b"), foreign);
         }
 
         #[test]
         fn configured_semantic_domain52_high_degree_family_publishes_bounded_groups_across_restart()
-         {
+        {
             fn published_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
                 namespace_state(f, "source-a")
                     .into_iter()
@@ -9925,8 +10073,7 @@ mod tests {
                 .map(|input| input.full_path(options).to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
             assert_eq!(
-                begin_active_stage(&mut cache, &f, &paths, &runtime)
-                    .unwrap(),
+                begin_active_stage(&mut cache, &f, &paths, &runtime).unwrap(),
                 Outcome::Written
             );
             assert_eq!(
@@ -10004,7 +10151,7 @@ mod tests {
                 &[inputs[0].full_path(options).to_string_lossy().into_owned()],
                 &runtime,
             )
-                .unwrap();
+            .unwrap();
             let mut held = None;
             for _ in 0..128 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
@@ -10423,7 +10570,12 @@ mod tests {
             );
             for _ in 0..128 {
                 let Some(batch) = cache.semantic_batch(64).unwrap() else {
-                    assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+                    assert_eq!(
+                        cache
+                            .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                            .unwrap(),
+                        Outcome::Written
+                    );
                     continue;
                 };
                 if batch.paths.is_empty() {
@@ -11252,12 +11404,39 @@ mod tests {
             let selector = Selector::ClaudeName {
                 name: "worker".into(),
             };
-            assert_eq!(cache.semantic_select(batch.epoch, &selector).unwrap_err().to_string(), "semantic_claude_name_members_pending");
-            assert_eq!(physical_groups::published(&f), before, "unavailable bodies cannot fabricate publication or custody");
-            let pending = f.db().query_row("SELECT count(*) FROM session_catalog_invalidations WHERE namespace='source-a'", [], |r| r.get::<_, i64>(0)).unwrap();
+            assert_eq!(
+                cache
+                    .semantic_select(batch.epoch, &selector)
+                    .unwrap_err()
+                    .to_string(),
+                "semantic_claude_name_members_pending"
+            );
+            assert_eq!(
+                physical_groups::published(&f),
+                before,
+                "unavailable bodies cannot fabricate publication or custody"
+            );
+            let pending = f
+                .db()
+                .query_row(
+                    "SELECT count(*) FROM session_catalog_invalidations WHERE namespace='source-a'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap();
             let stale = shared_state(&f);
-            assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
-            assert_eq!(shared_state(&f), stale, "enrollment invalidates the prepared page without ACK");
+            assert_eq!(
+                cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&f),
+                stale,
+                "enrollment invalidates the prepared page without ACK"
+            );
             drop(cache);
             let mut cache = open(&f.config);
             for input in &inputs[1..] {
@@ -11267,7 +11446,9 @@ mod tests {
             claude_ingest(&mut cache, options, &inputs);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
-            cache.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap();
+            cache
+                .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+                .unwrap();
             assert!(f.db().query_row("SELECT count(*) FROM session_catalog_invalidations WHERE namespace='source-a'", [], |r| r.get::<_, i64>(0)).unwrap() >= pending);
             let progress = physical_groups::finish(&mut cache, &f, options, &inputs, None);
             assert!(progress.publications >= 2 && progress.restarted_between_groups);
@@ -11604,7 +11785,8 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            let progress = physical_groups::finish(&mut cache, &f, options, &inputs, Some("receipt"));
+            let progress =
+                physical_groups::finish(&mut cache, &f, options, &inputs, Some("receipt"));
             assert!(progress.frontier_paged && progress.restarted_frontier);
             assert!(progress.publications >= 2 && progress.restarted_between_groups);
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 65);
@@ -11758,7 +11940,12 @@ mod tests {
             );
             for _ in 0..256 {
                 let Some(batch) = cache.semantic_batch(64).unwrap() else {
-                    assert_eq!(cache.begin_semantic_stage_with_journal(&paths, &runtime, true).unwrap(), Outcome::Written);
+                    assert_eq!(
+                        cache
+                            .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                            .unwrap(),
+                        Outcome::Written
+                    );
                     continue;
                 };
                 // Reset pages commit progress but do not yet admit selectors.
@@ -12238,7 +12425,8 @@ mod tests {
             admitted
                 .begin_semantic_stage_with_journal(std::slice::from_ref(&seed), &runtime, true)
                 .unwrap();
-            let progress = physical_groups::finish(&mut admitted, &f, options, &inputs, Some("claudeid"));
+            let progress =
+                physical_groups::finish(&mut admitted, &f, options, &inputs, Some("claudeid"));
             assert!(progress.frontier_paged && progress.restarted_frontier);
             assert!(progress.publications >= 2 && progress.restarted_between_groups);
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 66);
