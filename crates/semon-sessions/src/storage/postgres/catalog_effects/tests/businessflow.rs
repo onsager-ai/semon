@@ -33,6 +33,27 @@ fn producer_rows(rows: &[CatalogRow]) -> serde_json::Value {
     value
 }
 
+fn native_proof_tuple(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    source: &CatalogSource,
+) -> Result<(Vec<u8>, i64, bool), StorageError> {
+    let proof = super::super::selected_reader::native_proof(tx, generation, source)?;
+    let row = tx
+        .driver
+        .query_one(
+            "SELECT page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND page_generation=$4",
+            &[
+                &tx.namespace.as_str().as_bytes(),
+                &generation.as_bytes(),
+                &super::super::path(source)?.as_bytes(),
+                &proof.id.0.as_bytes(),
+            ],
+        )
+        .map_err(sqlstate::error)?;
+    Ok((row.get(0), row.get(1), row.get(2)))
+}
+
 fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::PreparedSources {
     crate::model::PreparedSources {
         base_generation: saved.base_generation.clone(),
@@ -2402,12 +2423,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .ok_or(StorageError::ScopeChanged)?
                     .clone();
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
-                let proof = super::super::selected_reader::native_proof(
-                    &mut tx,
-                    &generation,
-                    &source,
-                )?;
-                Ok((source, proof.id))
+                let proof = native_proof_tuple(&mut tx, &generation, &source)?;
+                Ok((source, proof))
             },
         )
         .unwrap();
@@ -4780,27 +4797,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     history_source == &pid_original_source,
                     "History keeps the exact original source ledger"
                 );
-                let history_proof = super::super::selected_reader::native_proof(
-                    &mut tx,
-                    &moved_store.generation,
-                    history_source,
-                )?;
                 let current_source = current
                     .sources
                     .iter()
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
-                let current_proof = super::super::selected_reader::native_proof(
-                    &mut tx,
-                    &moved_store.generation,
-                    current_source,
-                )?;
+                let history_proof =
+                    native_proof_tuple(&mut tx, &moved_store.generation, history_source)?;
+                let current_proof =
+                    native_proof_tuple(&mut tx, &moved_store.generation, current_source)?;
                 assert!(
-                    history_proof.id == pid_original_proof,
-                    "History keeps the original Native proof generation"
+                    history_proof == pid_original_proof,
+                    "History keeps the complete original Native proof tuple"
                 );
                 assert!(
-                    history_proof.id != current_proof.id,
+                    history_proof != current_proof,
                     "a different Current proof cannot substitute for History"
                 );
                 assert!(
@@ -5710,6 +5721,39 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let qualified = store.session_catalog_generation().unwrap();
+    let parent_path = claude_parent.to_str().unwrap().to_owned();
+    let (composite_current_source, composite_withdrawn_source, composite_old_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            qualified.as_deref().unwrap(),
+            |snapshot| {
+                let current = snapshot
+                    .catalog("one", false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let current_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.path.to_str() == Some(parent_path.as_str()))
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let withdrawn_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.path.to_str() == Some(agent.as_str()))
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let proof = native_proof_tuple(
+                    &mut tx,
+                    qualified.as_deref().unwrap(),
+                    &withdrawn_source,
+                )?;
+                Ok((current_source, withdrawn_source, proof))
+            },
+        )
+        .unwrap();
     fs::rename(&claude_agent, oracle.root.join("retained-agent180.jsonl")).unwrap();
     assert_eq!(
         store.remove_files(&agent_removal).unwrap(),
@@ -5826,6 +5870,61 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let caught = ack.1.unwrap();
     assert_eq!(catchup.session_catalog_generation().unwrap(), caught);
     assert_ne!(Some(caught.clone()), qualified);
+    let (composite_history_source, history_b_proof, current_a_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &caught,
+            |snapshot| {
+                assert!(snapshot.owner("one")?.is_some());
+                let current = snapshot
+                    .catalog("one", false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let (history, _, _) = snapshot
+                    .selected("one", true, 0, 1)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let history_a = history
+                    .sources
+                    .iter()
+                    .find(|source| source.path == composite_current_source.path)
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(history_a, &composite_current_source);
+                let history_b = history
+                    .sources
+                    .iter()
+                    .find(|source| source.path == composite_withdrawn_source.path)
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                assert_eq!(history_b, composite_withdrawn_source);
+                assert!(
+                    current.sources.contains(&composite_current_source),
+                    "the unchanged same-harness Source A stays Current"
+                );
+                assert!(
+                    !current.sources.contains(&composite_withdrawn_source),
+                    "the same-harness Source B is withdrawn from Current"
+                );
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let history_b_proof = native_proof_tuple(&mut tx, &caught, &history_b)?;
+                let current_a_proof =
+                    native_proof_tuple(&mut tx, &caught, &composite_current_source)?;
+                Ok((history_b, history_b_proof, current_a_proof))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        composite_history_source, composite_withdrawn_source,
+        "composite History retains the exact withdrawn Source B"
+    );
+    assert_eq!(
+        history_b_proof, composite_old_proof,
+        "composite History carries Source B's complete old Native proof tuple"
+    );
+    assert_ne!(
+        history_b_proof, current_a_proof,
+        "Current Source A's proof cannot substitute for retained Source B"
+    );
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();

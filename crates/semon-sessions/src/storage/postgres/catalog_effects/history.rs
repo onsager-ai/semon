@@ -12,31 +12,6 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
     String::from_utf8(bytes).map_err(|_| StorageError::ScopeChanged)
 }
 
-type NativeProofReference = (Vec<u8>, i64, bool);
-
-fn native_proof_references(
-    rows: &[tokio_postgres::Row],
-) -> Result<Vec<NativeProofReference>, StorageError> {
-    if rows.is_empty() || rows.len() > 64 {
-        return Err(StorageError::ScopeChanged);
-    }
-    rows.iter()
-        .map(|row| {
-            let generation = row
-                .get::<_, Option<Vec<u8>>>(0)
-                .ok_or(StorageError::ScopeChanged)?;
-            if generation.len() != 64 || !generation.iter().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(StorageError::ScopeChanged);
-            }
-            let usage_generation = row.get::<_, i64>(1);
-            if usage_generation <= 0 {
-                return Err(StorageError::ScopeChanged);
-            }
-            Ok((generation, usage_generation, row.get(2)))
-        })
-        .collect()
-}
-
 impl History<'_, '_> {
     fn owner(&self, key: &str) -> Result<Option<(String, bool)>, StorageError> {
         self.owner_at(self.previous, key)
@@ -89,157 +64,6 @@ impl History<'_, '_> {
                 text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)
             })
             .transpose()
-    }
-    fn project_source_proofs(
-        &self,
-        source_generation: &str,
-        source: &CatalogSource,
-    ) -> Result<(), StorageError> {
-        let path = path(source)?;
-        let path_bytes = path.as_bytes();
-        let receipt = crate::events::store::header_ledger(&crate::source_carrier::ledger(source));
-        let tx = self.effects.tx.borrow_mut();
-        tx.check()?;
-        let ns = tx.namespace.as_str().as_bytes();
-        let source_rows = tx
-            .driver
-            .query(
-                "SELECT CASE WHEN octet_length(p.page_generation)=64 THEN p.page_generation END,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation AND g.source_id=p.usage_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3 AND g.ledger=$4 LIMIT 65",
-                &[&ns, &source_generation.as_bytes(), &path_bytes, &receipt.as_bytes()],
-            )
-            .map_err(sqlstate::error)?;
-        let source_proofs = native_proof_references(&source_rows)?;
-        tx.check()?;
-        tx.driver
-            .execute(
-                "INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT p.namespace,$2::bytea,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation AND g.source_id=p.usage_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5 ON CONFLICT DO NOTHING",
-                &[
-                    &ns,
-                    &self.effects.generation.as_bytes(),
-                    &source_generation.as_bytes(),
-                    &path_bytes,
-                    &receipt.as_bytes(),
-                ],
-            )
-            .map_err(sqlstate::error)?;
-        tx.check()?;
-        let projected_rows = tx
-            .driver
-            .query(
-                "SELECT CASE WHEN octet_length(p.page_generation)=64 THEN p.page_generation END,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation AND g.source_id=p.usage_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3 AND g.ledger=$4 LIMIT 65",
-                &[&ns, &self.effects.generation.as_bytes(), &path_bytes, &receipt.as_bytes()],
-            )
-            .map_err(sqlstate::error)?;
-        let projected_proofs = native_proof_references(&projected_rows)?;
-        if !source_proofs
-            .iter()
-            .all(|proof| projected_proofs.contains(proof))
-        {
-            return Err(StorageError::ScopeChanged);
-        }
-        boundary(&tx)
-    }
-    fn project_history_source_proofs(
-        &self,
-        owner_generation: &str,
-        key: &str,
-        source: &CatalogSource,
-    ) -> Result<(), StorageError> {
-        let path = path(source)?;
-        let encoded = encoded(source)?;
-        let tx = self.effects.tx.borrow_mut();
-        tx.check()?;
-        let ns = tx.namespace.as_str().as_bytes();
-        let rows = tx
-            .driver
-            .query(
-                "SELECT session_key=$4,source_path=$5,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_history_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND path_digest=sha256($5::bytea) AND source_path=$5 LIMIT 2",
-                &[
-                    &ns,
-                    &owner_generation.as_bytes(),
-                    &digest(key.as_bytes()),
-                    &key.as_bytes(),
-                    &path.as_bytes(),
-                ],
-            )
-            .map_err(sqlstate::error)?;
-        let row = rows.first().ok_or(StorageError::ScopeChanged)?;
-        if rows.len() != 1
-            || !row.get::<_, bool>(0)
-            || !row.get::<_, bool>(1)
-            || row.get::<_, Option<Vec<u8>>>(2).as_deref() != Some(encoded.as_bytes())
-        {
-            return Err(StorageError::ScopeChanged);
-        }
-        drop(tx);
-        self.project_source_proofs(owner_generation, source)
-    }
-    fn project_history_owner_proofs(
-        &self,
-        owner_generation: &str,
-        key: &str,
-    ) -> Result<(), StorageError> {
-        let metadata = self
-            .metadata("semon_pg_native_catalog_history_headers", owner_generation, key)?
-            .ok_or(StorageError::ScopeChanged)?;
-        let row: CatalogRow =
-            serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?;
-        if row.key != key || row.sources.len() > 64 {
-            return Err(StorageError::ScopeChanged);
-        }
-        for source in &row.sources {
-            self.project_history_source_proofs(owner_generation, key, source)?;
-        }
-        Ok(())
-    }
-    fn project_mentioned_history_proofs(
-        &self,
-        mentioned: &[Vec<u8>],
-    ) -> Result<(), StorageError> {
-        let mut after: Option<Vec<u8>> = None;
-        loop {
-            let tx = self.effects.tx.borrow_mut();
-            tx.check()?;
-            let ns = tx.namespace.as_str().as_bytes();
-            let rows = tx.driver.query(
-                "SELECT key_digest,CASE WHEN octet_length(session_key)<=4096 THEN session_key END,CASE WHEN octet_length(owner_generation)=64 THEN owner_generation END FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[]) AND ($4::bytea IS NULL OR key_digest>$4) ORDER BY key_digest LIMIT 65",
-                &[
-                    &ns,
-                    &self.effects.generation.as_bytes(),
-                    &mentioned,
-                    &after,
-                ],
-            ).map_err(sqlstate::error)?;
-            drop(tx);
-            if rows.is_empty() {
-                return Ok(());
-            }
-            let page_size = rows.len().min(64);
-            for row in rows.iter().take(page_size) {
-                let key_digest: Vec<u8> = row.get(0);
-                let key = text(
-                    row.get::<_, Option<Vec<u8>>>(1)
-                        .ok_or(StorageError::ScopeChanged)?,
-                )?;
-                if digest(key.as_bytes()) != key_digest {
-                    return Err(StorageError::ScopeChanged);
-                }
-                let owner_generation = text(
-                    row.get::<_, Option<Vec<u8>>>(2)
-                        .ok_or(StorageError::ScopeChanged)?,
-                )?;
-                if owner_generation.len() != 64
-                    || !owner_generation.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
-                    return Err(StorageError::ScopeChanged);
-                }
-                self.project_history_owner_proofs(&owner_generation, &key)?;
-            }
-            after = Some(rows[page_size - 1].get(0));
-            if rows.len() <= 64 {
-                return Ok(());
-            }
-        }
     }
     fn recipe(
         &self,
@@ -497,21 +321,6 @@ impl OriginalHistoryStore for History<'_, '_> {
     }
 }
 
-pub(super) fn project_mentioned(
-    tx: &mut PgTxn<'_>,
-    generation: &str,
-    mentioned: &[Vec<u8>],
-) -> Result<(), StorageError> {
-    let store = History {
-        effects: Effects {
-            tx: std::cell::RefCell::new(tx),
-            generation,
-        },
-        previous: generation,
-    };
-    store.project_mentioned_history_proofs(mentioned)
-}
-
 impl CompositeHistoryStore for History<'_, '_> {
     type Error = StorageError;
     fn data(_: serde_json::Error) -> StorageError {
@@ -536,7 +345,17 @@ impl CompositeHistoryStore for History<'_, '_> {
         let path = path(source)?.as_bytes();
         // Retain the exact Native prefix alongside the historical source.
         // A successor can also publish a newer prefix for this same path.
-        self.project_source_proofs(self.previous, source)?;
+        let receipt = crate::events::store::header_ledger(&crate::source_carrier::ledger(source));
+        let tx = self.effects.tx.borrow_mut();
+        let ns = tx.namespace.as_str().as_bytes();
+        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT p.namespace,$2,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$3 AND p.path_digest=sha256($4::bytea) AND p.source_path=$4 AND g.source_path=$4 AND g.ledger=$5 ON CONFLICT DO NOTHING", &[&ns, &self.effects.generation.as_bytes(), &self.previous.as_bytes(), &path, &receipt.as_bytes()]).map_err(sqlstate::error)?;
+        if changed == 0 {
+            let retained: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.path_digest=sha256($3::bytea) AND p.source_path=$3 AND g.source_path=$3 AND g.ledger=$4)", &[&ns, &self.effects.generation.as_bytes(), &path, &receipt.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            if !retained {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        drop(tx);
         self.effects.put(
             "semon_pg_native_catalog_history_sources",
             &[
