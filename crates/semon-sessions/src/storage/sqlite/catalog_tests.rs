@@ -187,6 +187,45 @@ fn family_owner_phase_diagnostic(fixture: &Fixture, phase: &'static str, key: &s
             digest_available && digest_matches
         );
     }
+
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+    let history_row = snapshot.history_catalog(key).unwrap().map(|metadata| serde_json::from_str::<crate::model::summary::CatalogRow>(&metadata).unwrap());
+    let mut actual_callback = None;
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::owned(&tx),
+        key,
+        &mut |row, owner| {
+            if row.key == key {
+                actual_callback = Some((
+                    owner,
+                    row.lifecycle,
+                    row.sources.first().map(crate::catalog::source_state).unwrap_or("missing"),
+                ));
+            }
+            json!({"state":null,"observation":"unavailable"})
+        },
+    )
+    .unwrap();
+    let (callback_owner, callback_lifecycle, source_state) = actual_callback.unwrap_or((
+        None,
+        crate::model::summary::CatalogLifecycle::Current,
+        "missing",
+    ));
+    let history_qualified = history_row.as_ref().is_some_and(|row| {
+        crate::storage::catalog::CatalogSnapshot::history_qualified(&snapshot, row)
+            .unwrap_or(false)
+    });
+    let (history_source_total, mut history_source_refs) =
+        (history_row.as_ref().map_or(0, |row| row.sources.len()), 0);
+    if let Some(row) = &history_row {
+        let prefix = crate::retention::source_generation(&row.sources).unwrap();
+        for source in &row.sources {
+            let ledger = crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
+            let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_proof_sources s ON s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key WHERE r.namespace=?1 AND r.session_key=?2 AND r.kind='history' AND g.stream=?3 AND g.prefix=?4 AND s.path=?5 AND s.ledger=?6)", rusqlite::params![namespace, key, current.stream_epoch, prefix, source.path.to_string_lossy(), ledger], |row| row.get(0)).unwrap();
+            history_source_refs += exact as usize;
+        }
+    }
+    eprintln!("family_owner_phase_selection phase={phase} callback_owner={callback_owner:?} lifecycle={callback_lifecycle:?} history_qualified={history_qualified} history_source_refs={history_source_refs}/{history_source_total} source_state={source_state}");
 }
 
 #[test]
