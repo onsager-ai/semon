@@ -5213,10 +5213,39 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
             );
         }
         let facts_path = fixture.options.facts.as_ref().unwrap();
-        let facts_bytes = fs::read(facts_path).unwrap();
-        let mut changed_facts: crate::Facts = serde_json::from_slice(&facts_bytes).unwrap();
-        changed_facts.hostname.push_str("-runtime-drift");
-        fs::write(facts_path, serde_json::to_vec(&changed_facts).unwrap()).unwrap();
+        let original_facts = crate::read_facts(facts_path).unwrap();
+        let unrelated_id = "00000000-0000-0000-0000-000000000001";
+        let index_path = fixture.options.codex_home.join("session_index.jsonl");
+        fs::write(
+            &index_path,
+            format!(
+                "{}\n",
+                json!({
+                    "id": unrelated_id,
+                    "thread_name": "unrelated runtime drift",
+                    "updated_at": "2026-10-31T00:00:00Z"
+                })
+            ),
+        )
+        .unwrap();
+        let unrelated_name = crate::facts::MachineFacts::Local
+            .native_names(&fixture.options)
+            .into_iter()
+            .find(|name| name.native_id == unrelated_id)
+            .unwrap();
+        assert!(unrelated_name.valid());
+        let mut changed_facts = original_facts.clone();
+        changed_facts.native_names.push(unrelated_name);
+        let original_runtime =
+            crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+        let intent = crate::SessionFactsWrite::begin(&fixture.options, &changed_facts).unwrap();
+        crate::write_facts(facts_path, &changed_facts, &fixture.options.source).unwrap();
+        intent.complete().unwrap();
+        assert_eq!(crate::read_facts(facts_path).unwrap(), changed_facts);
+        assert_ne!(
+            crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+            original_runtime
+        );
         crate::events::FILE_READS.with(|n| n.set(0));
         crate::events::HASHED_BYTES.with(|n| n.set(0));
         crate::source_chunks::READ_BYTES.with(|n| n.set(0));
@@ -5230,15 +5259,28 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
             None,
             crate::SessionSourceReadMode::LocalOrPinnedProvider,
         );
-        fs::write(facts_path, facts_bytes).unwrap();
-        let refused = refused.unwrap();
-        assert!(
-            refused.get("error").is_some(),
-            "changed global runtime must not reuse the published Query observation: {refused}"
+        let query_reads = (
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            crate::events::HASHED_BYTES.with(std::cell::Cell::get),
+            crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
         );
-        assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
-        assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
-        assert_eq!(crate::source_chunks::READ_BYTES.with(std::cell::Cell::get), 0);
+        let intent = crate::SessionFactsWrite::begin(&fixture.options, &original_facts).unwrap();
+        crate::write_facts(facts_path, &original_facts, &fixture.options.source).unwrap();
+        intent.complete().unwrap();
+        fs::remove_file(index_path).unwrap();
+        assert_eq!(crate::read_facts(facts_path).unwrap(), original_facts);
+        assert_eq!(
+            crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+            original_runtime
+        );
+        let refused = refused.unwrap_err();
+        assert_eq!(refused.code, "unavailable");
+        assert_eq!(
+            refused.message,
+            "Native Query runtime observations changed during the query",
+            "changed global runtime must hit the Query observation fence: {refused:?}"
+        );
+        assert_eq!(query_reads, (0, 0, 0));
 
         // Preserved proofs still reject changed original bytes.
         let mut bytes = fs::read(&path).unwrap();
