@@ -976,6 +976,67 @@ impl<'tx> FrontierLayout<'tx> {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static FRONTIER_VM_COUNTER: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>> = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+struct FrontierVmTraceGuard(
+    Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+);
+
+#[cfg(test)]
+impl FrontierVmTraceGuard {
+    fn install(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
+        let previous = FRONTIER_VM_COUNTER.with(|slot| slot.replace(Some(counter)));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for FrontierVmTraceGuard {
+    fn drop(&mut self) {
+        let previous = self.0.take();
+        FRONTIER_VM_COUNTER.with(|slot| *slot.borrow_mut() = previous);
+    }
+}
+
+#[cfg(test)]
+fn frontier_vm_snapshot() -> Option<usize> {
+    FRONTIER_VM_COUNTER.with(|slot| {
+        slot.borrow().as_ref().map(|counter| {
+            counter.load(std::sync::atomic::Ordering::Relaxed)
+        })
+    })
+}
+
+#[cfg(test)]
+fn frontier_vm_report(task: &str, statement: &str, before: Option<usize>) {
+    if let (Some(before), Some(after)) = (before, frontier_vm_snapshot()) {
+        eprintln!(
+            "name_members_frontier task={task} statement={statement} vm_steps={}",
+            after.saturating_sub(before)
+        );
+    }
+}
+
+macro_rules! trace_frontier_vm {
+    ($task:expr, $statement:expr, $body:block) => {{
+        #[cfg(test)]
+        {
+            let vm_start = frontier_vm_snapshot();
+            let result = $body;
+            frontier_vm_report($task, $statement, vm_start);
+            result
+        }
+        #[cfg(not(test))]
+        {
+            $body
+        }
+    }};
+}
+
 struct ScopedNativeFrontier<'a> {
     db: &'a Connection,
     ns: &'a str,
@@ -1051,6 +1112,24 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
     let mut result = Vec::new();
     c.execute_batch("SAVEPOINT native_layout_probe").unwrap();
     for family in ["metadata", "support"] {
+        let support_cache_hit = if family == "support" {
+            let version: i64 = c
+                .query_row("PRAGMA main.schema_version", [], |row| row.get(0))
+                .unwrap();
+            let registered: bool = c
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_semantic_support_layout' AND narg=1)")
+                .unwrap()
+                .query_row([], |row| row.get(0))
+                .unwrap();
+            registered
+                && c.prepare_cached("SELECT semon_semantic_support_layout(?1)")
+                    .unwrap()
+                    .query_row([version], |row| row.get::<_, Option<bool>>(0))
+                    .unwrap()
+                    == Some(true)
+        } else {
+            false
+        };
         let started = std::time::Instant::now();
         let steps = Arc::new(AtomicUsize::new(0));
         let observed = steps.clone();
@@ -1073,7 +1152,15 @@ pub(crate) fn native_frontier_vm_probe(c: &Connection, ns: &str, id: &str) -> Ve
         let elapsed = started.elapsed();
         let steps = steps.load(Ordering::Relaxed);
         eprintln!(
-            "native_frontier_layout family={family} vm_steps={steps} elapsed_us={}",
+            "native_frontier_layout family={family} cache_state={} autocommit={} vm_steps={steps} elapsed_us={}",
+            if family == "support" && support_cache_hit {
+                "cache_hit"
+            } else if family == "support" {
+                "cache_miss"
+            } else {
+                "not_applicable"
+            },
+            c.is_autocommit(),
             elapsed.as_micros()
         );
         // Wall time also includes the validator's reference-connection work,
@@ -1256,7 +1343,19 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
     let mut budget = 64usize;
     let mut metadata_bytes = 0usize;
     while budget > 0 {
-        let task: Option<(String,String,String,String)>=c.query_row("SELECT kind,value,harness,after_key FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0 ORDER BY kind,value,harness LIMIT 1",[ns],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(error)?;
+        let task: Option<(String, String, String, String)> = trace_frontier_vm!(
+            "dispatch",
+            "next_task",
+            {
+                c.query_row(
+                    "SELECT kind,value,harness,after_key FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0 ORDER BY kind,value,harness LIMIT 1",
+                    [ns],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
+                .optional()
+            }
+        )
+        .map_err(error)?;
         let Some((kind, value, harness, after)) = task else {
             return Ok(true);
         };
@@ -1272,18 +1371,26 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
                     Vec::new()
                 }
             } else if kind == "oldneighbors" {
-                effects
-                    .neighbor_page(&value, &after, budget)
-                    .map_err(error)?
+                trace_frontier_vm!(kind.as_str(), "neighbor_page", {
+                    effects.neighbor_page(&value, &after, budget)
+                }).map_err(error)?
             } else {
-                c.prepare("SELECT session_key FROM main.session_catalog_sources WHERE namespace=?1 AND source_path=?2 AND lifecycle='current' AND session_key>?3 ORDER BY session_key LIMIT ?4").map_err(error)?.query_map(params![ns,value,after,budget as i64], |r| r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?
+                trace_frontier_vm!(kind.as_str(), "pathowner_lookup", {
+                    (|| -> rusqlite::Result<Vec<String>> {
+                        c.prepare("SELECT session_key FROM main.session_catalog_sources WHERE namespace=?1 AND source_path=?2 AND lifecycle='current' AND session_key>?3 ORDER BY session_key LIMIT ?4")?
+                            .query_map(params![ns,value,after,budget as i64], |r| r.get(0))?
+                            .collect()
+                    })()
+                }).map_err(error)?
             };
             let mut consumed = 0usize;
             let mut last = after.clone();
             for key in &keys {
                 // Each owner is individually bounded before decoding. Limit
                 // total metadata captured by this durable discovery step too.
-                let length: i64 = c.query_row("SELECT octet_length(metadata) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'", params![ns,key], |r| r.get(0)).map_err(error)?;
+                let length: i64 = trace_frontier_vm!(kind.as_str(), "owner_metadata_length", {
+                    c.query_row("SELECT octet_length(metadata) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'", params![ns,key], |r| r.get(0))
+                }).map_err(error)?;
                 let length =
                     usize::try_from(length).map_err(|_| refuse("semantic_affected_owner_bytes"))?;
                 if metadata_bytes.saturating_add(length) > 1048576 {
@@ -1292,12 +1399,16 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
                     }
                     break;
                 }
-                metadata_bytes += effects.snapshot(key).map_err(error)?;
+                metadata_bytes += trace_frontier_vm!(kind.as_str(), "snapshot_owner", {
+                    effects.snapshot(key)
+                }).map_err(error)?;
                 consumed += 1;
                 last = key.clone();
             }
             let done = consumed == keys.len() && (kind == "oldowner" || keys.len() < budget);
-            c.execute("UPDATE main.catalog_semantic_frontier SET after_key=?5,done=?6 WHERE namespace=?1 AND kind=?2 AND value=?3 AND harness=?4", params![ns,kind,value,harness,last,done]).map_err(error)?;
+            trace_frontier_vm!(kind.as_str(), "advance_owner_cursor", {
+                c.execute("UPDATE main.catalog_semantic_frontier SET after_key=?5,done=?6 WHERE namespace=?1 AND kind=?2 AND value=?3 AND harness=?4", params![ns,kind,value,harness,last,done])
+            }).map_err(error)?;
             budget = budget.saturating_sub(consumed.max(1));
             if consumed < keys.len() {
                 break;
@@ -1345,31 +1456,52 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             }
             _ => return Err(refuse("semantic_nonprimitive_frontier_pending")),
         };
-        let mut q = c.prepare(sql).map_err(error)?;
-        q.raw_bind_parameter(1, ns).map_err(error)?;
-        q.raw_bind_parameter(2, &value).map_err(error)?;
-        q.raw_bind_parameter(3, &after).map_err(error)?;
-        q.raw_bind_parameter(4, budget as i64).map_err(error)?;
-        if q.parameter_count() == 5 {
-            q.raw_bind_parameter(5, &harness).map_err(error)?;
-        }
-        let mut rows = q.raw_query();
-        let mut paths = Vec::new();
-        while let Some(row) = rows.next().map_err(error)? {
-            paths.push(row.get::<_, String>(0).map_err(error)?);
-        }
-        drop(rows);
-        drop(q);
-        let claims = super::source_journal::claims(c, ns, &paths).map_err(error)?;
+        let paths = trace_frontier_vm!(kind.as_str(), "frontier_cursor_page", {
+            (|| -> rusqlite::Result<Vec<String>> {
+                let mut q = c.prepare(sql)?;
+                q.raw_bind_parameter(1, ns)?;
+                q.raw_bind_parameter(2, &value)?;
+                q.raw_bind_parameter(3, &after)?;
+                q.raw_bind_parameter(4, budget as i64)?;
+                if q.parameter_count() == 5 {
+                    q.raw_bind_parameter(5, &harness)?;
+                }
+                let mut rows = q.raw_query();
+                let mut paths = Vec::new();
+                while let Some(row) = rows.next()? {
+                    paths.push(row.get::<_, String>(0)?);
+                }
+                drop(rows);
+                drop(q);
+                Ok(paths)
+            })()
+        })
+        .map_err(error)?;
+        let claims = trace_frontier_vm!(kind.as_str(), "source_claims", {
+            super::source_journal::claims(c, ns, &paths)
+        })
+        .map_err(error)?;
         for (path, claim) in claims {
-            c.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim]).map_err(error)?;
-            c.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'pathowner',?2,'')",params![ns,path]).map_err(error)?;
+            trace_frontier_vm!(kind.as_str(), "record_source_claim", {
+                c.execute("INSERT OR IGNORE INTO main.catalog_semantic_sources(namespace,source_path,claim) VALUES(?1,?2,?3)",params![ns,path,claim])
+            })
+            .map_err(error)?;
+            trace_frontier_vm!(kind.as_str(), "enqueue_pathowner", {
+                c.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'pathowner',?2,'')",params![ns,path])
+            })
+            .map_err(error)?;
         }
         let last = paths.last().unwrap_or(&after);
-        c.execute("UPDATE main.catalog_semantic_frontier SET after_key=?5,done=?6 WHERE namespace=?1 AND kind=?2 AND value=?3 AND harness=?4",params![ns,kind,value,harness,last,paths.len()<budget]).map_err(error)?;
+        trace_frontier_vm!(kind.as_str(), "advance_cursor", {
+            c.execute("UPDATE main.catalog_semantic_frontier SET after_key=?5,done=?6 WHERE namespace=?1 AND kind=?2 AND value=?3 AND harness=?4",params![ns,kind,value,harness,last,paths.len()<budget])
+        })
+        .map_err(error)?;
         budget = budget.saturating_sub(paths.len().max(1));
     }
-    c.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0)).map_err(error)
+    trace_frontier_vm!("dispatch", "finish_pending_check", {
+        c.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)",[ns],|r|r.get(0))
+    })
+    .map_err(error)
 }
 
 struct AdmittedLookup<'a> {
@@ -1417,6 +1549,20 @@ pub(crate) fn name_members_vm_probe(
     let mut targets = Vec::new();
     for kind in ["hints", "candidates", "capacity", "members"] {
         tx.execute_batch("SAVEPOINT name_members_probe").unwrap();
+        if kind == "members" {
+            let owners = owners::Owners {
+                db: &tx,
+                namespace: ns,
+            };
+            for (target_index, target) in targets.iter().enumerate() {
+                let plan = owners
+                    .neighbor_page_plan(target, "", 32)
+                    .unwrap();
+                eprintln!(
+                    "name_members_neighbor_plan target_index={target_index} details={plan:?}"
+                );
+            }
+        }
         let steps = Arc::new(AtomicUsize::new(0));
         let observed = steps.clone();
         c.progress_handler(
@@ -1444,16 +1590,32 @@ pub(crate) fn name_members_vm_probe(
                 for target in &targets {
                     tx.execute("INSERT INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'members',?2,'') ON CONFLICT(namespace,kind,value,harness) DO UPDATE SET done=0,after_key=''", params![ns,target]).unwrap();
                 }
+                let frontier_start = steps.load(Ordering::Relaxed);
+                let trace = FrontierVmTraceGuard::install(steps.clone());
                 frontier_page(&layout, ns).unwrap();
-                staged_paths(&tx, ns).unwrap().len()
+                drop(trace);
+                eprintln!(
+                    "name_members_phase phase=frontier_page vm_steps={}",
+                    steps.load(Ordering::Relaxed) - frontier_start
+                );
+                let staged_start = steps.load(Ordering::Relaxed);
+                let paths = trace_frontier_vm!("members", "staged_paths", {
+                    staged_paths(&tx, ns)
+                })
+                .unwrap();
+                eprintln!(
+                    "name_members_phase phase=staged_paths vm_steps={}",
+                    steps.load(Ordering::Relaxed) - staged_start
+                );
+                paths.len()
             }
         };
         c.progress_handler(0, None::<fn() -> bool>).unwrap();
         let steps = steps.load(Ordering::Relaxed);
+        eprintln!("name_members_query kind={kind} vm_steps={steps} rows={rows}");
         assert!(steps > 0 && steps <= 4096, "{kind}: {steps}");
         assert!(rows <= 64);
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
-        eprintln!("name_members_query kind={kind} vm_steps={steps} rows={rows}");
         result.push((kind.into(), steps, rows));
         tx.execute_batch("ROLLBACK TO name_members_probe; RELEASE name_members_probe")
             .unwrap();
