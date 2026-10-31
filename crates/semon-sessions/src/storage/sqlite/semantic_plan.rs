@@ -38,10 +38,12 @@ impl ContextPort for Plan<'_> {
     fn children(&self, key: &str, used: &mut usize) -> rusqlite::Result<Vec<String>> {
         let mut children = Vec::new();
         let mut q = self.db.prepare("SELECT session_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND parent_key=?2 ORDER BY session_key")?;
-        for child in q.query_map(params![self.ns,key], |r| r.get::<_,String>(0))? {
+        for child in q.query_map(params![self.ns, key], |r| r.get::<_, String>(0))? {
             let child = child?;
             *used = used.saturating_add(child.len());
-            if *used > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
+            if *used > 1048576 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             children.push(child);
         }
         Ok(children)
@@ -52,9 +54,20 @@ impl ContextPort for Plan<'_> {
     fn parent(&self, key: &str) -> rusqlite::Result<Option<String>> {
         self.db.query_row("SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2", params![self.ns,key], |r| r.get(0)).optional().map(Option::flatten)
     }
-    fn endpoint(&self, key: &str, used: &mut usize) -> rusqlite::Result<Option<crate::model::relation_stage::Endpoint>> {
+    fn endpoint(
+        &self,
+        key: &str,
+        used: &mut usize,
+    ) -> rusqlite::Result<Option<crate::model::relation_stage::Endpoint>> {
         let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)", params![self.ns,key], |r| r.get(0))?;
-        if !exists { return Ok(None); }
-        super::owners::Owners { db: self.db, namespace: self.ns }.endpoint_with_budget(key, used).map(Some)
+        if !exists {
+            return Ok(None);
+        }
+        super::owners::Owners {
+            db: self.db,
+            namespace: self.ns,
+        }
+        .endpoint_with_budget(key, used)
+        .map(Some)
     }
 }

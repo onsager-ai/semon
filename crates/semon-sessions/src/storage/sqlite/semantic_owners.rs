@@ -206,7 +206,12 @@ impl crate::model::relation_stage::LifecycleStore for Owners<'_> {
 }
 
 impl Owners<'_> {
-    pub(super) fn neighbor_page(&self, key: &str, after: &str, limit: usize) -> rusqlite::Result<Vec<String>> {
+    pub(super) fn neighbor_page(
+        &self,
+        key: &str,
+        after: &str,
+        limit: usize,
+    ) -> rusqlite::Result<Vec<String>> {
         self.db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=?1 AND lifecycle='current' AND session_key IN (SELECT parent_key FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 UNION SELECT session_key FROM main.session_catalog WHERE namespace=?1 AND parent_key=?2 AND lifecycle='current' UNION SELECT json_extract(metadata,'$.from') FROM main.session_trace_edges WHERE namespace=?1 AND (json_extract(metadata,'$.from')=?2 OR json_extract(metadata,'$.to')=?2) UNION SELECT json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=?1 AND (json_extract(metadata,'$.from')=?2 OR json_extract(metadata,'$.to')=?2) UNION SELECT peer.session_key FROM main.session_catalog_sources own JOIN main.catalog_native_dependencies d ON d.namespace=own.namespace AND d.source_path=own.source_path JOIN main.catalog_native_dependencies p ON p.namespace=d.namespace AND p.harness=d.harness AND p.native_id=d.native_id JOIN main.session_catalog_sources peer ON peer.namespace=p.namespace AND peer.source_path=p.source_path AND peer.lifecycle='current' WHERE own.namespace=?1 AND own.session_key=?2 AND own.lifecycle='current' AND (d.harness='runtime:pid' OR d.harness LIKE 'lineage:%' OR d.harness LIKE 'bridge:%')) AND session_key>?3 ORDER BY session_key LIMIT ?4")?.query_map(params![self.namespace,key,after,limit as i64], |r| r.get(0))?.collect()
     }
 
@@ -214,8 +219,11 @@ impl Owners<'_> {
     /// Later publications read this immutable row rather than the moving head.
     pub(super) fn snapshot(&self, key: &str) -> rusqlite::Result<usize> {
         let exists: bool = self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_prior_owners WHERE namespace=?1 AND session_key=?2)", params![self.namespace,key], |r| r.get(0))?;
-        if exists { return Ok(0); }
-        let row = crate::model::relation_stage::LifecycleStore::owner(self, key).map_err(invalid)?;
+        if exists {
+            return Ok(0);
+        }
+        let row =
+            crate::model::relation_stage::LifecycleStore::owner(self, key).map_err(invalid)?;
         let text = serde_json::to_string(&row).map_err(invalid)?;
         if text.len() > 1048576 || row.sources.is_empty() || row.sources.len() > 64 {
             return Err(rusqlite::Error::InvalidQuery);
@@ -230,17 +238,25 @@ impl Owners<'_> {
         Ok(text.len())
     }
 
-    pub(super) fn prior(&self, paths: &[String]) -> rusqlite::Result<std::collections::BTreeMap<String, crate::model::summary::CatalogRow>> {
+    pub(super) fn prior(
+        &self,
+        paths: &[String],
+    ) -> rusqlite::Result<std::collections::BTreeMap<String, crate::model::summary::CatalogRow>>
+    {
         let selected = serde_json::to_string(paths).map_err(invalid)?;
         let mut q = self.db.prepare("SELECT o.session_key,CASE WHEN octet_length(o.metadata)<=1048576 THEN o.metadata END FROM main.catalog_semantic_prior_owners o WHERE o.namespace=?1 AND o.session_key IN (SELECT session_key FROM main.catalog_semantic_prior_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2))) ORDER BY o.session_key LIMIT 65")?;
         let mut out = std::collections::BTreeMap::new();
         let mut used = 0usize;
-        for row in q.query_map(params![self.namespace,selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?)))? {
-            let (key,text) = row?;
+        for row in q.query_map(params![self.namespace, selected], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })? {
+            let (key, text) = row?;
             let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
             used = used.saturating_add(text.len());
-            if out.len() == 64 || used > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
-            out.insert(key,serde_json::from_str(&text).map_err(invalid)?);
+            if out.len() == 64 || used > 1048576 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            out.insert(key, serde_json::from_str(&text).map_err(invalid)?);
         }
         Ok(out)
     }
@@ -363,10 +379,16 @@ impl Owners<'_> {
     pub(super) fn endpoint(&self, key: &str) -> rusqlite::Result<Endpoint> {
         self.endpoint_with_budget(key, &mut 0)
     }
-    pub(super) fn endpoint_with_budget(&self, key: &str, used: &mut usize) -> rusqlite::Result<Endpoint> {
+    pub(super) fn endpoint_with_budget(
+        &self,
+        key: &str,
+        used: &mut usize,
+    ) -> rusqlite::Result<Endpoint> {
         let (text,parent,root):(String,Option<String>,Option<String>) = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         *used = used.saturating_add(text.len());
-        if *used > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
+        if *used > 1048576 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let mut endpoint: Endpoint = serde_json::from_str(&text).map_err(invalid)?;
         endpoint.parent = parent.clone();
         endpoint.row.parent = parent;
