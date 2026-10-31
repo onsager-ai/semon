@@ -123,6 +123,24 @@ jobs:
         with:
           name: query-fixture-tests
           path: ${{ runner.temp }}/query-fixture-tests.log
+      - name: Catalog batch publication parity fixture
+        id: catalog_batch_fixture
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          test=events::store::tests::catalog_batch_complete_publisher_matches_row_wise_rows_feed_sources_slots_and_repairs
+          case_result=0
+          cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/catalog-batch-publisher-case.log" 2>&1 || case_result=$?
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/catalog-batch-publisher-case.log"; then case_result=1; fi
+          cat "$RUNNER_TEMP/catalog-batch-publisher-case.log"
+          echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/catalog-batch-publisher-case.log"
+          exit "$case_result"
+      - name: Retain Catalog batch publication results
+        if: ${{ !cancelled() && steps.catalog_batch_fixture.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: catalog-batch-publisher-tests
+          path: ${{ runner.temp }}/catalog-batch-publisher-case.log
       - name: Configured header ownership and copied-usage fixture contracts
         id: ownership_fixtures
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
@@ -199,7 +217,7 @@ jobs:
         shell: bash
         run: |
           result=0
-          for group in configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody configured_semantic_domain61_late_child_restarts_complete_native_cohort configured_semantic_selected65_private_witness_is_bound_independently_of_rows configured_semantic_real_model_claude_replacement_rollback_stale_and_history archived_event_index_survives_absence_without_current_membership retained_projection_falls_back_to_history_only_when_main_omits_path transcript_snapshot_keeps_original_recipes_during_an_active_append retained_history_list_keeps_indexed_fields_and_positions_across_append family_status_does_not_treat_a_retired_native_selection_as_current family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification; do
+          for group in configured_semantic_domain52_identity_pid_and_parent_transition_preserves_custody configured_semantic_domain61_late_child_restarts_complete_native_cohort configured_semantic_selected65_private_witness_is_bound_independently_of_rows configured_semantic_real_model_claude_replacement_rollback_stale_and_history archived_event_index_survives_absence_without_current_membership retained_projection_falls_back_to_history_only_when_main_omits_path transcript_snapshot_keeps_original_recipes_during_an_active_append retained_history_list_keeps_indexed_fields_and_positions_across_append family_status_does_not_treat_a_retired_native_selection_as_current family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification mcp_history_selection_keeps_current_runtime_qualification; do
             group_result=0
             cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/retained-contract-case.log" 2>&1 || group_result=$?
             if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/retained-contract-case.log"; then group_result=1; fi
