@@ -327,6 +327,14 @@ pub(crate) fn runtime_source_cwds(
     db: &Connection,
     sources: &[CatalogSource],
 ) -> io::Result<std::collections::BTreeSet<String>> {
+    runtime_source_cwds_if_current(db, sources)?
+        .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))
+}
+
+pub(crate) fn runtime_source_cwds_if_current(
+    db: &Connection,
+    sources: &[CatalogSource],
+) -> io::Result<Option<std::collections::BTreeSet<String>>> {
     if sources.is_empty() || sources.len() > 64 {
         return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
     }
@@ -336,7 +344,7 @@ pub(crate) fn runtime_source_cwds(
         let ledger = crate::events::store::ledger_row(db, &path).map_err(io::Error::other)?;
         if ledger.as_ref().map(|(_, ledger)| ledger) != Some(&crate::source_carrier::ledger(source))
         {
-            return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+            return Ok(None);
         }
         let cwd: Option<String> = db
             .query_row(
@@ -349,7 +357,7 @@ pub(crate) fn runtime_source_cwds(
             cwds.insert(cwd);
         }
     }
-    Ok(cwds)
+    Ok(Some(cwds))
 }
 
 /// Bound Home/Query readers select through the same admitted snapshot as
@@ -374,15 +382,42 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         options: &Options,
         row: &CatalogRow,
-        _runtime: &str,
+        runtime: &str,
     ) -> io::Result<Option<String>> {
-        let binding = self.row_runtime_binding(row)?;
-        let cwds = runtime_source_cwds(self.0, &row.sources)?;
-        let scoped = self
-            .3
-            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
-            .scope(row, &cwds)?;
-        binding.map(|binding| binding.witness(&scoped)).transpose()
+        match runtime_source_cwds_if_current(self.0, &row.sources)? {
+            Some(cwds) => {
+                let Some(binding) = self.row_runtime_binding(row)? else {
+                    return Ok(None);
+                };
+                let scoped = self
+                    .3
+                    .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                    .scope(row, &cwds)?;
+                binding.witness(&scoped).map(Some)
+            }
+            None => {
+                let (binding, observations) =
+                    super::proof_generations::observation_binding_with_observations(
+                        self.0, &self.2, row,
+                    )
+                    .map_err(io::Error::other)?;
+                let captured = observations
+                    .runtime_for(row)
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+                let captured_global = observations
+                    .runtime
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+                // A changed Index source ledger may make the captured CWD scope
+                // unavailable. Retain the row observation only while the live
+                // global input still matches this publication's bound witness.
+                let current_global = binding.witness(runtime)?;
+                if current_global != captured_global {
+                    return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+                }
+                Ok(Some(captured))
+            }
+        }
     }
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         self.1.clone()
