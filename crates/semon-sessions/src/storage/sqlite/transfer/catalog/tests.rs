@@ -269,7 +269,7 @@ pub(crate) fn seed_large_presentation(
     };
     use serde_json::json;
     const CHILDREN: usize = 16;
-    const CHILD_TURNS: usize = 200;
+    const USAGE_REPORTS: usize = 1000;
     let (options, initial) = seed_catalog(source, root);
     let parent_key = initial[0].key.clone();
     let mut host = AuthorizedOriginals::default();
@@ -328,6 +328,29 @@ pub(crate) fn seed_large_presentation(
         .map(|index| format!("large-child-{index:02}"))
         .collect::<Vec<_>>();
     let timestamp = |second: usize| format!("2026-10-01T00:{:02}:{:02}Z", second / 60, second % 60);
+    let usage_timestamp = |offset: usize| {
+        let mut year = 2026;
+        let mut month = 10;
+        let mut day = 2 + offset;
+        loop {
+            let days_in_month = match month {
+                2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+                2 => 28,
+                4 | 6 | 9 | 11 => 30,
+                _ => 31,
+            };
+            if day <= days_in_month {
+                break;
+            }
+            day -= days_in_month;
+            month += 1;
+            if month == 13 {
+                month = 1;
+                year += 1;
+            }
+        }
+        format!("{year:04}-{month:02}-{day:02}T00:00:00Z")
+    };
     let calls = children.iter().enumerate().map(|(index, _)| {
         json!({"type":"tool_use","id":format!("spawn-{index:02}"),"name":"Agent","input":{"description":format!("sanitized task {index}"),"prompt":"sanitized 0"}})
     }).collect::<Vec<_>>();
@@ -347,21 +370,25 @@ pub(crate) fn seed_large_presentation(
         let child_path = child_input.full_path(&options);
         std::fs::create_dir_all(child_path.parent().unwrap()).unwrap();
         let mut body = String::new();
-        let mut previous: Option<String> = None;
-        for turn in 0..CHILD_TURNS {
-            let user_id = format!("{child}-u{turn}");
-            let assistant_id = format!("{child}-a{turn}");
-            for record in [
-                json!({"type":"user","sessionId":"catalog","uuid":user_id,"parentUuid":previous,"timestamp":timestamp(3 + 2 * turn),"cwd":"/sanitized","message":{"role":"user","content":format!("sanitized {turn}")}}),
-                json!({"type":"assistant","sessionId":"catalog","uuid":assistant_id,"parentUuid":user_id,"timestamp":timestamp(4 + 2 * turn),"cwd":"/sanitized","message":{"id":assistant_id,"role":"assistant","model":"claude-test","content":[{"type":"text","text":format!("sanitized answer {turn}")}]}}),
-            ] {
-                body.push_str(&format!("{record}\n"));
-            }
-            previous = Some(assistant_id);
+        let user_id = format!("{child}-u0");
+        let assistant_id = format!("{child}-a0");
+        for record in [
+            json!({"type":"user","sessionId":"catalog","uuid":user_id,"parentUuid":null,"timestamp":timestamp(3),"cwd":"/sanitized","message":{"role":"user","content":"sanitized child task"}}),
+            json!({"type":"assistant","sessionId":"catalog","uuid":assistant_id,"parentUuid":user_id,"timestamp":timestamp(4),"cwd":"/sanitized","message":{"id":assistant_id,"role":"assistant","model":"claude-test","content":[{"type":"text","text":format!("sanitized answer {index}")}]}}),
+        ] {
+            body.push_str(&format!("{record}\n"));
+        }
+        let mut previous = assistant_id;
+        for day in 0..USAGE_REPORTS {
+            let usage_uuid = format!("{child}-usage-record-{day:04}");
+            let usage_id = format!("{child}-usage-message-{day:04}");
+            let usage = json!({"type":"assistant","sessionId":"catalog","uuid":usage_uuid,"parentUuid":previous,"timestamp":usage_timestamp(day),"cwd":"/sanitized","message":{"id":usage_id,"role":"assistant","model":"claude-sonnet-4-5-20250929","content":[],"usage":{"input_tokens":410,"output_tokens":0}}});
+            body.push_str(&format!("{usage}\n"));
+            previous = usage_uuid;
         }
         // A child-owned native hand-back gives each canonical spawn its own
         // result preview owner instead of putting all results in the parent.
-        let handback = json!({"type":"assistant","sessionId":"catalog","uuid":format!("{child}-handback"),"parentUuid":previous,"timestamp":timestamp(3 + 2 * CHILD_TURNS),"cwd":"/sanitized","message":{"id":format!("{child}-handback"),"role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":format!("{child}-return"),"name":"SubagentHandback","input":{"message":format!("sanitized completed child {index}")}}]}});
+        let handback = json!({"type":"assistant","sessionId":"catalog","uuid":format!("{child}-handback"),"parentUuid":previous,"timestamp":usage_timestamp(USAGE_REPORTS),"cwd":"/sanitized","message":{"id":format!("{child}-handback"),"role":"assistant","model":"claude-test","content":[{"type":"tool_use","id":format!("{child}-return"),"name":"SubagentHandback","input":{"message":format!("sanitized completed child {index}")}}]}});
         body.push_str(&format!("{handback}\n"));
         std::fs::write(&child_path, body).unwrap();
         std::fs::write(

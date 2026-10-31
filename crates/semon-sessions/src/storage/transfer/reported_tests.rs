@@ -570,6 +570,45 @@ pub(crate) fn finish_catalog(
             .prepare_semantic_model_batch(options, &batch_inputs, &batch, 1_790_000_000_000)
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
+            if model.prepared().rows.len() == 17 {
+                let prepared = model.prepared();
+                let cost_bytes = prepared
+                    .rows
+                    .iter()
+                    .map(|row| serde_json::to_vec(&row.cost).unwrap().len())
+                    .sum::<usize>();
+                let cost_quote_count = prepared
+                    .rows
+                    .iter()
+                    .map(|row| row.cost.by_day.len())
+                    .sum::<usize>();
+                let metadata = prepared
+                    .rows
+                    .iter()
+                    .map(serde_json::to_string)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap();
+                let metadata_bytes = serde_json::to_string(&metadata).unwrap().len();
+                let witness_bytes = prepared.staged_model_witness().unwrap().len();
+                let transcript_count = prepared.transcripts.len();
+                let transcript_slots = prepared
+                    .transcripts
+                    .iter()
+                    .map(|transcript| transcript.slots.len())
+                    .sum::<usize>();
+                eprintln!(
+                    "large_catalog_prepublication paths={} rows={} cost_bytes={} cost_quote_count={} transcripts={} transcript_slots={} metadata_bytes={} witness_bytes={} context_bytes={}",
+                    batch.paths.len(),
+                    prepared.rows.len(),
+                    cost_bytes,
+                    cost_quote_count,
+                    transcript_count,
+                    transcript_slots,
+                    metadata_bytes,
+                    witness_bytes,
+                    metadata_bytes.saturating_add(witness_bytes),
+                );
+            }
             assert!(
                 model.prepared().rows.is_empty()
                     || model
