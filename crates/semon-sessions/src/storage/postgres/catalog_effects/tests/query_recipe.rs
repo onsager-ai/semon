@@ -435,7 +435,11 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     tx.commit().unwrap();
     drop(db);
     drop(cache);
-    let (pool, _) = fixture(|_| {});
+    // The held snapshot spans the ordinary retirement and successor stages.
+    let (pool, _) = fixture(|limits| {
+        limits.idle_in_tx_timeout = Duration::from_secs(30);
+        limits.txn_deadline = Duration::from_secs(30);
+    });
     let control = PgCancellation::default();
     let config = crate::storage::StoreConfig {
         backend: crate::storage::StoreBackend::Postgres {
