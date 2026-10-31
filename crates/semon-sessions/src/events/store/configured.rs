@@ -1232,7 +1232,7 @@ impl Writer {
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        self.publish_catalog_with_origin(publication, expected, claims, closed, None)
+        self.publish_catalog_with_origin(publication, expected, claims, closed, None, None)
     }
 
     pub(crate) fn publish_catalog_with_origin(
@@ -1242,6 +1242,7 @@ impl Writer {
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
         origin: Option<&crate::model::relation_stage::OriginPublication>,
+        origin_model_witness: Option<&str>,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         connection
@@ -1280,6 +1281,7 @@ impl Writer {
             closed,
             origin.map(super::CatalogStage::Origin),
             super::CatalogWriter::Auto,
+            origin_model_witness,
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {

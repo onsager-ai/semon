@@ -105,6 +105,8 @@ pub(crate) struct OriginId(pub(crate) i64);
 pub(crate) struct OriginPublication {
     pub(crate) origin: OriginId,
     pub(crate) held_epoch: i64,
+    /// Existing derived-key generation. Takeover preserves it; reset advances it.
+    pub(crate) key_epoch: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
