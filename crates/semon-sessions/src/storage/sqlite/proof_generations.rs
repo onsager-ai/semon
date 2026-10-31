@@ -973,11 +973,18 @@ pub(crate) fn observation_binding_with_observations(
         )
         .map_err(ObservationPreparationError::into_storage)?
     };
+    #[cfg(test)]
+    eprintln!(
+        "catalog_runtime_capture_selection owner={owner_kind} imported={imported} exact_semantic_owner={exact_semantic_owner} proof_candidate={proof_candidate} exact_owner_grant={exact_owner_grant} direct_capture_present={}",
+        direct_grant.as_ref().is_some_and(|(capture, _)| capture.is_some())
+    );
     if !proof_candidate
         && let Some(observations) =
             direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
                 .inspect_err(|_| diagnose_observation_refusal("direct_capture"))?
     {
+        #[cfg(test)]
+        eprintln!("catalog_runtime_capture_selected origin=direct_without_proof");
         return Ok((current.clone(), observations));
     }
     let verified =
@@ -1009,6 +1016,8 @@ pub(crate) fn observation_binding_with_observations(
                 direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
                     .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
         {
+            #[cfg(test)]
+            eprintln!("catalog_runtime_capture_selected origin=direct_selected_row");
             return Ok((current.clone(), direct));
         }
         diagnose_observation_refusal("selected_row_runtime_equality");
@@ -1017,12 +1026,24 @@ pub(crate) fn observation_binding_with_observations(
     if !imported {
         match direct_capture_for_row(current, selected, imported, direct_grant.as_ref()) {
             Ok(Some(direct)) if !same_runtime_inputs(&direct, &observations, selected) => {
+                #[cfg(test)]
+                eprintln!("catalog_runtime_capture_selected origin=direct_changed_inputs");
                 return Ok((current.clone(), direct));
             }
             Err(StorageError::Busy) => return Err(StorageError::Busy),
-            _ => {}
+            _result => {
+                #[cfg(test)]
+                eprintln!(
+                    "catalog_runtime_capture_direct_validation valid={} capture_present={} error={:?}",
+                    matches!(&_result, Ok(Some(_))),
+                    direct_grant.as_ref().is_some_and(|(capture, _)| capture.is_some()),
+                    _result.as_ref().err()
+                );
+            }
         }
     }
+    #[cfg(test)]
+    eprintln!("catalog_runtime_capture_selected origin=immutable");
     Ok((original_binding, observations))
 }
 
