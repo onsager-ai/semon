@@ -7427,6 +7427,33 @@ mod tests {
         (open(left), open(right))
     }
 
+    fn catalog_semantic_stage_pair(
+        options: &crate::Options,
+    ) -> (
+        crate::storage::sqlite::semantic::Stage,
+        PathBuf,
+        crate::storage::sqlite::semantic::Stage,
+        PathBuf,
+    ) {
+        let seed = crate::events::EventCache::path(&options.cache);
+        let left = seed.with_file_name("semantic_batch.sqlite3");
+        let right = seed.with_file_name("semantic_row_wise.sqlite3");
+        fs::copy(&seed, &left).unwrap();
+        fs::copy(&seed, &right).unwrap();
+        let open = |path: PathBuf| {
+            let config = options.source.config(&path.with_extension("json")).unwrap();
+            let capability =
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+            (
+                crate::storage::sqlite::semantic::Stage::open(capability).unwrap(),
+                path,
+            )
+        };
+        let (left, left_path) = open(left);
+        let (right, right_path) = open(right);
+        (left, left_path, right, right_path)
+    }
+
     fn catalog_store(options: &crate::Options) -> SqliteStore {
         let config = options.source.config(&options.cache).unwrap();
         let path = config.backend.sqlite_database().unwrap().clone();
@@ -8712,7 +8739,8 @@ mod tests {
         use crate::model::relation_stage::Phase;
         let root = scratch("catalog-commit-boundary-semantic");
         let (options, rows, _) = catalog_native_fixture(&root, 4, false);
-        let (mut disabled, mut enabled) = catalog_pair(&options);
+        let (mut disabled, disabled_path, mut enabled, enabled_path) =
+            catalog_semantic_stage_pair(&options);
         let paths = rows
             .iter()
             .flat_map(|row| &row.sources)
@@ -8723,9 +8751,12 @@ mod tests {
         let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
         let mut outcomes = Vec::new();
         let mut states = Vec::new();
-        for (store, timing) in [(&mut disabled, false), (&mut enabled, true)] {
+        for (store, path, timing) in [
+            (&mut disabled, &disabled_path, false),
+            (&mut enabled, &enabled_path, true),
+        ] {
             let scoped_options = crate::Options {
-                cache: store.path.with_extension("json"),
+                cache: path.with_extension("json"),
                 ..options.clone()
             };
             let mut cache = crate::events::EventCache::open_scoped(
@@ -8735,7 +8766,7 @@ mod tests {
             .unwrap();
             let stage_before = crate::model::now_ms();
             assert_eq!(
-                store.semantic_begin(&paths, &runtime).unwrap(),
+                store.begin(&paths, &runtime).unwrap(),
                 Outcome::Written
             );
             let mut written = Vec::new();
@@ -8743,13 +8774,13 @@ mod tests {
             let mut finished = false;
             for _ in 0..128 {
                 let batch = store
-                    .semantic_next(64)
+                    .batch(64)
                     .unwrap()
                     .expect("active real semantic fixture");
                 if batch.paths.is_empty() {
                     if batch.phase == Phase::Publication {
                         assert_eq!(
-                            store.semantic_finish(batch.epoch).unwrap(),
+                            store.finish(batch.epoch).unwrap(),
                             Outcome::Written
                         );
                         finished = true;
@@ -8769,7 +8800,7 @@ mod tests {
                             .unwrap()
                     })
                     .collect::<Vec<_>>();
-                let prepared = match batch.phase {
+                let mut prepared = match batch.phase {
                     Phase::Indexing => crate::model::prepare_semantic_index_sources(
                         &scoped_options,
                         &mut cache,
@@ -8794,22 +8825,159 @@ mod tests {
                 }
                 .unwrap();
                 if batch.phase == Phase::Publication {
+                    let user_version: i64 = store
+                        .connection_for_test()
+                        .pragma_query_value(None, "user_version", |row| row.get(0))
+                        .unwrap();
+                    store
+                        .connection_for_test()
+                        .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+                        .unwrap();
+                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
+                        store.connection_for_test(),
+                    );
+                    let changes_before = store.connection_for_test().total_changes();
+                    let recording =
+                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    assert!(matches!(
+                        store.publish(&batch, &prepared),
+                        Err(StoreError::Configured(
+                            crate::storage::StorageError::NamespaceUpgradePending
+                        ))
+                    ));
+                    assert_eq!(
+                        crate::native_timing::cleanup_tests::snapshot(
+                            store.connection_for_test()
+                        ),
+                        raw_before,
+                        "unsupported schema refusal must not write"
+                    );
+                    assert_eq!(
+                        store.connection_for_test().total_changes(),
+                        changes_before
+                    );
+                    crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                    assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+                    drop(recording);
+                    store
+                        .connection_for_test()
+                        .pragma_update(None, "user_version", user_version)
+                        .unwrap();
+
+                    let original_claims = prepared.claims.clone();
+                    prepared
+                        .claims
+                        .first_mut()
+                        .expect("publication captures source claims")
+                        .1 = Some(-1);
+                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
+                        store.connection_for_test(),
+                    );
+                    let recording =
+                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    assert_eq!(
+                        store.publish(&batch, &prepared).unwrap(),
+                        (Outcome::Conflict, None),
+                        "a stale source claim must refuse publication"
+                    );
+                    assert_eq!(
+                        crate::native_timing::cleanup_tests::snapshot(
+                            store.connection_for_test()
+                        ),
+                        raw_before
+                    );
+                    crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                    assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+                    drop(recording);
+                    prepared.claims = original_claims;
+
+                    store
+                        .connection_for_test()
+                        .execute_batch(
+                            "PRAGMA foreign_keys=ON;
+                             CREATE TABLE boundary_parent(id INTEGER PRIMARY KEY);
+                             CREATE TABLE boundary_child(
+                                 parent INTEGER REFERENCES boundary_parent(id)
+                                     DEFERRABLE INITIALLY DEFERRED
+                             );
+                             CREATE TEMP TABLE boundary_temp(value TEXT);
+                             INSERT INTO boundary_temp VALUES('preserved');
+                             CREATE TEMP TRIGGER boundary_late_dml
+                                 AFTER UPDATE ON main.catalog_semantic_stage
+                                 WHEN NEW.phase='publication' AND NEW.generation IS NOT NULL
+                             BEGIN
+                                 INSERT INTO boundary_child VALUES(1);
+                                 INSERT INTO boundary_temp VALUES('late-dml');
+                             END;",
+                        )
+                        .unwrap();
+                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
+                        store.connection_for_test(),
+                    );
+                    let recording =
+                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    let error = store.publish(&batch, &prepared).unwrap_err();
+                    assert!(
+                        error.to_string().contains("FOREIGN KEY constraint failed"),
+                        "expected genuine deferred COMMIT FK error: {error}"
+                    );
+                    assert_eq!(
+                        crate::native_timing::catalog_commit_tests::counts(),
+                        if timing { (2, 7) } else { (0, 0) },
+                        "Stage DML reaches pre-COMMIT capture, but failed COMMIT emits no aggregate"
+                    );
+                    assert!(store.connection_for_test().is_autocommit());
+                    assert_eq!(
+                        crate::native_timing::cleanup_tests::snapshot(
+                            store.connection_for_test()
+                        ),
+                        raw_before,
+                        "all raw MAIN/TEMP rows and schemas restore after failed COMMIT"
+                    );
+                    crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                    drop(recording);
+                    store
+                        .connection_for_test()
+                        .execute_batch("DROP TRIGGER temp.boundary_late_dml;")
+                        .unwrap();
+
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     let before = crate::model::now_ms();
-                    let outcome = store.publish_semantic_catalog(&batch, &prepared).unwrap();
+                    let outcome = store.publish(&batch, &prepared).unwrap();
                     assert_eq!(outcome.0, Outcome::Written);
+                    let replay_generation = outcome.1.clone();
                     written.push(outcome);
                     publication_states.push(catalog_commit_success_state(
-                        &store.connection,
+                        store.connection_for_test(),
                         before,
                         crate::model::now_ms(),
                     ));
                     crate::native_timing::catalog_commit_tests::assert_written(timing);
                     drop(recording);
                     cache.publish_session_descriptions();
+
+                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
+                        store.connection_for_test(),
+                    );
+                    let recording =
+                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    assert_eq!(
+                        store.publish(&batch, &prepared).unwrap(),
+                        (Outcome::Written, replay_generation)
+                    );
+                    assert_eq!(
+                        crate::native_timing::cleanup_tests::snapshot(
+                            store.connection_for_test()
+                        ),
+                        raw_before,
+                        "publication replay must not write"
+                    );
+                    crate::native_timing::catalog_commit_tests::assert_uncommitted();
+                    assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+                    drop(recording);
                 } else {
                     assert_eq!(
-                        store.semantic_record(&batch, &prepared).unwrap(),
+                        store.record(&batch, &prepared).unwrap(),
                         Outcome::Written
                     );
                 }
@@ -8822,14 +8990,14 @@ mod tests {
             );
             assert_eq!(
                 store
-                    .connection
+                    .connection_for_test()
                     .query_row("SELECT COUNT(*) FROM catalog_semantic_stage", [], |row| row
                         .get::<_, i64>(0))
                     .unwrap(),
                 0
             );
             publication_states.push(catalog_commit_success_state(
-                &store.connection,
+                store.connection_for_test(),
                 stage_before,
                 crate::model::now_ms(),
             ));
@@ -9356,15 +9524,19 @@ mod tests {
                 .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
                 .unwrap();
             let raw = crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let changes = store.connection.total_changes();
             let recording = crate::native_timing::catalog_commit_tests::recording(timing);
-            assert_eq!(
-                catalog_write(store, &rows, &projections, false, CatalogWriter::Auto).unwrap(),
-                (Outcome::Stale, None)
-            );
+            assert!(matches!(
+                catalog_write(store, &rows, &projections, false, CatalogWriter::Auto),
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::NamespaceUpgradePending
+                ))
+            ));
             assert_eq!(
                 crate::native_timing::cleanup_tests::snapshot(&store.connection),
                 raw
             );
+            assert_eq!(store.connection.total_changes(), changes);
             crate::native_timing::catalog_commit_tests::assert_uncommitted();
             assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
             drop(recording);
