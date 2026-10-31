@@ -993,16 +993,21 @@ fn read_inner(
         )?,
     };
     selected_read_stage(SelectedReadStage::CatalogRowAuthorization);
-    let row: crate::model::summary::CatalogRow = serde_json::from_str(&row_text).inspect_err(|_| {
-        if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: selected_row_authority_refused boundary=row_decode");
-        }
-    })?;
+    let row: crate::model::summary::CatalogRow =
+        serde_json::from_str(&row_text).inspect_err(|_| {
+            if crate::native_timing::enabled() {
+                eprintln!(
+                    "semon sessions native: selected_row_authority_refused boundary=row_decode"
+                );
+            }
+        })?;
     // Query observations are optional metadata. Authenticate the selected row
     // even without one before its recipes can admit any native/provider bytes.
     let current = binding.runtime_binding_at(&transaction).inspect_err(|_| {
         if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: selected_row_authority_refused boundary=runtime_binding");
+            eprintln!(
+                "semon sessions native: selected_row_authority_refused boundary=runtime_binding"
+            );
         }
     })?;
     crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)

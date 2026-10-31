@@ -791,15 +791,9 @@ pub(crate) fn page_with_gate(
                             .get_ref()?
                             .downcast_ref::<crate::storage::StorageError>()
                     });
-                let sqlite_error = cause
-                    .downcast_ref::<rusqlite::Error>()
-                    .or_else(|| io_error?.get_ref()?.downcast_ref::<rusqlite::Error>());
-                let sqlite_details = sqlite_error.map(crate::storage::sqlite::error_class);
-                let sqlite_kind = sqlite_details.map(|(kind, _)| kind);
-                let sqlite_extended_code = sqlite_details.and_then(|(_, code)| code);
                 let io_kind = io_error.map(io::Error::kind);
                 eprintln!(
-                    "semon sessions native: catalog_page_refused stage=page_read storage={storage:?} io_kind={io_kind:?} sqlite_kind={sqlite_kind:?} sqlite_extended_code={sqlite_extended_code:?}"
+                    "semon sessions native: catalog_page_refused stage=page_read storage={storage:?} io_kind={io_kind:?}"
                 );
             }
             error(
@@ -888,9 +882,7 @@ pub(crate) fn read_page_snapshot_with_search(
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
-        return Err(
-            page_read_error("catalog_generation_missing", "catalog not published").into(),
-        );
+        return Err(page_read_error("catalog_generation_missing", "catalog not published").into());
     };
     if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
         return Err(page_read_error("catalog_version_mismatch", "catalog version").into());
