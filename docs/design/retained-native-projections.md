@@ -88,6 +88,12 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
+Semantic publication keeps external staged endpoints as graph context across
+bounded physical owner groups. Their virtual transcripts do not enter that
+group's publication recipes. Every real owner retains its transcript projection;
+genuine unmatched call or receipt stubs retain their explicit relationship and
+projection witnesses without gaining Catalog ownership or Raw membership.
+
 SQLite semantic catch-up accepts a removed path only with its durable ordinary
 producer removal invalidation and no remaining live ledger. An exact index
 retained by the ordinary removal writer remains historical custody; staging

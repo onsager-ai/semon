@@ -9803,6 +9803,8 @@ mod tests {
                 pub(super) frontier_paged: bool,
                 pub(super) restarted_frontier: bool,
                 pub(super) restarted_between_groups: bool,
+                pub(super) external_child: bool,
+                pub(super) external_parent: bool,
             }
 
             fn resume(
@@ -9891,6 +9893,52 @@ mod tests {
                         .unwrap();
                     if batch.phase != Phase::Publication {
                         continue;
+                    }
+                    let prepared = model.prepared();
+                    let row_keys = prepared
+                        .rows
+                        .iter()
+                        .map(|row| row.key.as_str())
+                        .collect::<BTreeSet<_>>();
+                    for key in &row_keys {
+                        assert_eq!(
+                            prepared
+                                .transcripts
+                                .iter()
+                                .filter(|projection| projection.key == *key)
+                                .count(),
+                            1,
+                            "every real owner retains exactly one transcript projection"
+                        );
+                    }
+                    for relation in prepared.relationships.relations.values() {
+                        if relation.kind != "spawn" {
+                            continue;
+                        }
+                        let Some(to) = &relation.to else {
+                            continue;
+                        };
+                        let (external, child) = match (
+                            row_keys.contains(relation.from.as_str()),
+                            row_keys.contains(to.as_str()),
+                        ) {
+                            (true, false) => (to, true),
+                            (false, true) => (&relation.from, false),
+                            _ => continue,
+                        };
+                        if relation.stubs.iter().any(|stub| &stub.key == external) {
+                            continue;
+                        }
+                        assert!(f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1)", [external], |r| r.get::<_, bool>(0)).unwrap(), "external relation endpoint retains its durable identity");
+                        assert!(
+                            prepared
+                                .transcripts
+                                .iter()
+                                .all(|projection| &projection.key != external),
+                            "external staged endpoint has no publication transcript"
+                        );
+                        progress.external_child |= child;
+                        progress.external_parent |= !child;
                     }
                     if progress.publications == 1 && !stale_checked {
                         let mut successor = open(&f.config);
@@ -10208,6 +10256,14 @@ mod tests {
             let progress = physical_groups::finish(&mut cache, &f, options, &inputs, None);
             assert!(progress.publications >= 2);
             assert!(progress.restarted_between_groups);
+            assert!(
+                progress.external_child,
+                "selected parent replays an external child"
+            );
+            assert!(
+                progress.external_parent,
+                "selected child replays an external parent"
+            );
             assert_eq!(namespace_state(&f, "source-b"), foreign);
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 65);
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='budget-00' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 64);
@@ -12213,6 +12269,7 @@ mod tests {
             let before = namespace_state(&f, "source-b");
             let mut own = open(&f.config);
             let (batch, model) = claude_ready(&mut own, options, &inputs);
+            oracle(&own, options, &inputs, model.prepared());
             let mut altered = crate::model::prepare_staged_sources(
                 options,
                 &mut own,

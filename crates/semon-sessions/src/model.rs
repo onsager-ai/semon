@@ -8767,13 +8767,23 @@ fn build_sources_inner(
     measurements.record("projection_query_summaries", started, 1);
     let started = measurements.start();
     let slot_projections = catalog.as_ref().map(|rows| {
-        crate::slot_projection::capture(
+        let mut projections = crate::slot_projection::capture(
             &tx,
             rows,
             Some(&source_records),
             history_records,
             (history_records.is_none()).then_some((&*builder.cache, catalog_base.as_deref())),
-        )
+        );
+        if staged_relationships.is_some() {
+            // External staged endpoints supply graph context, not this group's
+            // transcript publication. Genuine unmatched stubs still carry their
+            // explicit relationship witness and must retain their projections.
+            projections.retain(|projection| {
+                builder.sessions[builder.by_key[&projection.key]].kind != SessKind::Stub
+                    || !builder.staged_endpoints.contains_key(&projection.key)
+            });
+        }
+        projections
     });
     measurements.record(
         "projection_slots",
