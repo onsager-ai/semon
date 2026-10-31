@@ -9094,9 +9094,10 @@ fn build_sources_inner(
                     .ok_or_else(|| io::Error::other("semantic replay epoch missing"))?;
                 let mut after = String::new();
                 loop {
-                    let page = builder
-                        .cache
-                        .semantic_replay_page(epoch, &replay.replay_owners, &after)?;
+                    let page =
+                        builder
+                            .cache
+                            .semantic_replay_page(epoch, &replay.replay_owners, &after)?;
                     let Some(last) = page.relations.keys().next_back() else {
                         break;
                     };
