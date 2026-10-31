@@ -114,7 +114,13 @@ jobs:
         shell: bash
         run: |
           result=0
-          for test in query::tests::catalog_search_admits_only_selected_archives_before_its_stop_boundary query::tests::catalog_search_qualifies_multi_machine_order_and_conflicts query::tests::the_window_bounds_what_is_read_and_says_where_it_starts query::tests::selected_query_refuses_changed_bytes_generations_and_revocation; do
+          for test in \
+            query::tests::catalog_search_admits_only_selected_archives_before_its_stop_boundary \
+            query::tests::catalog_search_qualifies_multi_machine_order_and_conflicts \
+            query::tests::the_window_bounds_what_is_read_and_says_where_it_starts \
+            query::tests::selected_query_refuses_changed_bytes_generations_and_revocation \
+            query::tests::selected_query_preserves_the_independent_tool_reference_and_union_labels \
+            query::tests::retained_context_tests::retained_child_fields_use_exact_current_parent_after_original_history_is_preserved; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/query-fixture-case.log" 2>&1 || case_result=$?
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/query-fixture-case.log"; then case_result=1; fi
