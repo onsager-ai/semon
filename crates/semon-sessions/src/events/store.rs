@@ -8931,6 +8931,9 @@ mod tests {
         }
         let mut oversized = rows[..2].to_vec();
         oversized[1].name = "x".repeat(1_048_576);
+        // Reuse row 0's real source so row 1's old source recipe is retained
+        // by the owned OriginalHistory producer during this same publication.
+        oversized[1].sources = rows[0].sources.clone();
         let metadata = oversized
             .iter()
             .map(json)
@@ -8939,6 +8942,22 @@ mod tests {
         assert!(catalog_batch_bytes(&oversized, &metadata, CatalogWriter::Auto).is_none());
         catalog_write_pair(&mut batch, &mut row_wise, &oversized, &projections, true);
         for store in [&batch, &row_wise] {
+            let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(
+                store.owner.clone(),
+            );
+            let history = crate::storage::sqlite::history::OriginalHistory::admitted(
+                &store.connection,
+                &admitted,
+            )
+            .unwrap();
+            assert!(
+                crate::storage::catalog::CompositeHistoryStore::original(
+                    &history,
+                    &oversized[1].key,
+                )
+                .unwrap(),
+                "the owner has genuine OriginalHistory custody before scoped search refresh"
+            );
             let documents = store
                 .connection
                 .prepare(
