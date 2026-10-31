@@ -629,14 +629,19 @@ impl SourceObservationStore for SourceJournal {
 
     fn recovery_cursor(&self) -> Result<Option<String>, StorageError> {
         let mut connection = self.writer()?;
-        let db = connection.transaction().map_err(failed)?;
-        self.validate(&db)?;
+        let tx = connection.transaction().map_err(failed)?;
+        self.validate(&tx)?;
         self.owner.as_ref().ok_or(StorageError::Unavailable)?;
-        db.query_row(
-            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after'",
-            [],
-            |row| row.get(0),
-        ).optional().map_err(failed)
+        let cursor = tx
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
+        tx.commit().map_err(failed)?;
+        Ok(cursor)
     }
 
     fn recover(
@@ -814,7 +819,9 @@ impl SourceObservationStore for SourceJournal {
         let mut db = self.writer()?;
         let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;
-        load_intents(&tx, self.namespace())
+        let intents = load_intents(&tx, self.namespace())?;
+        tx.commit().map_err(failed)?;
+        Ok(intents)
     }
 
     fn acknowledge_intent(&mut self, operation: &SourceOperation) -> Result<(), StorageError> {
