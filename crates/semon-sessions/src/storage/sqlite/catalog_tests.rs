@@ -2026,28 +2026,7 @@ fn home_native_previews_preserve_question_answers_and_archive_generation_without
     );
     assert!(!path.exists());
     // A missing current overview must be repairable after native eviction,
-    // using the retained selected source provenance.
-    let metadata: String = db
-        .query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key='home'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let mut selected: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
-    for source in &mut selected.sources {
-        source.native_role = None;
-    }
-    db.execute(
-        "UPDATE session_catalog SET metadata=?1 WHERE session_key='home'",
-        [serde_json::to_string(&selected).unwrap()],
-    )
-    .unwrap();
-    db.execute(
-        "UPDATE session_slot_projections SET source_generation=?1 WHERE session_key='home'",
-        [crate::retention::source_generation(&selected.sources).unwrap()],
-    )
-    .unwrap();
+    // using the still-qualified selected source provenance.
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT namespace,'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
     let migrated =
         crate::events::EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
@@ -4949,7 +4928,9 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
             let facts_path = fixture.options.facts.as_ref().unwrap();
             let mut facts = crate::read_facts(facts_path).unwrap();
             facts.proc_starts.insert(99, 777);
-            crate::write_facts(facts_path, &facts, &crate::Options::default().source).unwrap();
+            let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+            facts_write.complete().unwrap();
             fs::create_dir_all(fixture.options.claude_home.join("sessions")).unwrap();
             fs::write(
                 fixture.options.claude_home.join("sessions/99.json"),
@@ -4974,12 +4955,26 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
         // A second admitted publication retains the first transcript under a
         // physical History owner. Live activity from the current Catalog row
         // must not be borrowed by that immutable History projection.
-        writeln!(
-            fs::OpenOptions::new().append(true).open(&path).unwrap(),
-            "{}",
-            json!({"type":"assistant","sessionId":"thinking-session","uuid":"progress","parentUuid":"thinking","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","content":"progress"}})
+        let from = fs::metadata(&path).unwrap().len();
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/thinking-session.jsonl".into(),
+        };
+        let write = crate::SessionSourceWrite::begin(
+            &fixture.options,
+            &input,
+            Some("0123456789abcdef0123456789abcdef"),
+            from,
         )
         .unwrap();
+        let line = format!(
+            "{}\n",
+            json!({"type":"assistant","sessionId":"thinking-session","uuid":"progress","parentUuid":"thinking","timestamp":"2026-10-01T00:00:02Z","message":{"role":"assistant","content":"progress"}})
+        );
+        let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        raw.write_all(line.as_bytes()).unwrap();
+        raw.sync_all().unwrap();
+        write.complete(from + line.len() as u64).unwrap();
         fixture.publish_existing();
         let history_metadata: String = {
             let db = fixture.db();
@@ -6727,11 +6722,12 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         unavailable["items"][0]["facts_observation"]["state"],
         "unavailable"
     );
-    // A valid atomic facts publication restores source authority while its
+    // A valid atomic Facts change restores source authority while its
     // existing complete Catalog still carries the prior runtime fence.
-    let changed = serde_json::from_value::<crate::Facts>(changed).unwrap();
-    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &changed).unwrap();
-    crate::write_facts(facts, &changed, &fixture.options.source).unwrap();
+    let mut refreshed = serde_json::from_value::<crate::Facts>(changed).unwrap();
+    refreshed.hostname = "admitted-runtime-input".into();
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &refreshed).unwrap();
+    crate::write_facts(facts, &refreshed, &fixture.options.source).unwrap();
     facts_write.complete().unwrap();
     let (code, pending) = page("");
     assert_eq!(code, 200);
