@@ -984,7 +984,10 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
             crate::CatalogReadScope::Current | crate::CatalogReadScope::RetainedHistory => {
                 Ok(vec![super::catalog::SelectedCatalogRow {
                     row: self.row.clone(),
-                    owner: None,
+                    // The witness was captured from the original Catalog
+                    // publication. Read scope does not change that provenance
+                    // or grant authority over today's Catalog or live Facts.
+                    owner: Some(CatalogObservationOwner::Catalog),
                 }])
             }
         }

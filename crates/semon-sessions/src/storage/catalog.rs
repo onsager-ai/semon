@@ -13,7 +13,8 @@ pub(crate) enum CatalogObservationOwner {
     History,
 }
 
-/// Request-local selection provenance; immutable presentations have no live owner.
+/// Physical selection provenance, including an immutable presentation's original
+/// publication owner. This does not grant live observation authority.
 pub(crate) struct SelectedCatalogRow {
     pub(crate) row: CatalogRow,
     pub(crate) owner: Option<CatalogObservationOwner>,
