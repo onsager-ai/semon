@@ -909,7 +909,9 @@ mod tests {
                     .map_err(|_| StorageError::ScopeChanged)?;
                 assert_eq!(
                     serde_json::to_value(
-                        rows.into_iter().map(|selected| selected.row).collect::<Vec<_>>(),
+                        rows.into_iter()
+                            .map(|selected| selected.row)
+                            .collect::<Vec<_>>(),
                     )
                     .unwrap(),
                     serde_json::to_value(&expected).unwrap()

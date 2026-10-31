@@ -2518,7 +2518,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     snapshot,
                 )
                 .map_err(|_| StorageError::ScopeChanged)?;
-                let rows = rows.into_iter().map(|selected| selected.row).collect::<Vec<_>>();
+                let rows = rows
+                    .into_iter()
+                    .map(|selected| selected.row)
+                    .collect::<Vec<_>>();
                 Ok((rows, page, first))
             },
         )
