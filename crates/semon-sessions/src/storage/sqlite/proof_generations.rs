@@ -800,7 +800,9 @@ pub(crate) fn observation_binding(
     .map_err(|_| StorageError::Busy)?;
     proof_codec::verify_presentation_digest(&base, &manifest, &record.proof).inspect_err(|_| {
         if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: observation_stage_refused boundary=presentation_digest");
+            eprintln!(
+                "semon sessions native: observation_stage_refused boundary=presentation_digest"
+            );
         }
     })?;
     proof_codec::verify_presentation_entry(
@@ -812,7 +814,9 @@ pub(crate) fn observation_binding(
     )
     .inspect_err(|_| {
         if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: observation_stage_refused boundary=presentation_entry");
+            eprintln!(
+                "semon sessions native: observation_stage_refused boundary=presentation_entry"
+            );
         }
     })?;
     proof_codec::observation_binding(record, current, selected).inspect_err(|_| {
