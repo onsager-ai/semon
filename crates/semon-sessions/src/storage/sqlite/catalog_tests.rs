@@ -2263,6 +2263,16 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
     }
 
     let fixture = Fixture::new();
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts
+        .repos
+        .insert("/synthetic/project".into(), Some("original-repo".into()));
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
     let append_model = |id: &str, timestamp: &str, model: &str| {
         let path = fixture
             .options
