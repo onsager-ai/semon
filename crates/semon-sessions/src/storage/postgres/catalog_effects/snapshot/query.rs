@@ -904,20 +904,19 @@ impl QueryCatalogStore for QueryCatalog {
             }
             if cutoff.is_some() {
                 for key in &current_context {
-                    if loaded.get(key).is_some_and(|(_, _, history)| *history) {
-                        if let Some(row) = snapshot.catalog(key, false).map_err(|error| match error {
+                    if loaded.get(key).is_some_and(|(_, _, history)| *history)
+                        && let Some(row) = snapshot.catalog(key, false).map_err(|error| match error {
                             StorageError::ScopeChanged => cohort_scope_changed("recent_current_context_refused"),
                             other => other,
                         })? {
-                            charge_catalog_row(&row, bytes_left)?;
-                            let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                            let eligible = current
-                                && (row.last.is_some_and(|last| last >= c)
-                                    || query_last(&row).is_some_and(|last| last >= c)
-                                    || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
-                            if eligible {
-                                loaded.insert(key.clone(), (row, true, false));
-                            }
+                        charge_catalog_row(&row, bytes_left)?;
+                        let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                        let eligible = current
+                            && (row.last.is_some_and(|last| last >= c)
+                                || query_last(&row).is_some_and(|last| last >= c)
+                                || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
+                        if eligible {
+                            loaded.insert(key.clone(), (row, true, false));
                         }
                     }
                 }
