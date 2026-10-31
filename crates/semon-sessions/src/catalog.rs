@@ -791,9 +791,15 @@ pub(crate) fn page_with_gate(
                             .get_ref()?
                             .downcast_ref::<crate::storage::StorageError>()
                     });
+                let sqlite_error = cause
+                    .downcast_ref::<rusqlite::Error>()
+                    .or_else(|| io_error?.get_ref()?.downcast_ref::<rusqlite::Error>());
+                let sqlite_details = sqlite_error.map(crate::storage::sqlite::error_class);
+                let sqlite_kind = sqlite_details.map(|(kind, _)| kind);
+                let sqlite_extended_code = sqlite_details.and_then(|(_, code)| code);
                 let io_kind = io_error.map(io::Error::kind);
                 eprintln!(
-                    "semon sessions native: catalog_page_refused stage=page_read storage={storage:?} io_kind={io_kind:?}"
+                    "semon sessions native: catalog_page_refused stage=page_read storage={storage:?} io_kind={io_kind:?} sqlite_kind={sqlite_kind:?} sqlite_extended_code={sqlite_extended_code:?}"
                 );
             }
             error(
@@ -804,6 +810,13 @@ pub(crate) fn page_with_gate(
             )
         }
     }
+}
+
+fn page_read_error(reason: &'static str, message: &'static str) -> io::Error {
+    if crate::native_timing::enabled() {
+        eprintln!("semon sessions native: catalog_page_refused stage=page_read reason={reason}");
+    }
+    io::Error::other(message)
 }
 
 /// Whether the selected backend has a readable persisted Catalog publication.
@@ -875,18 +888,22 @@ pub(crate) fn read_page_snapshot_with_search(
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
-        return Err(io::Error::other("catalog not published").into());
+        return Err(
+            page_read_error("catalog_generation_missing", "catalog not published").into(),
+        );
     };
     if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
-        return Err(io::Error::other("catalog version").into());
+        return Err(page_read_error("catalog_version_mismatch", "catalog version").into());
     }
     if request.require_complete {
         match meta("catalog_completeness")?.as_deref() {
             None | Some("complete") => {}
             _ => {
-                return Err(
-                    io::Error::other("catalog ownership is unavailable or provisional").into(),
-                );
+                return Err(page_read_error(
+                    "catalog_ownership_unavailable",
+                    "catalog ownership is unavailable or provisional",
+                )
+                .into());
             }
         }
     }
@@ -925,7 +942,13 @@ pub(crate) fn read_page_snapshot_with_search(
         let collection_complete = match meta("catalog_completeness")?.as_deref() {
             None | Some("complete") => true,
             Some("partial") => false,
-            _ => return Err(io::Error::other("catalog completeness unavailable").into()),
+            _ => {
+                return Err(page_read_error(
+                    "catalog_completeness_unavailable",
+                    "catalog completeness unavailable",
+                )
+                .into());
+            }
         };
         let complete = collection_complete
             && meta("search_backfill_complete")?.as_deref() == Some("1")
@@ -1006,7 +1029,11 @@ pub(crate) fn read_page_snapshot_with_search(
     }
     let completeness = meta("catalog_completeness")?.unwrap_or_else(|| "complete".into());
     if !matches!(completeness.as_str(), "partial" | "complete") {
-        return Err(io::Error::other("catalog completeness is invalid").into());
+        return Err(page_read_error(
+            "catalog_completeness_invalid",
+            "catalog completeness is invalid",
+        )
+        .into());
     }
     if admit_search
         && completeness == "partial"
