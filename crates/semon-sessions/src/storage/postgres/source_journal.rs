@@ -49,7 +49,10 @@ impl PgSourceJournal {
                     let source = crate::retention::source_generation(&row.sources)
                         .map_err(|_| StorageError::ScopeChanged)?;
                     let owner = if history {
-                        snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?
+                        snapshot
+                            .owner(key)?
+                            .ok_or(StorageError::ScopeChanged)?
+                            .generation
                     } else {
                         generation.clone()
                     };

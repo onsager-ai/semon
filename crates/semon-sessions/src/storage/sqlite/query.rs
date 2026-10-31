@@ -10,6 +10,112 @@ use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Persisted selected fields name their dependency source generations. Resolve
+/// those exact endpoint publications without changing native identity derivation.
+pub(crate) fn selected_query_context(
+    tx: &rusqlite::Transaction<'_>,
+    binding: &crate::storage::NativeReaderBinding,
+    options: &Options,
+    row: &crate::model::summary::CatalogRow,
+    history: bool,
+) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, crate::storage::StorageError> {
+    use crate::storage::StorageError;
+    if !binding.validate(tx, &binding.config().namespace)? {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    let current = binding.runtime_binding_at(tx)?;
+    for source in &row.sources {
+        if crate::catalog::source_relative(options, &row.harness, source).is_none() {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    crate::storage::query::selected_edge_context(
+        row,
+        history,
+        |key, history| {
+            let table = if history {
+                "session_history_catalog"
+            } else {
+                "session_catalog"
+            };
+            let text: Option<Option<String>> = tx
+                .query_row(
+                    &format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1"),
+                    [key],
+                    |record| record.get(0),
+                )
+                .optional()
+                .map_err(crate::storage::sqlite::failed)?;
+            let Some(text) = text else {
+                return Ok(None);
+            };
+            let text = text.ok_or(StorageError::Busy)?;
+            crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
+            serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| StorageError::ScopeChanged)
+        },
+        |candidate, history| qualify_context_candidate(tx, &current, options, candidate, history),
+    )
+}
+
+pub(crate) fn qualify_context_candidate(
+    tx: &rusqlite::Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    options: &Options,
+    candidate: &crate::model::summary::CatalogRow,
+    history: bool,
+) -> Result<(), crate::storage::StorageError> {
+    use crate::storage::{StorageError, catalog::CatalogObservationOwner};
+    let owner = if history {
+        CatalogObservationOwner::History
+    } else {
+        CatalogObservationOwner::Catalog
+    };
+    if candidate.sources.is_empty() || candidate.sources.len() > 64 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+    if !crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
+        .map_err(|_| StorageError::ScopeChanged)?
+        || candidate.sources.iter().any(|source| {
+            crate::catalog::source_relative(options, &candidate.harness, source).is_none()
+        })
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    super::proof_generations::observation_binding_for_physical_owner(
+        tx, current, candidate, owner,
+    )?;
+    if history {
+        if !crate::history_projection::qualified(tx, candidate).map_err(super::failed)? {
+            return Err(StorageError::ScopeChanged);
+        }
+    } else {
+        let header =
+            crate::query_projection::header(tx, &crate::query_projection::identity(candidate))
+                .map_err(super::failed)?
+                .ok_or(StorageError::ScopeChanged)?;
+        let header: Value =
+            serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
+        use sha2::Digest;
+        let query_generation = format!(
+            "{:x}",
+            sha2::Sha256::digest(
+                serde_json::to_vec(&candidate.query).map_err(|_| StorageError::ScopeChanged)?
+            )
+        );
+        if header["version"] != 1
+            || header["complete"] != true
+            || header["source_generation"] != saved["source_generation"]
+            || header["query_generation"] != query_generation
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct SqliteQueryCatalog {
     pub(crate) options: Options,
     pub(crate) binding: crate::storage::NativeReaderBinding,

@@ -182,13 +182,23 @@ pub(crate) fn publish_current_owned(
             }
             if let Some(current) = &row.trace {
                 let started = measurements.start();
-                crate::causal_trace::update_current_observation(
+                let trace_generation = crate::causal_trace::update_current_observation(
                     tx,
                     &row.key,
                     current,
                     content_generation(&prior),
                 )?;
                 measurements.record("trace_update", started, 1);
+                if let Some(trace_generation) = trace_generation {
+                    let started = measurements.start();
+                    crate::causal_trace::publish_current_query_owned(
+                        tx,
+                        row,
+                        current,
+                        &trace_generation,
+                    )?;
+                    measurements.record("query_projection_update", started, 1);
+                }
             }
             let started = measurements.start();
             tx.prepare_cached(

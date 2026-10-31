@@ -251,6 +251,24 @@ pub(crate) fn publish_owned(
     publish_record(trace_store, row, projection, record, &mut measurements)
 }
 
+/// Refresh only the mutable Query recipe projection when Current advances past
+/// an immutable History overview. The retained Trace and Query observations
+/// remain owned by their original History rows.
+pub(crate) fn publish_current_query_owned(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+    trace_generation: &str,
+) -> rusqlite::Result<()> {
+    if row.query.is_none() {
+        return Ok(());
+    }
+    let Some(query) = &projection.query else {
+        return Ok(());
+    };
+    query.publish(tx, row, trace_generation)
+}
+
 fn publication_record(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
@@ -360,7 +378,7 @@ pub(crate) fn update_current_observation(
     key: &str,
     current: &Projection,
     content_generation: String,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<Option<String>> {
     let prior: Option<(String, String)> = tx
         .query_row(
             "SELECT metadata,generation FROM session_trace_headers WHERE session_key=?1",
@@ -369,7 +387,7 @@ pub(crate) fn update_current_observation(
         )
         .optional()?;
     let Some((encoded, version)) = prior else {
-        return Ok(());
+        return Ok(None);
     };
     let mut metadata: Value = serde_json::from_str(&encoded)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
@@ -381,17 +399,19 @@ pub(crate) fn update_current_observation(
     }
     metadata["content_generation"] = json!(content_generation);
     let text = metadata.to_string();
+    let mut generation = version;
     if text != encoded {
-        let generation = format!(
+        let updated_generation = format!(
             "{:x}",
-            Sha256::digest(json!([version, metadata]).to_string().as_bytes())
+            Sha256::digest(json!([generation, metadata]).to_string().as_bytes())
         );
         tx.execute(
             "UPDATE main.session_trace_headers SET metadata=?2,generation=?3 WHERE namespace=semon_namespace() AND session_key=?1",
-            params![key, text, generation],
+            params![key, text, updated_generation],
         )?;
+        generation = updated_generation;
     }
-    Ok(())
+    Ok(Some(generation))
 }
 
 #[cfg(test)]
