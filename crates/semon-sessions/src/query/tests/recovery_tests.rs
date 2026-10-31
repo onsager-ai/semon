@@ -1426,6 +1426,111 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
 }
 
 #[test]
+fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
+    let home = Home::new("recovery-direct-history-transfer");
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(1, 0), "direct-only retained prompt"),
+            assistant("lead", ts(1, 1), vec![text("retained answer")]),
+        ],
+    );
+    publish(&home);
+
+    let args = json!({"id":"lead","after":0,"limit":10});
+    let expected = home.query().call_at("read_transcript", &args, NOW).unwrap();
+    let archive = selected_archive(&home, 0);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+
+    let current = recovery_catalog_row(&db, "session_catalog", "lead");
+    assert!(recovery_proof_snapshot(&db, "lead").is_empty());
+    let direct_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='lead' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let direct_capture = direct_capture.unwrap();
+    let before_grant = recovery_observation_grant(&db, "lead", "catalog").unwrap();
+
+    fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
+    publish(&home);
+
+    let retained = recovery_catalog_row(&db, "session_history_catalog", "lead");
+    assert_eq!(
+        retained.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    assert_eq!(retained.sources, current.sources);
+    assert_eq!(retained.query, current.query);
+    assert!(recovery_proof_snapshot(&db, "lead").is_empty());
+
+    let history_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='lead' AND owner_kind='history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(history_capture.as_deref(), Some(direct_capture.as_str()));
+    let history_grant = recovery_observation_grant(&db, "lead", "history").unwrap();
+    let mut normalized_history = retained.clone();
+    normalized_history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    assert_eq!(
+        history_grant.0,
+        crate::storage::proof_codec::digest(
+            serde_json::to_string(&normalized_history).unwrap().as_bytes()
+        )
+    );
+    assert_eq!(history_grant.1, before_grant.1);
+    assert_eq!(history_grant.2, before_grant.2);
+
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db.transaction().unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    assert!(
+        !crate::storage::sqlite::proof_generations::imported_catalog(&tx, &current_binding)
+            .unwrap()
+    );
+    let (original_binding, observations) =
+        crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+            &tx,
+            &current_binding,
+            &retained,
+        )
+        .unwrap();
+    assert_eq!(original_binding, current_binding);
+    assert_eq!(
+        observations.runtime_for(&retained).as_deref(),
+        retained.query.as_ref().unwrap()["runtime"].as_str()
+    );
+    tx.rollback().unwrap();
+
+    let mut query = Query::from_sources(admitted(home.options.clone()));
+    assert_eq!(
+        query
+            .call_selected_at(
+                "local",
+                "lead",
+                "read_transcript",
+                &args,
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+                NOW,
+            )
+            .unwrap(),
+        expected,
+        "the retained selected read must use the transferred original binding"
+    );
+}
+
+#[test]
 fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     let home = Home::new("recovery-stage-only");
     home.top(
