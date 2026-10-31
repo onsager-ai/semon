@@ -49,13 +49,24 @@ fn retirement_plan(
         .collect::<Vec<_>>();
     let prior = super::super::semantic_owners::affected(tx, expected, &paths)?;
     if encoded(&prior)? != encoded(semantic.prior_owners)? {
+        #[cfg(test)]
+        eprintln!("PG_RETIREMENT_REFUSED boundary=prior_owner_preimage");
         return Err(StorageError::Conflict);
     }
     if let Some(authority) = &semantic.lifecycle_authority {
-        if authority.0.runtime != semantic.runtime
-            || (authority.0.facts.is_none() && !semantic.retired_owners.is_empty())
-            || !super::super::current_sources::lifecycle_recorded(tx, authority.0)?
-        {
+        if authority.0.runtime != semantic.runtime {
+            #[cfg(test)]
+            eprintln!("PG_RETIREMENT_REFUSED boundary=lifecycle_runtime");
+            return Err(StorageError::Conflict);
+        }
+        if authority.0.facts.is_none() && !semantic.retired_owners.is_empty() {
+            #[cfg(test)]
+            eprintln!("PG_RETIREMENT_REFUSED boundary=retired_owner_facts_absent");
+            return Err(StorageError::Conflict);
+        }
+        if !super::super::current_sources::lifecycle_recorded(tx, authority.0)? {
+            #[cfg(test)]
+            eprintln!("PG_RETIREMENT_REFUSED boundary=lifecycle_recorded");
             return Err(StorageError::Conflict);
         }
     } else if !semantic.retired_owners.is_empty()
@@ -64,6 +75,8 @@ fn retirement_plan(
                 .iter()
                 .any(|row| row.query.is_some() || row.trace.is_some()))
     {
+        #[cfg(test)]
+        eprintln!("PG_RETIREMENT_REFUSED boundary=lifecycle_authority_missing");
         return Err(StorageError::Conflict);
     }
     let mut outgoing = Vec::new();
@@ -73,6 +86,8 @@ fn retirement_plan(
                 .iter()
                 .any(|path| source.path == std::path::Path::new(path))
         }) {
+            #[cfg(test)]
+            eprintln!("PG_RETIREMENT_REFUSED boundary=prior_source_coverage");
             return Err(StorageError::Conflict);
         }
         if rows.iter().any(|row| row.key == old.key) {
@@ -104,6 +119,8 @@ fn retirement_plan(
                     .is_none()
                         && super::super::native_reader::ledger(tx, path)?.is_some())
                 {
+                    #[cfg(test)]
+                    eprintln!("PG_RETIREMENT_REFUSED boundary=outgoing_source_removal");
                     return Err(StorageError::Conflict);
                 }
             }
@@ -111,6 +128,8 @@ fn retirement_plan(
         outgoing.push(old.clone());
     }
     if encoded(&outgoing)? != encoded(&semantic.retired_owners)? {
+        #[cfg(test)]
+        eprintln!("PG_RETIREMENT_REFUSED boundary=retired_owner_preimage");
         return Err(StorageError::Conflict);
     }
     Ok(outgoing
@@ -376,7 +395,11 @@ pub(in crate::storage::postgres) fn publish(
         expected,
         &bound,
         true,
-    )?;
+    )
+    .inspect_err(|_error| {
+        #[cfg(test)]
+        eprintln!("PG_RETIREMENT_REFUSED boundary=semantic_owner_begin error={_error:?}");
+    })?;
     let epoch = old_epoch
         .unwrap_or(0)
         .checked_add(1)
