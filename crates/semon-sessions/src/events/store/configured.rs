@@ -6104,6 +6104,27 @@ mod tests {
         let (batch, prepared) = publication_ready(&mut *store, &a.raw, "replay");
         let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
         let before = shared_state(&a);
+        let previous_observed_at: String = a
+            .db()
+            .query_row(
+                "SELECT value FROM meta WHERE namespace='source-a' AND key='catalog_observed_at'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let clock_is_pinned = cfg!(feature = "test-clock")
+            && std::env::var("SEMON_TEST_NOW")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+                .is_some();
+        if !clock_is_pinned {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert_ne!(
+                crate::model::now_ms().to_string(),
+                previous_observed_at,
+                "replay test requires a later publication clock value"
+            );
+        }
         assert_eq!(
             store.publish_semantic_catalog(&batch, &prepared).unwrap(),
             first
