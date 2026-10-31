@@ -6389,13 +6389,14 @@ mod tests {
             .unwrap();
         top.native_role = Some(serde_json::json!({"Top":{"slug":"project"}}));
         assert!(selected_roles_current(&store.connection, &[top.clone()]).unwrap());
-        store
+        let changed = store
             .connection
             .execute(
-                "UPDATE meta SET value=?1 WHERE key='cache_version'",
+                "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
                 [(CACHE_VERSION + 1).to_string()],
             )
             .unwrap();
+        assert_eq!(changed, 1);
         assert!(!selected_roles_current(&store.connection, &[top]).unwrap());
         assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), reads);
         drop(store);
