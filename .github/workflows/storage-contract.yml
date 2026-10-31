@@ -88,6 +88,21 @@ jobs:
         with:
           name: filename-owner-tests
           path: ${{ runner.temp }}/filename-owner-tests.log
+      - name: Native model identity regressions
+        id: native_model
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          cargo test --locked -p semon-sessions --lib model::tests:: -- --nocapture > "$RUNNER_TEMP/native-model-tests.log" 2>&1 || result=$?
+          cat "$RUNNER_TEMP/native-model-tests.log"
+          exit "$result"
+      - name: Retain native model identity regressions
+        if: ${{ !cancelled() && steps.native_model.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: native-model-tests
+          path: ${{ runner.temp }}/native-model-tests.log
       - name: Selected Query recipe foundation and token loader
         id: query_recipe_loader
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
