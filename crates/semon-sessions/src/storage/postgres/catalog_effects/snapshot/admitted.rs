@@ -222,7 +222,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     ) -> io::Result<crate::query_projection::SelectedRecipe> {
         self.load_query_recipe(observation)
             .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other(crate::storage::query::QueryRecipeLoadError::MissingPayload))
+            .ok_or_else(|| {
+                io::Error::other(crate::storage::query::QueryRecipeLoadError::MissingPayload)
+            })
     }
 
     fn runtime_observation(
