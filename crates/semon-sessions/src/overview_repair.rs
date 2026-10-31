@@ -1,7 +1,7 @@
 //! Bounded migration of content-free publications from original native sources.
 //! Uses the existing producer; never restores files or publishes current owners.
 use crate::{
-    Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
+    CatalogReadScope, Options, SessionSourceReadMode, SessionSourceReader, events::EventCache,
     model::summary::CatalogRow,
 };
 use rusqlite::{Connection, OptionalExtension};
@@ -377,6 +377,23 @@ fn catalog(db: &Connection, key: &str) -> io::Result<Option<CatalogRow>> {
     })
     .transpose()
 }
+// Ordinary local refresh observes Current; original-evidence callers retain
+// the History preference above. Both reads use the caller's authorized snapshot.
+fn query_catalog(
+    db: &Connection,
+    key: &str,
+    scope: CatalogReadScope,
+) -> io::Result<Option<CatalogRow>> {
+    if scope == CatalogReadScope::RetainedHistory {
+        return catalog(db, key);
+    }
+    let text = db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'",[key],|row|row.get::<_,String>(0)).optional().map_err(failure)?;
+    text.map(|text| {
+        crate::selected_read::charge(512, text.len())?;
+        serde_json::from_str(&text).map_err(failure)
+    })
+    .transpose()
+}
 fn same_catalog_metadata(left: &CatalogRow, right: &CatalogRow) -> io::Result<bool> {
     Ok(serde_json::to_value(left).map_err(failure)?
         == serde_json::to_value(right).map_err(failure)?)
@@ -436,8 +453,8 @@ struct Selection {
     rows: Vec<CatalogRow>,
     incomplete: bool,
 }
-fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
-    let target = catalog(db, key)?.ok_or_else(|| {
+fn selection(db: &Connection, key: &str, scope: CatalogReadScope) -> io::Result<Selection> {
+    let target = query_catalog(db, key, scope)?.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "Selected native query source unavailable",
@@ -475,19 +492,22 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
         }
     };
     if let Some(parent) = parent
-        && let Some(row) = catalog(db, &parent)?
+        && let Some(row) = query_catalog(db, &parent, scope)?
     {
         add(row);
     }
-    let mut related=db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related=db.prepare("SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 AND (?2 OR lifecycle='current') ORDER BY session_key LIMIT 65").map_err(failure)?;
     let mut count = 0;
     for sid in related
-        .query_map([key], |row| row.get::<_, String>(0))
+        .query_map(
+            rusqlite::params![key, scope == CatalogReadScope::RetainedHistory],
+            |row| row.get::<_, String>(0),
+        )
         .map_err(failure)?
     {
         let sid = sid.map_err(failure)?;
         count += 1;
-        if let Some(row) = catalog(db, &sid)? {
+        if let Some(row) = query_catalog(db, &sid, scope)? {
             add(row);
         }
     }
@@ -496,9 +516,9 @@ fn selection(db: &Connection, key: &str) -> io::Result<Selection> {
     Ok(selection)
 }
 
-fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
-    let mut selected = if catalog(db, key)?.is_some() {
-        selection(db, key)?
+fn query_selection(db: &Connection, key: &str, scope: CatalogReadScope) -> io::Result<Selection> {
+    let mut selected = if query_catalog(db, key, scope)?.is_some() {
+        selection(db, key, scope)?
     } else {
         // Far-end and unsent sessions have no native transcript. Resolve their
         // owner through indexed handoff endpoints, never a workspace scan.
@@ -513,7 +533,7 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
         let mut rows = BTreeMap::new();
         let mut incomplete = owners.len() == 65;
         for owner in owners.into_iter().take(64) {
-            let context = selection(db, &owner)?;
+            let context = selection(db, &owner, scope)?;
             incomplete |= context.incomplete;
             for row in context.rows {
                 rows.insert(row.key.clone(), row);
@@ -548,14 +568,17 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
     let mut pending: std::collections::BTreeSet<_> =
         selected.rows.iter().map(|row| row.key.clone()).collect();
     let mut visited = std::collections::BTreeSet::new();
-    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT session_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
-    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+    let mut related = db.prepare("SELECT endpoint FROM (SELECT parent_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND (?2 OR lifecycle='current') UNION SELECT session_key AS endpoint FROM main.session_catalog WHERE namespace=semon_namespace() AND parent_key=?1 AND (?2 OR lifecycle='current') UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.from') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 UNION SELECT CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.to') END AS endpoint FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1) WHERE endpoint IS NOT NULL ORDER BY endpoint LIMIT 65").map_err(failure)?;
+    let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 AND (?2 OR lifecycle='current') ORDER BY session_key LIMIT 65").map_err(failure)?;
     while let Some(owner) = pending.pop_first() {
         if !visited.insert(owner.clone()) {
             continue;
         }
         let mut endpoints: std::collections::BTreeSet<_> = related
-            .query_map([&owner], |row| row.get::<_, String>(0))
+            .query_map(
+                rusqlite::params![owner, scope == CatalogReadScope::RetainedHistory],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(failure)?
             .collect::<Result<_, _>>()
             .map_err(failure)?;
@@ -586,7 +609,10 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
         }
         for name in names {
             let matches = aliases
-                .query_map([name], |row| row.get::<_, String>(0))
+                .query_map(
+                    rusqlite::params![name, scope == CatalogReadScope::RetainedHistory],
+                    |row| row.get::<_, String>(0),
+                )
                 .map_err(failure)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failure)?;
@@ -603,7 +629,7 @@ fn query_selection(db: &Connection, key: &str) -> io::Result<Selection> {
             }
             // Far-end stubs have no source owner. The native producer derives
             // them from the admitted owner's recorded handoff evidence.
-            let Some(row) = catalog(db, &endpoint)? else {
+            let Some(row) = query_catalog(db, &endpoint, scope)? else {
                 continue;
             };
             let paths: std::collections::BTreeSet<_> = selected
@@ -637,7 +663,7 @@ pub fn overview_repair_sources(
 ) -> io::Result<Option<Vec<crate::SessionSourceRef>>> {
     let mut db = connection(options)?;
     let tx = transaction(&mut db, options)?;
-    let rows = selection(&tx, key)?.rows;
+    let rows = selection(&tx, key, CatalogReadScope::RetainedHistory)?.rows;
     if ready(&tx, &rows[0])? {
         return Ok(None);
     }
@@ -652,7 +678,7 @@ pub fn session_query_sources(
 ) -> io::Result<Vec<crate::SessionSourceRef>> {
     let mut db = connection(options)?;
     let tx = transaction(&mut db, options)?;
-    let selected = query_selection(&tx, key)?;
+    let selected = query_selection(&tx, key, CatalogReadScope::RetainedHistory)?;
     if selected.incomplete {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -672,13 +698,13 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
     ).map_err(failure)? {
         return Ok(None);
     }
-    let (key, selected) = match query_selection(db, key) {
+    let (key, selected) = match query_selection(db, key, CatalogReadScope::Current) {
         Ok(selected) => (key.to_owned(), selected),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             // A complete Catalog's namespace can differ from the CLI's file
             // window. Resolve original native IDs through the existing index;
             // query_selection then includes every identity collision owner.
-            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 ORDER BY session_key LIMIT 65").map_err(failure)?;
+            let mut aliases = db.prepare("SELECT DISTINCT session_key FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND native_id=?1 AND lifecycle='current' ORDER BY session_key LIMIT 65").map_err(failure)?;
             let owners = aliases
                 .query_map([key], |row| row.get::<_, String>(0))
                 .map_err(failure)?
@@ -693,7 +719,7 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
             let Some(owner) = owners.into_iter().next() else {
                 return Ok(None);
             };
-            let selected = query_selection(db, &owner)?;
+            let selected = query_selection(db, &owner, CatalogReadScope::Current)?;
             (owner, selected)
         }
         Err(error) => return Err(error),
@@ -707,8 +733,12 @@ fn local_query_selection(db: &Connection, key: &str) -> io::Result<Option<(Strin
     Ok(Some((key, selected)))
 }
 
-pub(crate) fn query_context(db: &Connection, key: &str) -> io::Result<Vec<CatalogRow>> {
-    let selected = query_selection(db, key)?;
+pub(crate) fn query_context(
+    db: &Connection,
+    key: &str,
+    scope: CatalogReadScope,
+) -> io::Result<Vec<CatalogRow>> {
+    let selected = query_selection(db, key, scope)?;
     if selected.incomplete {
         return Err(failure(
             "Selected query relationship closure exceeds its source bound",
@@ -723,6 +753,7 @@ pub(crate) fn query_window_context_current(
     db: &Connection,
     options: &Options,
     key: &str,
+    scope: CatalogReadScope,
     now: i64,
 ) -> io::Result<bool> {
     if !db.query_row(
@@ -732,7 +763,7 @@ pub(crate) fn query_window_context_current(
     ).map_err(failure)? {
         return Ok(false);
     }
-    let selected = query_selection(db, key)?;
+    let selected = query_selection(db, key, scope)?;
     if selected.incomplete {
         return Ok(false);
     }
@@ -938,7 +969,7 @@ pub fn repair_session_overview_with_control(
     }
     let mut db = connection(options)?;
     let tx = transaction(&mut db, options)?;
-    let selection = selection(&tx, key)?;
+    let selection = selection(&tx, key, CatalogReadScope::RetainedHistory)?;
     let rows = selection.rows;
     if ready(&tx, &rows[0])? {
         tx.commit().map_err(failure)?;
@@ -1482,9 +1513,11 @@ fn with_records<T>(
 
 /// Selected native Query evidence uses the same original-generation reader as
 /// Home/Trace repair. No provider or credentials escape this request.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn with_query<T>(
     options: &Options,
     key: &str,
+    scope: CatalogReadScope,
     provider: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
     now: i64,
@@ -1494,7 +1527,7 @@ pub(crate) fn with_query<T>(
     crate::selected_read::check()?;
     let mut db = connection(options)?;
     let tx = transaction(&mut db, options)?;
-    let selection = query_selection(&tx, key)?;
+    let selection = query_selection(&tx, key, scope)?;
     if selection.incomplete {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -1524,7 +1557,7 @@ pub(crate) fn with_query<T>(
     })?;
     let result = read(data);
     let tx = transaction(&mut db, options)?;
-    let current = query_selection(&tx, key)?;
+    let current = query_selection(&tx, key, scope)?;
     let footprint = |rows: &[CatalogRow]| -> BTreeMap<_, _> {
         rows.iter()
             .map(|row| (row.key.clone(), row.sources.clone()))

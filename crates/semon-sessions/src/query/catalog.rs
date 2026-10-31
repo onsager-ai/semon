@@ -137,39 +137,47 @@ impl Query {
                 }
                 continue;
             }
-            crate::overview_repair::with_query(&source.options, key, reader, mode, now, |data| {
-                let data = Arc::new(data);
-                let native_parts = self
-                    .sources
-                    .machines
-                    .iter()
-                    .enumerate()
-                    .map(|(part, (key, source))| {
-                        (
-                            key.clone(),
-                            if part == *index {
-                                data.clone()
-                            } else {
-                                Arc::new(crate::model::QueryData::identity(&source.options, now))
-                            },
-                        )
-                    })
-                    .collect();
-                let native = QueryRead::new(native_parts, usize::MAX);
-                let view = View::native(
-                    &native,
-                    now,
-                    ReadShape::Search,
-                    reader.map(|reader| (reader, mode)),
-                )?;
-                let transcript = data
-                    .tx
-                    .get(own)
-                    .ok_or_else(|| unavailable("Selected search transcript unavailable"))?;
-                let records = data.sources.reader_with_mode(reader, mode);
-                search.scan(&served, transcript, &data, &view.handoffs, &records)?;
-                records.finish().map_err(|error| QueryError::io(&error))
-            })
+            crate::overview_repair::with_query(
+                &source.options,
+                key,
+                crate::CatalogReadScope::RetainedHistory,
+                reader,
+                mode,
+                now,
+                |data| {
+                    let data = Arc::new(data);
+                    let native_parts = self
+                        .sources
+                        .machines
+                        .iter()
+                        .enumerate()
+                        .map(|(part, (key, source))| {
+                            (
+                                key.clone(),
+                                if part == *index {
+                                    data.clone()
+                                } else {
+                                    Arc::new(crate::model::QueryData::identity(&source.options, now))
+                                },
+                            )
+                        })
+                        .collect();
+                    let native = QueryRead::new(native_parts, usize::MAX);
+                    let view = View::native(
+                        &native,
+                        now,
+                        ReadShape::Search,
+                        reader.map(|reader| (reader, mode)),
+                    )?;
+                    let transcript = data
+                        .tx
+                        .get(own)
+                        .ok_or_else(|| unavailable("Selected search transcript unavailable"))?;
+                    let records = data.sources.reader_with_mode(reader, mode);
+                    search.scan(&served, transcript, &data, &view.handoffs, &records)?;
+                    records.finish().map_err(|error| QueryError::io(&error))
+                },
+            )
             .map_err(|error| QueryError::io(&error))??;
             if search.stopped() {
                 break;
