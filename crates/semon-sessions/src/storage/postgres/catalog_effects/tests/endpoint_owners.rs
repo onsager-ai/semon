@@ -151,8 +151,16 @@ fn pg_imported_current_handoff_preserves_its_proof_and_old_current_reads() {
         })
         .unwrap();
     let host = super::businessflow::body_host(&options, std::slice::from_ref(current));
-    let successor =
-        super::native_history::advance(&options, current, "imported-current-native-history");
+    // The ordinary producer retires this imported standalone source before
+    // ingesting the same native identity from its successor path.
+    let continued = advance_catalog(&config, &options);
+    assert_eq!(continued.len(), 1);
+    assert_eq!(continued[0].key, current.key);
+    assert_ne!(continued[0].sources, current.sources);
+    let successor = crate::events::EventCache::open_configured(&config)
+        .unwrap()
+        .session_catalog_generation()
+        .unwrap();
     snapshot::with_generation(&pool, namespace, &control, &successor, |snapshot| {
         let history = snapshot.catalog(&current.key, true)?.unwrap();
         assert_eq!(history.sources, current.sources);
