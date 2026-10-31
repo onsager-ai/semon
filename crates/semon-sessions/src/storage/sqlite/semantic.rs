@@ -1938,8 +1938,12 @@ impl Stage {
             .expected_stream_epoch
             .as_deref()
             .ok_or_else(|| refuse("semantic_stream_epoch"))?;
-        for row in &prepared.rows {
-            super::proof_generations::clear_native_catalog_observation_capture(
+        for row in prepared
+            .rows
+            .iter()
+            .chain(prepared.relationships.retired_owners.iter())
+        {
+            super::proof_generations::clear_native_observation_captures_owned_by_proofs(
                 &tx,
                 ns,
                 &row.key,
