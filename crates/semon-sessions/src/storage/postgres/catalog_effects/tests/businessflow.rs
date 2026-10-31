@@ -7165,12 +7165,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // owner, while both source identities and their original proof tuples stay
     // attached to physical History.
     let composite_a = composite_a_path.to_str().unwrap().to_owned();
-    let composite_a_removal = vec![(
-        composite_a.clone(),
-        store.ledger(&composite_a).unwrap(),
-    )];
-    fs::rename(&composite_a_path, oracle.root.join("retained-fresh-composite-a.jsonl"))
-        .unwrap();
+    let composite_a_removal = vec![(composite_a.clone(), store.ledger(&composite_a).unwrap())];
+    fs::rename(
+        &composite_a_path,
+        oracle.root.join("retained-fresh-composite-a.jsonl"),
+    )
+    .unwrap();
     assert_eq!(
         store.remove_files(&composite_a_removal).unwrap(),
         crate::events::Outcome::Written
@@ -7209,7 +7209,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
         assert_eq!(ack.1, None);
         final_deferrals += 1;
-        assert!(final_deferrals < 64, "Source A custody makes bounded progress");
+        assert!(
+            final_deferrals < 64,
+            "Source A custody makes bounded progress"
+        );
     };
     assert_eq!(final_ack.0, crate::events::Outcome::Written);
     final_catchup
@@ -7241,9 +7244,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 assert!(physical.sources.contains(&composite_current_source));
                 assert!(physical.sources.contains(&composite_withdrawn_source));
                 assert_eq!(physical.sources.len(), 2);
-                assert!(snapshot
-                    .history_qualified(&physical)
-                    .map_err(|_| StorageError::ScopeChanged)?);
+                assert!(
+                    snapshot
+                        .history_qualified(&physical)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                );
                 snapshot::query::qualify_context_candidate(
                     snapshot,
                     &facts_options,
@@ -7265,11 +7270,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let (source_a_proof, source_b_proof) = {
                     let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
                     (
-                        native_proof_tuple(
-                            &mut tx,
-                            &final_generation,
-                            &composite_current_source,
-                        )?,
+                        native_proof_tuple(&mut tx, &final_generation, &composite_current_source)?,
                         native_proof_tuple(
                             &mut tx,
                             &final_generation,
