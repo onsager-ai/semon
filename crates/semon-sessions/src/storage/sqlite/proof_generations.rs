@@ -545,6 +545,50 @@ pub(crate) fn observation_binding(
     }
     let current_digest = proof_codec::digest(current_metadata.as_bytes());
     let retained_digest = proof_codec::digest(retained_metadata.as_bytes());
+    if crate::native_timing::enabled() {
+        // Observe at most the two owner slots after ordinary authority missed.
+        // This diagnostic never supplies authority or changes its outcome.
+        let slots = db
+            .prepare(
+                "SELECT owner_kind='catalog',metadata_digest IN (?3,?4),admission=?5,stream=?6 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 ORDER BY owner_kind LIMIT 2",
+            )
+            .and_then(|mut statement| {
+                let slots = statement.query_map(
+                    params![
+                        ns,
+                        selected.key,
+                        current_digest,
+                        retained_digest,
+                        admission,
+                        current.stream_epoch
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, bool>(0)?,
+                            row.get::<_, bool>(1)?,
+                            row.get::<_, bool>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )?;
+                slots.collect::<rusqlite::Result<Vec<_>>>()
+            });
+        match slots {
+            Ok(slots) => {
+                for (catalog, owner) in [(true, "catalog"), (false, "history")] {
+                    let slot = slots.iter().find(|slot| slot.0 == catalog);
+                    let present = slot.is_some();
+                    let digest_match = slot.is_some_and(|slot| slot.1);
+                    let admission_match = slot.is_some_and(|slot| slot.2);
+                    let stream_match = slot.is_some_and(|slot| slot.3);
+                    eprintln!("semon sessions native: observation_direct_grant_miss owner={owner} present={present} digest_match={digest_match} admission_match={admission_match} stream_match={stream_match}");
+                }
+            }
+            Err(_) => {
+                eprintln!("semon sessions native: observation_direct_grant_diagnostic=unavailable");
+            }
+        }
+    }
     // Stage grants hash the exact metadata and bind its admission/stream. The
     // joined immutable presentation root is checked below against g.metadata.
     let mut statement = db
@@ -630,8 +674,16 @@ pub(crate) fn observation_binding(
     let (record, base, manifest, presentation, granted) = values
         .into_iter()
         .next()
-        .ok_or(StorageError::ScopeChanged)?;
+        .ok_or(StorageError::ScopeChanged)
+        .inspect_err(|_| {
+            if crate::native_timing::enabled() {
+                eprintln!("semon sessions native: observation_stage_refused boundary=candidate_absent");
+            }
+        })?;
     if !granted {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: observation_stage_refused boundary=grant_mismatch");
+        }
         return Err(StorageError::ScopeChanged);
     }
     crate::selected_read::charge(
