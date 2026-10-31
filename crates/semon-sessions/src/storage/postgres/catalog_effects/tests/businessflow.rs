@@ -1168,25 +1168,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let pid_bytes = serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
     let parent_before_withdrawal = fs::read(&claude_parent).unwrap();
-    let mut parent = fs::OpenOptions::new()
-        .append(true)
-        .open(&claude_parent)
-        .unwrap();
-    parent.write_all(source_append.as_bytes()).unwrap();
-    parent.write_all(facts_append.as_bytes()).unwrap();
-    drop(parent);
-    let oracle_pid = options.claude_home.join("sessions/4242.json");
-    fs::create_dir_all(oracle_pid.parent().unwrap()).unwrap();
-    fs::write(&oracle_pid, &pid_bytes).unwrap();
-    let oracle_facts = oracle.root.join("withdrawal-facts.json");
-    let mut withdrawal_facts = crate::Facts {
-        version: 2,
-        hostname: "source-write-after158".into(),
-        ..Default::default()
-    };
-    withdrawal_facts.proc_starts.insert(4242, 1234);
-    crate::write_facts(&oracle_facts, &withdrawal_facts, &options.source).unwrap();
-    withdraw_options.facts = Some(oracle_facts);
     let refresh = |options: &Options| {
         // Query's private listing completion does not finish Catalog/search
         // publication. Run the ordinary observer to completion before saving
@@ -1225,7 +1206,152 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         drop(work);
         listing
     };
-    let before_withdrawal = refresh(&withdraw_options)["total"].as_u64().unwrap();
+
+    // Give SQLite the same original `one` owner that PostgreSQL published
+    // before its continuation. The retained History recipe after the append
+    // must still name this exact source prefix.
+    let parent_relative = claude_parent
+        .strip_prefix(&options.claude_home)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let parent_source = |identity: &crate::CatalogSessionIdentity| {
+        identity
+            .source_refs
+            .iter()
+            .find(|reference| {
+                reference.source.root == "claude" && reference.source.path == parent_relative
+            })
+            .expect("Claude parent source in Catalog identity")
+            .source
+            .clone()
+    };
+    let source_paths = |identity: &crate::CatalogSessionIdentity| {
+        identity
+            .source_refs
+            .iter()
+            .map(|reference| {
+                (
+                    reference.source.root.clone(),
+                    reference.source.path.clone(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let composite_a_relative = composite_a_path
+        .strip_prefix(&options.claude_home)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let composite_b_relative = composite_b_path
+        .strip_prefix(&options.claude_home)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let original_listing = refresh(&withdraw_options);
+    assert!(original_listing["total"].as_u64().unwrap() > 0);
+    let original_parent_current = crate::session_catalog_identity(
+        &withdraw_options,
+        recent_machine,
+        "one",
+    )
+    .unwrap()
+    .expect("SQLite original parent Current identity");
+    assert_eq!(
+        original_parent_current.read_scope,
+        crate::CatalogReadScope::Current
+    );
+    let original_parent_history = crate::session_catalog_history_identity(
+        &withdraw_options,
+        recent_machine,
+        "one",
+    )
+    .unwrap()
+    .expect("SQLite original parent retained identity");
+    assert_eq!(
+        original_parent_history.read_scope,
+        crate::CatalogReadScope::RetainedHistory
+    );
+    let original_parent_source = parent_source(&original_parent_current);
+    assert_eq!(parent_source(&original_parent_history), original_parent_source);
+    assert_eq!(
+        original_parent_source.offset,
+        parent_before_withdrawal.len() as u64,
+        "SQLite original owner captures the complete precontinuation parent prefix"
+    );
+
+    let mut parent = fs::OpenOptions::new()
+        .append(true)
+        .open(&claude_parent)
+        .unwrap();
+    parent.write_all(source_append.as_bytes()).unwrap();
+    parent.write_all(facts_append.as_bytes()).unwrap();
+    drop(parent);
+    let oracle_pid = options.claude_home.join("sessions/4242.json");
+    fs::create_dir_all(oracle_pid.parent().unwrap()).unwrap();
+    fs::write(&oracle_pid, &pid_bytes).unwrap();
+    let oracle_facts = oracle.root.join("withdrawal-facts.json");
+    let mut withdrawal_facts = crate::Facts {
+        version: 2,
+        hostname: "source-write-after158".into(),
+        ..Default::default()
+    };
+    withdrawal_facts.proc_starts.insert(4242, 1234);
+    crate::write_facts(&oracle_facts, &withdrawal_facts, &options.source).unwrap();
+    withdraw_options.facts = Some(oracle_facts);
+    let continued_listing = refresh(&withdraw_options);
+    let continued_parent_current = crate::session_catalog_identity(
+        &withdraw_options,
+        recent_machine,
+        "one",
+    )
+    .unwrap()
+    .expect("SQLite continued parent Current identity");
+    assert_eq!(
+        continued_parent_current.read_scope,
+        crate::CatalogReadScope::Current
+    );
+    let continued_parent_source = parent_source(&continued_parent_current);
+    assert_eq!(
+        continued_parent_source.offset,
+        original_parent_source.offset + (source_append.len() + facts_append.len()) as u64,
+        "SQLite Current consumes both parent continuations"
+    );
+    let continued_parent_history = crate::session_catalog_history_identity(
+        &withdraw_options,
+        recent_machine,
+        "one",
+    )
+    .unwrap()
+    .expect("SQLite continued parent retained identity");
+    assert_eq!(
+        parent_source(&continued_parent_history),
+        original_parent_source,
+        "SQLite History preserves the original parent source prefix"
+    );
+    let composite_before_withdrawal = crate::session_catalog_identity(
+        &withdraw_options,
+        recent_machine,
+        composite_key,
+    )
+    .unwrap()
+    .expect("SQLite prewithdrawal composite Current identity");
+    assert_eq!(
+        composite_before_withdrawal.read_scope,
+        crate::CatalogReadScope::Current
+    );
+    assert_eq!(
+        source_paths(&composite_before_withdrawal),
+        std::collections::BTreeSet::from([
+            ("claude".into(), composite_a_relative.clone()),
+            ("claude".into(), composite_b_relative.clone()),
+        ]),
+        "SQLite original composite Current owner contains Sources A and B"
+    );
+    let before_withdrawal = continued_listing["total"].as_u64().unwrap();
     let sqlite_before_current = page_keys(crate::catalog::session_catalog_page(
         &withdraw_options,
         recent_machine,
@@ -1254,6 +1380,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             claude_agent191.clone(),
             oracle.root.join("parked-agent191.jsonl"),
         ),
+        (
+            composite_b_path.clone(),
+            oracle.root.join("parked-fresh-composite-b.jsonl"),
+        ),
     ];
     for (from, to) in &parked {
         fs::rename(from, to).unwrap();
@@ -1262,6 +1392,54 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(
         after_withdrawal < before_withdrawal,
         "SQLite withdrawal {before_withdrawal} -> {after_withdrawal}"
+    );
+    let composite_after_withdrawal = crate::session_catalog_identity(
+        &withdraw_options,
+        recent_machine,
+        composite_key,
+    )
+    .unwrap()
+    .expect("SQLite postwithdrawal composite Current identity");
+    assert_eq!(
+        composite_after_withdrawal.read_scope,
+        crate::CatalogReadScope::Current
+    );
+    assert_eq!(
+        source_paths(&composite_after_withdrawal),
+        std::collections::BTreeSet::from([("claude".into(), composite_a_relative.clone())]),
+        "SQLite Current retains Source A"
+    );
+    let composite_history_after_withdrawal = crate::session_catalog_history_identity(
+        &withdraw_options,
+        recent_machine,
+        composite_key,
+    )
+    .unwrap()
+    .expect("SQLite postwithdrawal composite History identity");
+    assert_eq!(
+        composite_history_after_withdrawal.read_scope,
+        crate::CatalogReadScope::RetainedHistory
+    );
+    assert_eq!(
+        source_paths(&composite_history_after_withdrawal),
+        std::collections::BTreeSet::from([("claude".into(), composite_b_relative)]),
+        "SQLite History retains only withdrawn Source B"
+    );
+    let parent_history_after_withdrawal = crate::session_catalog_history_identity(
+        &withdraw_options,
+        recent_machine,
+        "one",
+    )
+    .unwrap()
+    .expect("SQLite postwithdrawal parent History identity");
+    assert_eq!(
+        parent_history_after_withdrawal.read_scope,
+        crate::CatalogReadScope::RetainedHistory
+    );
+    assert_eq!(
+        parent_source(&parent_history_after_withdrawal),
+        original_parent_source,
+        "SQLite parent History still points to its original precontinuation source"
     );
     let sqlite_scoped = |scope: &str, limit: usize| {
         let mut items = Vec::new();
@@ -1299,6 +1477,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(sqlite_parent_exact.status, 200);
     let sqlite_parent_exact: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
+    assert_eq!(
+        sqlite_parent_exact["items"][0]["lifecycle"], "retained",
+        "exact parent History selects the original retained owner"
+    );
     let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
         &withdraw_options,
         recent_machine,
@@ -1321,6 +1503,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .map(|item| item["key"].as_str().unwrap().to_owned())
         .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        sqlite_current.contains("one"),
+        "withdrawn subagent Sources do not withdraw the connected parent"
+    );
     let oracle_withdrawn = sqlite_retained
         .iter()
         .filter(|item| !sqlite_current.contains(item["key"].as_str().unwrap()))
