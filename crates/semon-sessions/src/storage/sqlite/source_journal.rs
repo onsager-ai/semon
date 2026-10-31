@@ -433,6 +433,13 @@ impl SourceJournal {
         })
     }
 
+    fn record_committed_changes(db: &Connection, before: i64) {
+        let delta = db.total_changes().saturating_sub(before as u64);
+        crate::native_timing::discovery_count(|counts| {
+            counts.committed_changes = counts.committed_changes.saturating_add(delta);
+        });
+    }
+
     #[cfg(test)]
     pub(crate) fn connection_for_test(
         &self,
@@ -481,7 +488,7 @@ impl SourceJournal {
         if actual.as_deref() != Some(expected.trim_end_matches(';')) {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let valid: bool = tx.query_row("SELECT qualification=?2 AND revision>=coalesce((SELECT max(revision) FROM main.session_catalog_invalidations WHERE namespace=?1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1", params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
+        let valid: bool = tx.query_row("SELECT qualification=?2 AND revision>=coalesce((SELECT revision FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision DESC LIMIT 1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1", params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
         if !valid {
             return Err(StorageError::NamespaceUpgradePending);
         }
@@ -540,10 +547,10 @@ impl SourceObservationStore for SourceJournal {
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
             return Ok(true);
         }
-        if cached.as_ref().is_none_or(|witness| {
-            witness.stamp.schema_version != current.schema_version
-                || witness.stamp.rollback_clock != current.rollback_clock
-        }) {
+        if cached
+            .as_ref()
+            .is_none_or(|witness| witness.stamp != current)
+        {
             self.validate_journal_layout(&db)?;
         }
         // EventCache reconciles durable intents before asking for this owner
@@ -589,10 +596,6 @@ impl SourceObservationStore for SourceJournal {
         let db = connection.transaction().map_err(failed)?;
         self.validate(&db)?;
         let current = self.stamp(&db)?;
-        let schema_changed = cached.as_ref().is_some_and(|witness| {
-            witness.stamp.schema_version != current.schema_version
-                || witness.stamp.rollback_clock != current.rollback_clock
-        });
         if matching_request
             && cached
                 .as_ref()
@@ -604,7 +607,10 @@ impl SourceObservationStore for SourceJournal {
             crate::native_timing::discovery_count(|counts| counts.skipped += 1);
             return Ok(true);
         }
-        if cached.is_none() || schema_changed {
+        if cached
+            .as_ref()
+            .is_none_or(|witness| witness.stamp != current)
+        {
             self.validate_journal_layout(&db)?;
         }
         db.commit().map_err(failed)?;
@@ -660,6 +666,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
+        self.validate_journal_layout(&tx)?;
         let before = self.stamp(&tx)?;
         if let Some((receipt, done)) = recovery_receipt(&tx, namespace, operation)? {
             let terminal: bool = tx.query_row(
@@ -669,6 +676,8 @@ impl SourceObservationStore for SourceJournal {
             if terminal {
                 acknowledge_intent_sql(&tx, namespace, operation)?;
             }
+            self.validate(&tx)?;
+            self.validate_journal_layout(&tx)?;
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             self.recovery_witness = None;
             return Ok((receipt, done));
@@ -697,10 +706,23 @@ impl SourceObservationStore for SourceJournal {
         crate::events::store::configured::effect("recovery_receipt").map_err(failed)?;
         insert_recovery_receipt(&tx, namespace, operation, applied, done)?;
         acknowledge_intent_sql(&tx, namespace, operation)?;
+        crate::native_timing::discovery_count(|counts| counts.statements += 1);
+        let recovery_pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_recovery_after')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        self.validate(&tx)?;
+        self.validate_journal_layout(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        if applied {
+            Self::record_committed_changes(&db, before.total_changes);
+        }
         let after = self.stamp(&db)?;
         drop(db);
-        if done && before.same_external_state(after) {
+        if done && !recovery_pending && before.same_external_state(after) {
             self.recovery_witness = Some(RecoveryWitness {
                 stamp: after,
             });
@@ -738,11 +760,17 @@ impl SourceObservationStore for SourceJournal {
             .map_err(failed)?;
         self.validate(&tx)?;
         let before = self.stamp(&tx)?;
-        persist_intent_sql(&tx, self.namespace(), intent)?;
-        let recovery_pending = if old_recovery
+        let advance_recovery = old_recovery
             .as_ref()
-            .is_some_and(|witness| witness.stamp == before)
-        {
+            .is_some_and(|witness| witness.stamp == before);
+        let advance_discovery = old_discovery
+            .as_ref()
+            .is_some_and(|witness| witness.stamp == before);
+        if advance_recovery || advance_discovery {
+            self.validate_journal_layout(&tx)?;
+        }
+        persist_intent_sql(&tx, self.namespace(), intent)?;
+        let recovery_pending = if advance_recovery {
             crate::native_timing::discovery_count(|counts| counts.statements += 1);
             Some(
                 tx.query_row(
@@ -755,6 +783,10 @@ impl SourceObservationStore for SourceJournal {
         } else {
             None
         };
+        if advance_recovery || advance_discovery {
+            self.validate(&tx)?;
+            self.validate_journal_layout(&tx)?;
+        }
         let after = self.stamp(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         drop(db);
@@ -797,11 +829,17 @@ impl SourceObservationStore for SourceJournal {
             .map_err(failed)?;
         self.validate(&tx)?;
         let before = self.stamp(&tx)?;
-        acknowledge_intent_sql(&tx, self.namespace(), operation)?;
-        let recovery_pending = if old_recovery
+        let advance_recovery = old_recovery
             .as_ref()
-            .is_some_and(|witness| witness.stamp == before)
-        {
+            .is_some_and(|witness| witness.stamp == before);
+        let advance_discovery = old_discovery.as_ref().is_some_and(|witness| {
+            witness.stamp == before && &witness.operation == operation
+        });
+        if advance_recovery || advance_discovery {
+            self.validate_journal_layout(&tx)?;
+        }
+        acknowledge_intent_sql(&tx, self.namespace(), operation)?;
+        let recovery_pending = if advance_recovery {
             crate::native_timing::discovery_count(|counts| counts.statements += 1);
             Some(
                 tx.query_row(
@@ -814,6 +852,10 @@ impl SourceObservationStore for SourceJournal {
         } else {
             None
         };
+        if advance_recovery || advance_discovery {
+            self.validate(&tx)?;
+            self.validate_journal_layout(&tx)?;
+        }
         let after = self.stamp(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         drop(db);
@@ -863,6 +905,7 @@ impl SourceObservationStore for SourceJournal {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(failed)?;
         self.validate(&tx)?;
+        self.validate_journal_layout(&tx)?;
         let before = self.stamp(&tx)?;
         if let Some(receipt) = stored_receipt(&tx, expected_namespace, operation)? {
             return Ok(receipt);
@@ -878,8 +921,11 @@ impl SourceObservationStore for SourceJournal {
                 |row| row.get(0),
             )
             .map_err(failed)?;
+        self.validate(&tx)?;
+        self.validate_journal_layout(&tx)?;
         let after = self.stamp(&tx)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Self::record_committed_changes(&db, before.total_changes);
         drop(db);
         if before.same_external_state(after) {
             self.recovery_witness = None;
