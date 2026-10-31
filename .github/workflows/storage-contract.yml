@@ -506,6 +506,13 @@ jobs:
       - name: SQLite adapter and reusable metadata conformance
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
+          semantic_parity_log="$RUNNER_TEMP/catalog-semantic-parity.log"
+          SEMON_TEST_NOW=1790294400000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::tests::catalog_commit_boundaries_match_real_semantic_publication -- --ignored --exact --nocapture 2>&1 | tee "$semantic_parity_log"
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$semantic_parity_log"; then
+            echo "semantic proof parity command did not report exactly one passing test"
+            exit 1
+          fi
+          cargo test --locked -p semon-sessions --lib events::store::tests::catalog_original_transfer_progresses_across_restart_and_unrelated_publication -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib reported_rows -- --nocapture
