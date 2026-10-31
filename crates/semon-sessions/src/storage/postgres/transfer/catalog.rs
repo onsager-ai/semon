@@ -620,7 +620,7 @@ mod tests {
         let current_recipe = "{ \"recipe\" : \"current-é\" }\n".to_owned();
         let history_recipe = "{\n  \"recipe\": \"history-漢字\"\n}\t".to_owned();
         let current_proof_recipe = "{ \"proof\": \"current-é\" }".to_owned();
-        let history_proof_recipe = "{\"proof\" : \"history-漢字\"}".to_owned();
+        let mut history_proof_recipe = "{\"proof\" : \"history-漢字\"}".to_owned();
         let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
         let namespace = source.namespace.as_str();
         db.execute(
@@ -647,6 +647,9 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        if current_proof_id == history_proof_id {
+            history_proof_recipe = current_proof_recipe.clone();
+        }
         db.execute_batch("DROP TRIGGER storage_proof_generation_immutable")
             .unwrap();
         db.execute(
@@ -954,9 +957,9 @@ mod tests {
             assert_eq!(current_recipe_pg.as_deref(), Some(current_recipe.as_bytes()));
             let history_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&initial[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
             assert_eq!(history_recipe_pg.as_deref(), Some(history_recipe.as_bytes()));
-            let current_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            let current_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT g.query_recipe FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.session_key=$2 AND f.kind=convert_to('current','UTF8') AND g.query_recipe IS NOT NULL LIMIT 1", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
             assert_eq!(current_proof_recipe_pg.as_deref(), Some(current_proof_recipe.as_bytes()));
-            let history_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&initial[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            let history_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT g.query_recipe FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.session_key=$2 AND f.kind=convert_to('history','UTF8') AND g.query_recipe IS NOT NULL LIMIT 1", &[&ns,&initial[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
             assert_eq!(history_proof_recipe_pg.as_deref(), Some(history_proof_recipe.as_bytes()));
             Ok(())
         }).unwrap();
@@ -1289,14 +1292,14 @@ mod tests {
         let current_recipe_reversed: Option<String> = reverse_db
             .query_row(
                 "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
-                rusqlite::params![reverse.namespace.as_str(), expected[0].key],
+                rusqlite::params![reverse.namespace.as_str(), expected[0].key.as_str()],
                 |row| row.get(0),
             )
             .unwrap();
         let history_recipe_reversed: Option<String> = reverse_db
             .query_row(
                 "SELECT query_recipe FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
-                rusqlite::params![reverse.namespace.as_str(), initial[0].key],
+                rusqlite::params![reverse.namespace.as_str(), initial[0].key.as_str()],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1304,15 +1307,15 @@ mod tests {
         assert_eq!(history_recipe_reversed.as_deref(), Some(history_recipe.as_str()));
         let current_proof_recipe_reversed: Option<String> = reverse_db
             .query_row(
-                "SELECT query_recipe FROM storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND query_recipe IS NOT NULL LIMIT 1",
-                rusqlite::params![reverse.namespace.as_str(), expected[0].key],
+                "SELECT g.query_recipe FROM storage_proof_refs f JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.query_recipe IS NOT NULL LIMIT 1",
+                rusqlite::params![reverse.namespace.as_str(), expected[0].key.as_str()],
                 |row| row.get(0),
             )
             .unwrap();
         let history_proof_recipe_reversed: Option<String> = reverse_db
             .query_row(
-                "SELECT query_recipe FROM storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND query_recipe IS NOT NULL LIMIT 1",
-                rusqlite::params![reverse.namespace.as_str(), initial[0].key],
+                "SELECT g.query_recipe FROM storage_proof_refs f JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='history' AND g.query_recipe IS NOT NULL LIMIT 1",
+                rusqlite::params![reverse.namespace.as_str(), initial[0].key.as_str()],
                 |row| row.get(0),
             )
             .unwrap();
