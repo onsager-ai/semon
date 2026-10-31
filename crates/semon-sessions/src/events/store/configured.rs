@@ -3722,7 +3722,23 @@ mod tests {
         crate::model::relation_stage::Batch,
         crate::model::SemanticModelBatch,
     ) {
-        let paths = vec![input.full_path(options).to_string_lossy().into_owned()];
+        model_ready_many(fixture, cache, options, std::slice::from_ref(input), runtime)
+    }
+
+    fn model_ready_many(
+        fixture: &Fixture,
+        cache: &mut EventCache,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+        runtime: &str,
+    ) -> (
+        crate::model::relation_stage::Batch,
+        crate::model::SemanticModelBatch,
+    ) {
+        let paths = inputs
+            .iter()
+            .map(|input| input.full_path(options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
         assert_eq!(
             cache
                 .begin_semantic_stage_with_journal(&paths, runtime, true)
@@ -3739,7 +3755,7 @@ mod tests {
                 let prepared = crate::model::prepare_semantic_batch(
                     options,
                     cache,
-                    std::slice::from_ref(input),
+                    inputs,
                     &batch,
                     1_790_000_000_000,
                 )
@@ -3762,7 +3778,7 @@ mod tests {
             let model = cache
                 .prepare_semantic_model_batch(
                     options,
-                    std::slice::from_ref(input),
+                    inputs,
                     &batch,
                     1_790_000_000_000,
                 )
@@ -4357,7 +4373,34 @@ mod tests {
             part.rows[&query_row.key], expected,
             "ordinary Query port reads exact persisted facts"
         );
+        let current_content_generation: Option<String> = db
+            .query_row(
+                "SELECT json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), query_row.key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap()
+            .flatten();
+        let current_projection_generation: Option<String> = db
+            .query_row(
+                "SELECT generation FROM session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                params![config.namespace.as_str(), query_row.key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        if let (Some(content), Some(projection)) = (
+            current_content_generation.as_ref(),
+            current_projection_generation.as_ref(),
+        ) {
+            assert_ne!(content, projection, "Home content and slot projection generations are distinct");
+        }
         if query_row.lifecycle == crate::model::summary::CatalogLifecycle::Retained {
+            assert!(part.witnesses.iter().any(|(key, _, history)| {
+                key == &query_row.key && *history
+            }), "all-time retained Query uses its selected History source");
+            assert!(!part.content.contains_key(&query_row.key), "History has no overview content hint without its saved summary");
             let summary = &part.rows[&query_row.key]["summary"];
             assert!(
                 summary["alive"].is_null(),
@@ -4372,6 +4415,8 @@ mod tests {
                 summary["state"].as_str(),
                 Some("working" | "waiting-question")
             ));
+        } else if let Some(content) = current_content_generation {
+            assert_eq!(part.content.get(&query_row.key), Some(&content));
         }
         for row in &prepared.rows {
             let trace = row.trace.as_ref().expect("real model trace");
@@ -4775,16 +4820,49 @@ mod tests {
         let path = inputs[1].full_path(&options[1]);
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"replacement\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"continued Claude replacement\"}}}}").unwrap();
+        writeln!(raw, "{{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"spawn-peer\",\"parentUuid\":\"replacement\",\"timestamp\":\"2026-10-01T00:03:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu-peer\",\"name\":\"Task\",\"input\":{{\"description\":\"new peer\",\"subagent_type\":\"general-purpose\"}}}}]}}}}").unwrap();
         drop(raw);
+        let peer_input = crate::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/sanitized/model-1/subagents/agent-peer.jsonl".into(),
+        };
+        let peer_path = peer_input.full_path(&options[1]);
+        fs::create_dir_all(peer_path.parent().unwrap()).unwrap();
+        fs::write(
+            &peer_path,
+            "{\"type\":\"user\",\"sessionId\":\"model-1\",\"agentId\":\"peer\",\"isSidechain\":true,\"uuid\":\"peer-user\",\"timestamp\":\"2026-10-01T00:04:00Z\",\"message\":{\"role\":\"user\",\"content\":\"new peer prompt\"}}\n",
+        )
+        .unwrap();
+        fs::write(
+            peer_path.with_extension("meta.json"),
+            "{\"toolUseId\":\"toolu-peer\",\"description\":\"new peer\",\"agentType\":\"general-purpose\"}",
+        )
+        .unwrap();
         caches[1].ingest(&"b".repeat(64), &path, "claude").unwrap();
+        caches[1]
+            .ingest(&"b".repeat(64), &peer_path, "claude")
+            .unwrap();
+        let mut replacement_inputs = vec![inputs[1].clone(), peer_input.clone()];
+        replacement_inputs.sort();
         let mut stale = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap(),
         )
         .unwrap();
-        let (old_batch, old_model) =
-            model_ready(&a, &mut stale, &options[1], &inputs[1], "old-model");
+        let (old_batch, old_model) = model_ready_many(
+            &a,
+            &mut stale,
+            &options[1],
+            &replacement_inputs,
+            "old-model",
+        );
         let old_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
-        let (batch, model) = model_ready(&a, &mut caches[1], &options[1], &inputs[1], "old-model");
+        let (batch, model) = model_ready_many(
+            &a,
+            &mut caches[1],
+            &options[1],
+            &replacement_inputs,
+            "old-model",
+        );
         assert!(batch.epoch > old_batch.epoch);
         let new_witness: (String, String, String) = a.db().query_row("SELECT metadata,projections,claims FROM storage_semantic_model_batches WHERE namespace='source-b'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert_eq!(
@@ -4843,6 +4921,20 @@ mod tests {
             .find(|row| row.key == expected.key)
             .cloned()
             .expect("replacement Current row");
+        let peer = model
+            .prepared()
+            .rows
+            .iter()
+            .find(|row| row.key != expected.key)
+            .expect("appended Claude subagent peer");
+        assert!(current.query.as_ref().unwrap()["selected"]["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| {
+                (edge["query"]["from"] == expected.key && edge["query"]["to"] == peer.key)
+                    || (edge["query"]["to"] == expected.key && edge["query"]["from"] == peer.key)
+            }), "the appended Current graph records its new peer");
         let retained_source_generation =
             crate::retention::source_generation(&expected.sources).unwrap();
         let current_source_generation =
@@ -4912,6 +5004,10 @@ mod tests {
             finite_part.rows[&current.key], current_facts,
             "a finite cutoff selects Current when only Current is recent"
         );
+        assert!(finite_part.rows.contains_key(&peer.key), "Current relationship context includes its new peer");
+        assert!(finite_part.witnesses.iter().any(|(key, _, history)| {
+            key == &current.key && !history
+        }), "finite selection binds the recent Current Query facts");
         finite_port.validate(&b.namespace, &finite_part).unwrap();
 
         let facts_path = options[1].facts.as_ref().unwrap();

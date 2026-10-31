@@ -5,7 +5,7 @@ use crate::{
     Options, QueryError,
     storage::{
         catalog::CatalogSnapshot,
-        query::{Part, QueryCatalogStore},
+        query::{Part, QueryCatalogStore, edge_timed, history_window, turn_kept},
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -100,112 +100,29 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
 
-fn edge_timed(edge: &serde_json::Value, cutoff: i64) -> bool {
-    edge["at"].as_i64().is_some_and(|at| at >= cutoff)
-        || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
-        || edge["status"]
-            .as_str()
-            .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
-}
-
-fn turn_kept(turn: &serde_json::Value, cutoff: i64, timed_edges: &BTreeSet<String>) -> bool {
-    turn["last"] == serde_json::json!(true)
-        || turn["last"] == serde_json::json!(1)
-        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
-        || turn["start"]
-            .as_str()
-            .is_some_and(|id| timed_edges.contains(id))
-}
-
 fn retained_window(
     row: &crate::model::summary::CatalogRow,
     generation: &str,
     cutoff: i64,
 ) -> Result<(Part, bool), StorageError> {
-    let saved = row
-        .query
-        .as_ref()
-        .ok_or_else(|| cohort_scope_changed("retained_query_missing"))?;
-    let selected = &saved["selected"];
-    let edges = selected["edges"]
-        .as_array()
-        .ok_or_else(|| cohort_scope_changed("retained_query_edges_missing"))?;
-    let turns = selected["turns"]
-        .as_array()
-        .ok_or_else(|| cohort_scope_changed("retained_query_turns_missing"))?;
-    let mut timed_edges = BTreeSet::new();
-    for recipe in edges {
-        let id = recipe["id"]
-            .as_str()
-            .ok_or_else(|| cohort_scope_changed("retained_query_edge_id_missing"))?;
-        if edge_timed(&recipe["query"], cutoff) {
-            timed_edges.insert(id.to_owned());
-        }
-    }
-    // An old last turn keeps its links only after the owner qualifies for the
-    // window; the turn alone cannot revive an expired retained owner.
-    let member = saved["last"].as_i64().is_some_and(|last| last >= cutoff)
-        || matches!(saved["state"].as_str(), Some("work" | "wait"))
-        || !timed_edges.is_empty();
-    let mut kept_turns = BTreeSet::new();
-    let mut kept_edges = timed_edges.clone();
-    for recipe in turns.iter().filter(|_| member) {
-        let turn = &recipe["query"];
-        if !turn_kept(turn, cutoff, &timed_edges) {
-            continue;
-        }
-        let id = recipe["id"]
-            .as_str()
-            .ok_or_else(|| cohort_scope_changed("retained_query_turn_id_missing"))?;
-        kept_turns.insert(id.to_owned());
-        if let Some(id) = turn["start"].as_str() {
-            kept_edges.insert(id.to_owned());
-        }
-        if let Some(sent) = turn["sent"].as_array() {
-            kept_edges.extend(sent.iter().filter_map(|id| id.as_str().map(str::to_owned)));
-        }
-    }
-    let mut rows = BTreeMap::new();
-    if member {
-        let summaries = saved["rows"]
-            .as_object()
-            .ok_or_else(|| cohort_scope_changed("retained_query_rows_missing"))?;
-        rows.insert(
-            row.key.clone(),
-            summaries
-                .get(&row.key)
-                .cloned()
-                .ok_or_else(|| cohort_scope_changed("retained_query_owner_missing"))?,
-        );
-        for recipe in edges {
-            let Some(id) = recipe["id"].as_str() else {
-                return Err(cohort_scope_changed("retained_query_edge_id_missing"));
-            };
-            if !kept_edges.contains(id) {
-                continue;
-            }
-            for endpoint in ["from", "to"]
-                .into_iter()
-                .filter_map(|field| recipe["query"][field].as_str())
-                .filter(|endpoint| *endpoint != "you")
-            {
-                rows.entry(endpoint.to_owned())
-                    .or_insert_with(|| summaries.get(endpoint).cloned().unwrap_or_default());
-            }
-        }
-    }
+    let selected = history_window(row, Some(cutoff)).map_err(cohort_scope_changed)?;
     Ok((
         Part {
             generation: generation.to_owned(),
-            runtime: saved["runtime"].as_str().unwrap_or_default().to_owned(),
-            rows,
+            runtime: row
+                .query
+                .as_ref()
+                .and_then(|saved| saved["runtime"].as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            rows: selected.rows,
             owners: BTreeMap::new(),
             content: BTreeMap::new(),
             witnesses: Vec::new(),
-            edges: kept_edges,
-            turns: kept_turns,
+            edges: selected.edges,
+            turns: selected.turns,
         },
-        member,
+        selected.member,
     ))
 }
 
@@ -573,7 +490,7 @@ impl QueryCatalogStore for QueryCatalog {
             let mut owners = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
-            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
                 let expected = if current {
                     snapshot.runtime_observation(&self.options, &row, &runtime)
@@ -593,14 +510,26 @@ impl QueryCatalogStore for QueryCatalog {
                 if !summaries.contains_key(&row.key) { return Err(cohort_scope_changed("query_owner_summary_missing")); }
                 for (id, value) in summaries.iter().filter(|(id, _)| keep.is_none_or(|keep| keep.contains(*id))) {
                     if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
-                    rows.insert(id.clone(), value.clone());
+                    let mut value = value.clone();
+                    if !current {
+                        value["summary"]["alive"] = serde_json::Value::Null;
+                        value["summary"]["run"] = serde_json::Value::Null;
+                        value["summary"]["open_question"] = serde_json::Value::Null;
+                        if matches!(value["summary"]["state"].as_str(), Some("working" | "waiting-question")) {
+                            value["summary"]["state"] = serde_json::json!("unknown");
+                        }
+                    }
+                    rows.insert(id.clone(), value);
                     owners.entry(id.clone()).or_insert_with(|| row.key.clone());
                 }
-                witnesses.push((row.key.clone(), witness));
-                // Content generation belongs to the same immutable selected trace.
-                use crate::storage::selected::ContextLookup;
-                let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
-                if let Some((_, Some(version))) = version { content.insert(row.key, version); }
+                witnesses.push((row.key.clone(), witness, selected_history));
+                // The preview header is a Current trace witness. History has
+                // no retained overview summary from which to derive this hint.
+                if !selected_history {
+                    use crate::storage::selected::ContextLookup;
+                    let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
+                    if let Some((_, Some(version))) = version { content.insert(row.key, version); }
+                }
                 Ok(())
             };
             // As the SQLite reader, retained history wins for the same owner.
@@ -623,34 +552,70 @@ impl QueryCatalogStore for QueryCatalog {
                 catalog.truncate(64);
                 let next = catalog.last().map(|(row,_)| (row.last.unwrap_or(0),row.key.as_bytes().to_vec()));
                 for (row,catalog_member) in catalog {
-                    let current = catalog_member && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                    let current_member = catalog_member && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
                     let Some(c) = cutoff else {
-                        let selected = if catalog_member { chosen(row)?.0 } else { row };
-                        loaded.insert(selected.key.clone(), (selected,current));
+                            let (selected, selected_history) = if catalog_member { chosen(row)? } else { (row,true) };
+                            let current = !selected_history && selected.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                            loaded.insert(selected.key.clone(), (selected,current,selected_history));
                         continue;
                     };
                     // The chosen history may have older timestamps than its
                     // Current header. Only physical Catalog members qualify
                     // by header time or live state; retained-only owners use
                     // their saved Query time below.
-                    let state = current && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
-                    let current_recent = catalog_member && (row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state);
-                    let (row, history) = if catalog_member { chosen(row)? } else { (row,true) };
-                    if current_recent || (history && query_last(&row).is_some_and(|last| last >= c)) {
-                        loaded.insert(row.key.clone(), (row,current));
+                    let state = current_member && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
+                    let current_recent = current_member && (row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state);
+                    if current_recent {
+                        loaded.insert(row.key.clone(), (row,true,false));
+                    } else {
+                        let (history, selected_history) = if catalog_member { chosen(row)? } else { (row,true) };
+                        if selected_history && history_window(&history, Some(c)).map_err(cohort_scope_changed)?.member {
+                            loaded.insert(history.key.clone(), (history,false,true));
+                        }
                     }
                 }
                 if !more { break; }
                 after = Some(next.ok_or_else(|| cohort_scope_changed("catalog_page_cursor_missing"))?);
+            }
+            let mut history_edges = BTreeSet::new();
+            let mut history_turns = BTreeSet::new();
+            let mut history_context = BTreeSet::new();
+            let mut history_required_owners = BTreeSet::new();
+            for (row, _, selected_history) in loaded.values() {
+                if !selected_history { continue; }
+                let window = history_window(row, cutoff).map_err(cohort_scope_changed)?;
+                if !window.member { return Err(cohort_scope_changed("selected_history_outside_window")); }
+                history_edges.extend(window.edges);
+                history_turns.extend(window.turns);
+                history_context.extend(window.rows.keys().cloned());
+                history_context.extend(window.context.iter().cloned());
+                history_required_owners.extend(window.context);
+            }
+            for key in &history_required_owners {
+                if cutoff.is_some()
+                    && loaded.get(key).is_some_and(|(_, current, history)| *current && !*history)
+                {
+                    return Err(cohort_scope_changed("current_history_context_source_conflict"));
+                }
+                if let Some(text) = snapshot.history_catalog(key).map_err(|_| StorageError::Unavailable)? {
+                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&text)
+                        .map_err(|_| cohort_scope_changed("history_context_metadata_invalid"))?;
+                    if row.key != *key { return Err(cohort_scope_changed("history_context_identity_mismatch")); }
+                    loaded.insert(key.clone(), (row, false, true));
+                } else {
+                    loaded.remove(key);
+                }
             }
             let Some(c) = cutoff else {
                 // An immutable owner's relationship summaries may still name
                 // a withdrawn peer. Membership comes from this cohort, as in
                 // the SQLite reader, rather than from embedded old summaries.
                 let mut keep = loaded.keys().cloned().collect::<BTreeSet<_>>();
+                keep.extend(history_context.iter().cloned());
                 // Each saved owner contains its complete relationship summaries.
                 // Exact edge/turn sets are loaded below from the immutable effects.
-                let (edges, turns) = {
+                let mut current_context = BTreeSet::new();
+                let (mut current_edges, mut current_turns) = {
                     let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
                     let mut sets = Vec::new();
                     for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
@@ -661,17 +626,23 @@ impl QueryCatalogStore for QueryCatalog {
                             tx.check()?;
                             let after_key = after.as_ref().map(|v| v.0.as_slice());
                             let after_id = after.as_ref().map(|v| v.1.as_slice());
-                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length(session_key)<=65536 THEN session_key END,CASE WHEN octet_length({column})<=65536 THEN {column} END,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
                             for row in &page {
-                                let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                                let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                                if !loaded.get(&owner).is_some_and(|(_, _, history)| !*history) { continue; }
+                                let value = text(row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?)?;
                                 *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
                                 if column == "edge_id" {
-                                    let bytes = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?;
+                                    let bytes = row.get::<_, Option<Vec<u8>>>(4).ok_or(StorageError::Busy)?;
                                     *bytes_left = bytes_left.checked_sub(bytes.len()).ok_or(StorageError::Busy)?;
                                     let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| cohort_scope_changed("all_time_edge_metadata_invalid"))?;
                                     let from = metadata["from"].as_str().ok_or_else(|| cohort_scope_changed("all_time_edge_source_missing"))?;
                                     keep.insert(from.to_owned());
-                                    if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") { keep.insert(to.to_owned()); }
+                                    current_context.insert(from.to_owned());
+                                    if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") {
+                                        keep.insert(to.to_owned());
+                                        current_context.insert(to.to_owned());
+                                    }
                                 }
                                 values.insert(value);
                             }
@@ -682,15 +653,28 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                     (sets.remove(0), sets.remove(0))
                 };
-                for (row,current) in loaded.into_values() { emit(row, current, Some(&keep), bytes_left)?; }
-                return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns });
+                if current_context.iter().any(|key| history_context.contains(key) || loaded.get(key).is_some_and(|(_, _, history)| *history)) {
+                    return Err(cohort_scope_changed("relationship_context_source_conflict"));
+                }
+                current_edges.extend(history_edges);
+                current_turns.extend(history_turns);
+                for (row,current,selected_history) in loaded.into_values() { emit(row, current, selected_history, Some(&keep), bytes_left)?; }
+                if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
+                    return Err(cohort_scope_changed("all_time_relationship_owner_missing"));
+                }
+                return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges: current_edges, turns: current_turns });
             };
             // Recent window: edges active or touched since the cutoff, then the
             // last/recent turns of each kept owner and their linked endpoints.
             let mut keep: BTreeSet<String> = loaded.keys().cloned().collect();
+            keep.extend(history_context.iter().cloned());
             let mut needed = keep.clone();
+            needed.retain(|key| loaded.contains_key(key));
+            needed.extend(history_context.iter().cloned());
             let mut edges = BTreeSet::new();
             let mut turns = BTreeSet::new();
+            let mut current_graph_owners = BTreeSet::new();
+            let mut current_context = BTreeSet::new();
             let json = |bytes: Option<Vec<u8>>| -> Result<serde_json::Value, StorageError> {
                 serde_json::from_slice(&bytes.ok_or(StorageError::Busy)?)
                     .map_err(|_| cohort_scope_changed("recent_relationship_metadata_invalid"))
@@ -709,14 +693,18 @@ impl QueryCatalogStore for QueryCatalog {
                     let page = tx.driver.query("SELECT key_digest,edge_digest,CASE WHEN octet_length(session_key)<=65536 AND octet_length(edge_id)<=65536 AND octet_length(metadata)<=65536 THEN session_key END,edge_id,metadata FROM semon_pg_native_catalog_trace_edges WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,edge_digest)>($3,$4)) ORDER BY key_digest,edge_digest LIMIT 64", &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
                     for row in &page {
                         let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                        if loaded.get(&owner).is_some_and(|(_, _, history)| *history) { continue; }
                         let id = text(row.get(3))?;
                         let metadata = json(row.get(4))?;
                         if !edge_timed(&metadata, c) { continue; }
                         let (from, to) = endpoint(&metadata)?;
                         *bytes_left = bytes_left.checked_sub(owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len)).ok_or(StorageError::Busy)?;
+                        current_graph_owners.insert(owner.clone());
                         needed.insert(owner);
                         edges.insert(id);
                         keep.insert(from);
+                        current_context.extend(to.iter().cloned());
+                        current_context.insert(from.clone());
                         keep.extend(to);
                     }
                     if page.len() < 64 { break; }
@@ -725,6 +713,7 @@ impl QueryCatalogStore for QueryCatalog {
             }
             let timed_edges = edges.clone();
             for owner in keep.clone() {
+                if loaded.get(&owner).is_some_and(|(_, _, history)| *history) { continue; }
                 let mut links = Vec::new();
                 {
                     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
@@ -754,33 +743,54 @@ impl QueryCatalogStore for QueryCatalog {
                         let metadata = serde_json::from_str(&metadata)
                             .map_err(|_| cohort_scope_changed("recent_turn_edge_metadata_invalid"))?;
                         let (from, to) = endpoint(&metadata)?;
+                        current_context.insert(from.clone());
                         keep.insert(from);
+                        current_context.extend(to.iter().cloned());
                         keep.extend(to);
                     }
                 }
             }
-            needed.extend(keep.iter().cloned());
+            if current_context.iter().any(|key| history_context.contains(key)) {
+                return Err(cohort_scope_changed("relationship_context_source_conflict"));
+            }
+            if cutoff.is_some() {
+                for key in &current_context {
+                    if loaded.get(key).is_some_and(|(_, _, history)| *history) {
+                        match snapshot.catalog(key, false).map_err(|error| match error {
+                            StorageError::ScopeChanged => cohort_scope_changed("recent_current_context_refused"),
+                            other => other,
+                        })? {
+                            Some(row) => {
+                                let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                                loaded.insert(key.clone(), (row, current, false));
+                            }
+                            None => { loaded.remove(key); }
+                        }
+                    }
+                }
+            } else if current_context.iter().any(|key| loaded.get(key).is_some_and(|(_, _, history)| *history)) {
+                return Err(cohort_scope_changed("relationship_context_source_conflict"));
+            }
+            needed.extend(current_context.iter().cloned());
+            edges.extend(history_edges);
+            turns.extend(history_turns);
             for key in &needed {
-                let (row,current) = match loaded.remove(key) {
+                let (row,current,selected_history) = match loaded.remove(key) {
                     Some(row) => row,
+                    None if history_required_owners.contains(key) => continue,
                     None => match snapshot.catalog(key, false).map_err(|error| match error {
                         StorageError::ScopeChanged => cohort_scope_changed("recent_current_catalog_refused"),
                         other => other,
                     })? {
                         Some(row) => {
                             let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                            (chosen(row)?.0,current)
+                            (row,current,false)
                         },
-                        None => match snapshot.catalog(key, true).map_err(|error| match error {
-                            StorageError::ScopeChanged => cohort_scope_changed("recent_history_catalog_refused"),
-                            other => other,
-                        })? {
-                            Some(row) => (row,false),
-                            None => continue,
-                        },
+                        None if current_graph_owners.contains(key) => continue,
+                        None => continue,
                     },
                 };
-                emit(row, current, Some(&keep), bytes_left)?;
+                emit(row, current, selected_history, Some(&keep), bytes_left)?;
             }
             if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
                 return Err(cohort_scope_changed("recent_relationship_owner_missing"));
