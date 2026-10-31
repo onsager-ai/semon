@@ -6394,8 +6394,8 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
     peer.parent = Some("session-00000".into());
     peer.query.as_mut().unwrap()["state"] = json!(state);
 
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
-        .unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let binding = cache.query_runtime_binding().unwrap();
     let mut observations = crate::storage::selected::PresentationObservations::capture(
         &fixture.options,
@@ -6417,7 +6417,9 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
         .unwrap();
     assert_eq!(
         observations.runtime_for(peer).as_deref(),
-        peer.query.as_ref().and_then(|query| query["runtime"].as_str()),
+        peer.query
+            .as_ref()
+            .and_then(|query| query["runtime"].as_str()),
         "the typed row keeps its published runtime witness"
     );
     let generation = cache.session_catalog_generation();
@@ -6570,10 +6572,10 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
     assert_eq!(original["query"]["state"], state);
     let save = |row: &Value| {
         db.execute(
-                "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00001'",
-                rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
-            )
-            .unwrap();
+            "UPDATE session_catalog SET lifecycle=?1,metadata=?2 WHERE session_key='session-00001'",
+            rusqlite::params![row["lifecycle"].as_str().unwrap(), row.to_string()],
+        )
+        .unwrap();
         db.execute(
             "UPDATE session_history_catalog SET metadata=?1 WHERE session_key='session-00001'",
             [row.to_string()],
@@ -6675,7 +6677,10 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
         .claude_home
         .join("projects/project/session-00001.jsonl");
     writeln!(
-        fs::OpenOptions::new().append(true).open(&child_source).unwrap(),
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&child_source)
+            .unwrap(),
         "{{}}"
     )
     .unwrap();

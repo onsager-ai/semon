@@ -5336,18 +5336,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let current_only = crate::viewer::percent_encode(&current_only_key);
     let current_item = selected_item(&format!("sid={current_only}&limit=50"));
-    let retained_item =
-        selected_item(&format!("sid={current_only}&scope=retained_history&limit=50"));
+    let retained_item = selected_item(&format!(
+        "sid={current_only}&scope=retained_history&limit=50"
+    ));
     assert!(current_item["transcript"]["generation"].is_string());
     assert!(current_item["transcript"]["total"].is_number());
     assert_eq!(
-        retained_item["transcript"]["generation"],
-        current_item["transcript"]["generation"],
+        retained_item["transcript"]["generation"], current_item["transcript"]["generation"],
         "retained scope uses the Current transcript when this key has no History owner"
     );
     assert_eq!(
-        retained_item["transcript"]["total"],
-        current_item["transcript"]["total"],
+        retained_item["transcript"]["total"], current_item["transcript"]["total"],
         "retained scope falls back to the Current transcript when this key has no History owner"
     );
     let pg_parent = scoped_items(&caught, "scope=retained_history&")

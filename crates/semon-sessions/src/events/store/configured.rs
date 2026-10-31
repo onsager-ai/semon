@@ -4482,8 +4482,15 @@ mod tests {
             );
         }
         assert_eq!(
-            part.rows.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
-            prepared.rows.iter().map(|row| row.key.as_str()).collect::<std::collections::BTreeSet<_>>(),
+            part.rows
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::BTreeSet<_>>(),
+            prepared
+                .rows
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
             "the complete published Source cohort is present and foreign Sources are excluded"
         );
         port.validate(&config.namespace, &part).unwrap();
