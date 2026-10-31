@@ -3253,7 +3253,9 @@ impl SqliteStore {
                             crate::storage::sqlite::trace::TraceWriter::owned(&transaction, owner)
                                 .map_err(|error| {
                                     #[cfg(test)]
-                                    eprintln!("catalog_publication_probe stage=trace_writer_failed");
+                                    eprintln!(
+                                        "catalog_publication_probe stage=trace_writer_failed"
+                                    );
                                     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                                 })
                                 .map_err(failure)?;
