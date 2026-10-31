@@ -12276,7 +12276,41 @@ mod tests {
         fn configured_semantic_domain72_claude_foreign_namespace_projection_isolated() {
             let (f, b, options, _) = model_sources();
             let options = &options[1];
-            let inputs = claude_inputs(options, 1, 1);
+            let mut inputs = claude_inputs(options, 1, 2);
+            // Match the native parent/subagent shape used by Home::agent in
+            // model tests. Call 0 stays unmatched for the virtual projection
+            // check below; this child links call 1 to a real spawn relation.
+            let agent = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/sanitized/claude72-0/subagents/agent-child.jsonl".into(),
+            };
+            let agent_path = agent.full_path(options);
+            fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+            fs::write(
+                &agent_path,
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "user",
+                        "sessionId": "claude72-0",
+                        "uuid": "child-first",
+                        "timestamp": "2026-10-01T00:03:00Z",
+                        "message": {"role": "user", "content": "sanitized child work"}
+                    })
+                ),
+            )
+            .unwrap();
+            fs::write(
+                agent_path.with_file_name("agent-child.meta.json"),
+                serde_json::json!({
+                    "agentType": "general-purpose",
+                    "description": "task child",
+                    "toolUseId": "claude-call-1"
+                })
+                .to_string(),
+            )
+            .unwrap();
+            inputs.push(agent);
             let mut foreign = open(&b);
             let (foreign_batch, foreign_model) = claude_ready(&mut foreign, options, &inputs);
             assert_eq!(
