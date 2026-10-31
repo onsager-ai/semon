@@ -234,7 +234,12 @@ impl Owners<'_> {
         after: &str,
         limit: usize,
     ) -> rusqlite::Result<Vec<String>> {
-        self.db.prepare(NEIGHBOR_PAGE_SQL)?.query_map(params![self.namespace,key,after,limit as i64], |r| r.get(0))?.collect()
+        self.db
+            .prepare(NEIGHBOR_PAGE_SQL)?
+            .query_map(params![self.namespace, key, after, limit as i64], |r| {
+                r.get(0)
+            })?
+            .collect()
     }
 
     #[cfg(test)]
@@ -246,7 +251,9 @@ impl Owners<'_> {
     ) -> rusqlite::Result<Vec<String>> {
         self.db
             .prepare(&format!("EXPLAIN QUERY PLAN {NEIGHBOR_PAGE_SQL}"))?
-            .query_map(params![self.namespace,key,after,limit as i64], |row| row.get(3))?
+            .query_map(params![self.namespace, key, after, limit as i64], |row| {
+                row.get(3)
+            })?
             .collect()
     }
 
@@ -261,7 +268,8 @@ impl Owners<'_> {
         }
         let row = trace_owner_vm!("load_owner", {
             crate::model::relation_stage::LifecycleStore::owner(self, key)
-        }).map_err(invalid)?;
+        })
+        .map_err(invalid)?;
         let text = serde_json::to_string(&row).map_err(invalid)?;
         if text.len() > 1048576 || row.sources.is_empty() || row.sources.len() > 64 {
             return Err(rusqlite::Error::InvalidQuery);

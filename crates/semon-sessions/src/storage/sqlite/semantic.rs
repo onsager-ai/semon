@@ -982,9 +982,7 @@ std::thread_local! {
 }
 
 #[cfg(test)]
-struct FrontierVmTraceGuard(
-    Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
-);
+struct FrontierVmTraceGuard(Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>);
 
 #[cfg(test)]
 impl FrontierVmTraceGuard {
@@ -1005,9 +1003,9 @@ impl Drop for FrontierVmTraceGuard {
 #[cfg(test)]
 fn frontier_vm_snapshot() -> Option<usize> {
     FRONTIER_VM_COUNTER.with(|slot| {
-        slot.borrow().as_ref().map(|counter| {
-            counter.load(std::sync::atomic::Ordering::Relaxed)
-        })
+        slot.borrow()
+            .as_ref()
+            .map(|counter| counter.load(std::sync::atomic::Ordering::Relaxed))
     })
 }
 
@@ -1373,7 +1371,8 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             } else if kind == "oldneighbors" {
                 trace_frontier_vm!(kind.as_str(), "neighbor_page", {
                     effects.neighbor_page(&value, &after, budget)
-                }).map_err(error)?
+                })
+                .map_err(error)?
             } else {
                 trace_frontier_vm!(kind.as_str(), "pathowner_lookup", {
                     (|| -> rusqlite::Result<Vec<String>> {
@@ -1399,9 +1398,9 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
                     }
                     break;
                 }
-                metadata_bytes += trace_frontier_vm!(kind.as_str(), "snapshot_owner", {
-                    effects.snapshot(key)
-                }).map_err(error)?;
+                metadata_bytes +=
+                    trace_frontier_vm!(kind.as_str(), "snapshot_owner", { effects.snapshot(key) })
+                        .map_err(error)?;
                 consumed += 1;
                 last = key.clone();
             }
@@ -1546,7 +1545,7 @@ pub(crate) fn name_members_vm_probe(
     assert!(started.elapsed() < std::time::Duration::from_secs(1));
     eprintln!("name_members_setup vm_steps={setup}");
     let mut result = vec![("setup".into(), setup, 0)];
-    let mut targets = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
     for kind in ["hints", "candidates", "capacity", "members"] {
         tx.execute_batch("SAVEPOINT name_members_probe").unwrap();
         if kind == "members" {
@@ -1555,9 +1554,7 @@ pub(crate) fn name_members_vm_probe(
                 namespace: ns,
             };
             for (target_index, target) in targets.iter().enumerate() {
-                let plan = owners
-                    .neighbor_page_plan(target, "", 32)
-                    .unwrap();
+                let plan = owners.neighbor_page_plan(target, "", 32).unwrap();
                 eprintln!(
                     "name_members_neighbor_plan target_index={target_index} details={plan:?}"
                 );
@@ -1599,10 +1596,9 @@ pub(crate) fn name_members_vm_probe(
                     steps.load(Ordering::Relaxed) - frontier_start
                 );
                 let staged_start = steps.load(Ordering::Relaxed);
-                let paths = trace_frontier_vm!("members", "staged_paths", {
-                    staged_paths(&tx, ns)
-                })
-                .unwrap();
+                let paths =
+                    trace_frontier_vm!("members", "staged_paths", { staged_paths(&tx, ns) })
+                        .unwrap();
                 eprintln!(
                     "name_members_phase phase=staged_paths vm_steps={}",
                     steps.load(Ordering::Relaxed) - staged_start
