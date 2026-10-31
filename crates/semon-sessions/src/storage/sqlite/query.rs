@@ -3,7 +3,7 @@
 use crate::storage::query::measured;
 use crate::storage::{
     LogicalSourceNamespace,
-    query::{Part, QueryCatalogStore},
+    query::{Part, QueryCatalogStore, history_window},
 };
 use crate::{Options, QueryError};
 use rusqlite::{Connection, OptionalExtension};
@@ -74,18 +74,19 @@ impl QueryCatalogStore for SqliteQueryCatalog {
         {
             return Err(unavailable("Native Catalog changed during the query"));
         }
-        for (key, expected) in &part.witnesses {
+        for (key, expected, selected_history) in &part.witnesses {
             let actual: Option<String> = db
                 .query_row(
-                    "SELECT CASE WHEN json_extract(h.metadata,'$.query')=?2 THEN json_extract(h.metadata,'$.query') WHEN json_extract(c.metadata,'$.query')=?2 THEN json_extract(c.metadata,'$.query') END FROM main.session_catalog c LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",
-                    rusqlite::params![key, expected],
+                    "SELECT CASE WHEN ?2 THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM (SELECT namespace,session_key FROM main.session_catalog UNION SELECT namespace,session_key FROM main.session_history_catalog) keys LEFT JOIN main.session_catalog c ON c.namespace=keys.namespace AND c.session_key=keys.session_key LEFT JOIN main.session_history_catalog h ON h.namespace=keys.namespace AND h.session_key=keys.session_key WHERE keys.namespace=semon_namespace() AND keys.session_key=?1",
+                    rusqlite::params![key, selected_history],
                     |row| row.get(0),
                 )
                 .optional()
                 .map_err(unavailable)?
                 .flatten();
             let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
-            if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
+            let expected: Value = serde_json::from_str(expected).map_err(unavailable)?;
+            if actual.as_ref() != Some(&expected) {
                 return Err(unavailable("Native Query facts changed during the query"));
             }
         }
@@ -177,7 +178,7 @@ fn read(
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     let base_sql = if cutoff.is_some() {
-        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT session_key FROM main.session_history_catalog WHERE namespace=semon_namespace() AND json_extract(metadata,'$.query.last')>=?1"
+        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT h.session_key FROM main.session_history_catalog h WHERE h.namespace=semon_namespace() AND (json_extract(h.metadata,'$.query.last')>=?1 OR json_extract(h.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM json_each(h.metadata,'$.query.selected.edges') q WHERE json_extract(q.value,'$.query.at')>=?1 OR json_extract(q.value,'$.query.done')>=?1 OR json_extract(q.value,'$.query.status') IN ('work','wait','new')))"
     } else {
         "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"
     };
@@ -191,8 +192,24 @@ fn read(
     measured(0, 0, 0, base.get_status(rusqlite::StatementStatus::VmStep));
     drop(base);
     let mut needed = keep.clone();
+    let mut history_selected = BTreeSet::new();
+    let mut history_candidates = db
+        .prepare(
+            "SELECT h.session_key FROM main.session_history_catalog h LEFT JOIN main.session_catalog c ON c.namespace=h.namespace AND c.session_key=h.session_key WHERE h.namespace=semon_namespace() AND (?1 IS NULL OR (json_extract(h.metadata,'$.query.last')>=?1 OR json_extract(h.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM json_each(h.metadata,'$.query.selected.edges') q WHERE json_extract(q.value,'$.query.at')>=?1 OR json_extract(q.value,'$.query.done')>=?1 OR json_extract(q.value,'$.query.status') IN ('work','wait','new')))) AND (?1 IS NULL OR NOT (c.lifecycle='current' AND (c.last_ms>=?1 OR json_extract(c.metadata,'$.query.last')>=?1 OR json_extract(c.metadata,'$.query.state') IN ('work','wait'))))",
+        )
+        .map_err(unavailable)?;
+    history_selected.extend(
+        history_candidates
+            .query_map(rusqlite::params![cutoff], |row| row.get::<_, String>(0))
+            .map_err(unavailable)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(unavailable)?,
+    );
+    drop(history_candidates);
     let mut edges = BTreeSet::new();
     let mut turns = BTreeSet::new();
+    let mut current_graph_owners = BTreeSet::new();
+    let mut current_context = BTreeSet::new();
     let edge_select = "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()";
     let edge_sql = if cutoff.is_some() {
         format!(
@@ -216,14 +233,22 @@ fn read(
         let (owner, id, from, to) = item.map_err(unavailable)?;
         #[cfg(test)]
         measured(0, 1, 0, 0);
+        if history_selected.contains(&owner) {
+            continue;
+        }
         spend(
             bytes_left,
             owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len),
         )?;
+        current_graph_owners.insert(owner.clone());
         needed.insert(owner);
         edges.insert(id);
+        current_context.insert(from.clone());
         keep.insert(from);
-        keep.extend(to.filter(|to| to != "you"));
+        if let Some(to) = to.filter(|to| to != "you") {
+            current_context.insert(to.clone());
+            keep.insert(to);
+        }
     }
     #[cfg(test)]
     measured(0, 0, 0, edge.get_status(rusqlite::StatementStatus::VmStep));
@@ -240,6 +265,9 @@ fn read(
     let mut recent = db.prepare(&turn_sql).map_err(unavailable)?;
     let mut endpoint = db.prepare("SELECT json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2").map_err(unavailable)?;
     for owner in &initially_kept {
+        if history_selected.contains(owner) {
+            continue;
+        }
         let params: Vec<rusqlite::types::Value> = std::iter::once(owner.clone().into())
             .chain(cutoff.map(Into::into))
             .collect();
@@ -271,8 +299,12 @@ fn read(
                         .optional()
                         .map_err(unavailable)?
                 {
+                    current_context.insert(from.clone());
                     keep.insert(from);
-                    keep.extend(to.filter(|to| to != "you"));
+                    if let Some(to) = to.filter(|to| to != "you") {
+                        current_context.insert(to.clone());
+                        keep.insert(to);
+                    }
                 }
             }
         }
@@ -287,7 +319,48 @@ fn read(
     );
     drop(recent);
     drop(endpoint);
-    needed.extend(keep.iter().cloned());
+    let mut history_context = BTreeSet::new();
+    let mut history_required_owners = BTreeSet::new();
+    for key in history_selected.intersection(&needed) {
+        if current_graph_owners.contains(key) {
+            continue;
+        }
+        let text: Option<String> = db
+            .query_row(
+                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?
+            .flatten();
+        let text = text.ok_or_else(|| unavailable("History metadata exceeds its bound"))?;
+        spend(bytes_left, text.len())?;
+        let row: crate::model::summary::CatalogRow =
+            serde_json::from_str(&text).map_err(unavailable)?;
+        if row.key != *key {
+            return Err(unavailable("History metadata identity changed"));
+        }
+        let window = history_window(&row, cutoff).map_err(unavailable)?;
+        if !window.member {
+            return Err(unavailable("Selected History row is outside its cutoff"));
+        }
+        keep.extend(window.rows.keys().cloned());
+        keep.extend(window.context.iter().cloned());
+        history_context.extend(window.rows.keys().cloned());
+        history_context.extend(window.context.iter().cloned());
+        history_required_owners.extend(window.context);
+        edges.extend(window.edges);
+        turns.extend(window.turns);
+    }
+    if history_context.iter().any(|key| current_context.contains(key))
+        || (cutoff.is_none() && current_context.iter().any(|key| history_selected.contains(key)))
+        || (cutoff.is_some() && history_required_owners.iter().any(|key| current_context.contains(key)))
+    {
+        return Err(unavailable("Current and History relationship context select different owners"));
+    }
+    needed.extend(history_required_owners.iter().cloned());
+    needed.extend(current_context.iter().cloned());
     let mut rows = BTreeMap::new();
     let mut owners = BTreeMap::new();
     let mut content = BTreeMap::new();
@@ -296,12 +369,16 @@ fn read(
     // own cutoff; a recent Current row must not be replaced by older history.
     let mut metadata = db
         .prepare(
-            "SELECT CASE WHEN hc.session_key IS NOT NULL AND (?2 IS NULL OR json_extract(hc.metadata,'$.query.last')>=?2) THEN json_extract(hc.metadata,'$.lifecycle') ELSE c.lifecycle END,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),CASE WHEN hc.session_key IS NOT NULL AND (?2 IS NULL OR json_extract(hc.metadata,'$.query.last')>=?2) THEN 1 ELSE 0 END FROM main.session_catalog c LEFT JOIN main.session_history_catalog hc ON hc.namespace=c.namespace AND hc.session_key=c.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",
+            "SELECT CASE WHEN ?2 THEN json_extract(hc.metadata,'$.lifecycle') ELSE c.lifecycle END,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,CASE WHEN ?2 THEN NULL ELSE json_extract(h.metadata,'$.content_generation') END,?2 FROM (SELECT namespace,session_key FROM main.session_catalog UNION SELECT namespace,session_key FROM main.session_history_catalog) keys LEFT JOIN main.session_catalog c ON c.namespace=keys.namespace AND c.session_key=keys.session_key LEFT JOIN main.session_history_catalog hc ON hc.namespace=keys.namespace AND hc.session_key=keys.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=keys.namespace AND h.session_key=keys.session_key WHERE keys.namespace=semon_namespace() AND keys.session_key=?1",
         )
         .map_err(unavailable)?;
     for key in needed {
+        let selected_history = history_required_owners.contains(&key)
+            || (history_selected.contains(&key)
+                && !current_graph_owners.contains(&key)
+                && (cutoff.is_none() || !current_context.contains(&key)));
         let record = metadata
-            .query_row(rusqlite::params![&key, cutoff], |row| {
+            .query_row(rusqlite::params![&key, selected_history], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -330,7 +407,7 @@ fn read(
         if row.lifecycle.as_str() != lifecycle.as_str() {
             return Err(unavailable("Catalog lifecycle changed"));
         }
-        let current_lifecycle = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+        let current_lifecycle = !selected_history && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
         if row.sources.is_empty()
             || row.sources.len() > 64
             || row.sources.iter().any(|source| {
@@ -390,7 +467,7 @@ fn read(
                 "Native Query observations changed; retry after publication",
             ));
         }
-        witnesses.push((key.clone(), saved.to_string()));
+        witnesses.push((key.clone(), saved.to_string(), selected_history));
         let summaries = saved["rows"]
             .as_object()
             .ok_or_else(|| unavailable("Invalid Catalog summaries"))?;
@@ -405,12 +482,12 @@ fn read(
             if !current_lifecycle {
                 saved["summary"]["alive"] = Value::Null;
                 saved["summary"]["run"] = Value::Null;
+                saved["summary"]["open_question"] = Value::Null;
                 if matches!(
                     saved["summary"]["state"].as_str(),
                     Some("working" | "waiting-question")
                 ) {
                     saved["summary"]["state"] = json!("unknown");
-                    saved["summary"]["open_question"] = Value::Null;
                 }
             }
             if let Some(prior) = rows.get(id)
