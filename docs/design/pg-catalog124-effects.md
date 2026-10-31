@@ -11,8 +11,11 @@ Worker127 extends this private staging family with immutable search effects
 and retained History. `catalog_search::publish_current_rows_port` is the single
 cohort producer for both adapters, with SQLite timing/probes outside the semantic
 steps. PG batches at most 64 postings per statement and compares full opaque
-identities on digest conflicts. Its documents and counts are generation-scoped;
-there is no mutable latest-path search mirror or complete search reader yet.
+identities on digest conflicts. Current stage rows enter both search scopes;
+carried retained owners keep their History documents and shared memberships.
+Because PG memberships have no scope column, each scope's exact count joins
+memberships to the matching generation-scoped document. There is no mutable
+latest-path search mirror or complete search reader yet.
 
 `catalog_effects::history::preserve(tx, generation, previous, publication)`
 executes the existing `preserve_replacement_rows` and `publish_history_rows`

@@ -30,6 +30,18 @@ pub(crate) struct SearchWriter<'a> {
     db: &'a Connection,
     namespace: &'a str,
 }
+
+pub(crate) struct SearchLookupRow {
+    pub(crate) row: CatalogRow,
+    pub(crate) scopes: crate::catalog_search::SearchScopeEligibility,
+}
+
+pub(crate) struct SearchLookup {
+    pub(crate) consumed: usize,
+    pub(crate) oversized: bool,
+    pub(crate) rows: Vec<SearchLookupRow>,
+}
+
 impl<'a> SearchWriter<'a> {
     pub(crate) fn admitted(
         db: &'a Connection,
@@ -39,6 +51,84 @@ impl<'a> SearchWriter<'a> {
         Ok(Self {
             db,
             namespace: source.namespace(),
+        })
+    }
+
+    pub(crate) fn key_page(&self, after: &str) -> rusqlite::Result<Vec<String>> {
+        let mut statement = self.db.prepare_cached(
+            "SELECT c.session_key FROM main.session_catalog c WHERE c.namespace=?1 AND c.session_key>?2 AND (c.lifecycle='current' OR EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key)) ORDER BY c.session_key LIMIT ?3",
+        )?;
+        statement
+            .query_map(
+                rusqlite::params![
+                    self.namespace,
+                    after,
+                    crate::catalog_search::MAX_PUBLICATION_KEYS as i64
+                ],
+                |row| row.get(0),
+            )?
+            .collect()
+    }
+
+    /// Resolve a bounded key cohort against Current catalog metadata and its
+    /// History eligibility. The returned prefix stays within the metadata
+    /// byte budget; later keys remain available to the next lookup call.
+    pub(crate) fn lookup(&self, keys: &[String]) -> rusqlite::Result<SearchLookup> {
+        if keys.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if keys.is_empty() {
+            return Ok(SearchLookup {
+                consumed: 0,
+                oversized: false,
+                rows: Vec::new(),
+            });
+        }
+        let requested = serde_json::to_string(keys)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let sql = "WITH requested AS (SELECT CAST(key AS INTEGER) AS ordinal,value AS session_key FROM json_each(?1)), candidates AS (SELECT requested.ordinal,requested.session_key,c.metadata,COALESCE(c.lifecycle='current',0) AS current_eligible,COALESCE(c.session_key IS NOT NULL AND (c.lifecycle='current' OR h.session_key IS NOT NULL),0) AS history_eligible,CASE WHEN c.session_key IS NOT NULL AND (c.lifecycle='current' OR h.session_key IS NOT NULL) THEN octet_length(c.metadata) ELSE 0 END AS metadata_bytes FROM requested LEFT JOIN main.session_catalog c ON c.namespace=?2 AND c.session_key=requested.session_key LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key), budgeted AS (SELECT *,SUM(metadata_bytes) OVER(ORDER BY ordinal ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS used_bytes FROM candidates) SELECT session_key,current_eligible,history_eligible,metadata_bytes,CASE WHEN used_bytes<=?3 AND history_eligible THEN metadata ELSE NULL END,used_bytes<=?3 FROM budgeted ORDER BY ordinal";
+        let mut statement = self.db.prepare_cached(sql)?;
+        let mut values = statement.query(rusqlite::params![
+            requested,
+            self.namespace,
+            crate::catalog_search::MAX_PUBLICATION_BYTES as i64
+        ])?;
+        let mut consumed = 0;
+        let mut oversized = false;
+        let mut rows = Vec::new();
+        while let Some(value) = values.next()? {
+            let key: String = value.get(0)?;
+            let fits: bool = value.get(5)?;
+            if !fits {
+                let bytes: i64 = value.get(3)?;
+                oversized = bytes > crate::catalog_search::MAX_PUBLICATION_BYTES as i64;
+                break;
+            }
+            consumed += 1;
+            let current: bool = value.get(1)?;
+            let retained_history: bool = value.get(2)?;
+            if !retained_history {
+                continue;
+            }
+            let encoded: Option<String> = value.get(4)?;
+            let encoded = encoded.ok_or(rusqlite::Error::InvalidQuery)?;
+            let row = serde_json::from_str::<CatalogRow>(&encoded)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            if row.key != key {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            rows.push(SearchLookupRow {
+                row,
+                scopes: crate::catalog_search::SearchScopeEligibility {
+                    current,
+                    retained_history,
+                },
+            });
+        }
+        Ok(SearchLookup {
+            consumed,
+            oversized,
+            rows,
         })
     }
 }
@@ -53,12 +143,15 @@ impl SearchPublicationStore for SearchWriter<'_> {
     fn data(error: serde_json::Error) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
-    fn begin(&self, rows: &[&CatalogRow]) -> rusqlite::Result<()> {
+    fn begin(&self, keys: &[String]) -> rusqlite::Result<()> {
+        if keys.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         self.db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS catalog_search_members(session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_search_members;")?;
-        for row in rows {
+        for key in keys {
             self.db
                 .prepare_cached("INSERT INTO catalog_search_members VALUES(?1)")?
-                .execute([&row.key])?;
+                .execute([key])?;
         }
         {
             let ns = self.namespace;
@@ -113,15 +206,20 @@ impl SearchPublicationStore for SearchWriter<'_> {
         }
         Ok(())
     }
-    fn postings(&self, rows: &[(&String, &CatalogRow)]) -> rusqlite::Result<()> {
-        let sql = "INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?4,?4)";
+    fn postings(
+        &self,
+        rows: &[crate::catalog_search::SearchPosting<'_>],
+    ) -> rusqlite::Result<()> {
+        let sql = "INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key,gram) DO UPDATE SET current_last_ms=excluded.current_last_ms,history_last_ms=excluded.history_last_ms";
         let mut posting = self.db.prepare_cached(sql)?;
-        for (gram, row) in rows {
+        for item in rows {
+            let timestamp = item.row.last.unwrap_or(0);
             posting.execute(params![
                 self.namespace,
-                row.key,
-                gram,
-                row.last.unwrap_or(0)
+                item.row.key,
+                item.gram,
+                item.scopes.current.then_some(timestamp),
+                item.scopes.retained_history.then_some(timestamp),
             ])?;
         }
         Ok(())

@@ -76,7 +76,7 @@ pub(crate) trait CurrentPublicationStore {
 
 /// Physical effects for the existing bounded metadata-search cohort algorithm.
 pub(crate) trait SearchPublicationStore {
-    fn begin(&self, rows: &[&CatalogRow]) -> Result<(), Self::Error>;
+    fn begin(&self, keys: &[String]) -> Result<(), Self::Error>;
     type Error;
     fn data(error: serde_json::Error) -> Self::Error;
     fn validate(&self, key: &str) -> Result<(), Self::Error>;
@@ -88,7 +88,10 @@ pub(crate) trait SearchPublicationStore {
         fields: &str,
         complete: bool,
     ) -> Result<(), Self::Error>;
-    fn postings(&self, rows: &[(&String, &CatalogRow)]) -> Result<(), Self::Error>;
+    fn postings(
+        &self,
+        rows: &[crate::catalog_search::SearchPosting<'_>],
+    ) -> Result<(), Self::Error>;
     fn counts(&self, scope: crate::CatalogReadScope) -> Result<(), Self::Error>;
 }
 

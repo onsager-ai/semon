@@ -42,11 +42,15 @@ catalog can return useful matches with `index_complete:false`. The collection
 from exhaustion of this request's candidate or byte budget. Non-search pages
 return `search:null`.
 
-Retained-history metadata extends qualified source/native references without
-changing these indexed fields. Its materialized metadata and current metadata
-share collection generation, while scope-specific postings keep current-only
-membership distinct from retained browsing. This contract does not provide a
-multi-source union or full-text transcript search.
+Current search documents are eligible only while
+`session_catalog.lifecycle='current'`. RetainedHistory includes those Current
+rows and rows with a matching `session_history_catalog` entry, provided the
+`session_catalog` row still exists. Both scopes derive search fields from
+`session_catalog.metadata`; history metadata qualifies retained inclusion and
+custody but does not replace the fields that produced the postings. An orphaned
+history row therefore creates no search document. Scope-specific postings keep
+Current membership distinct from retained browsing. This contract does not
+provide a multi-source union or full-text transcript search.
 
 Verification and measured complete-path results will be recorded after the
 schema-15 producer stack and schema-16 search gates run. Endpoint work alone does

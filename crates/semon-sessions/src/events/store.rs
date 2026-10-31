@@ -3233,6 +3233,14 @@ impl SqliteStore {
                 )
                 .optional()
                 .map_err(failure)?;
+            let previous_search_version: Option<String> = transaction
+                .query_row(
+                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(failure)?;
             metadata_measurements.record("setup", setup_started, 1);
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=current_metadata_setup_complete");
@@ -3443,110 +3451,91 @@ impl SqliteStore {
                 let search =
                     crate::storage::sqlite::search::SearchWriter::admitted(&transaction, source)
                         .map_err(StoreError::Configured)?;
-                // Empty Current is a real publication too. No row batch will
-                // initialize its two namespace-owned coverage records.
+                // Initialize both namespace-owned coverage records even when
+                // the publication has no searchable row batch.
                 crate::storage::catalog::SearchPublicationStore::begin(&search, &[])
                     .map_err(failure)?;
                 #[allow(unused_mut)]
-                let mut refresh =
-                    |refreshed: &[crate::model::summary::CatalogRow]| -> Result<(), StoreError> {
-                        #[cfg(test)]
-                        eprintln!("catalog_publication_probe stage=search_refresh");
-                        let refs = refreshed.iter().collect::<Vec<_>>();
-                        #[cfg(test)]
-                        if let CatalogWriter::Traversal { owners, measured } = writer {
-                            return crate::catalog_search::publish_current_rows_effects(
+                let mut refresh = |keys: &[String]| -> Result<(), StoreError> {
+                    for cohort in keys.chunks(crate::catalog_search::MAX_PUBLICATION_KEYS) {
+                        let mut offset = 0;
+                        while offset < cohort.len() {
+                            let selected = search.lookup(&cohort[offset..]).map_err(failure)?;
+                            if selected.oversized {
+                                return Err(StoreError::Data(
+                                    "catalog search metadata exceeds 1 MiB for an eligible row"
+                                        .into(),
+                                ));
+                            }
+                            if selected.consumed == 0 {
+                                return Err(failure(rusqlite::Error::InvalidQuery));
+                            }
+                            let roster = &cohort[offset..offset + selected.consumed];
+                            let rows = selected
+                                .rows
+                                .iter()
+                                .map(|selected| crate::catalog_search::ScopedCatalogRow {
+                                    row: &selected.row,
+                                    scopes: selected.scopes,
+                                })
+                                .collect::<Vec<_>>();
+                            #[cfg(test)]
+                            eprintln!("catalog_publication_probe stage=search_refresh");
+                            #[cfg(test)]
+                            {
+                                if let CatalogWriter::Traversal { owners, measured } = writer {
+                                    crate::catalog_search::publish_scoped_rows_effects(
+                                        &transaction,
+                                        &search,
+                                        roster,
+                                        &rows,
+                                        owners,
+                                        measured.then_some(&mut search_observation),
+                                    )
+                                    .map_err(failure)?;
+                                } else {
+                                    crate::catalog_search::publish_scoped_rows_with_store(
+                                        &transaction,
+                                        roster,
+                                        &rows,
+                                        &search,
+                                    )
+                                    .map_err(failure)?;
+                                }
+                            }
+                            #[cfg(not(test))]
+                            crate::catalog_search::publish_scoped_rows_with_store(
                                 &transaction,
+                                roster,
+                                &rows,
                                 &search,
-                                &refs,
-                                owners,
-                                measured.then_some(&mut search_observation),
                             )
-                            .map_err(failure);
+                            .map_err(failure)?;
+                            offset += selected.consumed;
                         }
-                        crate::catalog_search::publish_current_rows_with_store(
-                            &transaction,
-                            &refs,
-                            &search,
-                        )
-                        .map_err(failure)
-                    };
-                if claims.is_none() {
+                    }
+                    Ok(())
+                };
+                if claims.is_none()
+                    || previous_search_version.as_deref()
+                        != Some(crate::catalog_search::VERSION)
+                {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
                     let mut after = String::new();
                     loop {
-                        let mut encoded = Vec::new();
-                        let mut bytes = 0usize;
-                        let mut statement = transaction.prepare("SELECT session_key,octet_length(metadata),CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key>?1 ORDER BY session_key LIMIT 64").map_err(failure)?;
-                        let mut values = statement.query([&after]).map_err(failure)?;
-                        while let Some(value) = values.next().map_err(failure)? {
-                            let size = usize::try_from(value.get::<_, i64>(1).map_err(failure)?)
-                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                            if size > 1048576 {
-                                return Err(failure(rusqlite::Error::InvalidQuery));
-                            }
-                            if bytes + size > 1048576 {
-                                break;
-                            }
-                            after = value.get(0).map_err(failure)?;
-                            encoded.push(value.get::<_, String>(2).map_err(failure)?);
-                            bytes += size;
-                        }
-                        drop(values);
-                        drop(statement);
-                        if encoded.is_empty() {
+                        let keys = search.key_page(&after).map_err(failure)?;
+                        if keys.is_empty() {
                             break;
                         }
-                        let refreshed = encoded
-                            .iter()
-                            .map(|value| {
-                                serde_json::from_str::<crate::model::summary::CatalogRow>(value)
-                                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        refresh(&refreshed)?;
+                        after = keys.last().unwrap().clone();
+                        refresh(&keys)?;
                     }
                 } else {
                     let mut keys = affected.clone();
                     keys.extend(rows.iter().map(|row| row.key.clone()));
-                    let mut refreshed = Vec::new();
-                    let mut bytes = 0usize;
-                    for key in keys {
-                        let value: Option<Option<String>> = transaction
-                            .query_row(
-                                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
-                                [&key],
-                                |row| row.get(0),
-                            )
-                            .optional()
-                            .map_err(failure)?;
-                        let (row, size) = match value {
-                            Some(Some(value)) => {
-                                let size = value.len();
-                                let row =
-                                    serde_json::from_str::<crate::model::summary::CatalogRow>(
-                                        &value,
-                                    )
-                                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                                (row, size)
-                            }
-                            Some(None) => {
-                                return Err(StoreError::Data(
-                                    "scoped catalog search metadata exceeds 1 MiB for an affected row"
-                                        .into(),
-                                ));
-                            }
-                            None => continue,
-                        };
-                        if bytes + size > 1048576 || refreshed.len() == 64 {
-                            refresh(&refreshed)?;
-                            refreshed.clear();
-                            bytes = 0;
-                        }
-                        bytes += size;
-                        refreshed.push(row);
-                    }
-                    refresh(&refreshed)?;
+                    keys.sort_unstable();
+                    keys.dedup();
+                    refresh(&keys)?;
                 }
                 transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;
             }
@@ -10710,7 +10699,7 @@ mod tests {
             let sql = if scope == CatalogReadScope::Current {
                 "SELECT metadata FROM session_catalog WHERE lifecycle='current'"
             } else {
-                "SELECT COALESCE(h.metadata,c.metadata) FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE h.metadata IS NOT NULL OR c.lifecycle='current'"
+                "SELECT c.metadata FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE h.session_key IS NOT NULL OR c.lifecycle='current'"
             };
             let rows = connection
                 .prepare(sql)
@@ -10943,6 +10932,78 @@ mod tests {
             assert!(crate::history_projection::qualified(&store.connection, &original).unwrap());
             let lifecycle: (String, i64) = store.connection.query_row("SELECT lifecycle,(SELECT COUNT(*) FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current') FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [&retained], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
             assert_eq!(lifecycle, ("retained".into(), 0));
+            let scopes = store.connection
+                .prepare("SELECT read_scope FROM main.session_search_documents WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY read_scope")
+                .unwrap()
+                .query_map([&retained], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                scopes,
+                vec!["retained_history"],
+                "a history-only owner must disappear from Current immediately"
+            );
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 AND current_last_ms IS NOT NULL",
+                    [&retained],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "retained postings must not carry Current timestamps"
+            );
+            assert!(store.connection.query_row(
+                "SELECT COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1 AND history_last_ms IS NOT NULL",
+                [&retained],
+                |row| row.get::<_, i64>(0),
+            ).unwrap() > 0);
+
+            let saved_history: String = store.connection.query_row(
+                "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [&retained],
+                |row| row.get(0),
+            ).unwrap();
+            let mut divergent_history: crate::model::summary::CatalogRow =
+                serde_json::from_str(&saved_history).unwrap();
+            divergent_history.name = "custody-only search marker".into();
+            store.connection.execute(
+                "UPDATE main.session_history_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+                rusqlite::params![retained, serde_json::to_string(&divergent_history).unwrap()],
+            ).unwrap();
+            let history_only = crate::catalog_search::read_admitted(
+                &store.connection,
+                crate::catalog_search::Query {
+                    scope: crate::CatalogReadScope::RetainedHistory,
+                    query: "custody-only search marker",
+                    harness: None,
+                    repo: None,
+                    model: None,
+                    after: None,
+                    limit: 10,
+                    index_complete: true,
+                },
+            ).unwrap();
+            assert!(history_only.rows.is_empty());
+            let catalog_field = crate::catalog_search::read_admitted(
+                &store.connection,
+                crate::catalog_search::Query {
+                    scope: crate::CatalogReadScope::RetainedHistory,
+                    query: &retained,
+                    harness: None,
+                    repo: None,
+                    model: None,
+                    after: None,
+                    limit: 10,
+                    index_complete: true,
+                },
+            ).unwrap();
+            assert_eq!(catalog_field.rows.len(), 1);
+            assert_eq!(catalog_field.rows[0].name, original.name);
+            store.connection.execute(
+                "UPDATE main.session_history_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
+                rusqlite::params![retained, saved_history],
+            ).unwrap();
         }
         for row in &mut rows[..63] {
             row.name = "shared original grams".into();
