@@ -5058,8 +5058,7 @@ mod tests {
         let history_orphan_key = "search-history-orphan";
         {
             let db = crate::storage::sqlite::semantic::Stage::open(
-                crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config)
-                    .unwrap(),
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap(),
             )
             .unwrap()
             .into_test_connection();

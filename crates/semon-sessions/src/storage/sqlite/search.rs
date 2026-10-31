@@ -180,9 +180,7 @@ pub(crate) fn rebuild_projection(
                 ));
             }
             if selected.consumed == 0 {
-                return Err(crate::events::store::failure(
-                    rusqlite::Error::InvalidQuery,
-                ));
+                return Err(crate::events::store::failure(rusqlite::Error::InvalidQuery));
             }
             let roster = &keys[offset..offset + selected.consumed];
             let rows = selected

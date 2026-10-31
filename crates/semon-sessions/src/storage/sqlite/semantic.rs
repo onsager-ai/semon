@@ -1769,8 +1769,8 @@ impl Stage {
         let previous = publication_head
             .base_generation()
             .map_err(StoreError::Configured)?;
-        let search_current = super::search::current_for_generation(&tx, previous.as_deref())
-            .map_err(error)?;
+        let search_current =
+            super::search::current_for_generation(&tx, previous.as_deref()).map_err(error)?;
         let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication' AND runtime=?3 AND resetting=0)",params![ns,batch.epoch,batch.runtime],|r|r.get(0)).map_err(error)?;
         if !valid || self.epoch != Some(batch.epoch) {
             #[cfg(test)]
