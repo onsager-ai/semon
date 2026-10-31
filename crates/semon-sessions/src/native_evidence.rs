@@ -761,7 +761,9 @@ impl NativeEvidence {
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
-            let discovery_started = crate::native_timing::enabled().then(Instant::now);
+            let discovery_started = crate::native_timing::ColdDiscoveryProgress::start(
+                crate::native_timing::enabled(),
+            );
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
@@ -791,18 +793,22 @@ impl NativeEvidence {
                         eprintln!("native catalog phase=discovery_publication");
                     })?;
             }
-            for input in page.inputs {
-                if !input.path.ends_with(".jsonl") {
-                    continue;
-                }
-                let modified = fs::metadata(input.full_path(&self.options))
-                    .and_then(|metadata| metadata.modified())
-                    .ok();
-                discovery
-                    .newest
-                    .insert((std::cmp::Reverse(modified), input));
-                if discovery.newest.len() > 64 {
-                    discovery.newest.pop_last();
+            {
+                let _timing =
+                    crate::native_timing::Phase::new(&self.options.cache, "candidate_metadata");
+                for input in page.inputs {
+                    if !input.path.ends_with(".jsonl") {
+                        continue;
+                    }
+                    let modified = fs::metadata(input.full_path(&self.options))
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
+                    discovery
+                        .newest
+                        .insert((std::cmp::Reverse(modified), input));
+                    if discovery.newest.len() > 64 {
+                        discovery.newest.pop_last();
+                    }
                 }
             }
             discovery.timing.page(
