@@ -588,7 +588,8 @@ pub(crate) fn finish_catalog(
 #[test]
 fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     use crate::storage::sqlite::proof_generations::{
-        CatalogObservationOwner, observation_binding, prepare_repriced_observation,
+        CatalogObservationOwner, observation_binding, observation_binding_with_observations,
+        prepare_repriced_observation,
     };
     use std::io::Write;
     let root = root();
@@ -640,9 +641,63 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     );
     let mut db = crate::storage::sqlite::semantic::pricing_connection(&owner).unwrap();
     assert!(
+        crate::storage::sqlite::proof_generations::imported_catalog(&db, &binding).unwrap(),
+        "the destination's actual transfer receipt selects imported Query authority"
+    );
+    assert!(
+        crate::storage::sqlite::catalog::runtime_source_cwds_if_current(
+            &db,
+            &original.sources
+        )
+        .unwrap()
+        .is_none(),
+        "the imported Current row has no matching local Index ledger"
+    );
+    assert!(
         observation_binding(&db, &binding, original).is_ok(),
         "the actual transfer receipt authorizes the original row"
     );
+    let (imported_binding, imported_observations) =
+        observation_binding_with_observations(&db, &binding, original).unwrap();
+    let current_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let current_global = imported_binding.witness(&current_runtime).unwrap();
+    assert_eq!(
+        imported_observations.runtime.as_deref(),
+        Some(current_global.as_str()),
+        "the imported proof could satisfy the captured global runtime fence"
+    );
+    assert!(imported_observations.runtime_for(original).is_some());
+    let mut target_options = options.clone();
+    target_options.source = options
+        .source
+        .clone()
+        .with_store(target.clone())
+        .unwrap();
+    let mut query = crate::Query::with_machines(vec![("target".into(), target_options)]);
+    crate::events::FILE_READS.with(|reads| reads.set(0));
+    crate::events::HASHED_BYTES.with(|reads| reads.set(0));
+    crate::source_chunks::READ_BYTES.with(|reads| reads.set(0));
+    let query_key = original.key.clone();
+    let query_error = query
+        .call_selected(
+            "target",
+            &query_key,
+            "get_session",
+            &serde_json::json!({"id":query_key.clone()}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap_err();
+    assert_eq!(query_error.code, "unavailable");
+    assert_eq!(
+        query_error.message,
+        crate::storage::StorageError::ScopeChanged.to_string(),
+        "the imported Current row must retain its prior stale-ledger refusal"
+    );
+    assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
+    assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
+    assert_eq!(crate::source_chunks::READ_BYTES.with(std::cell::Cell::get), 0);
+    drop(query);
     let before: String = db
         .query_row(
             "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
