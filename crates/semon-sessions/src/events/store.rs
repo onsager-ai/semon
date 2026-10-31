@@ -9061,9 +9061,21 @@ mod tests {
                         crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     let error = store.publish(&batch, prepared.prepared()).unwrap_err();
+                    // Stage intentionally sanitizes SQLite errors to
+                    // Configured(Unavailable). In the enabled pass, the
+                    // (2, 7) counts below prove publication reached the
+                    // pre-COMMIT capture immediately before tx.commit(); with
+                    // this deferred FK fixture, that capture plus the rollback
+                    // oracle establishes the failed COMMIT boundary without
+                    // exposing SQLite's error text.
                     assert!(
-                        error.to_string().contains("FOREIGN KEY constraint failed"),
-                        "expected genuine deferred COMMIT FK error: {error}"
+                        matches!(
+                            &error,
+                            StoreError::Configured(
+                                crate::storage::StorageError::Unavailable
+                            )
+                        ),
+                        "expected sanitized configured-storage error: {error}"
                     );
                     assert_eq!(
                         crate::native_timing::catalog_commit_tests::counts(),
