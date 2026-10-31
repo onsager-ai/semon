@@ -351,11 +351,11 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         let row: crate::model::summary::CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         let key = row.key.as_bytes();
+        let parent_key = row
+            .parent
+            .as_deref()
+            .map(|parent| parent.as_bytes().to_vec());
         if *kind == Current {
-            let parent_key = row
-                .parent
-                .as_deref()
-                .map(|parent| parent.as_bytes().to_vec());
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9)", &[&ns,&generation.as_bytes(),&key,&parent_key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
             // Rebuild the producer's physical incident index from the exact
             // transferred metadata; this is content, never publication authority.
@@ -378,8 +378,8 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             }
         } else {
             let (activity, active) = crate::storage::query::history_activity(&row);
-            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,query_activity,query_active) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,NULL,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active]).map_err(sqlstate::error)?;
-            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7,$8,$9)", &[&ns,&generation.as_bytes(),&key,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active]).map_err(sqlstate::error)?;
+            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,NULL,$5,$6,$7,$8,$9,$10,$11)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
+            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
         }
         let table = if *kind == Current {
             "catalog_sources"
