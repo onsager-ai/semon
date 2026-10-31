@@ -4212,7 +4212,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     // Preserve an exact original recipe beside its still-Current owner. This
     // isolates history selection from source revision or proof mismatches.
     db.execute_batch(
-        "INSERT INTO session_history_catalog SELECT namespace,session_key,metadata FROM session_catalog WHERE session_key='live-history';
+        "INSERT INTO session_history_catalog(namespace,session_key,metadata) SELECT namespace,session_key,metadata FROM session_catalog WHERE session_key='live-history';
          INSERT INTO session_history_projections SELECT namespace,session_key,generation,source_generation,version,total,0 FROM session_slot_projections WHERE session_key='live-history';
          INSERT INTO session_history_slots SELECT namespace,session_key,slot,metadata FROM session_slots WHERE session_key='live-history';",
     )
