@@ -134,7 +134,7 @@ pub(crate) fn step(
 }
 
 #[cfg(test)]
-pub(super) fn drain_for_store_test(
+pub(crate) fn drain_for_store_test(
     owner: &configured::NativeOwnership,
     table: Arc<EffectiveTable>,
 ) -> rusqlite::Result<()> {
