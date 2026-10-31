@@ -744,10 +744,15 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"import-index-ahead","parentUuid":"price-answer","timestamp":"2026-10-01T00:02:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized destination append"}})).unwrap();
     drop(raw);
     let mut destination = cache(&target);
-    let receipt = destination.ingest(&"a".repeat(64), &path, "claude").unwrap();
+    let receipt = destination
+        .ingest(&"a".repeat(64), &path, "claude")
+        .unwrap();
     destination.flush_cold_writes().unwrap();
     assert!(!receipt.replayed);
-    assert_eq!(receipt.consumed_bytes, std::fs::metadata(&path).unwrap().len());
+    assert_eq!(
+        receipt.consumed_bytes,
+        std::fs::metadata(&path).unwrap().len()
+    );
     assert!(
         crate::storage::sqlite::catalog::runtime_source_cwds_if_current(&db, &original.sources)
             .unwrap()
@@ -805,7 +810,10 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         .err()
         .expect("the admitted native append leaves Catalog catch-up pending");
     assert_eq!(query_error.code, "unavailable");
-    assert_eq!(query_error.message, "Native Catalog publication is incomplete");
+    assert_eq!(
+        query_error.message,
+        "Native Catalog publication is incomplete"
+    );
     assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
     assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
     assert_eq!(
