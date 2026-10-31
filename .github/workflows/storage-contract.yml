@@ -134,6 +134,11 @@ jobs:
         run: |
           result=0
           for test in \
+            events::store::semantic_stage::tests::codex_physical_owner_closure_is_complete_exact_and_bounded \
+            events::store::semantic_stage::tests::codex_physical_owner_closure_uses_binary_id_and_harness_equality \
+            events::store::semantic_stage::tests::publication_packing_defers_an_owner_that_will_not_fit \
+            storage::sqlite::semantic::plan::tests::codex_native_members_are_exact_and_namespace_scoped \
+            events::store::configured::tests::domain52::configured_semantic_domain61_component_source_capacity_is_not_conflict \
             events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result \
             events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace \
             events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches \
