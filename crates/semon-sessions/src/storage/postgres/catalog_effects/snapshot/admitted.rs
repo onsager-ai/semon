@@ -157,7 +157,7 @@ impl Snapshot<'_, '_> {
         // the original Current row's lifecycle retag to Retained.
         let first_metadata = &current_metadata;
         let second_metadata = &retained_metadata;
-        let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) AND ($6::bytea IS NULL OR f.kind=$6) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),first_metadata,second_metadata,&reference_kind]).map_err(sqlstate::error).map_err(failed)?;
+        let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) AND ($6::bytea IS NULL OR f.kind=$6) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),first_metadata,second_metadata,&reference_kind]).map_err(sqlstate::error).map_err(failed)?;
         let Some(value) = rows.into_iter().next() else {
             return Err(failed(StorageError::ScopeChanged));
         };
@@ -216,6 +216,17 @@ impl Snapshot<'_, '_> {
 }
 
 impl CatalogSnapshot for Snapshot<'_, '_> {
+    fn selected_query_recipe(
+        &self,
+        observation: &crate::storage::query::QueryRecipeObservation,
+    ) -> io::Result<crate::query_projection::SelectedRecipe> {
+        self.load_query_recipe(observation)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| {
+                io::Error::other(crate::storage::query::QueryRecipeLoadError::MissingPayload)
+            })
+    }
+
     fn runtime_observation(
         &self,
         options: &crate::Options,

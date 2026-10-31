@@ -112,6 +112,21 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Inactive PostgreSQL selected Query recipe loader
+        id: query_recipe
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p semon-sessions --lib --locked --features postgres-test-tls pg_query_recipe_loader_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-query-recipe.log"
+          grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/pg-query-recipe.log"
+      - name: Retain selected Query recipe diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.query_recipe.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-query-recipe-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-query-recipe.log
+          if-no-files-found: error
       - name: Typed Catalog scheduling and JSON claim ordering
         id: catalog_selector
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
