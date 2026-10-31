@@ -147,6 +147,27 @@ jobs:
         with:
           name: catalog-search-recovery-tests
           path: ${{ runner.temp }}/catalog-search-recovery-tests.log
+      - name: Cold search demand lifecycle and selected upgrade priority
+        id: catalog_search_lifecycle
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          cargo test --locked -p semon-sessions --lib cold_catalog_search_ -- --nocapture > "$RUNNER_TEMP/catalog-search-lifecycle.log" 2>&1 || result=$?
+          if ! grep -Fq 'test result: ok. 29 passed; 0 failed;' "$RUNNER_TEMP/catalog-search-lifecycle.log"; then result=1; fi
+          case_result=0
+          cargo test --locked -p semon-sessions --lib events::store::tests::selected_projection_upgrade_precedes_draining_and_preserves_revision -- --exact --nocapture > "$RUNNER_TEMP/catalog-search-priority.log" 2>&1 || case_result=$?
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/catalog-search-priority.log"; then case_result=1; fi
+          cat "$RUNNER_TEMP/catalog-search-priority.log" >> "$RUNNER_TEMP/catalog-search-lifecycle.log"
+          if [ "$case_result" -ne 0 ]; then result=1; fi
+          cat "$RUNNER_TEMP/catalog-search-lifecycle.log"
+          exit "$result"
+      - name: Retain cold search lifecycle and selected priority results
+        if: ${{ !cancelled() && steps.catalog_search_lifecycle.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: catalog-search-lifecycle-tests
+          path: ${{ runner.temp }}/catalog-search-lifecycle.log
       - name: Selected Query recipe foundation and token loader
         id: query_recipe_loader
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
