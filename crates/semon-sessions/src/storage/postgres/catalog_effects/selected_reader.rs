@@ -131,7 +131,7 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
             let mut borrowed = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
             let tx = &mut **borrowed;
             native_proof(tx, self.generation, self.source)
-                .map_err(|error| {
+                .inspect_err(|_error| {
                     #[cfg(test)]
                     pid_read_diagnostic(
                         "native_proof_lookup",
@@ -139,10 +139,9 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
                         Some(start),
                         Some(length),
                     );
-                    error
                 })?
                 .chunk_hash(tx, index)
-                .map_err(|error| {
+                .inspect_err(|_error| {
                     #[cfg(test)]
                     pid_read_diagnostic(
                         "native_chunk_hash_lookup",
@@ -150,7 +149,6 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
                         Some(start),
                         Some(length),
                     );
-                    error
                 })
         })()
         .map_err(io::Error::other)?;
@@ -160,10 +158,9 @@ impl SessionSourceReader for Reader<'_, '_, '_> {
         let part = self
             .host
             .read_range(reference, expected, start, length)
-            .map_err(|error| {
+            .inspect_err(|_error| {
                 #[cfg(test)]
                 pid_read_diagnostic("host_call", "refused", Some(start), Some(length));
-                error
             })?;
         crate::selected_read::check()?;
         if part.offset != start

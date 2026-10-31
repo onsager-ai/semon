@@ -73,12 +73,12 @@ fn body_host_diagnostic(
     size_ok: bool,
     offset_ok: bool,
     range_ok: bool,
-    offset: u64,
-    max: usize,
+    range: (u64, usize),
 ) {
     if super::super::selected_reader::pid_read_diagnostics_enabled() {
         eprintln!(
-            "pg_vertical140_pid_host category={category} exact_reference_match={exact_reference_match} expected_pin_match={expected_pin_match} size_ok={size_ok} offset_ok={offset_ok} range_ok={range_ok} offset={offset} max={max}"
+            "pg_vertical140_pid_host category={category} exact_reference_match={exact_reference_match} expected_pin_match={expected_pin_match} size_ok={size_ok} offset_ok={offset_ok} range_ok={range_ok} offset={} max={}",
+            range.0, range.1
         );
     }
 }
@@ -105,8 +105,7 @@ impl crate::SessionSourceReader for BodyHost {
                 size_ok,
                 false,
                 false,
-                offset,
-                max,
+                (offset, max),
             );
             return Err(std::io::Error::other("host denied"));
         };
@@ -126,8 +125,7 @@ impl crate::SessionSourceReader for BodyHost {
                 size_ok,
                 false,
                 false,
-                offset,
-                max,
+                (offset, max),
             );
             return Err(std::io::Error::other("host denied"));
         }
@@ -141,8 +139,7 @@ impl crate::SessionSourceReader for BodyHost {
                     size_ok,
                     false,
                     false,
-                    offset,
-                    max,
+                    (offset, max),
                 );
                 return Err(std::io::Error::other(error));
             }
@@ -157,8 +154,7 @@ impl crate::SessionSourceReader for BodyHost {
                 size_ok,
                 offset_ok,
                 false,
-                offset,
-                max,
+                (offset, max),
             );
             return Err(std::io::Error::other("host range"));
         };
@@ -169,8 +165,7 @@ impl crate::SessionSourceReader for BodyHost {
             size_ok,
             offset_ok,
             true,
-            offset,
-            max,
+            (offset, max),
         );
         Ok(crate::SessionSourceRange {
             generation: "body-fixture".into(),
