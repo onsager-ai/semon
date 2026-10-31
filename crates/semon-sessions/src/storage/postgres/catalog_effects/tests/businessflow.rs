@@ -3432,10 +3432,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     // Later old-generation checks use the immutable captured proof route; the
     // separate live Current refusal is asserted above.
-    assert_eq!(
-        captured_bodies(&pool),
-        expected_bodies
-    );
+    assert_eq!(captured_bodies(&pool), expected_bodies);
     drop(cache);
     let (mut cache, _) = crate::storage::postgres::index_store::open(
         pool.clone(),
