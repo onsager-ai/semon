@@ -8385,6 +8385,63 @@ mod tests {
                     .collect()
             }
 
+            fn assert_deferred_history_change_feed(
+                before: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+                after: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+                namespace: &str,
+                key: &str,
+            ) {
+                let has_history = |state: &BTreeMap<
+                    String,
+                    Vec<Vec<rusqlite::types::Value>>,
+                >| {
+                    state["session_history_catalog"].iter().any(|row| {
+                        row.first()
+                            == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
+                            && row.get(1)
+                                == Some(&rusqlite::types::Value::Text(key.to_owned()))
+                    })
+                };
+                let history_existed = has_history(before);
+                assert!(
+                    has_history(after),
+                    "Deferred original custody completes the target History row"
+                );
+
+                let before_changes = &before["session_catalog_changes"];
+                let mut added = after["session_catalog_changes"].clone();
+                for old in before_changes {
+                    let Some(index) = added.iter().position(|row| row == old) else {
+                        panic!("Deferred custody removed or changed a catalog change event");
+                    };
+                    added.remove(index);
+                }
+                let expected_added = if history_existed { 0 } else { 1 };
+                assert_eq!(
+                    added.len(),
+                    expected_added,
+                    "Deferred custody adds only the target History insertion event"
+                );
+                if expected_added == 1 {
+                    let event = &added[0];
+                    assert_eq!(
+                        event.get(1),
+                        Some(&rusqlite::types::Value::Text(namespace.to_owned())),
+                        "History event stays in the admitted namespace"
+                    );
+                    assert_eq!(
+                        event.get(2),
+                        Some(&rusqlite::types::Value::Text(key.to_owned())),
+                        "History event identifies only the deferred owner"
+                    );
+                    assert_eq!(
+                        event.get(3),
+                        Some(&rusqlite::types::Value::Text("retained_history".into())),
+                        "History insertion does not emit a Current event"
+                    );
+                }
+            }
+
             fn assert_deferred_original_custody(
                 f: &Fixture,
                 namespace: &str,
@@ -8397,6 +8454,10 @@ mod tests {
                 assert!(before_other.keys().eq(after_other.keys()));
                 for (table, expected) in &before_other {
                     let actual = &after_other[table];
+                    if table == "session_catalog_changes" {
+                        assert_deferred_history_change_feed(before, after, namespace, key);
+                        continue;
+                    }
                     assert!(
                         actual == expected,
                         "Deferred custody changed {table}: before_rows={} after_rows={}",
