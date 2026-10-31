@@ -129,6 +129,16 @@ fn publish(home: &Home) {
     .unwrap();
 }
 
+fn recovery_selected_transcript(home: &Home, key: &str) -> crate::ViewerReply {
+    crate::session_transcript_range_with_mode(
+        &home.options,
+        "local",
+        &format!("sid={key}&after=0&limit=1"),
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    )
+}
+
 fn publish_semantic(home: &Home) {
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let mut work = crate::viewer::lock(&evidence.work);
@@ -1281,7 +1291,14 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
         "reused",
         &[human("reused", ts(1, 0), "original native prompt")],
     );
+    publish(&home);
     publish_semantic(&home);
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/-work-proj/reused.jsonl".into(),
+    };
+    publish_semantic_stage(&home, &input);
+    publish(&home);
     std::fs::remove_file(
         home.options
             .claude_home
@@ -1297,6 +1314,8 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
     home.process(30, 777);
     home.pid_file(30, "reused", "busy", 777);
     publish_semantic(&home);
+    publish_semantic_stage(&home, &input);
+    publish(&home);
 
     let config = home.options.source.config(&home.options.cache).unwrap();
     let mut db = crate::storage::sqlite::semantic::Stage::open(
@@ -1311,6 +1330,39 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
         crate::retention::source_generation(&current.sources).unwrap(),
         "the real producer must retain a divergent Current row for this key"
     );
+    let proof_refs = recovery_proof_snapshot(&db, "reused");
+    assert!(proof_refs.iter().any(|proof| proof.0 == "current"));
+    assert!(proof_refs.iter().any(|proof| proof.0 == "history"));
+    let current_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='reused' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='reused' AND owner_kind='history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(current_capture.is_none());
+    assert!(history_capture.is_none());
+    let retained_history = crate::model::summary::CatalogRow {
+        lifecycle: crate::model::summary::CatalogLifecycle::Retained,
+        ..history.clone()
+    };
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db.transaction().unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    assert!(crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+        &tx,
+        &current_binding,
+        &retained_history,
+    )
+    .is_ok());
+    tx.rollback().unwrap();
     let history_query = history.query.as_ref().unwrap();
     let current_query = current.query.as_ref().unwrap();
     assert_ne!(history_query["runtime"], current_query["runtime"]);
@@ -1523,8 +1575,23 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
             assistant("first", ts(1, 1), vec![text("Index ahead answer")]),
         ],
     );
-    publish_semantic(&home);
+    publish(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
+    let before_semantic_batch = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let direct_before_semantic_batch: Option<String> = before_semantic_batch
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_before_semantic_batch.is_some());
+    drop(before_semantic_batch);
+    publish_semantic(&home);
     let direct_before_stage = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
     )
@@ -1538,8 +1605,8 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         )
         .unwrap();
     assert!(
-        direct_capture_before_stage.is_some(),
-        "ordinary Catalog publication owns its row runtime capture before semantic Stage"
+        direct_capture_before_stage.is_none(),
+        "generic semantic-batch publication clears the ordinary direct capture"
     );
     drop(direct_before_stage);
     publish_semantic_stage(
@@ -1570,6 +1637,73 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         direct_capture_after_stage.is_none(),
         "semantic Stage keeps runtime observations in its immutable presentation proof"
     );
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    assert!(proof_snapshot.iter().any(|proof| proof.0 == "current"));
+    let metadata_before_identical_publish =
+        recovery_catalog_metadata(&db, "session_catalog", "first");
+    publish(&home);
+    assert_eq!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        metadata_before_identical_publish,
+        "the ordinary producer republishes the identical selected row"
+    );
+    let direct_capture_after_identical_publish: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_capture_after_identical_publish.is_none());
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+    db.execute(
+        "UPDATE storage_catalog_native_observation_grants SET direct_capture='invalid direct capture' WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        recovery_selected_transcript(&home, "first").status,
+        200,
+        "a valid exact semantic owner remains authoritative over a stale direct value"
+    );
+    db.execute(
+        "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+        [],
+    )
+    .unwrap();
+    let hostname = home.options.proc_root.join("sys/kernel/hostname");
+    let original_hostname = fs::read(&hostname).unwrap();
+    fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
+    publish(&home);
+    let changed_row = recovery_catalog_row(&db, "session_catalog", "first");
+    assert_ne!(
+        recovery_catalog_metadata(&db, "session_catalog", "first"),
+        metadata_before_identical_publish
+    );
+    assert_eq!(
+        crate::retention::source_generation(&changed_row.sources).unwrap(),
+        crate::retention::source_generation(&selected.sources).unwrap(),
+        "Facts drift keeps the Index source generation"
+    );
+    assert_ne!(
+        changed_row.query.as_ref().unwrap()["runtime"],
+        selected.query.as_ref().unwrap()["runtime"],
+        "the ordinary producer captures the changed global runtime"
+    );
+    let fresh_direct_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(fresh_direct_capture.is_some());
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+    fs::write(&hostname, original_hostname).unwrap();
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 503);
+    publish(&home);
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+    let selected = recovery_catalog_row(&db, "session_catalog", "first");
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
     let tx = db.transaction().unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();
@@ -1635,6 +1769,135 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         "a changed global runtime must not reuse the publication's captured row witness"
     );
     tx.rollback().unwrap();
+}
+
+#[test]
+fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
+    let home = Home::new("recovery-direct-damaged-proof");
+    home.top(
+        "first",
+        &[
+            human("first", ts(1, 0), "proof owner prompt"),
+            assistant("first", ts(1, 1), vec![text("proof owner answer")]),
+        ],
+    );
+    publish(&home);
+    publish_semantic(&home);
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
+    publish(&home);
+
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let before = recovery_catalog_row(&db, "session_catalog", "first");
+    let hostname = home.options.proc_root.join("sys/kernel/hostname");
+    let original_hostname = fs::read(&hostname).unwrap();
+    fs::write(&hostname, "recovery-direct-damaged-proof-drift\n").unwrap();
+    publish(&home);
+    let after = recovery_catalog_row(&db, "session_catalog", "first");
+    assert_eq!(
+        crate::retention::source_generation(&before.sources).unwrap(),
+        crate::retention::source_generation(&after.sources).unwrap()
+    );
+    assert_ne!(
+        before.query.as_ref().unwrap()["runtime"],
+        after.query.as_ref().unwrap()["runtime"]
+    );
+    let direct_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_capture.is_some());
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+
+    fs::write(&hostname, "recovery-direct-witness-stale\n").unwrap();
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 503);
+    fs::write(&hostname, b"recovery-direct-damaged-proof-drift\n").unwrap();
+
+    let current_id = recovery_proof_snapshot(&db, "first")
+        .into_iter()
+        .find(|proof| proof.0 == "current")
+        .unwrap()
+        .1;
+    assert_eq!(
+        db.execute(
+            "DELETE FROM storage_proof_presentations WHERE namespace=semon_namespace() AND id=?1 AND session_key='first'",
+            [&current_id],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        recovery_selected_transcript(&home, "first").status,
+        503,
+        "a damaged exact semantic owner blocks fallback to a valid direct capture"
+    );
+    fs::write(&hostname, original_hostname).unwrap();
+}
+
+#[test]
+fn recovery_ordinary_index_advance_supersedes_the_old_semantic_source() {
+    let home = Home::new("recovery-direct-index-advance");
+    let original_records = [
+        human("first", ts(1, 0), "initial Index source"),
+        assistant("first", ts(1, 1), vec![text("initial answer")]),
+    ];
+    home.top("first", &original_records);
+    publish(&home);
+    publish_semantic(&home);
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let before = recovery_catalog_row(&db, "session_catalog", "first");
+
+    home.top(
+        "first",
+        &[
+            original_records[0].clone(),
+            original_records[1].clone(),
+            human("first", ts(1, 2), "advanced Index source"),
+            assistant("first", ts(1, 3), vec![text("advanced answer")]),
+        ],
+    );
+    publish(&home);
+
+    let after = recovery_catalog_row(&db, "session_catalog", "first");
+    assert_ne!(
+        crate::retention::source_generation(&before.sources).unwrap(),
+        crate::retention::source_generation(&after.sources).unwrap(),
+        "the ordinary producer advances the indexed source generation"
+    );
+    let direct_capture: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_capture.is_some());
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
 }
 
 #[test]

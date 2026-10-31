@@ -247,29 +247,6 @@ mod partial_readers {
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
-        let mut retained = row.clone();
-        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-        db.execute(
-            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
-            params![config.namespace.as_str(), row.key, serde_json::to_string(&retained).unwrap()],
-        )
-        .unwrap();
-        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-            &db,
-            config.namespace.as_str(),
-            &row.key,
-            u64::try_from(admission).unwrap(),
-            &stream,
-        )
-        .unwrap();
-        let history_capture: Option<String> = db
-            .query_row(
-                "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
-                params![config.namespace.as_str(), row.key],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(history_capture.as_deref(), Some(direct_capture.as_str()));
         for corruption in [
             "missing-grant",
             "changed-grant",
