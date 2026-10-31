@@ -3166,8 +3166,11 @@ mod tests {
 
         header_repair_invalidate(&store, &path, "removed");
         let pending = header_repair_claim(&store, &path);
-        assert!(!store.qualified_catalog().unwrap());
+        // A pending repair preserves the published Current catalog. Readiness
+        // follows its complete generation markers until a stage is active.
+        assert!(store.qualified_catalog().unwrap());
         assert_eq!(header_repair_claim(&store, &path), pending);
+        assert!(store.connection.query_row("SELECT lifecycle='current' AND EXISTS(SELECT 1 FROM session_catalog_sources WHERE session_key='old' AND source_path=?1 AND lifecycle='current') FROM session_catalog WHERE session_key='old'", [&path], |row| row.get::<_, bool>(0)).unwrap());
         assert_eq!(
             store
                 .semantic_begin(std::slice::from_ref(&path), "runtime")
