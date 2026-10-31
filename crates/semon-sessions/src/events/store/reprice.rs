@@ -130,6 +130,19 @@ pub(crate) fn step(
     step_inner(owner, table, true)
 }
 
+#[cfg(test)]
+pub(super) fn drain_for_store_test(
+    owner: &configured::NativeOwnership,
+    table: Arc<EffectiveTable>,
+) -> rusqlite::Result<()> {
+    for _ in 0..64 {
+        if !step_inner(owner, Arc::clone(&table), false)? {
+            return Ok(());
+        }
+    }
+    Err(rusqlite::Error::InvalidQuery)
+}
+
 fn owner_error(error: crate::storage::StorageError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
 }
