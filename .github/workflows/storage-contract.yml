@@ -529,6 +529,28 @@ jobs:
       - name: Direct Catalog grant retention and snapshot qualification
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib events::store::tests::direct_catalog_ -- --nocapture
+      - name: Authenticated semantic publication reuse and refusal
+        id: semantic_publication_reuse
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        run: |
+          result=0
+          for test in events::store::configured::tests::configured_semantic_publication_replay_is_idempotent events::store::configured::tests::configured_semantic_noop_refuses_dangling_proof_source_and_grant query::tests::recovery_tests::recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/semantic-publication-reuse-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/semantic-publication-reuse-case.log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/semantic-publication-reuse-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/semantic-publication-reuse-case.log" >> "$RUNNER_TEMP/semantic-publication-reuse-tests.log"
+            echo "CASE name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/semantic-publication-reuse-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/semantic-publication-reuse-tests.log"
+          exit "$result"
+      - name: Retain authenticated semantic publication reuse results
+        if: ${{ !cancelled() && steps.semantic_publication_reuse.outcome != 'skipped' && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-publication-reuse-tests
+          path: ${{ runner.temp }}/semantic-publication-reuse-tests.log
       - name: SQLite adapter and reusable metadata conformance
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
