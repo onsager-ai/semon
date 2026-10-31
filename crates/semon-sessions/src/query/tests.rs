@@ -237,8 +237,33 @@ fn admitted(options: Options) -> Arc<SessionSources> {
     )]))
 }
 
+fn configured_options(
+    home: &Home,
+    namespace: &str,
+    epoch: char,
+) -> (Options, crate::storage::StoreConfig) {
+    let source = crate::storage::HostSource::new(
+        crate::storage::LogicalSourceNamespace::new(namespace).unwrap(),
+        epoch.to_string().repeat(64),
+    )
+    .unwrap();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Sqlite {
+            database: crate::events::EventCache::path(&home.options.cache),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config.clone()).unwrap();
+    (options, config)
+}
+
 fn catalog_generation(home: &Home) -> Option<String> {
-    crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+    catalog_generation_options(&home.options)
+}
+
+fn catalog_generation_options(options: &Options) -> Option<String> {
+    crate::events::EventCache::open_scoped(&options.cache, &options.source)
         .unwrap()
         .session_catalog_generation()
 }
@@ -1916,10 +1941,20 @@ fn ids_of(answer: &Value) -> Vec<&str> {
 
 /// Whether the event index holds a file's index: whether a build read it.
 fn indexed(home: &Home, file: &str) -> bool {
-    crate::events::EventCache::open(&home.options.cache, &home.options.source)
+    let namespace = home.options.source.namespace().unwrap();
+    let path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj")
+        .join(file);
+    rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
         .unwrap()
-        .paths()
-        .any(|path| path.ends_with(file))
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.files WHERE namespace=?1 AND path=?2)",
+            rusqlite::params![namespace.as_str(), path.to_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn assert_paused_find_before_window_preparation(query: &mut Query, home: &Home) {
@@ -5458,8 +5493,30 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             "unrelated",
             &[human("unrelated", ts(1, 0), "unrelated archive history")],
         );
+        let (options, config) = configured_options(&home, "catalog-archive-search", 'a');
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        crate::model::observe_catalog(
+            &options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        let generation = catalog_generation_options(&options).expect("published Catalog");
         let args = json!({"text":"needle","limit":1});
-        let expected = Query::from_sources(admitted(home.options.clone()))
+        let sources = || {
+            Arc::new(
+                SessionSources::with_configured_machines(vec![(
+                    String::new(),
+                    options.clone(),
+                    config.clone(),
+                )])
+                .unwrap(),
+            )
+        };
+        let expected = Query::from_sources(sources())
             .call_optional_at("find", &args, NOW)
             .unwrap();
         let archive = Arc::new(selected_archive(&home, fault));
@@ -5471,17 +5528,6 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             )
             .unwrap();
         }
-        let mut cache =
-            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
-                .unwrap();
-        crate::model::observe_catalog(
-            &home.options,
-            &mut cache,
-            &mut false,
-            &mut crate::model::Texts::default(),
-            NOW,
-        )
-        .unwrap();
         let admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let factory_admissions = admissions.clone();
         let factory_archive = archive.clone();
@@ -5495,7 +5541,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
                 factory_admissions.fetch_add(1, Ordering::Relaxed);
                 Ok(Box::new(SharedSearchArchive(factory_archive.clone())))
             };
-        let result = Query::from_sources(admitted(home.options.clone())).call_optional_catalog_at(
+        let result = Query::from_sources(sources()).call_optional_catalog_at(
             "find",
             &args,
             Some(&factory),
@@ -5512,6 +5558,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
                 "invalid native bytes, replacement or revocation was accepted: {fault}"
             );
         }
+        assert_eq!(catalog_generation_options(&options), Some(generation));
     }
 }
 
@@ -5527,19 +5574,35 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         ],
     );
     second.top("peer", &[human("peer", ts(23, 0), "needle newer")]);
+    let (first_options, first_config) = configured_options(&first, "catalog-first", 'b');
+    let (second_options, second_config) = configured_options(&second, "catalog-second", 'c');
+    for options in [&first_options, &second_options] {
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        crate::model::observe_catalog(
+            options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+    }
     let machines = vec![
-        ("a".into(), first.options.clone()),
-        ("b".into(), second.options.clone()),
+        ("a".into(), first_options.clone(), first_config.clone()),
+        ("b".into(), second_options.clone(), second_config.clone()),
     ];
-    let sources = Arc::new(SessionSources::with_machines(machines.clone()));
-    let mut native = Query::from_sources(sources);
+    let sources = || {
+        Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap())
+    };
+    let mut native = Query::from_sources(sources());
     for args in [
         json!({"text":"needle"}),
         json!({"text":"needle","limit":1}),
         json!({"text":"needle","max_bytes":1}),
     ] {
         let expected = native.call_optional_at("find", &args, NOW).unwrap();
-        let actual = Query::from_sources(Arc::new(SessionSources::with_machines(machines.clone())))
+        let actual = Query::from_sources(sources())
             .call_optional_catalog_at(
                 "find",
                 &args,
@@ -5554,11 +5617,22 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         "lead",
         &[human("lead", ts(1, 0), "duplicate native identity")],
     );
-    native
+    let mut updated_cache =
+        crate::events::EventCache::open_scoped(&second_options.cache, &second_options.source)
+            .unwrap();
+    crate::model::observe_catalog(
+        &second_options,
+        &mut updated_cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    Query::from_sources(sources())
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap_err();
     assert_eq!(
-        Query::from_sources(Arc::new(SessionSources::with_machines(machines)))
+        Query::from_sources(sources())
             .call_optional_catalog_at(
                 "find",
                 &json!({"text":"needle"}),
