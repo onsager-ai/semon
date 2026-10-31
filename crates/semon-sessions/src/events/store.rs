@@ -8010,14 +8010,22 @@ mod tests {
     #[test]
     fn direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant() {
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
-        use crate::storage::sqlite::proof_generations::{CatalogObservationOwner, query_recipe_observation};
+        use crate::storage::sqlite::proof_generations::{
+            CatalogObservationOwner, query_recipe_observation,
+        };
         // The ordinary producer authors metadata, source witnesses and grants.
         // Until its payload hook exists, the admitted fixture writer supplies
         // only the matching payload cell; it never writes observation authority.
-        let supply_payload = |store: &SqliteStore, owner: CatalogObservationOwner, metadata: &str, payload: &str| {
+        let supply_payload = |store: &SqliteStore,
+                              owner: CatalogObservationOwner,
+                              metadata: &str,
+                              payload: &str| {
             let mut db = crate::storage::sqlite::semantic::Stage::open(
-                crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
-            ).unwrap().into_test_connection();
+                crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
+                    .unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
             let tx = db.transaction().unwrap();
             let reader = crate::storage::NativeReaderBinding::Semantic(store.owner.clone());
             let binding = reader.runtime_binding_at(&tx).unwrap();
@@ -8034,20 +8042,57 @@ mod tests {
         let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
         let expected = rows[0].query_recipe.clone().unwrap();
         let prepared = crate::query_projection::SelectedRecipe::prepare(&rows[0]).unwrap();
-        rows[0].query = serde_json::from_str::<crate::model::summary::CatalogRow>(&prepared.metadata).unwrap().query;
+        rows[0].query =
+            serde_json::from_str::<crate::model::summary::CatalogRow>(&prepared.metadata)
+                .unwrap()
+                .query;
         let config = options.source.config(&options.cache).unwrap();
-        let mut store = current_test_store_with_epoch(&crate::events::EventCache::path(&options.cache), &config.namespace, config.expected_stream_epoch.as_deref().unwrap());
-        assert_eq!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap().0, Outcome::Written);
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
+        assert_eq!(
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
         let reader = crate::storage::NativeReaderBinding::Semantic(store.owner.clone());
         let binding = reader.runtime_binding_at(&store.connection).unwrap();
-        let original = query_recipe_observation(&store.connection, &binding, CatalogObservationOwner::Catalog, &rows[0]).unwrap();
-        let port = crate::storage::sqlite::query::SqliteQueryCatalog { options: options.clone(), binding: reader.clone() };
-        assert!(matches!(port.selected_recipe(&original), Err(QueryRecipeLoadError::MissingPayload)));
+        let original = query_recipe_observation(
+            &store.connection,
+            &binding,
+            CatalogObservationOwner::Catalog,
+            &rows[0],
+        )
+        .unwrap();
+        let port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: options.clone(),
+            binding: reader.clone(),
+        };
+        assert!(matches!(
+            port.selected_recipe(&original),
+            Err(QueryRecipeLoadError::MissingPayload)
+        ));
         let payload = prepared.query_recipe.unwrap();
-        supply_payload(&store, CatalogObservationOwner::Catalog, &prepared.metadata, &payload);
-        assert_eq!(port.selected_recipe(&original).unwrap(), Some(expected.clone()));
+        supply_payload(
+            &store,
+            CatalogObservationOwner::Catalog,
+            &prepared.metadata,
+            &payload,
+        );
+        assert_eq!(
+            port.selected_recipe(&original).unwrap(),
+            Some(expected.clone())
+        );
         let request = crate::SelectedReadControl::default().with_limits(4, 1);
-        assert!(request.scope(|| Ok(port.selected_recipe(&original))).is_err(), "fetched cells consume preparation accounting before decoding");
+        assert!(
+            request
+                .scope(|| Ok(port.selected_recipe(&original)))
+                .is_err(),
+            "fetched cells consume preparation accounting before decoding"
+        );
 
         // A real native append must preserve the original owner through the
         // ordinary bounded custody publication before Current is replaced.
@@ -8058,28 +8103,89 @@ mod tests {
         drop(raw);
         let (mut next, next_projections) = catalog_fixture_projection(&options);
         let next_prepared = crate::query_projection::SelectedRecipe::prepare(&next[0]).unwrap();
-        next[0].query = serde_json::from_str::<crate::model::summary::CatalogRow>(&next_prepared.metadata).unwrap().query;
+        next[0].query =
+            serde_json::from_str::<crate::model::summary::CatalogRow>(&next_prepared.metadata)
+                .unwrap()
+                .query;
         for tick in 0..128 {
-            if catalog_write(&mut store, &next, &next_projections, false, CatalogWriter::Auto).unwrap().0 == Outcome::Written {
+            if catalog_write(
+                &mut store,
+                &next,
+                &next_projections,
+                false,
+                CatalogWriter::Auto,
+            )
+            .unwrap()
+            .0 == Outcome::Written
+            {
                 break;
             }
             assert!(tick < 127);
         }
-        assert!(matches!(port.selected_recipe(&original), Err(QueryRecipeLoadError::ObservationChanged)));
+        assert!(matches!(
+            port.selected_recipe(&original),
+            Err(QueryRecipeLoadError::ObservationChanged)
+        ));
         let history_metadata: String = store.connection.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
         let history_row = serde_json::from_str(&history_metadata).unwrap();
-        let history = query_recipe_observation(&store.connection, &binding, CatalogObservationOwner::History, &history_row).unwrap();
-        supply_payload(&store, CatalogObservationOwner::History, &history_metadata, &payload);
+        let history = query_recipe_observation(
+            &store.connection,
+            &binding,
+            CatalogObservationOwner::History,
+            &history_row,
+        )
+        .unwrap();
+        supply_payload(
+            &store,
+            CatalogObservationOwner::History,
+            &history_metadata,
+            &payload,
+        );
         assert_eq!(port.selected_recipe(&history).unwrap(), Some(expected));
-        assert!(query_recipe_observation(&store.connection, &binding, CatalogObservationOwner::Catalog, &history_row).is_err(), "History cannot be guessed from its lifecycle or substituted for Current");
-        supply_payload(&store, CatalogObservationOwner::History, &history_metadata, "{}");
-        assert!(matches!(port.selected_recipe(&history), Err(QueryRecipeLoadError::CorruptPayload)));
-        supply_payload(&store, CatalogObservationOwner::History, &history_metadata, &payload);
-        let db = crate::storage::sqlite::semantic::Stage::open(crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap()).unwrap().into_test_connection();
+        assert!(
+            query_recipe_observation(
+                &store.connection,
+                &binding,
+                CatalogObservationOwner::Catalog,
+                &history_row
+            )
+            .is_err(),
+            "History cannot be guessed from its lifecycle or substituted for Current"
+        );
+        supply_payload(
+            &store,
+            CatalogObservationOwner::History,
+            &history_metadata,
+            "{}",
+        );
+        assert!(matches!(
+            port.selected_recipe(&history),
+            Err(QueryRecipeLoadError::CorruptPayload)
+        ));
+        supply_payload(
+            &store,
+            CatalogObservationOwner::History,
+            &history_metadata,
+            &payload,
+        );
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute("DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'", params![config.namespace.as_str(), rows[0].key]).unwrap();
-        assert!(matches!(port.selected_recipe(&history), Err(QueryRecipeLoadError::ObservationChanged)), "a failed History grant cannot fall back to the valid Current owner");
+        assert!(
+            matches!(
+                port.selected_recipe(&history),
+                Err(QueryRecipeLoadError::ObservationChanged)
+            ),
+            "a failed History grant cannot fall back to the valid Current owner"
+        );
         db.execute("UPDATE storage_namespaces SET admission_generation=admission_generation+2 WHERE namespace=?1", [config.namespace.as_str()]).unwrap();
-        assert!(port.selected_recipe(&history).is_err(), "destination re-admission fences the original token");
+        assert!(
+            port.selected_recipe(&history).is_err(),
+            "destination re-admission fences the original token"
+        );
         drop(db);
         drop(store);
         fs::remove_dir_all(root).unwrap();

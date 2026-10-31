@@ -1337,20 +1337,28 @@ pub(crate) fn load_query_recipe(
     db: &Connection,
     reader: &NativeReaderBinding,
     observation: &crate::storage::query::QueryRecipeObservation,
-) -> Result<Option<crate::query_projection::SelectedRecipe>, crate::storage::query::QueryRecipeLoadError> {
-    use crate::storage::query::{QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence};
+) -> Result<
+    Option<crate::query_projection::SelectedRecipe>,
+    crate::storage::query::QueryRecipeLoadError,
+> {
+    use crate::storage::query::{
+        QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
+    };
     let current = reader.runtime_binding_at(db)?;
     if current != observation.destination {
         return Err(Error::ObservationChanged);
     }
     let selected = observation.row();
     let namespace = current.namespace.as_str();
-    let current_admission = i64::try_from(current.admission).map_err(|_| Error::ObservationChanged)?;
+    let current_admission =
+        i64::try_from(current.admission).map_err(|_| Error::ObservationChanged)?;
     let payload = match &observation.residence {
         QueryRecipeResidence::NativeCatalog { metadata_digest }
         | QueryRecipeResidence::NativeHistory { metadata_digest } => {
             let (owner, kind) = match &observation.residence {
-                QueryRecipeResidence::NativeCatalog { .. } => (CatalogObservationOwner::Catalog, "current"),
+                QueryRecipeResidence::NativeCatalog { .. } => {
+                    (CatalogObservationOwner::Catalog, "current")
+                }
                 _ => (CatalogObservationOwner::History, "history"),
             };
             let cells: Option<(Option<String>, Option<String>, bool)> = db.query_row(
@@ -1363,22 +1371,34 @@ pub(crate) fn load_query_recipe(
                 return Err(StorageError::HistoryRetentionBounds.into());
             }
             let metadata = metadata.ok_or(Error::CorruptPayload)?;
-            crate::selected_read::charge(1, metadata.len() + payload.as_ref().map_or(0, String::len))
-                .map_err(|_| StorageError::Busy)?;
+            crate::selected_read::charge(
+                1,
+                metadata.len() + payload.as_ref().map_or(0, String::len),
+            )
+            .map_err(|_| StorageError::Busy)?;
             if metadata != observation.metadata || observation.original != current {
                 return Err(Error::ObservationChanged);
             }
             let mut normalized = selected.clone();
             normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-            let normalized = serde_json::to_string(&normalized).map_err(|_| Error::CorruptPayload)?;
+            let normalized =
+                serde_json::to_string(&normalized).map_err(|_| Error::CorruptPayload)?;
             if proof_codec::digest(normalized.as_bytes()) != *metadata_digest {
                 return Err(Error::ObservationChanged);
             }
             let prefix = crate::retention::source_generation(&selected.sources)
                 .map_err(|_| Error::CorruptPayload)?;
             // Preserve immutable-corruption refusal ahead of mutable authority.
-            if immutable_observation_candidate(db, namespace, &selected.key, kind, &prefix, &current.stream_epoch, &normalized)
-                .map_err(ObservationPreparationError::into_storage)?
+            if immutable_observation_candidate(
+                db,
+                namespace,
+                &selected.key,
+                kind,
+                &prefix,
+                &current.stream_epoch,
+                &normalized,
+            )
+            .map_err(ObservationPreparationError::into_storage)?
             {
                 verify_immutable_observation(db, &current, selected, kind, &prefix, false)
                     .map_err(ObservationPreparationError::into_storage)?;
@@ -1393,8 +1413,13 @@ pub(crate) fn load_query_recipe(
             }
             payload
         }
-        QueryRecipeResidence::Immutable { owner, generation, publication } => {
-            let original_admission = i64::try_from(observation.original.admission).map_err(|_| Error::ObservationChanged)?;
+        QueryRecipeResidence::Immutable {
+            owner,
+            generation,
+            publication,
+        } => {
+            let original_admission = i64::try_from(observation.original.admission)
+                .map_err(|_| Error::ObservationChanged)?;
             let kind = match owner {
                 QueryRecipeOwner::Catalog => "current",
                 QueryRecipeOwner::History => "history",
@@ -1416,7 +1441,19 @@ pub(crate) fn load_query_recipe(
                 params![namespace, selected.key, kind, generation.0, publication, original_admission, observation.original.stream_epoch],
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, bool>(10)?)),
             ).optional().map_err(failed)?.ok_or(Error::ObservationChanged)?;
-            let (proof, admission, stream, metadata, payload, slots, prefix, base, manifest, presentation, within) = cells;
+            let (
+                proof,
+                admission,
+                stream,
+                metadata,
+                payload,
+                slots,
+                prefix,
+                base,
+                manifest,
+                presentation,
+                within,
+            ) = cells;
             if !within {
                 return Err(StorageError::HistoryRetentionBounds.into());
             }
@@ -1424,8 +1461,15 @@ pub(crate) fn load_query_recipe(
             let slots = slots.ok_or(StorageError::HistoryRetentionBounds)?;
             let manifest = manifest.ok_or(StorageError::HistoryRetentionBounds)?;
             let presentation = presentation.ok_or(StorageError::HistoryRetentionBounds)?;
-            crate::selected_read::charge(64, metadata.len() + payload.as_ref().map_or(0, String::len) + slots.len() + manifest.len() + presentation.len())
-                .map_err(|_| StorageError::Busy)?;
+            crate::selected_read::charge(
+                64,
+                metadata.len()
+                    + payload.as_ref().map_or(0, String::len)
+                    + slots.len()
+                    + manifest.len()
+                    + presentation.len(),
+            )
+            .map_err(|_| StorageError::Busy)?;
             let grant = format!("{}:{}", current.admission, current.stream_epoch);
             let digest = proof_codec::digest(metadata.as_bytes());
             let granted: bool = db.query_row(
@@ -1437,26 +1481,49 @@ pub(crate) fn load_query_recipe(
                 return Err(Error::ObservationChanged);
             }
             proof_codec::verify_presentation_digest(&base, &manifest, &proof)?;
-            proof_codec::verify_presentation_entry(&selected.key, &metadata, &slots, &presentation, &manifest)?;
-            let original: CatalogRow = serde_json::from_str(&metadata).map_err(|_| Error::CorruptPayload)?;
+            proof_codec::verify_presentation_entry(
+                &selected.key,
+                &metadata,
+                &slots,
+                &presentation,
+                &manifest,
+            )?;
+            let original: CatalogRow =
+                serde_json::from_str(&metadata).map_err(|_| Error::CorruptPayload)?;
             if original.lifecycle != crate::model::summary::CatalogLifecycle::Current {
                 return Err(Error::ObservationChanged);
             }
             let record = proof_codec::GenerationRecord {
-                namespace: namespace.to_owned(), id: generation.clone(), session_key: selected.key.clone(), publication: publication.clone(), proof,
-                admission: u64::try_from(admission).map_err(|_| Error::ObservationChanged)?, stream, metadata, slots, prefix,
+                namespace: namespace.to_owned(),
+                id: generation.clone(),
+                session_key: selected.key.clone(),
+                publication: publication.clone(),
+                proof,
+                admission: u64::try_from(admission).map_err(|_| Error::ObservationChanged)?,
+                stream,
+                metadata,
+                slots,
+                prefix,
             };
-            if proof_codec::observation_binding(record, &current, selected)? != observation.original {
+            if proof_codec::observation_binding(record, &current, selected)? != observation.original
+            {
                 return Err(Error::ObservationChanged);
             }
             payload
         }
     };
     if selected.query.is_none() {
-        return if payload.is_none() { Ok(None) } else { Err(Error::CorruptPayload) };
+        return if payload.is_none() {
+            Ok(None)
+        } else {
+            Err(Error::CorruptPayload)
+        };
     }
     let payload = payload.ok_or(crate::storage::query::QueryRecipeLoadError::MissingPayload)?;
-    observation.decode(&payload).map(Some).map_err(|_| crate::storage::query::QueryRecipeLoadError::CorruptPayload)
+    observation
+        .decode(&payload)
+        .map(Some)
+        .map_err(|_| crate::storage::query::QueryRecipeLoadError::CorruptPayload)
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable
