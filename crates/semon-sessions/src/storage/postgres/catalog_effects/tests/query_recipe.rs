@@ -244,7 +244,18 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     let input = crate::native_evidence::catalog_input(path, &options).unwrap();
     let mut published = None;
     for _ in 0..256 {
-        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        let Some(batch) = cache.semantic_batch(64).unwrap() else {
+            // Completing the seeded publication leaves bounded semantic GC.
+            // begin advances those ordinary pages before creating the next
+            // stage, so Written alone does not yet promise a batch.
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, "query-recipe-import", true)
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            continue;
+        };
         if batch.paths.is_empty() {
             continue;
         }
