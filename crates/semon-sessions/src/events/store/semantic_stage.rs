@@ -197,8 +197,40 @@ CREATE TABLE session_catalog_invalidations(namespace TEXT,source_path TEXT);")?;
 }
 
 pub(super) fn stage_layout(c: &Connection) -> rusqlite::Result<()> {
+    let mut shapes = HashMap::new();
+    for &table in STAGE_TABLES {
+        shapes.insert(
+            table,
+            StageShape {
+                columns: columns(c, table)?,
+                definition: String::new(),
+                indexes: Vec::new(),
+            },
+        );
+    }
+    // Read the schema once rather than rescan it for each staged table/index.
+    let tables = serde_json::to_string(STAGE_TABLES).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let mut q = c.prepare_cached("SELECT tbl_name,type,name,sql FROM main.sqlite_schema WHERE tbl_name IN (SELECT value FROM json_each(?1)) AND type IN ('table','index') AND sql IS NOT NULL ORDER BY name")?;
+    for row in q.query_map([tables], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
+    })? {
+        let (table, kind, name, sql) = row?;
+        let shape = shapes
+            .get_mut(table.as_str())
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        if kind == "table" {
+            shape.definition = sql;
+        } else {
+            shape.indexes.push((name, sql));
+        }
+    }
     for (table, expected) in STAGE_TABLES.iter().zip(stage_shapes()?) {
-        if stage_shape(c, table)? != *expected {
+        if shapes.get(table).ok_or(rusqlite::Error::InvalidQuery)? != expected {
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
@@ -234,27 +266,6 @@ pub(crate) fn validate_support(c: &Connection) -> rusqlite::Result<()> {
     }
     observation_shapes(c)?;
     stage_layout(c)?;
-    for (table, key) in [
-        ("catalog_relocation_candidates", "old_path,new_path"),
-        (
-            "catalog_native_dependencies",
-            "source_path,harness,native_id",
-        ),
-        ("session_source_mutations", "source_path"),
-        ("reported_runs", "session_id,start"),
-    ] {
-        let pk: String = c.prepare_cached("SELECT coalesce(group_concat(name,','),'') FROM (SELECT name FROM pragma_table_info(?1,'main') WHERE pk>0 ORDER BY pk)")?.query_row([table], |r| r.get(0))?;
-        let ns = pk == format!("namespace,{key}");
-        let namespace_valid: bool = c.prepare_cached("SELECT count(*)=1 AND min(pk=1 AND [notnull]=1 AND type='TEXT') FROM pragma_table_info(?1,'main') WHERE name='namespace'")?.query_row([table], |r| r.get(0))?;
-        let physical: bool = c
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
-            )?
-            .query_row([table], |r| r.get(0))?;
-        if !ns || !namespace_valid || !physical {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-    }
     let reference = Connection::open_in_memory()?;
     reference.execute_batch(support_schema())?;
     for table in [
@@ -263,7 +274,12 @@ pub(crate) fn validate_support(c: &Connection) -> rusqlite::Result<()> {
         "session_source_mutations",
         "reported_runs",
     ] {
-        if columns(c, table)? != columns(&reference, table)? {
+        let physical: bool = c
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            )?
+            .query_row([table], |r| r.get(0))?;
+        if !physical || columns(c, table)? != columns(&reference, table)? {
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
