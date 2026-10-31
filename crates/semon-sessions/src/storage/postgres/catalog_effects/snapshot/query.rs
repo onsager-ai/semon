@@ -382,7 +382,9 @@ impl QueryCatalogStore for QueryCatalog {
                     .selected(key, history, 0, 1)
                     .inspect_err(|_error| {
                         #[cfg(test)]
-                        eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
+                        eprintln!(
+                            "pg_selected_snapshot_lookup key={key:?} history={history}: {_error}"
+                        );
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
                 let current_row = snapshot.catalog(key, false)?;
@@ -421,7 +423,10 @@ impl QueryCatalogStore for QueryCatalog {
                 if !self.captured && current {
                     let current_row = current_row.ok_or(StorageError::ScopeChanged)?;
                     let runtime = runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
-                    let saved = current_row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+                    let saved = current_row
+                        .query
+                        .as_ref()
+                        .ok_or(StorageError::ScopeChanged)?;
                     let expected = snapshot
                         .runtime_observation(&self.options, current_row, runtime)
                         .map_err(|_| StorageError::ScopeChanged)?
@@ -549,7 +554,12 @@ impl QueryCatalogStore for QueryCatalog {
                         summary["machine"] = serde_json::json!(machine);
                     }
                     records.finish().map_err(|_| StorageError::ScopeChanged)?;
-                    if runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|_| StorageError::Unavailable)? != runtime
+                    if runtime_observation
+                        .as_ref()
+                        .map(|observation| observation.generation(&self.options))
+                        .transpose()
+                        .map_err(|_| StorageError::Unavailable)?
+                        != runtime
                     {
                         return Err(StorageError::ScopeChanged);
                     }
@@ -601,7 +611,12 @@ impl QueryCatalogStore for QueryCatalog {
                     let _ = error;
                     StorageError::ScopeChanged
                 })?;
-                if runtime_observation.as_ref().map(|observation| observation.generation(&self.options)).transpose().map_err(|_| StorageError::Unavailable)? != runtime
+                if runtime_observation
+                    .as_ref()
+                    .map(|observation| observation.generation(&self.options))
+                    .transpose()
+                    .map_err(|_| StorageError::Unavailable)?
+                    != runtime
                 {
                     return Err(StorageError::ScopeChanged);
                 }
