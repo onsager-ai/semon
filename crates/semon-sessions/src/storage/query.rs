@@ -357,6 +357,27 @@ mod tests {
     }
 
     #[test]
+    fn prepared_recipe_charges_compact_metadata_and_payload_without_changing_active_row() {
+        let recipe = crate::query_projection::SelectedRecipe {
+            session: json!({"busy":"x".repeat(super::super::proof_codec::METADATA_MAX * 3 / 4)}),
+            turns: Vec::new(),
+            edges: Vec::new(),
+        };
+        let mut row = retained_row(json!({"version":1,"selected":recipe}));
+        row.query_recipe = Some(recipe.clone());
+        let active = serde_json::to_string(&row).unwrap();
+        let prepared = crate::query_projection::SelectedRecipe::prepare(&row).unwrap();
+        let payload = prepared.query_recipe.unwrap();
+        assert!(active.len() + payload.len() > super::super::proof_codec::METADATA_MAX);
+        assert!(prepared.metadata.len() + payload.len() < super::super::proof_codec::METADATA_MAX);
+        assert_eq!(serde_json::to_string(&row).unwrap(), active);
+        let compact = serde_json::from_str(&prepared.metadata).unwrap();
+        assert_eq!(crate::query_projection::SelectedRecipe::decode(&compact, &payload).unwrap(), recipe);
+        row.query_recipe = None;
+        assert!(crate::query_projection::SelectedRecipe::prepare(&row).is_err());
+    }
+
+    #[test]
     fn history_activity_matches_window_eligibility() {
         let mut row = retained_row(json!({
             "last":null,"state":"idle",

@@ -25,7 +25,32 @@ pub(crate) struct SelectedRecipeRef {
     digest: String,
 }
 
+/// A single publication's compact metadata and complete selected payload.
+/// This preparation boundary is inactive until every storage/read hook is ready.
+pub(crate) struct SelectedRecipePublication {
+    pub(crate) metadata: String,
+    pub(crate) query_recipe: Option<String>,
+}
+
 impl SelectedRecipe {
+    /// Prepare both stored cells without changing the producer's active row.
+    pub(crate) fn prepare(row: &CatalogRow) -> std::io::Result<SelectedRecipePublication> {
+        if row.query_recipe.is_none()
+            && row.query.as_ref().is_some_and(|query| query.get("selected").is_some())
+        {
+            return Err(std::io::Error::other("Selected Query producer recipe unavailable"));
+        }
+        let mut compact = row.clone();
+        let query_recipe = Self::detach(&mut compact)?;
+        let metadata = serde_json::to_string(&compact).map_err(std::io::Error::other)?;
+        if metadata.len().saturating_add(query_recipe.as_ref().map_or(0, String::len))
+            > crate::storage::proof_codec::METADATA_MAX
+        {
+            return Err(std::io::Error::other("Selected Query metadata budget exceeded"));
+        }
+        Ok(SelectedRecipePublication { metadata, query_recipe })
+    }
+
     /// Replace selected result metadata with its exact publication reference.
     /// The caller publishes the returned bytes atomically with this row.
     pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
