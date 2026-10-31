@@ -1984,8 +1984,8 @@ mod tests {
         proof_catalog_tables(&connection);
         connection
             .execute(
-                "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('reported_runs'),'reported_runs','retained')",
-                [],
+                "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_version'),'catalog_version',?1)",
+                [crate::model::summary::CATALOG_VERSION.to_string()],
             )
             .unwrap();
         let chunks = Chunks {
@@ -2051,7 +2051,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             count, 7,
-            "the other proof's two pages/header, three proof-tree nodes and observed runs survive"
+            "the other proof's two pages/header, three proof-tree nodes and catalog version survive"
         );
     }
 }
