@@ -2176,8 +2176,12 @@ impl Stage {
             tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='slot_projection_catalog_generation'",[ns]).map_err(error)?;
         }
         publication_phase("publication_proof");
-        let selected_observed_at = crate::model::now_ms();
-        if !repeat {
+        let selected_observed_at = if repeat {
+            None
+        } else {
+            Some(crate::model::now_ms())
+        };
+        if let Some(selected_observed_at) = selected_observed_at {
             let presentations = super::proof_generations::capture_presentations(
                 &tx,
                 ns,
@@ -2331,7 +2335,10 @@ impl Stage {
                 tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'slot_projection_catalog_generation',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,generation]).map_err(error)?;
             }
         }
-        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_observed_at',?3),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch,selected_observed_at.to_string()]).map_err(error)?;
+        if let Some(selected_observed_at) = selected_observed_at {
+            tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_observed_at',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,selected_observed_at.to_string()]).map_err(error)?;
+        }
+        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_publication_epoch',?2),(?1,'catalog_completeness','partial') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![ns,epoch]).map_err(error)?;
         // A qualified imported closure survives an unrelated native component
         // publication. The carried rows retain their original proof authority.
         let carried_listing = super::proof_generations::imported_catalog(&tx, &crate::storage::QueryRuntimeBinding {
