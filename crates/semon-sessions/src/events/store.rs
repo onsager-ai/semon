@@ -6551,6 +6551,12 @@ mod tests {
             .unwrap();
         transaction
             .execute(
+                "INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(?1,'recover',0,'claude','{}')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction
+            .execute(
                 "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'recover','current','claude','recover','/recovered.jsonl')",
                 [namespace.as_str()],
             )
