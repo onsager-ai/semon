@@ -1184,7 +1184,9 @@ impl Snapshot<'_, '_> {
     ) -> Result<(usize, crate::slot_projection::SavedSlot), StorageError> {
         let (owner, slots) = if history {
             (
-                self.owner(key)?.ok_or(StorageError::ScopeChanged)?,
+                self.owner(key)?
+                    .ok_or(StorageError::ScopeChanged)?
+                    .generation,
                 "semon_pg_native_catalog_history_slots",
             )
         } else {

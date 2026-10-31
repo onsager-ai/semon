@@ -68,7 +68,8 @@ impl Snapshot<'_, '_> {
             Some(
                 self.owner(&row.key)
                     .map_err(failed)?
-                    .ok_or_else(|| failed(StorageError::ScopeChanged))?,
+                    .ok_or_else(|| failed(StorageError::ScopeChanged))?
+                    .generation,
             )
         } else {
             None
@@ -612,12 +613,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             .map_err(failed)
     }
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        self.catalog(key, true)
+        self.history_display_catalog(key)
             .map_err(failed)?
-            .map(|mut row| {
-                row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-                serde_json::to_string(&row).map_err(io::Error::other)
-            })
+            .map(|row| serde_json::to_string(&row).map_err(io::Error::other))
             .transpose()
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
@@ -625,6 +623,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let Some(owner_generation) = self.owner(&row.key).map_err(failed)? else {
             return Ok(false);
         };
+        let owner_generation = owner_generation.generation;
         let tx = self
             .tx
             .lock()

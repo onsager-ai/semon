@@ -415,3 +415,6 @@ presentation context. Immutable presentation replay keeps its authenticated
 captured observations and acquires no live physical owner. Current source CWD,
 immutable proof, admission, source generation and live global runtime fences
 remain independent requirements; neither owner can borrow the other's authority.
+Same-key composite History preserves its captured Current display lifecycle while
+Current remains, then displays Retained after Current disappears. Original History
+displays Retained even when the key is reused by a Current owner.
