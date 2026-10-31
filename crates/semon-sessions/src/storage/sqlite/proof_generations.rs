@@ -928,8 +928,15 @@ pub(super) fn reusable_presentations(
             return Err(StorageError::ScopeChanged);
         }
         let owned = immutable_observation_candidate(
-            tx, ns, &row.key, "current", &prefix, &current.stream_epoch, &metadata,
-        ).map_err(ObservationPreparationError::into_storage)?;
+            tx,
+            ns,
+            &row.key,
+            "current",
+            &prefix,
+            &current.stream_epoch,
+            &metadata,
+        )
+        .map_err(ObservationPreparationError::into_storage)?;
         if !owned {
             reusable = false;
             continue;

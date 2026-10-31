@@ -6148,7 +6148,10 @@ mod tests {
         let metadata = serde_json::to_value(&prepared.rows).unwrap();
         let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
         assert_eq!(first.0, Outcome::Written);
-        assert_eq!(store.finish_semantic_stage(batch.epoch).unwrap(), Outcome::Written);
+        assert_eq!(
+            store.finish_semantic_stage(batch.epoch).unwrap(),
+            Outcome::Written
+        );
         let (next, mut prepared) = publication_ready(&mut *store, &a.raw, "changed-observation");
         assert_eq!(serde_json::to_value(&prepared.rows).unwrap(), metadata);
         let mut observations = crate::storage::selected::PresentationObservations::default();
@@ -6157,11 +6160,20 @@ mod tests {
         let second = store.publish_semantic_catalog(&next, &prepared).unwrap();
         assert_eq!(second.0, Outcome::Written);
         assert_ne!(second.1, first.1);
-        assert_eq!(store.finish_semantic_stage(next.epoch).unwrap(), Outcome::Written);
-        assert_eq!(a.db().query_row(
-            "SELECT count(*) FROM storage_semantic_publications WHERE namespace='source-a'",
-            [], |row| row.get::<_, i64>(0),
-        ).unwrap(), 2);
+        assert_eq!(
+            store.finish_semantic_stage(next.epoch).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(
+            a.db()
+                .query_row(
+                    "SELECT count(*) FROM storage_semantic_publications WHERE namespace='source-a'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
     }
 
     #[test]
