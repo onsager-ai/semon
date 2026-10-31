@@ -5299,7 +5299,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         sqlite_parent["last"], sqlite_parent_exact["items"][0]["last"],
         "parent append must move the retained list position"
     );
-    let current_only_key = super::super::snapshot::with_admitted_generation(
+    let current_only_key = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
         &control,
