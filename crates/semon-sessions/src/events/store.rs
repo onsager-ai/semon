@@ -6750,7 +6750,7 @@ mod tests {
             .observation_journal
             .connection_for_test()
             .unwrap()
-            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;")
+            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON main.source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;")
             .unwrap();
 
         let (_, done) = store
@@ -6802,7 +6802,7 @@ mod tests {
             .observation_journal
             .connection_for_test()
             .unwrap()
-            .execute_batch("CREATE TEMP TRIGGER corrupt_discovery_journal_revision AFTER INSERT ON source_observation_receipts WHEN NEW.namespace=semon_namespace() BEGIN UPDATE main.storage_source_journal SET revision=0 WHERE namespace=semon_namespace(); END;")
+            .execute_batch("CREATE TEMP TRIGGER corrupt_discovery_journal_revision AFTER INSERT ON main.source_observation_receipts WHEN NEW.namespace=semon_namespace() BEGIN UPDATE storage_source_journal SET revision=0 WHERE namespace=semon_namespace(); END;")
             .unwrap();
         crate::native_timing::take_discovery_records();
         assert!(
