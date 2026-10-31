@@ -4112,15 +4112,31 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         !selected_parent_sources.is_empty(),
         "selected related-session edge must reference the appended parent source"
     );
-    let current_parent_ref = append_current_identity
-        .source_refs
+    // The PG continuation is at 00:00:05, while the isolated SQLite oracle
+    // appends at 00:00:02. Their byte lengths match, but their hashes must not.
+    let current_parent = continued
+        .rows
         .iter()
-        .find(|reference| {
-            reference.source.root == "claude" && reference.source.path == append_relative_path
-        })
-        .expect("SQLite successor identity references the appended parent")
-        .source
-        .clone();
+        .find(|row| row.key == appended_key)
+        .expect("PG successor producer includes the appended parent");
+    let current_parent_source = current_parent
+        .sources
+        .iter()
+        .find(|source| source.path == appended_path)
+        .expect("PG successor parent includes its exact current source");
+    let current_parent_ref = crate::SessionSourceRef {
+        root: current_parent.harness.clone(),
+        path: append_relative_path.to_owned(),
+        native_id: current_parent_source.native_id.clone(),
+        offset: current_parent_source.offset,
+        prefix_sha256: current_parent_source.prefix_sha256,
+        tail_sha256: current_parent_source.tail_sha256,
+    };
+    assert_eq!(
+        current_parent_ref.offset,
+        appended_offset(&append_current_identity),
+        "PG Current consumes the same-length continuation as the SQLite oracle"
+    );
     let retained_parent_ref = append_history_identity
         .source_refs
         .iter()
