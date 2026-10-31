@@ -224,7 +224,7 @@ impl NativeReaderBinding {
 }
 
 /// Logical runtime observation fence. Physical database coordinates are absent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct QueryRuntimeBinding {
     pub(crate) namespace: LogicalSourceNamespace,
     pub(crate) admission: u64,

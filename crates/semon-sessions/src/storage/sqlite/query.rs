@@ -15,6 +15,14 @@ pub(crate) struct SqliteQueryCatalog {
     pub(crate) binding: crate::storage::NativeReaderBinding,
 }
 impl QueryCatalogStore for SqliteQueryCatalog {
+    fn selected_recipe(
+        &self,
+        observation: &crate::storage::query::QueryRecipeObservation,
+    ) -> Result<Option<crate::query_projection::SelectedRecipe>, crate::storage::query::QueryRecipeLoadError> {
+        let db = self.binding.snapshot(&observation.destination.namespace)?;
+        super::proof_generations::load_query_recipe(&db, &self.binding, observation)
+    }
+
     fn read_cohort(
         &self,
         namespace: &LogicalSourceNamespace,
