@@ -247,6 +247,7 @@ fn configured_options(
         epoch.to_string().repeat(64),
     )
     .unwrap();
+    // The unbound native oracle resolves this HostSource to the same local DB.
     let config = source
         .store_config(crate::storage::StoreBackend::Sqlite {
             database: crate::events::EventCache::path(&home.options.cache),
@@ -5514,7 +5515,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
         .unwrap();
         let generation = admitted_catalog_generation(&config).expect("published Catalog");
         let args = json!({"text":"needle","limit":1});
-        let sources = || {
+        let configured_sources = || {
             Arc::new(
                 SessionSources::with_configured_machines(vec![(
                     String::new(),
@@ -5524,7 +5525,9 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
                 .unwrap(),
             )
         };
-        let expected = Query::from_sources(sources())
+        // Native expected results need the semantic producer binding. The
+        // configured machine set is reserved for Catalog reader snapshots.
+        let expected = Query::from_sources(admitted(options.clone()))
             .call_optional_at("find", &args, NOW)
             .unwrap();
         let archive = Arc::new(selected_archive(&home, fault));
@@ -5549,7 +5552,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
                 factory_admissions.fetch_add(1, Ordering::Relaxed);
                 Ok(Box::new(SharedSearchArchive(factory_archive.clone())))
             };
-        let result = Query::from_sources(sources()).call_optional_catalog_at(
+        let result = Query::from_sources(configured_sources()).call_optional_catalog_at(
             "find",
             &args,
             Some(&factory),
@@ -5595,19 +5598,27 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         )
         .unwrap();
     }
-    let machines = vec![
+    let native_machines = vec![
+        ("a".into(), first_options.clone()),
+        ("b".into(), second_options.clone()),
+    ];
+    let configured_machines = vec![
         ("a".into(), first_options.clone(), first_config.clone()),
         ("b".into(), second_options.clone(), second_config.clone()),
     ];
-    let sources = || Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap());
-    let mut native = Query::from_sources(sources());
+    let configured_sources = || {
+        Arc::new(SessionSources::with_configured_machines(configured_machines.clone()).unwrap())
+    };
+    // Keep the native oracle on the semantic producer path. Configured
+    // machines below supply the separately admitted Catalog reader snapshots.
+    let mut native = Query::from_sources(Arc::new(SessionSources::with_machines(native_machines)));
     for args in [
         json!({"text":"needle"}),
         json!({"text":"needle","limit":1}),
         json!({"text":"needle","max_bytes":1}),
     ] {
         let expected = native.call_optional_at("find", &args, NOW).unwrap();
-        let actual = Query::from_sources(sources())
+        let actual = Query::from_sources(configured_sources())
             .call_optional_catalog_at(
                 "find",
                 &args,
@@ -5631,11 +5642,11 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         NOW,
     )
     .unwrap();
-    Query::from_sources(sources())
+    native
         .call_at("list_sessions", &json!({}), NOW)
         .unwrap_err();
     assert_eq!(
-        Query::from_sources(sources())
+        Query::from_sources(configured_sources())
             .call_optional_catalog_at(
                 "find",
                 &json!({"text":"needle"}),
