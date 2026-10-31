@@ -3139,6 +3139,11 @@ impl SqliteStore {
                 self.semantic_rejection = Some("publication_generation");
                 return Ok(Outcome::Conflict);
             }
+            let search_current = crate::storage::sqlite::search::current_for_generation(
+                &transaction,
+                previous.as_deref(),
+            )
+            .map_err(failure)?;
             if preserve_complete
                 && !closed_catalog(&transaction, publication, claims.unwrap_or_default())
                     .map_err(failure)?
@@ -3316,14 +3321,6 @@ impl SqliteStore {
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
-                    [],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(failure)?;
-            let previous_search_version: Option<String> = transaction
-                .query_row(
-                    "SELECT value FROM meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version'",
                     [],
                     |row| row.get(0),
                 )
@@ -3604,9 +3601,7 @@ impl SqliteStore {
                     }
                     Ok(())
                 };
-                if claims.is_none()
-                    || previous_search_version.as_deref() != Some(crate::catalog_search::VERSION)
-                {
+                if claims.is_none() || !search_current {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
                     let mut after = String::new();
                     loop {
@@ -11093,6 +11088,21 @@ mod tests {
                 rusqlite::params![retained, saved_history],
             ).unwrap();
         }
+        let stale_search_key = "unaffected-stale-search-orphan";
+        for store in &mut stores {
+            store.connection.execute_batch(
+                "INSERT INTO main.session_search_documents(namespace,read_scope,session_key,fields,complete) VALUES(semon_namespace(),'current','unaffected-stale-search-orphan','[]',1),(semon_namespace(),'retained_history','unaffected-stale-search-orphan','[]',1); INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(semon_namespace(),'unaffected-stale-search-orphan','stalegram',1,1); INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) VALUES(semon_namespace(),'current','stalegram',1),(semon_namespace(),'retained_history','stalegram',1); UPDATE main.session_search_coverage SET incomplete=incomplete+1 WHERE namespace=semon_namespace() AND read_scope='retained_history'; UPDATE main.meta SET value='stale-generation' WHERE namespace=semon_meta_scope('search_generation_retained_history') AND key='search_generation_retained_history';",
+            ).unwrap();
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('search_version') AND key='search_version'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                ).unwrap(),
+                crate::catalog_search::VERSION,
+                "the regression starts with the current search version",
+            );
+        }
         for row in &mut rows[..63] {
             row.name = "shared original grams".into();
             row.last = Some(700);
@@ -11103,6 +11113,60 @@ mod tests {
         crate::catalog_search::assert_posting_multiset(&rows[..63]).unwrap();
         for (store, writer) in stores.iter_mut().zip(writers) {
             catalog_write(store, &rows[..63], &projections, true, writer).unwrap();
+        }
+        for store in &stores {
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT count(*) FROM main.session_search_documents WHERE namespace=semon_namespace() AND session_key=?1",
+                    [stale_search_key],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "stale orphan documents are removed by a scoped publication",
+            );
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT count(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1",
+                    [stale_search_key],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "stale orphan postings are removed by a scoped publication",
+            );
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT count(*) FROM main.session_search_counts WHERE namespace=semon_namespace() AND gram='stalegram'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "stale orphan grams are removed from scoped counts",
+            );
+            let generation: String = store.connection.query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            ).unwrap();
+            for scope in ["current", "retained_history"] {
+                assert_eq!(
+                    store.connection.query_row(
+                        "SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+                        [format!("search_generation_{scope}")],
+                        |row| row.get::<_, String>(0),
+                    ).unwrap(),
+                    generation,
+                    "both search scopes advance to the published Catalog generation",
+                );
+                assert_eq!(
+                    store.connection.query_row(
+                        "SELECT value=(SELECT CAST(incomplete AS TEXT) FROM main.session_search_coverage WHERE namespace=semon_namespace() AND read_scope=?1) FROM main.meta WHERE namespace=semon_meta_scope(?2) AND key=?2",
+                        rusqlite::params![scope, format!("search_incomplete_{scope}")],
+                        |row| row.get::<_, bool>(0),
+                    ).unwrap(),
+                    true,
+                    "scope coverage markers agree with their records",
+                );
+            }
         }
         rows[0].name = "shared replacement selective".into();
         rows[1].name = "shared replacement".into();
