@@ -4518,8 +4518,7 @@ mod tests {
         }
         for row in &prepared.rows {
             let trace = row.trace.as_ref().expect("real model trace");
-            let witness: serde_json::Value =
-                serde_json::from_str(&trace.publication_witness(row)).unwrap();
+            let witness = trace.publication_witness(row);
             for (table, id, expected) in [
                 ("session_trace_turns", "turn_id", &witness[1]),
                 ("session_trace_edges", "edge_id", &witness[2]),
@@ -4541,7 +4540,7 @@ mod tests {
                 generation,
                 format!(
                     "{:x}",
-                    Sha256::digest(trace.publication_witness(row).as_bytes())
+                    Sha256::digest(serde_json::to_vec(&witness).unwrap())
                 )
             );
             assert_eq!(
