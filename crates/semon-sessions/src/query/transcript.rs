@@ -911,15 +911,23 @@ fn read_inner(
     // Read proof pages and root witnesses only for touched byte ranges. Each
     // request-owned source retains at most one decoded hash page.
     let session = args["_session"] == true;
-    let context = if search.is_some() || session {
-        crate::overview_repair::query_context(&tx, key, scope).map_err(unavailable)?
+    let context_witness = if search.is_some() || session {
+        crate::storage::sqlite::query::selected_query_context(
+            &tx,
+            &binding,
+            options,
+            &row,
+            history.is_some(),
+        )
+        .map_err(unavailable)?
     } else {
-        vec![row.clone()]
+        vec![(row.clone(), history.is_some())]
     };
+    let context: Vec<_> = context_witness.iter().map(|(row, _)| row.clone()).collect();
     let mut query_headers = Vec::new();
     if search.is_some() || session {
-        for owner in &context {
-            if scope == crate::CatalogReadScope::RetainedHistory
+        for (owner, owner_history) in &context_witness {
+            if *owner_history
                 && let Some(encoded) =
                     crate::history_projection::catalog(&tx, &owner.key).map_err(unavailable)?
             {
@@ -1070,10 +1078,16 @@ fn read_inner(
                 return Err(unavailable("Native query recipes changed"));
             }
         }
-        let current =
-            crate::overview_repair::query_context(&snapshot, key, scope).map_err(unavailable)?;
+        let current = crate::storage::sqlite::query::selected_query_context(
+            &snapshot,
+            &binding,
+            options,
+            &row,
+            history.is_some(),
+        )
+        .map_err(unavailable)?;
         if serde_json::to_value(&current).map_err(unavailable)?
-            != serde_json::to_value(&context).map_err(unavailable)?
+            != serde_json::to_value(&context_witness).map_err(unavailable)?
         {
             return Err(unavailable("Native query relationship publication changed"));
         }
@@ -1145,7 +1159,19 @@ fn read_inner(
                     {
                         vec![]
                     } else {
-                        vec![edge(&db, id, &context, &records, &bytes_left)?]
+                        let recipe = saved["selected"]["edges"]
+                            .as_array()
+                            .and_then(|edges| {
+                                edges.iter().find(|edge| edge["id"].as_str() == Some(id.as_str()))
+                            })
+                            .ok_or_else(|| unavailable("Native handoff recipe unavailable"))?;
+                        vec![render_edge(
+                            id,
+                            &context,
+                            &records,
+                            std::slice::from_ref(recipe),
+                            &bytes_left,
+                        )?]
                     }
                 } else {
                     vec![]
@@ -1179,10 +1205,16 @@ fn read_inner(
                 return Err(unavailable("Native query recipes changed"));
             }
         }
-        let current =
-            crate::overview_repair::query_context(&snapshot, key, scope).map_err(unavailable)?;
+        let current = crate::storage::sqlite::query::selected_query_context(
+            &snapshot,
+            &binding,
+            options,
+            &row,
+            history.is_some(),
+        )
+        .map_err(unavailable)?;
         if serde_json::to_value(&current).map_err(unavailable)?
-            != serde_json::to_value(&context).map_err(unavailable)?
+            != serde_json::to_value(&context_witness).map_err(unavailable)?
         {
             return Err(unavailable("Native query relationship publication changed"));
         }
