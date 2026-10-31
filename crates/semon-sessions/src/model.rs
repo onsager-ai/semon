@@ -7421,6 +7421,25 @@ pub(crate) fn observe_catalog(
     observe_catalog_fenced(options, cache, dirty, texts, now).map(|(pids, _)| pids)
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static OBSERVED_CATALOG_ROWS: std::cell::RefCell<Option<Vec<summary::CatalogRow>>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+/// Ask the next successful ordinary Catalog observation on this test thread to
+/// retain its in-memory producer rows, including the serde-skipped recipe.
+#[cfg(test)]
+pub(crate) fn capture_observed_catalog_rows() {
+    OBSERVED_CATALOG_ROWS.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
+}
+
+#[cfg(test)]
+pub(crate) fn take_observed_catalog_rows() -> Option<Vec<summary::CatalogRow>> {
+    OBSERVED_CATALOG_ROWS.with(|capture| capture.borrow_mut().take())
+}
+
 /// The generation belongs to this observation's transaction, even if a peer
 /// advances the shared Catalog before the caller acknowledges its own work.
 pub(crate) fn observe_catalog_fenced(
@@ -9137,6 +9156,15 @@ fn build_sources_inner(
                 );
             }
             cache.publish_session_descriptions();
+            #[cfg(test)]
+            if let Some(rows) = &catalog {
+                OBSERVED_CATALOG_ROWS.with(|capture| {
+                    let mut capture = capture.borrow_mut();
+                    if capture.is_some() {
+                        *capture = Some(rows.clone());
+                    }
+                });
+            }
             return Ok(BuildOutput::Catalog(
                 pids.iter().map(|pid| pid.pid).collect(),
                 generation,
