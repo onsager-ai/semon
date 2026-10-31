@@ -3695,12 +3695,28 @@ mod tests {
     ) {
         use crate::model::relation_stage::Phase;
         let paths = vec![path.to_string_lossy().into_owned()];
-        assert_eq!(
-            store.begin_semantic_stage(&paths, runtime, true).unwrap(),
-            Outcome::Written
+        // Written may commit a bounded GC page before creating the successor.
+        // Keep the first real batch for the ordinary producer below.
+        let mut first_batch = None;
+        for _ in 0..512 {
+            assert_eq!(
+                store.begin_semantic_stage(&paths, runtime, true).unwrap(),
+                Outcome::Written
+            );
+            first_batch = store.semantic_batch(64).unwrap();
+            if first_batch.is_some() {
+                break;
+            }
+        }
+        assert!(
+            first_batch.is_some(),
+            "bounded private GC failed to yield a successor stage"
         );
         for _ in 0..128 {
-            let batch = store.semantic_batch(64).unwrap().unwrap();
+            let batch = match first_batch.take() {
+                Some(batch) => batch,
+                None => store.semantic_batch(64).unwrap().unwrap(),
+            };
             if batch.paths.is_empty() {
                 continue;
             }
