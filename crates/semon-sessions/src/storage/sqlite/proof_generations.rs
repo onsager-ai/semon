@@ -976,7 +976,9 @@ pub(crate) fn observation_binding_with_observations(
     #[cfg(test)]
     eprintln!(
         "catalog_runtime_capture_selection owner={owner_kind} imported={imported} exact_semantic_owner={exact_semantic_owner} proof_candidate={proof_candidate} exact_owner_grant={exact_owner_grant} direct_capture_present={}",
-        direct_grant.as_ref().is_some_and(|(capture, _)| capture.is_some())
+        direct_grant
+            .as_ref()
+            .is_some_and(|(capture, _)| capture.is_some())
     );
     if !proof_candidate
         && let Some(observations) =
@@ -1036,7 +1038,9 @@ pub(crate) fn observation_binding_with_observations(
                 eprintln!(
                     "catalog_runtime_capture_direct_validation valid={} capture_present={} error={:?}",
                     matches!(&_result, Ok(Some(_))),
-                    direct_grant.as_ref().is_some_and(|(capture, _)| capture.is_some()),
+                    direct_grant
+                        .as_ref()
+                        .is_some_and(|(capture, _)| capture.is_some()),
                     _result.as_ref().err()
                 );
             }
