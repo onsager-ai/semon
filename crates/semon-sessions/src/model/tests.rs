@@ -2846,6 +2846,87 @@ fn a_result_follows_the_last_block_of_its_reply() {
 }
 
 #[test]
+fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() {
+    let home = Home::new();
+    let first = home.lines(
+        "claude/projects/project-one/shared.jsonl",
+        &[uuid(
+            user("shared", ts(0, 0), "first source prompt"),
+            "native-start-one",
+        )],
+    );
+    let second = home.lines(
+        "claude/projects/project-two/shared.jsonl",
+        &[uuid(
+            user("shared", ts(0, 0), "second source prompt"),
+            "native-start-two",
+        )],
+    );
+    let first_id = native_start_turn_id("shared", "native-start-one");
+    let second_id = native_start_turn_id("shared", "native-start-two");
+    let anchors = |data: &QueryData| {
+        data.tx["shared"]
+            .slots
+            .iter()
+            .filter_map(|slot| {
+                matches!(slot.kind, SlotKind::U).then(|| {
+                    (
+                        slot.file.as_ref().expect("source prompt has a file").path.clone(),
+                        slot.turn.clone().expect("source prompt has a turn"),
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected = BTreeMap::from([
+        (first.clone(), first_id.clone()),
+        (second.clone(), second_id.clone()),
+    ]);
+
+    let built = home.build_query();
+    let turns = turns_of(&built, "shared");
+    assert_eq!(turns.len(), 2);
+    assert!(turns.iter().all(|turn| {
+        turn.file == "shared" && turn.offset == 0 && turn.start.is_none()
+    }));
+    assert_eq!(
+        turns
+            .iter()
+            .map(|turn| turn.id.clone())
+            .collect::<BTreeSet<_>>(),
+        expected.values().cloned().collect::<BTreeSet<_>>()
+    );
+    assert_eq!(anchors(&built), expected);
+
+    let third = home.lines(
+        "claude/projects/project-three/shared.jsonl",
+        &[uuid(
+            user("shared", ts(0, 0), "third source prompt"),
+            "native-start-three",
+        )],
+    );
+    let third_id = native_start_turn_id("shared", "native-start-three");
+    let expanded = home.build_query();
+    let expanded_turns = turns_of(&expanded, "shared");
+    assert_eq!(expanded_turns.len(), 3);
+    assert_eq!(
+        expanded_turns
+            .iter()
+            .map(|turn| turn.id.clone())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([first_id.clone(), second_id.clone(), third_id.clone()])
+    );
+    assert_eq!(
+        anchors(&expanded),
+        BTreeMap::from([
+            (first, first_id),
+            (second, second_id),
+            (third, third_id),
+        ])
+    );
+}
+
+#[test]
 fn turns_split_at_each_incoming_entry_and_at_a_gap() {
     let home = Home::new();
     let path = home.top(
