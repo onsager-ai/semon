@@ -3,9 +3,12 @@
 use super::*;
 #[path = "semantic_plan.rs"]
 mod plan;
-pub(crate) use plan::{ContextPort, OwnerClosurePort, PublicationPlanPort, context_with, owner_closure_with, publication_groups_with};
 use crate::model::relation_stage::{
     Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
+};
+pub(crate) use plan::{
+    ContextPort, OwnerClosurePort, PhysicalOwnerSourceBudget, PublicationPlanPort, context_with,
+    owner_closure_with, publication_groups_with,
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -819,7 +822,13 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
 struct OrdinaryOwnerPlan<'a>(&'a Connection);
 impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
     fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>> {
-        self.0.query_row("SELECT harness,is_top FROM catalog_semantic_inputs WHERE source_path=?1", [path], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+        self.0
+            .query_row(
+                "SELECT harness,is_top FROM catalog_semantic_inputs WHERE source_path=?1",
+                [path],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
     }
     fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)> {
         self.0.query_row("SELECT s.native_id,CASE WHEN octet_length(f.links)<=1048576 THEN f.links END FROM catalog_semantic_inputs s JOIN files f ON f.path=s.source_path WHERE s.source_path=?1", [path], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1604,7 +1613,9 @@ impl ContextPort for OrdinaryOwnerPlan<'_> {
         for child in q.query_map([key], |r| r.get::<_, String>(0))? {
             let child = child?;
             *used = used.saturating_add(child.len());
-            if *used > MAX_CONTEXT { return Err(rusqlite::Error::InvalidQuery); }
+            if *used > MAX_CONTEXT {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
             children.push(child);
         }
         Ok(children)
@@ -1613,21 +1624,35 @@ impl ContextPort for OrdinaryOwnerPlan<'_> {
         self.0.query_row("SELECT family_cost FROM catalog_semantic_endpoints WHERE session_key=?1 AND cost_done=1", [key], |r| r.get(0))
     }
     fn parent(&self, key: &str) -> rusqlite::Result<Option<String>> {
-        self.0.query_row("SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key=?1", [key], |r| r.get(0)).optional().map(Option::flatten)
+        self.0
+            .query_row(
+                "SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key=?1",
+                [key],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
     }
     fn endpoint(&self, key: &str, used: &mut usize) -> rusqlite::Result<Option<Endpoint>> {
         let found: Option<(Option<String>,Option<String>,Option<String>)> = self.0.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM catalog_semantic_endpoints WHERE session_key=?1", [key], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
-        found.map(|(text,parent,root)| {
-            let mut endpoint: Endpoint = bounded(text, used)?;
-            endpoint.parent = parent.clone();
-            endpoint.row.parent = parent;
-            endpoint.root = root.unwrap_or_else(|| key.to_owned());
-            endpoint.root_alive = root_alive(self.0, &endpoint.root)?;
-            Ok(endpoint)
-        }).transpose()
+        found
+            .map(|(text, parent, root)| {
+                let mut endpoint: Endpoint = bounded(text, used)?;
+                endpoint.parent = parent.clone();
+                endpoint.row.parent = parent;
+                endpoint.root = root.unwrap_or_else(|| key.to_owned());
+                endpoint.root_alive = root_alive(self.0, &endpoint.root)?;
+                Ok(endpoint)
+            })
+            .transpose()
     }
 }
-fn load_context(c: &Connection, paths: &[String], p: Phase, epoch: i64) -> rusqlite::Result<Context> {
+fn load_context(
+    c: &Connection,
+    paths: &[String],
+    p: Phase,
+    epoch: i64,
+) -> rusqlite::Result<Context> {
     context_with(&OrdinaryOwnerPlan(c), paths, p, epoch)
 }
 
@@ -2050,8 +2075,10 @@ impl SqliteStore {
                 }
             };
             if p == "publication" {
-                publication_groups = publication_groups_with(&OrdinaryOwnerPlan(&tx)).map_err(failure)?;
-                let selected: BTreeSet<String> = publication_groups.iter().flatten().cloned().collect();
+                publication_groups =
+                    publication_groups_with(&OrdinaryOwnerPlan(&tx)).map_err(failure)?;
+                let selected: BTreeSet<String> =
+                    publication_groups.iter().flatten().cloned().collect();
                 paths = selected.into_iter().collect();
                 if !paths.is_empty() {
                     result_phase = Phase::Publication;

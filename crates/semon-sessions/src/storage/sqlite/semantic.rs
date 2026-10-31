@@ -471,11 +471,16 @@ fn collect_stage_page(db: &Connection, ns: &str) -> rusqlite::Result<()> {
         ("catalog_semantic_frontier", "kind,value,harness"),
         ("catalog_semantic_sources", "source_path"),
     ] {
-        if budget == 0 { return Ok(()); }
+        if budget == 0 {
+            return Ok(());
+        }
         budget -= db.execute(&format!("DELETE FROM main.{table} WHERE namespace=?1 AND ({key}) IN (SELECT {key} FROM main.{table} WHERE namespace=?1 ORDER BY {key} LIMIT ?2)"), params![ns,budget as i64])?;
     }
     if budget > 0 {
-        db.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_gc'", [ns])?;
+        db.execute(
+            "DELETE FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_gc'",
+            [ns],
+        )?;
     }
     Ok(())
 }
@@ -495,12 +500,17 @@ fn reduction_witnesses(c: &Connection, ns: &str) -> rusqlite::Result<ReductionWi
     // ownership and explicit negative memberships. SQL returns one scalar;
     // component width never becomes a decoded source cohort.
     let changed: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s LEFT JOIN main.session_catalog_invalidations i ON i.namespace=s.namespace AND i.source_path=s.source_path LEFT JOIN main.files f ON f.namespace=s.namespace AND f.path=s.source_path WHERE s.namespace=?1 AND s.index_done=1 AND (i.revision IS NOT s.claim OR (f.dev IS NOT s.dev OR f.ino IS NOT s.ino OR f.size IS NOT s.size OR f.mtime_ns IS NOT s.mtime_ns OR f.ctime_ns IS NOT s.ctime_ns OR f.resume_at IS NOT s.resume_at OR f.head_sha256 IS NOT s.head_sha256 OR f.tail_sha256 IS NOT s.tail_sha256) OR (s.withdrawal IS NULL AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs p WHERE p.namespace=s.namespace AND p.source_path=s.source_path) AND s.ack_done=0 AND i.reason IS NOT 'removed')))", [ns], |r| r.get(0))?;
-    if changed { return Ok(ReductionWitness::Changed); }
+    if changed {
+        return Ok(ReductionWitness::Changed);
+    }
     let authority: Option<Option<String>> = c.query_row("SELECT CASE WHEN octet_length(withdrawal_authority)<=1048576 THEN withdrawal_authority END FROM main.catalog_semantic_stage WHERE namespace=?1 AND withdrawal_authority IS NOT NULL", [ns], |r| r.get(0)).optional()?;
     if let Some(text) = authority {
         let text = text.ok_or(rusqlite::Error::InvalidQuery)?;
-        let authority: crate::model::relation_stage::Withdrawal = serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if !authority.authority_current().unwrap_or(false) { return Ok(ReductionWitness::Changed); }
+        let authority: crate::model::relation_stage::Withdrawal =
+            serde_json::from_str(&text).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if !authority.authority_current().unwrap_or(false) {
+            return Ok(ReductionWitness::Changed);
+        }
     }
     Ok(ReductionWitness::Current)
 }
@@ -521,7 +531,11 @@ fn removed_source(c: &Connection, ns: &str, path: &str) -> rusqlite::Result<bool
     }
 }
 
-fn removed_paths(c: &Connection, ns: &str, selected: &[String]) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+fn removed_paths(
+    c: &Connection,
+    ns: &str,
+    selected: &[String],
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let selected = serde_json::to_string(selected).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let paths = c.prepare("SELECT s.source_path FROM main.catalog_semantic_sources s WHERE s.namespace=?1 AND s.source_path IN (SELECT value FROM json_each(?2)) AND s.index_done=1 AND s.withdrawal IS NULL AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) ORDER BY s.source_path LIMIT 65")?.query_map(params![ns,selected], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
     if paths.len() > 64 {
@@ -577,7 +591,8 @@ fn validate_withdrawals(
             return Err(refuse("semantic_withdrawal_witness"));
         }
     }
-    let selected = serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+    let selected =
+        serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
     let count: i64 = db.query_row("SELECT count(*) FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) AND withdrawal IS NOT NULL",params![ns,selected],|r|r.get(0)).map_err(error)?;
     if count != paths.len() as i64 {
         return Err(refuse("semantic_withdrawal_membership"));
@@ -602,7 +617,11 @@ fn retirement_plan(
     prepared: &PreparedSources,
 ) -> Result<Vec<(String, bool)>, StoreError> {
     let ns = source.namespace();
-    let paths = prepared.claims.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>();
+    let paths = prepared
+        .claims
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
     let effects = owners::Owners { db, namespace: ns };
     let prior = effects.prior(&paths).map_err(error)?;
     if !prior.is_empty()
@@ -667,48 +686,98 @@ fn retirement_plan(
     Ok(plan)
 }
 
-fn validate_source_page(db: &Connection, source: &AdmittedSource, revision: i64) -> Result<bool, StoreError> {
+fn validate_source_page(
+    db: &Connection,
+    source: &AdmittedSource,
+    revision: i64,
+) -> Result<bool, StoreError> {
     let ns = source.namespace();
     let (mut after, observed, done): (String, Option<i64>, bool) = db.query_row("SELECT validation_after,validation_revision,validation_done FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(error)?;
-    if observed == Some(revision) && done { return Ok(true); }
+    if observed == Some(revision) && done {
+        return Ok(true);
+    }
     if observed != Some(revision) {
         after.clear();
         db.execute("UPDATE main.catalog_semantic_stage SET validation_after='',validation_revision=?2,validation_done=0 WHERE namespace=?1", params![ns,revision]).map_err(error)?;
     }
     let mut q = db.prepare("SELECT source_path,CASE WHEN octet_length(ledger)<=1048576 THEN ledger END,CASE WHEN octet_length(withdrawal)<=1048576 THEN withdrawal END FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path>?2 ORDER BY source_path LIMIT 64").map_err(error)?;
-    let mut rows = q.query(params![ns,after]).map_err(error)?;
+    let mut rows = q.query(params![ns, after]).map_err(error)?;
     let mut used = 0usize;
     let mut progressed = false;
     while let Some(row) = rows.next().map_err(error)? {
         let path: String = row.get(0).map_err(error)?;
         let recorded: Option<String> = row.get(1).map_err(error)?;
         let negative: Option<String> = row.get(2).map_err(error)?;
-        let length = recorded.as_ref().map_or(0,String::len) + negative.as_ref().map_or(0,String::len);
+        let length =
+            recorded.as_ref().map_or(0, String::len) + negative.as_ref().map_or(0, String::len);
         if used.saturating_add(length) > 1048576 {
-            if !progressed { return Err(refuse("semantic_source_validation_bytes")); }
+            if !progressed {
+                return Err(refuse("semantic_source_validation_bytes"));
+            }
             break;
         }
         let typed: Option<Option<String>> = db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get(0)).optional().map_err(error)?;
-        let text = typed.map(|text| text.ok_or_else(|| refuse("semantic_source_validation_bytes"))).transpose()?;
-        let length = length.saturating_add(text.as_ref().map_or(0,String::len));
+        let text = typed
+            .map(|text| text.ok_or_else(|| refuse("semantic_source_validation_bytes")))
+            .transpose()?;
+        let length = length.saturating_add(text.as_ref().map_or(0, String::len));
         if used.saturating_add(length) > 1048576 {
-            if !progressed { return Err(refuse("semantic_source_validation_bytes")); }
+            if !progressed {
+                return Err(refuse("semantic_source_validation_bytes"));
+            }
             break;
         }
         used += length;
-        let ledger = crate::events::store::ledger_row(db, &path).map_err(error)?.map(|(_,ledger)| serde_json::to_string(&ledger)).transpose().map_err(|e| StoreError::Data(e.to_string()))?;
-        if ledger != recorded { return Err(refuse("semantic_source_validation_changed")); }
-        let captured: Option<Ledger> = recorded.as_deref().map(serde_json::from_str).transpose().map_err(|e| StoreError::Data(e.to_string()))?;
-        let withdrawal: Option<crate::model::relation_stage::Withdrawal> = negative.as_deref().map(serde_json::from_str).transpose().map_err(|e| StoreError::Data(e.to_string()))?;
-        let withdrawn = withdrawal.as_ref().is_some_and(|w| w.path == path && w.current().unwrap_or(false));
-        if withdrawal.is_some() && !withdrawn { return Err(refuse("semantic_source_validation_changed")); }
-        let physical = if withdrawn { true } else if let Some(ledger) = &captured {
-            crate::events::Stat::of(std::path::Path::new(&path)).ok().as_ref() == Some(&ledger.stat) || removed_source(db, ns, &path).map_err(error)?
-        } else { removed_source(db, ns, &path).map_err(error)? };
-        if !physical { return Err(refuse("semantic_source_validation_changed")); }
+        let ledger = crate::events::store::ledger_row(db, &path)
+            .map_err(error)?
+            .map(|(_, ledger)| serde_json::to_string(&ledger))
+            .transpose()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        if ledger != recorded {
+            return Err(refuse("semantic_source_validation_changed"));
+        }
+        let captured: Option<Ledger> = recorded
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        let withdrawal: Option<crate::model::relation_stage::Withdrawal> = negative
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        let withdrawn = withdrawal
+            .as_ref()
+            .is_some_and(|w| w.path == path && w.current().unwrap_or(false));
+        if withdrawal.is_some() && !withdrawn {
+            return Err(refuse("semantic_source_validation_changed"));
+        }
+        let physical = if withdrawn {
+            true
+        } else if let Some(ledger) = &captured {
+            crate::events::Stat::of(std::path::Path::new(&path))
+                .ok()
+                .as_ref()
+                == Some(&ledger.stat)
+                || removed_source(db, ns, &path).map_err(error)?
+        } else {
+            removed_source(db, ns, &path).map_err(error)?
+        };
+        if !physical {
+            return Err(refuse("semantic_source_validation_changed"));
+        }
         if let Some(text) = text {
-            let input: crate::model::summary::CatalogSource = serde_json::from_str(&text).map_err(|e| StoreError::Data(e.to_string()))?;
-            if !crate::events::store::admitted_roles_current(db, std::slice::from_ref(&input), source).map_err(error)? { return Err(refuse("semantic_source_validation_changed")); }
+            let input: crate::model::summary::CatalogSource =
+                serde_json::from_str(&text).map_err(|e| StoreError::Data(e.to_string()))?;
+            if !crate::events::store::admitted_roles_current(
+                db,
+                std::slice::from_ref(&input),
+                source,
+            )
+            .map_err(error)?
+            {
+                return Err(refuse("semantic_source_validation_changed"));
+            }
         }
         after = path;
         progressed = true;
@@ -724,21 +793,38 @@ fn selected_witnesses(db: &Connection, ns: &str, paths: &[String]) -> Result<boo
     let mut used = 0usize;
     for path in paths {
         let (recorded, negative, indexed): (Option<String>, bool, bool) = db.query_row("SELECT CASE WHEN octet_length(ledger)<=1048576 THEN ledger END,withdrawal IS NOT NULL,EXISTS(SELECT 1 FROM main.catalog_semantic_inputs i WHERE i.namespace=s.namespace AND i.source_path=s.source_path) FROM main.catalog_semantic_sources s WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(error)?;
-        used = used.saturating_add(recorded.as_ref().map_or(0,String::len));
-        if used > 1048576 { return Err(refuse("semantic_source_witness_bytes")); }
-        let actual = crate::events::store::ledger_row(db, path).map_err(error)?.map(|(_,ledger)| serde_json::to_string(&ledger)).transpose().map_err(|e| StoreError::Data(e.to_string()))?;
-        if actual != recorded { return Ok(false); }
+        used = used.saturating_add(recorded.as_ref().map_or(0, String::len));
+        if used > 1048576 {
+            return Err(refuse("semantic_source_witness_bytes"));
+        }
+        let actual = crate::events::store::ledger_row(db, path)
+            .map_err(error)?
+            .map(|(_, ledger)| serde_json::to_string(&ledger))
+            .transpose()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        if actual != recorded {
+            return Ok(false);
+        }
         if !indexed && !negative {
-            let absent = crate::events::Stat::of(std::path::Path::new(path)).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
-            if !absent || !removed_source(db, ns, path).map_err(error)? { return Ok(false); }
+            let absent = crate::events::Stat::of(std::path::Path::new(path))
+                .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+            if !absent || !removed_source(db, ns, path).map_err(error)? {
+                return Ok(false);
+            }
         }
     }
     Ok(true)
 }
 
-fn group_current(db: &Connection, ns: &str, batch: &Batch, prepared: &PreparedSources) -> Result<bool, StoreError> {
+fn group_current(
+    db: &Connection,
+    ns: &str,
+    batch: &Batch,
+    prepared: &PreparedSources,
+) -> Result<bool, StoreError> {
     let paths = serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
-    let keys = serde_json::to_string(&prepared.rows.iter().map(|row| &row.key).collect::<Vec<_>>()).map_err(|e| StoreError::Data(e.to_string()))?;
+    let keys = serde_json::to_string(&prepared.rows.iter().map(|row| &row.key).collect::<Vec<_>>())
+        .map_err(|e| StoreError::Data(e.to_string()))?;
     // A selected source may not omit a replacement owner or an original owner.
     // Absence is qualified against the captured original membership, not against
     // a Catalog already changed by an earlier group from this epoch.
@@ -1086,17 +1172,25 @@ fn event_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError>
 
 fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
     let (after_harness, after_native, done): (String,String,bool) = c.query_row("SELECT key_after_harness,key_after_native,keys_done FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(error)?;
-    if done { return Ok(true); }
+    if done {
+        return Ok(true);
+    }
     let mut query=c.prepare("SELECT harness,native_id FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness,native_id)>(?2,?3) GROUP BY harness,native_id ORDER BY harness,native_id LIMIT 64").map_err(error)?;
-    let mut rows = query.query(params![ns,after_harness,after_native]).map_err(error)?;
+    let mut rows = query
+        .query(params![ns, after_harness, after_native])
+        .map_err(error)?;
     let mut after = (after_harness, after_native);
     let mut used = 0usize;
     while let Some(row) = rows.next().map_err(error)? {
         let harness: String = row.get(0).map_err(error)?;
         let native: String = row.get(1).map_err(error)?;
         let length = harness.len().saturating_add(native.len());
-        if length > 1048576 { return Err(refuse("semantic_native_key_metadata_budget")); }
-        if used.saturating_add(length) > 1048576 { break; }
+        if length > 1048576 {
+            return Err(refuse("semantic_native_key_metadata_budget"));
+        }
+        if used.saturating_add(length) > 1048576 {
+            break;
+        }
         used += length;
         // An outgoing source already observed in this epoch is replaced by
         // the staged input cohort. Its old Current row is custody, not a live
@@ -1126,11 +1220,20 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             return Ok(true);
         };
         if kind == "oldowner" || kind == "oldneighbors" || kind == "pathowner" {
-            let effects = owners::Owners { db: c, namespace: ns };
+            let effects = owners::Owners {
+                db: c,
+                namespace: ns,
+            };
             let keys = if kind == "oldowner" {
-                if after.is_empty() { vec![value.clone()] } else { Vec::new() }
+                if after.is_empty() {
+                    vec![value.clone()]
+                } else {
+                    Vec::new()
+                }
             } else if kind == "oldneighbors" {
-                effects.neighbor_page(&value, &after, budget).map_err(error)?
+                effects
+                    .neighbor_page(&value, &after, budget)
+                    .map_err(error)?
             } else {
                 c.prepare("SELECT session_key FROM main.session_catalog_sources WHERE namespace=?1 AND source_path=?2 AND lifecycle='current' AND session_key>?3 ORDER BY session_key LIMIT ?4").map_err(error)?.query_map(params![ns,value,after,budget as i64], |r| r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?
             };
@@ -1139,9 +1242,13 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             for key in &keys {
                 // Each owner is individually bounded before decoding. Limit
                 // total metadata captured by this durable discovery step too.
-                let length: usize = c.query_row("SELECT octet_length(metadata) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'", params![ns,key], |r| r.get(0)).map_err(error)?;
+                let length: i64 = c.query_row("SELECT octet_length(metadata) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'", params![ns,key], |r| r.get(0)).map_err(error)?;
+                let length = usize::try_from(length)
+                    .map_err(|_| refuse("semantic_affected_owner_bytes"))?;
                 if metadata_bytes.saturating_add(length) > 1048576 {
-                    if consumed == 0 && metadata_bytes == 0 { return Err(refuse("semantic_affected_owner_bytes")); }
+                    if consumed == 0 && metadata_bytes == 0 {
+                        return Err(refuse("semantic_affected_owner_bytes"));
+                    }
                     break;
                 }
                 metadata_bytes += effects.snapshot(key).map_err(error)?;
@@ -1151,7 +1258,9 @@ fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreErr
             let done = consumed == keys.len() && (kind == "oldowner" || keys.len() < budget);
             c.execute("UPDATE main.catalog_semantic_frontier SET after_key=?5,done=?6 WHERE namespace=?1 AND kind=?2 AND value=?3 AND harness=?4", params![ns,kind,value,harness,last,done]).map_err(error)?;
             budget = budget.saturating_sub(consumed.max(1));
-            if consumed < keys.len() { break; }
+            if consumed < keys.len() {
+                break;
+            }
             continue;
         }
         // Member discovery yields after 32 observations, independently of the
@@ -1436,6 +1545,11 @@ impl crate::events::store::semantic_stage::ReductionStore for ScopedReduction<'_
 }
 
 fn error(error: rusqlite::Error) -> StoreError {
+    if let rusqlite::Error::ToSqlConversionFailure(cause) = &error
+        && cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
+    {
+        return refuse("semantic_physical_owner_source_budget");
+    }
     StoreError::Configured(failed(error))
 }
 fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
@@ -1684,7 +1798,8 @@ impl Stage {
             eprintln!("semantic_publication_conflict reason=source_revision");
             return Ok((Outcome::Conflict, None));
         }
-        let selected_paths = serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+        let selected_paths =
+            serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
         let staged:Vec<String>=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65").map_err(error)?.query_map(params![ns,selected_paths],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
         let mut requested = batch.paths.clone();
         requested.sort();
@@ -2118,7 +2233,9 @@ impl Stage {
         tx.execute("UPDATE main.catalog_semantic_prior_owners SET published=1 WHERE namespace=?1 AND session_key IN (SELECT session_key FROM main.catalog_semantic_prior_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)))", params![ns,selected_paths]).map_err(error)?;
         for (path, claim) in &prepared.claims {
             let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_owner_sources o JOIN main.catalog_semantic_endpoints e ON e.namespace=o.namespace AND e.session_key=o.session_key WHERE o.namespace=?1 AND o.source_path=?2 AND e.published=0) OR EXISTS(SELECT 1 FROM main.catalog_semantic_prior_sources p JOIN main.catalog_semantic_prior_owners o ON o.namespace=p.namespace AND o.session_key=p.session_key WHERE p.namespace=?1 AND p.source_path=?2 AND o.published=0)", params![ns,path], |r| r.get(0)).map_err(error)?;
-            if pending { return Err(refuse("semantic_publication_owner_pending")); }
+            if pending {
+                return Err(refuse("semantic_publication_owner_pending"));
+            }
             tx.execute("UPDATE main.catalog_semantic_sources SET publication_done=1 WHERE namespace=?1 AND source_path=?2", params![ns,path]).map_err(error)?;
             if let Some(claim) = claim
                 && tx.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=?1 AND source_path=?2 AND revision=?3",params![ns,path,claim]).map_err(error)? != 1
@@ -2204,7 +2321,11 @@ impl Stage {
         if !ready {
             return Ok(Outcome::Conflict);
         }
-        tx.execute("DELETE FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2", params![ns,epoch]).map_err(error)?;
+        tx.execute(
+            "DELETE FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2",
+            params![ns, epoch],
+        )
+        .map_err(error)?;
         tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_semantic_gc','1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'", [ns]).map_err(error)?;
         tx.execute(
             "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
@@ -2267,7 +2388,9 @@ impl Stage {
                 return Err(refuse("stale semantic selector"));
             }
             let qualified: bool = tx.query_row("SELECT validation_done=1 AND validation_revision=?2 FROM main.catalog_semantic_stage WHERE namespace=?1", params![ns,tx.query_row("SELECT revision FROM storage_source_journal WHERE namespace=?1", [ns], |r| r.get::<_,i64>(0)).map_err(error)?], |r| r.get(0)).map_err(error)?;
-            if !qualified { return Err(refuse("semantic_source_validation_pending")); }
+            if !qualified {
+                return Err(refuse("semantic_source_validation_pending"));
+            }
         }
         let mut lookup = AdmittedLookup {
             db: &tx,
@@ -2748,17 +2871,43 @@ impl Stage {
             eprintln!("semantic_batch_conflict reason=reduction");
             return Err(StoreError::Configured(StorageError::Conflict));
         }
-        let revision: i64 = tx.query_row("SELECT revision FROM storage_source_journal WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+        let revision: i64 = tx
+            .query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                [ns],
+                |r| r.get(0),
+            )
+            .map_err(error)?;
         let changed: bool = tx.query_row("SELECT revision<>?2 OR EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0) FROM main.catalog_semantic_stage WHERE namespace=?1", params![ns,revision], |r| r.get(0)).map_err(error)?;
         if !resetting && phase != "indexing" && changed {
             reset(&tx, ns, &runtime).map_err(error)?;
-            tx.execute("DELETE FROM storage_semantic_model_batches WHERE namespace=?1", [ns]).map_err(error)?;
-            let next_epoch = tx.query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| r.get(0)).map_err(error)?;
+            tx.execute(
+                "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
+                [ns],
+            )
+            .map_err(error)?;
+            let next_epoch = tx
+                .query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                    [ns],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
             #[cfg(test)]
-            crate::events::store::configured::effect("semantic_late_incident_reset").map_err(error)?;
+            crate::events::store::configured::effect("semantic_late_incident_reset")
+                .map_err(error)?;
             tx.commit().map_err(error)?;
             self.epoch = Some(next_epoch);
-            return Ok(Some(Batch { epoch: next_epoch, phase: Phase::Indexing, paths: Vec::new(), base_generation, source_revision: revision, runtime, context: Context::default(), relation_cursor: None }));
+            return Ok(Some(Batch {
+                epoch: next_epoch,
+                phase: Phase::Indexing,
+                paths: Vec::new(),
+                base_generation,
+                source_revision: revision,
+                runtime,
+                context: Context::default(),
+                relation_cursor: None,
+            }));
         }
         let physical = plan::Plan { db: &tx, ns };
         let mut result_phase = Phase::Indexing;
@@ -2769,13 +2918,22 @@ impl Stage {
                 match phase.as_str() {
                     "indexing" => {
                         paths = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r| r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
-                        if !paths.is_empty() { break; }
-                        if !self.reduction { return Err(StoreError::Configured(StorageError::NamespaceUpgradePending)); }
+                        if !paths.is_empty() {
+                            break;
+                        }
+                        if !self.reduction {
+                            return Err(StoreError::Configured(
+                                StorageError::NamespaceUpgradePending,
+                            ));
+                        }
                         let layout = FrontierLayout::bind(&tx).map_err(error)?;
                         let events = event_page(&layout, ns)?;
                         let frontier = frontier_page(&layout, ns)?;
                         paths = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r| r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
-                        if !paths.is_empty() || !events || !frontier || !native_keys_page(&tx, ns)? { break; }
+                        if !paths.is_empty() || !events || !frontier || !native_keys_page(&tx, ns)?
+                        {
+                            break;
+                        }
                         phase = "identity".to_owned();
                     }
                     "identity" => {
@@ -2783,29 +2941,66 @@ impl Stage {
                         let seeds = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND identity_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r| r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
                         let mut selected = std::collections::BTreeSet::new();
                         for seed in seeds {
-                            if selected.contains(&seed) { continue; }
-                            let group = crate::events::store::semantic_stage::owner_closure_with(&physical, &seed).map_err(error)?;
-                            if selected.len() + group.iter().filter(|path| !selected.contains(*path)).count() > 64 { break; }
+                            if selected.contains(&seed) {
+                                continue;
+                            }
+                            let group = crate::events::store::semantic_stage::owner_closure_with(
+                                &physical, &seed,
+                            )
+                            .map_err(error)?;
+                            if selected.len()
+                                + group
+                                    .iter()
+                                    .filter(|path| !selected.contains(*path))
+                                    .count()
+                                > 64
+                            {
+                                break;
+                            }
                             selected.extend(group);
                         }
                         paths = selected.into_iter().collect();
-                        if !paths.is_empty() { break; }
+                        if !paths.is_empty() {
+                            break;
+                        }
                         let validated = validate_source_page(&tx, &self.source, revision)?;
-                        if !crate::events::store::semantic_stage::reduce_with(&ScopedReduction { db: &tx, ns }).map_err(error)?
-                            || !crate::events::store::semantic_stage::qualify_with(&ScopedQualification { db: &tx, ns }).map_err(error)?
-                            || !validated { break; }
+                        if !crate::events::store::semantic_stage::reduce_with(&ScopedReduction {
+                            db: &tx,
+                            ns,
+                        })
+                        .map_err(error)?
+                            || !crate::events::store::semantic_stage::qualify_with(
+                                &ScopedQualification { db: &tx, ns },
+                            )
+                            .map_err(error)?
+                            || !validated
+                        {
+                            break;
+                        }
                         phase = "relations".to_owned();
                     }
                     "relations" => {
                         result_phase = Phase::Relations;
                         paths = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND relation_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r| r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
-                        if !paths.is_empty() { break; }
+                        if !paths.is_empty() {
+                            break;
+                        }
                         phase = "publication".to_owned();
                     }
                     "publication" => {
                         result_phase = Phase::Publication;
-                        publication_groups = crate::events::store::semantic_stage::publication_groups_with(&physical).map_err(error)?;
-                        paths = publication_groups.iter().flatten().cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                        publication_groups =
+                            crate::events::store::semantic_stage::publication_groups_with(
+                                &physical,
+                            )
+                            .map_err(error)?;
+                        paths = publication_groups
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
                         if paths.is_empty() {
                             paths = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND publication_done=0 ORDER BY source_path LIMIT 64").map_err(error)?.query_map([ns], |r| r.get(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
                         }
@@ -2814,29 +3009,63 @@ impl Stage {
                     _ => return Err(refuse("semantic_phase_pending")),
                 }
             }
-            tx.execute("UPDATE main.catalog_semantic_stage SET phase=?2,revision=?3 WHERE namespace=?1", params![ns,phase,revision]).map_err(error)?;
+            tx.execute(
+                "UPDATE main.catalog_semantic_stage SET phase=?2,revision=?3 WHERE namespace=?1",
+                params![ns, phase, revision],
+            )
+            .map_err(error)?;
         }
         let claude = result_phase == Phase::Relations && paths.first().map(|path| tx.query_row("SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get::<_,bool>(0)).optional()).transpose().map_err(error)?.flatten().unwrap_or(false);
-        if claude { paths.truncate(1); }
+        if claude {
+            paths.truncate(1);
+        }
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
-            Context { epoch: (result_phase == Phase::Identity).then_some(epoch), ..Context::default() }
+            Context {
+                epoch: (result_phase == Phase::Identity).then_some(epoch),
+                ..Context::default()
+            }
         } else {
             loop {
                 let loaded = (|| -> rusqlite::Result<Context> {
-                    let mut context = crate::events::store::semantic_stage::context_with(&physical, &paths, result_phase, epoch)?;
+                    let mut context = crate::events::store::semantic_stage::context_with(
+                        &physical,
+                        &paths,
+                        result_phase,
+                        epoch,
+                    )?;
                     if result_phase == Phase::Publication {
-                        context.prior_owners = owners::Owners { db: &tx, namespace: ns }.prior(&paths)?;
+                        context.prior_owners = owners::Owners {
+                            db: &tx,
+                            namespace: ns,
+                        }
+                        .prior(&paths)?;
                     }
-                    if serde_json::to_vec(&context).map_err(|_| rusqlite::Error::InvalidQuery)?.len() > 1048576 { return Err(rusqlite::Error::InvalidQuery); }
+                    if serde_json::to_vec(&context)
+                        .map_err(|_| rusqlite::Error::InvalidQuery)?
+                        .len()
+                        > 1048576
+                    {
+                        return Err(rusqlite::Error::InvalidQuery);
+                    }
                     Ok(context)
                 })();
                 match loaded {
                     Ok(context) => break context,
-                    Err(_) if result_phase == Phase::Publication && publication_groups.len() > 1 => {
+                    Err(_)
+                        if result_phase == Phase::Publication && publication_groups.len() > 1 =>
+                    {
                         publication_groups.pop();
-                        paths = publication_groups.iter().flatten().cloned().collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                        paths = publication_groups
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .into_iter()
+                            .collect();
                     }
-                    Err(_) if result_phase == Phase::Relations && paths.len() > 1 => { paths.truncate(1); }
+                    Err(_) if result_phase == Phase::Relations && paths.len() > 1 => {
+                        paths.truncate(1);
+                    }
                     Err(e) => return Err(error(e)),
                 }
             }
@@ -2844,18 +3073,43 @@ impl Stage {
         let relation_cursor = if claude {
             let selected = paths[0].clone();
             let cursor = relation_page(&tx, ns, &selected, &mut context).map_err(error)?;
-            let mut actors = context.matching_locations.iter().flatten().map(|location| location.source.path.to_string_lossy().into_owned()).collect::<std::collections::BTreeSet<_>>();
+            let mut actors = context
+                .matching_locations
+                .iter()
+                .flatten()
+                .map(|location| location.source.path.to_string_lossy().into_owned())
+                .collect::<std::collections::BTreeSet<_>>();
             actors.insert(selected.clone());
             let mut companions = std::collections::BTreeSet::new();
-            for actor in &actors { companions.extend(crate::events::store::semantic_stage::owner_closure_with(&physical, actor).map_err(error)?); }
-            let companion_context = crate::events::store::semantic_stage::context_with(&physical, &companions.iter().cloned().collect::<Vec<_>>(), result_phase, epoch).map_err(error)?;
+            for actor in &actors {
+                companions.extend(
+                    crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
+                        .map_err(error)?,
+                );
+            }
+            let companion_context = crate::events::store::semantic_stage::context_with(
+                &physical,
+                &companions.iter().cloned().collect::<Vec<_>>(),
+                result_phase,
+                epoch,
+            )
+            .map_err(error)?;
             context.endpoints.extend(companion_context.endpoints);
             companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
             paths = vec![selected.clone()];
             paths.extend(companions.into_iter().filter(|path| path != &selected));
-            if paths.len() > 64 || serde_json::to_vec(&context).map_err(|e| StoreError::Data(e.to_string()))?.len() > 1048576 { return Err(refuse("semantic_source_budget")); }
+            if paths.len() > 64
+                || serde_json::to_vec(&context)
+                    .map_err(|e| StoreError::Data(e.to_string()))?
+                    .len()
+                    > 1048576
+            {
+                return Err(refuse("semantic_source_budget"));
+            }
             Some(cursor)
-        } else { None };
+        } else {
+            None
+        };
         let source_revision = tx
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace=?1",
@@ -2957,7 +3211,11 @@ impl Stage {
             {
                 return Err(refuse("semantic_publication_component_budget"));
             }
-            if !group_current(&tx, ns, batch, prepared)? || !selected_witnesses(&tx, ns, &batch.paths)? { return Ok(Outcome::Conflict); }
+            if !group_current(&tx, ns, batch, prepared)?
+                || !selected_witnesses(&tx, ns, &batch.paths)?
+            {
+                return Ok(Outcome::Conflict);
+            }
             // Virtual stub transcripts are witnesses, not admitted Catalog owners.
             let mut metadata = Vec::new();
             let mut covered = validate_withdrawals(&tx, &self.source, batch, prepared)?;
@@ -3018,7 +3276,8 @@ impl Stage {
             if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
                 return Err(refuse("semantic_context_budget"));
             }
-            let paths = serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+            let paths =
+                serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
             tx.execute("INSERT INTO storage_semantic_model_batches VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,(SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1)) ON CONFLICT(namespace) DO UPDATE SET epoch=excluded.epoch,metadata=excluded.metadata,projections=excluded.projections,claims=excluded.claims,base_generation=excluded.base_generation,source_revision=excluded.source_revision,runtime=excluded.runtime,paths=excluded.paths,original_generation=excluded.original_generation",params![ns,batch.epoch,metadata,projections,claims,batch.base_generation,batch.source_revision,batch.runtime,paths]).map_err(error)?;
             #[cfg(test)]
             crate::events::store::configured::effect("semantic_model_record").map_err(error)?;
@@ -3374,7 +3633,12 @@ impl Stage {
             .dependency(path, &format!("runtime:native:{harness}"), native)
             .map_err(error)?;
             let layout = FrontierLayout::bind(&tx).map_err(error)?;
-            crate::events::store::semantic_stage::native_frontier_with(&layout.frontier(ns), harness, native).map_err(error)?;
+            crate::events::store::semantic_stage::native_frontier_with(
+                &layout.frontier(ns),
+                harness,
+                native,
+            )
+            .map_err(error)?;
         }
         for (harness, native) in &prepared.lineage_dependencies {
             let kind = if harness.starts_with("bridge:") {
@@ -3407,7 +3671,12 @@ impl Stage {
             tx.execute("INSERT INTO main.catalog_semantic_inputs(namespace,source_path,harness,native_id,is_top,metadata) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,source_path) DO UPDATE SET harness=excluded.harness,native_id=excluded.native_id,is_top=excluded.is_top,metadata=excluded.metadata", params![ns,path.as_ref(),harness,source.native_id,top,metadata]).map_err(error)?;
             tx.execute("UPDATE main.catalog_semantic_sources SET ledger=?3,index_done=1,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=?1 AND path=?2) WHERE namespace=?1 AND source_path=?2", params![ns,path.as_ref(),ledger]).map_err(error)?;
             let layout = FrontierLayout::bind(&tx).map_err(error)?;
-            crate::events::store::semantic_stage::native_frontier_with(&layout.frontier(ns), harness, &source.native_id).map_err(error)?;
+            crate::events::store::semantic_stage::native_frontier_with(
+                &layout.frontier(ns),
+                harness,
+                &source.native_id,
+            )
+            .map_err(error)?;
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,'pathowner',?2,'')",params![ns,path.as_ref()]).map_err(error)?;
         }
         #[cfg(test)]

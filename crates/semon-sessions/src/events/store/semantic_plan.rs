@@ -2,10 +2,19 @@
 //! admission, epoch fences and durable effects remain with the storage owner.
 use super::*;
 
+#[derive(Debug)]
+pub(crate) struct PhysicalOwnerSourceBudget;
+
+impl std::fmt::Display for PhysicalOwnerSourceBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("semantic_physical_owner_source_budget")
+    }
+}
+
+impl std::error::Error for PhysicalOwnerSourceBudget {}
+
 fn source_budget() -> rusqlite::Error {
-    rusqlite::Error::ToSqlConversionFailure(Box::new(io::Error::other(
-        "semantic_physical_owner_source_budget",
-    )))
+    rusqlite::Error::ToSqlConversionFailure(Box::new(PhysicalOwnerSourceBudget))
 }
 
 pub(crate) trait OwnerClosurePort {
@@ -18,7 +27,10 @@ pub(crate) fn owner_closure_with(
     port: &impl OwnerClosurePort,
     seed: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    if !port.input(seed)?.is_some_and(|(harness, top)| harness == "claude" && top) {
+    if !port
+        .input(seed)?
+        .is_some_and(|(harness, top)| harness == "claude" && top)
+    {
         return Ok(vec![seed.to_owned()]);
     }
     let mut paths = BTreeSet::new();
@@ -36,7 +48,10 @@ pub(crate) fn owner_closure_with(
         let (id, links) = port.links(&path)?;
         let links: super::super::super::Links = bounded(links, &mut used)?;
         let mut selectors = Vec::new();
-        for id in std::iter::once(id).chain(links.session_ids).chain(links.continued_in) {
+        for id in std::iter::once(id)
+            .chain(links.session_ids)
+            .chain(links.continued_in)
+        {
             if ids.insert(id.clone()) {
                 selectors.push(("lineage:claude", id));
             }
@@ -96,7 +111,12 @@ pub(crate) fn publication_groups_with(
                 }
             }
         }
-        if selected.len() + paths.iter().filter(|path| !selected.contains(*path)).count() > 64
+        if selected.len()
+            + paths
+                .iter()
+                .filter(|path| !selected.contains(*path))
+                .count()
+            > 64
             || owners.len() + group_owners.len() > 64
         {
             break;

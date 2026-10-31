@@ -329,6 +329,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `events/store/native_usage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/relocation.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/reprice.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+| `events/store/semantic_plan.rs` | direct | Shared physical owner planning through metadata ports; admitted SQLite effects remain adapter-owned. |
 | `events/store/semantic_stage.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/tree_state.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `events/store/configured.rs` | direct | Current namespace-native Event/Facts writer and admitted owner qualification. Public backend qualification remains incomplete. |
