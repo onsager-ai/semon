@@ -9,6 +9,7 @@ use crate::storage::{
 
 mod admitted;
 mod context;
+mod query_recipe;
 pub(in crate::storage::postgres) mod query;
 
 /// Lease acquisition checks an acknowledged publication, never just a physical

@@ -12,6 +12,7 @@ use std::{fs, time::Duration};
 mod businessflow;
 mod endpoint_owners;
 mod native_history;
+mod query_recipe;
 
 const L1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const L2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
