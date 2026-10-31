@@ -99,10 +99,19 @@ impl Snapshot<'_, '_> {
                     .ok_or_else(|| failed(StorageError::ScopeChanged))?
                     .clone();
                 original.lifecycle = reference.lifecycle;
+                let query_recipe = observations::query_recipe_at(
+                    &mut tx,
+                    &history_owner,
+                    true,
+                    &row.key,
+                    metadata,
+                )
+                .map_err(failed)?;
                 let observations = observations::publication(
                     &mut tx,
                     &current,
                     &encoded(&original).map_err(failed)?,
+                    query_recipe.as_deref(),
                     &reference.receipt,
                 )
                 .map_err(failed)?;
@@ -145,8 +154,26 @@ impl Snapshot<'_, '_> {
             };
             let receipt: observations::NativeReceipt =
                 serde_json::from_slice(&native).map_err(io::Error::other)?;
-            let observations =
-                observations::publication(&mut tx, &current, original, &receipt).map_err(failed)?;
+            let query_recipe = observations::query_recipe_at(
+                &mut tx,
+                if owner.is_some() {
+                    &self.generation
+                } else {
+                    &receipt.2
+                },
+                false,
+                &row.key,
+                original,
+            )
+            .map_err(failed)?;
+            let observations = observations::publication(
+                &mut tx,
+                &current,
+                original,
+                query_recipe.as_deref(),
+                &receipt,
+            )
+            .map_err(failed)?;
             return Ok(Some((current, observations, Origin::Native(receipt))));
         }
         let reference_kind = owner.map(|owner| match owner {

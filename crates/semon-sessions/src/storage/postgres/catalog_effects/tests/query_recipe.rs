@@ -125,6 +125,57 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     assert_eq!(outcome, crate::events::Outcome::Written);
     let generation = generation.unwrap();
     let row = &prepared.rows[0];
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        let bytes: Vec<u8> = tx.driver.query_one("SELECT payload FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&namespace.as_str().as_bytes(), &generation.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        let publication: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let metadata = compact.metadata.as_bytes();
+        let recipe = compact.query_recipe.as_deref().map(str::as_bytes);
+        let captured = super::super::observations::publication_observations(
+            &publication,
+            metadata,
+            recipe,
+        )?;
+        assert_eq!(
+            serde_json::to_value(captured).unwrap(),
+            serde_json::to_value(prepared.presentation_observations()).unwrap(),
+            "v2 retains the publication's exact presentation observations"
+        );
+        for fault in [
+            "old_version",
+            "malformed",
+            "duplicate",
+            "wrong_owner",
+            "metadata_bytes",
+            "payload_bytes",
+            "missing_payload",
+        ] {
+            let mut bad = publication.clone();
+            let mut cells: Vec<serde_json::Value> =
+                serde_json::from_str(bad[1].as_str().unwrap()).unwrap();
+            match fault {
+                "old_version" => bad[0] = serde_json::json!("catalog-publication-v1"),
+                "malformed" => cells[0] = serde_json::json!([row.key, compact.metadata]),
+                "duplicate" => cells.push(cells[0].clone()),
+                "wrong_owner" => cells[0][0] = serde_json::json!("different-owner"),
+                "metadata_bytes" => {
+                    cells[0][1] = serde_json::json!(format!("{}\n", compact.metadata));
+                }
+                "payload_bytes" => {
+                    cells[0][2] = serde_json::json!(format!("{}\n", compact.query_recipe.as_ref().unwrap()));
+                }
+                "missing_payload" => cells[0][2] = serde_json::Value::Null,
+                _ => unreachable!(),
+            }
+            bad[1] = serde_json::json!(serde_json::to_string(&cells).unwrap());
+            assert!(
+                super::super::observations::publication_observations(&bad, metadata, recipe)
+                    .is_err(),
+                "{fault}"
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
     let token =
         snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
             // Retained display does not move a physical Current selection to History.
@@ -176,13 +227,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         Ok(())
     })
     .unwrap();
-    let payload = format!("{}\n", compact.query_recipe.unwrap());
-    // Preserve insignificant Current whitespace byte-for-byte through custody;
-    // normal publication already authored the pair and its native receipt.
-    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 AND metadata=$5", &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &row.key.as_bytes(), &payload.as_bytes(), &compact.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
-        Ok(())
-    }).unwrap();
+    let payload = compact.query_recipe.unwrap();
     snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
         assert_eq!(
             view.load_query_recipe(&token).unwrap(),
@@ -208,6 +253,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         "corrupt",
         "digest",
         "bound",
+        "whitespace",
         "grant",
         "admission",
         "stream",
@@ -218,10 +264,11 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
             let ns = namespace.as_str().as_bytes();
             match fault {
-                "corrupt" | "digest" | "bound" => {
+                "corrupt" | "digest" | "bound" | "whitespace" => {
                     let bad = match fault {
                         "corrupt" => "{".to_owned(),
                         "digest" => serde_json::to_string(&crate::query_projection::SelectedRecipe { session: serde_json::json!({}), turns: vec![], edges: vec![] }).unwrap(),
+                        "whitespace" => format!("{payload}\n"),
                         _ => "x".repeat(1048576),
                     };
                     tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns, &generation.as_bytes(), &bad.as_bytes()]).map_err(sqlstate::error)?;
@@ -239,7 +286,6 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             snapshot::in_transaction(tx, &generation, |view| {
                 let error = view.load_query_recipe(&token).unwrap_err();
                 match fault {
-                    "corrupt" | "digest" => assert!(matches!(error, Error::CorruptPayload), "{fault}: {error}"),
                     "bound" => assert!(matches!(error, Error::Storage(StorageError::HistoryRetentionBounds)), "{error}"),
                     _ => assert!(matches!(error, Error::ObservationChanged), "{fault}: {error}"),
                 }
