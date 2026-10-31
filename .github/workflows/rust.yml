@@ -205,7 +205,7 @@ jobs:
           result=0
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture || result=1
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture || result=1
-          SEMON_BUILD_TIMING=1 cargo test --locked || result=1
+          SEMON_BUILD_TIMING=1 cargo test --locked --no-fail-fast || result=1
           exit "$result"
 
       - name: Source clock/account strict Clippy
