@@ -68,7 +68,10 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
             snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)?;
             Ok((
                 history,
-                snapshot.owner(&original.key)?.unwrap(),
+                snapshot
+                    .owner(&original.key)?
+                    .unwrap()
+                    .generation,
                 snapshot.catalog(&original.key, false)?.unwrap(),
             ))
         })
@@ -87,7 +90,10 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
     }).unwrap();
     snapshot::with_generation(&pool, &namespace, &control, &latest, |snapshot| {
         assert_eq!(
-            snapshot.owner(&original.key)?.as_deref(),
+            snapshot
+                .owner(&original.key)?
+                .as_ref()
+                .map(|owner| owner.generation.as_str()),
             Some(owner.as_str())
         );
         snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
