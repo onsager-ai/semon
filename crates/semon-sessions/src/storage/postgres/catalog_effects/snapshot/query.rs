@@ -5,7 +5,7 @@ use crate::{
     Options, QueryError,
     storage::{
         catalog::CatalogSnapshot,
-        query::{Part, QueryCatalogStore, edge_timed, history_window, select_history, turn_kept},
+        query::{Part, QueryCatalogStore, edge_timed, history_window, turn_kept},
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -754,12 +754,11 @@ impl QueryCatalogStore for QueryCatalog {
                     if !loaded.get(key).is_some_and(|(_, current, _)| *current) {
                         loaded.insert(key.clone(), (row, false, true));
                     }
-                } else if !loaded.contains_key(key) {
-                    if let Some(row) = snapshot.catalog(key, false).map_err(|_| StorageError::Unavailable)? {
-                        charge_catalog_row(&row, bytes_left)?;
-                        let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                        loaded.insert(key.clone(), (row, current, false));
-                    }
+                } else if !loaded.contains_key(key)
+                    && let Some(row) = snapshot.catalog(key, false).map_err(|_| StorageError::Unavailable)? {
+                    charge_catalog_row(&row, bytes_left)?;
+                    let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                    loaded.insert(key.clone(), (row, current, false));
                 }
             }
             let Some(c) = cutoff else {
@@ -906,22 +905,19 @@ impl QueryCatalogStore for QueryCatalog {
             if cutoff.is_some() {
                 for key in &current_context {
                     if loaded.get(key).is_some_and(|(_, _, history)| *history) {
-                        match snapshot.catalog(key, false).map_err(|error| match error {
+                        if let Some(row) = snapshot.catalog(key, false).map_err(|error| match error {
                             StorageError::ScopeChanged => cohort_scope_changed("recent_current_context_refused"),
                             other => other,
                         })? {
-                            Some(row) => {
-                                charge_catalog_row(&row, bytes_left)?;
-                                let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                                let eligible = current
-                                    && (row.last.is_some_and(|last| last >= c)
-                                        || query_last(&row).is_some_and(|last| last >= c)
-                                        || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
-                                if eligible {
-                                    loaded.insert(key.clone(), (row, true, false));
-                                }
+                            charge_catalog_row(&row, bytes_left)?;
+                            let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                            let eligible = current
+                                && (row.last.is_some_and(|last| last >= c)
+                                    || query_last(&row).is_some_and(|last| last >= c)
+                                    || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
+                            if eligible {
+                                loaded.insert(key.clone(), (row, true, false));
                             }
-                            None => {}
                         }
                     }
                 }
