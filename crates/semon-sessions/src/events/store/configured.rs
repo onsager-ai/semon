@@ -7808,7 +7808,7 @@ mod tests {
         }
 
         #[test]
-        fn configured_semantic_domain_withdrawal_retires_only_owned_current_and_keeps_recipes() {
+        fn semantic_rejection_configured_facts_withdrawal_is_fenced_by_live_authority() {
             let (f, b, options, inputs) = model_sources();
             let options = &options[0];
             let input = &inputs[0];
@@ -7838,6 +7838,57 @@ mod tests {
                 &crate::Options::default().source,
             )
             .unwrap();
+            let mut cache = EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+            )
+            .unwrap();
+            let paths = [input.full_path(options).to_string_lossy().into_owned()];
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                    .unwrap(),
+                Outcome::Written
+            );
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(batch.phase, Phase::Indexing);
+            let model = crate::model::prepare_semantic_batch(
+                options,
+                &mut cache,
+                std::slice::from_ref(input),
+                &batch,
+                1_790_000_000_000,
+            )
+            .unwrap();
+            assert_eq!(model.prepared().withdrawals.len(), 1);
+            let before_record = shared_state(&f);
+            // This is the real model withdrawal from the admitted Facts
+            // authority. Replacing Facts after preparation must refuse the
+            // indexing record without changing the configured store.
+            crate::facts::write_facts(
+                options.facts.as_ref().unwrap(),
+                &crate::Facts {
+                    version: 2,
+                    hostname: "domain".into(),
+                    codex_rollouts: Some(Default::default()),
+                    ..Default::default()
+                },
+                &crate::Options::default().source,
+            )
+            .unwrap();
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
+                Outcome::Conflict,
+                "replaced Facts authority refuses the prepared withdrawal"
+            );
+            assert_eq!(
+                shared_state(&f),
+                before_record,
+                "stale Facts withdrawal makes zero indexing writes"
+            );
+            drop(cache);
             let mut cache = EventCache::open_semantic(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
             )
