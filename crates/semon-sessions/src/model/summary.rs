@@ -128,6 +128,9 @@ pub(crate) struct CatalogRow {
     pub(crate) overview: Option<crate::overview::Summary>,
     #[serde(skip)]
     pub(crate) trace: Option<crate::causal_trace::Projection>,
+    /// Explicit producer payload; persisted separately from the compact row.
+    #[serde(skip)]
+    pub(crate) query_recipe: Option<crate::query_projection::SelectedRecipe>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) query: Option<Value>,
     #[serde(default)]
@@ -231,6 +234,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
         rows.push(CatalogRow {
             overview: None,
             trace: None,
+            query_recipe: None,
             query: None,
             lifecycle: CatalogLifecycle::Current,
             key: session.key.clone(),

@@ -3,6 +3,64 @@ use crate::{QueryError, storage::LogicalSourceNamespace};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Exact residence selected by an admitted store snapshot. This is separate
+/// from Catalog lifecycle: a retained display row can still reside in Current,
+/// and imported originals retain their immutable producer generation.
+#[derive(Clone, Debug)]
+pub(crate) enum QueryRecipeResidence {
+    Catalog,
+    History,
+    Immutable(super::proof_lifetime::ProofGenerationId),
+}
+
+/// Store-issued recipe lookup authority. Callers cannot manufacture a History
+/// selection from a lifecycle tag or pass a guessed history boolean to lookup.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryRecipeObservation {
+    pub(in crate::storage) residence: QueryRecipeResidence,
+    pub(in crate::storage) publication: String,
+    pub(in crate::storage) metadata: String,
+    pub(in crate::storage) original: super::QueryRuntimeBinding,
+    pub(in crate::storage) destination: super::QueryRuntimeBinding,
+    row: crate::model::summary::CatalogRow,
+}
+
+impl QueryRecipeObservation {
+    /// The owning adapter must first authenticate this exact metadata and its
+    /// original binding using the selected residence's existing grant/receipt.
+    pub(in crate::storage) fn qualified(
+        residence: QueryRecipeResidence,
+        publication: String,
+        metadata: String,
+        original: super::QueryRuntimeBinding,
+        destination: super::QueryRuntimeBinding,
+    ) -> Result<Self, super::StorageError> {
+        if original.namespace != destination.namespace
+            || original.stream_epoch != destination.stream_epoch
+            || original.admission == 0
+            || destination.admission == 0
+            || metadata.len() > super::proof_codec::METADATA_MAX
+        {
+            return Err(super::StorageError::ScopeChanged);
+        }
+        let row = serde_json::from_str(&metadata).map_err(|_| super::StorageError::Unavailable)?;
+        Ok(Self { residence, publication, metadata, original, destination, row })
+    }
+
+    pub(crate) fn row(&self) -> &crate::model::summary::CatalogRow {
+        &self.row
+    }
+
+    /// Decoding cannot substitute a payload from a different observation. The
+    /// adapter additionally checks the stored residence and original binding.
+    pub(in crate::storage) fn decode(
+        &self,
+        payload: &str,
+    ) -> std::io::Result<crate::query_projection::SelectedRecipe> {
+        crate::query_projection::SelectedRecipe::decode(&self.row, payload)
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Work {

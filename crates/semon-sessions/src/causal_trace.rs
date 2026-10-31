@@ -24,7 +24,7 @@ impl Projection {
     pub(crate) fn selected_query_recipe(
         &self,
         summary: &crate::overview::Summary,
-    ) -> Option<Value> {
+    ) -> Option<crate::query_projection::SelectedRecipe> {
         self.query
             .as_ref()
             .map(|query| query.selected_recipe(summary))

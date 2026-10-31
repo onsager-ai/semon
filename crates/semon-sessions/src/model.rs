@@ -8942,15 +8942,14 @@ fn build_sources_inner(
                     )
                     .with_sources(&row.sources)?,
                 );
-                row.query.as_mut().expect("query captured")["selected"] = row
+                row.query_recipe = row
                     .trace
                     .as_ref()
                     .and_then(|trace| {
                         trace.selected_query_recipe(
                             row.overview.as_ref().expect("overview captured"),
                         )
-                    })
-                    .unwrap_or(Value::Null);
+                    });
                 measurements.record("projection_overview", started, 1);
             }
         }

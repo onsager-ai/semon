@@ -8,16 +8,171 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+/// The selected result is distinct from the compact Catalog observation. Its
+/// complete native metadata remains available to explicit session/field reads.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelectedRecipe {
+    pub(crate) session: Value,
+    pub(crate) turns: Vec<Value>,
+    pub(crate) edges: Vec<Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SelectedRecipeRef {
+    version: u32,
+    digest: String,
+}
+
+impl SelectedRecipe {
+    /// Replace selected result metadata with its exact publication reference.
+    /// The caller publishes the returned bytes atomically with this row.
+    pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
+        let Some(recipe) = &row.query_recipe else {
+            return Ok(None);
+        };
+        let reference = recipe.reference(row).map_err(std::io::Error::other)?;
+        let encoded = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
+        let query = row.query.as_mut().ok_or_else(|| {
+            std::io::Error::other("Selected Query observation unavailable")
+        })?;
+        query["selected"] = serde_json::to_value(reference).map_err(std::io::Error::other)?;
+        Ok(Some(encoded))
+    }
+
+    pub(crate) fn reference(&self, row: &CatalogRow) -> serde_json::Result<SelectedRecipeRef> {
+        let source = crate::retention::source_generation(&row.sources)?;
+        let bytes = serde_json::to_vec(&(
+            "selected-query-recipe-v1",
+            &row.key,
+            &row.harness,
+            source,
+            self,
+        ))?;
+        Ok(SelectedRecipeRef {
+            version: 1,
+            digest: format!("{:x}", Sha256::digest(bytes)),
+        })
+    }
+
+    /// The caller has already qualified the row's actual publication residence.
+    /// A digest is integrity evidence, never namespace or source authority.
+    pub(crate) fn decode(row: &CatalogRow, text: &str) -> std::io::Result<Self> {
+        let metadata = serde_json::to_vec(row).map_err(std::io::Error::other)?;
+        if metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX {
+            return Err(std::io::Error::other("Selected Query metadata budget exceeded"));
+        }
+        let selected = row.query.as_ref().and_then(|query| query.get("selected"))
+            .ok_or_else(|| std::io::Error::other("Selected Query reference unavailable"))?;
+        let expected: SelectedRecipeRef = serde_json::from_value(selected.clone())
+            .map_err(std::io::Error::other)?;
+        let recipe: Self = serde_json::from_str(text).map_err(std::io::Error::other)?;
+        if expected != recipe.reference(row).map_err(std::io::Error::other)? {
+            return Err(std::io::Error::other("Selected Query recipe changed"));
+        }
+        Ok(recipe)
+    }
+}
+
+#[cfg(test)]
+mod selected_recipe_tests {
+    use super::*;
+
+    fn row() -> CatalogRow {
+        serde_json::from_value(json!({
+            "key":"owner","name":"owner","harness":"claude","kind":"session",
+            "native_ids":[],"parent":null,"parent_source":null,"repo":null,
+            "branch":null,"model":"","effort":null,"start":100,"last":100,
+            "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[],
+                "split_unknown_messages":0,"by_model":{},"by_day":{}},
+            "sources":[],"query":{"version":1}
+        })).unwrap()
+    }
+
+    fn recipe() -> SelectedRecipe {
+        SelectedRecipe {
+            session: json!({"busy":[[100,200]]}),
+            turns: vec![json!({"id":"turn","query":{"at":100}})],
+            edges: vec![json!({"id":"edge","query":{"from":"owner","to":"peer"}})],
+        }
+    }
+
+    #[test]
+    fn detached_recipe_preserves_complete_payload_and_compact_observation() {
+        let mut row = row();
+        let mut recipe = recipe();
+        recipe.session["busy"] = json!(vec![[100,200]; 2048]);
+        row.query_recipe = Some(recipe.clone());
+        let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        let metadata = serde_json::to_string(&row).unwrap();
+        assert!(metadata.len() < 8192);
+        assert!(row.query.as_ref().unwrap()["selected"].get("session").is_none());
+        assert_eq!(SelectedRecipe::decode(&row, &encoded).unwrap(), recipe);
+        let restored: CatalogRow = serde_json::from_str(&metadata).unwrap();
+        assert!(restored.query_recipe.is_none());
+        assert_eq!(SelectedRecipe::decode(&restored, &encoded).unwrap(), recipe);
+    }
+
+    #[test]
+    fn recipe_reference_binds_owner_harness_and_complete_source_vector() {
+        let mut row = row();
+        row.query_recipe = Some(recipe());
+        let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        let mut foreign = row.clone();
+        foreign.key = "other".into();
+        assert!(SelectedRecipe::decode(&foreign, &encoded).is_err());
+        foreign = row.clone();
+        foreign.harness = "codex".into();
+        assert!(SelectedRecipe::decode(&foreign, &encoded).is_err());
+        foreign = row.clone();
+        foreign.sources.push(crate::model::summary::CatalogSource {
+            path: "source.jsonl".into(), native_id: "native".into(),
+            dev: 1, ino: 1, size: 1, modified_ns: 1, changed_ns: Some(1),
+            offset: 1, prefix_sha256: [1;32], tail_sha256: [1;32], native_role: None,
+        });
+        assert!(SelectedRecipe::decode(&foreign, &encoded).is_err());
+        row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        assert!(SelectedRecipe::decode(&row, &encoded).is_ok());
+    }
+
+    #[test]
+    fn consuming_recipe_refuses_missing_corrupt_or_changed_payload() {
+        let mut row = row();
+        row.query_recipe = Some(recipe());
+        let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        assert!(SelectedRecipe::decode(&row, "").is_err());
+        assert!(SelectedRecipe::decode(&row, "{}").is_err());
+        let mut changed = recipe();
+        changed.session["busy"] = json!([]);
+        assert!(SelectedRecipe::decode(&row, &serde_json::to_string(&changed).unwrap()).is_err());
+        row.query.as_mut().unwrap().as_object_mut().unwrap().remove("selected");
+        assert!(SelectedRecipe::decode(&row, &encoded).is_err());
+    }
+
+    #[test]
+    fn recipe_load_preserves_combined_catalog_record_budget() {
+        let mut row = row();
+        row.query_recipe = Some(recipe());
+        let mut encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        let metadata = serde_json::to_vec(&row).unwrap().len();
+        encoded.push_str(&" ".repeat(crate::storage::proof_codec::METADATA_MAX - metadata - encoded.len()));
+        assert!(SelectedRecipe::decode(&row, &encoded).is_ok());
+        encoded.push(' ');
+        assert!(SelectedRecipe::decode(&row, &encoded).is_err());
+    }
+}
+
 /// Retained endpoints must own their field recipes before a later Current
 /// publication can withdraw the other endpoint's relationship observation.
 pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
     let mut fields = std::collections::BTreeMap::<String, serde_json::Map<String, Value>>::new();
     for row in rows.iter() {
         for edge in row
-            .query
+            .query_recipe
             .as_ref()
             .into_iter()
-            .flat_map(|query| query["selected"]["edges"].as_array().into_iter().flatten())
+            .flat_map(|recipe| &recipe.edges)
         {
             let saved = fields
                 .entry(edge["id"].as_str().expect("edge identity").into())
@@ -37,14 +192,14 @@ pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
         }
     }
     for row in rows {
-        if let Some(edges) = row
-            .query
-            .as_mut()
-            .and_then(|query| query["selected"]["edges"].as_array_mut())
-        {
-            for edge in edges {
+        if let Some(recipe) = &mut row.query_recipe {
+            for edge in &mut recipe.edges {
                 edge["query_content"] = json!(fields[edge["id"].as_str().expect("edge identity")]);
             }
+        }
+        if let Some(recipe) = &row.query_recipe {
+            row.query.as_mut().ok_or_else(|| std::io::Error::other("Selected Query observation missing"))?["selected"] =
+                serde_json::to_value(recipe).map_err(std::io::Error::other)?;
         }
     }
     Ok(())
@@ -113,7 +268,7 @@ impl Projection {
         }
     }
     /// Content-free selected recipes, persisted with the same Catalog witness.
-    pub(crate) fn selected_recipe(&self, summary: &Summary) -> Value {
+    pub(crate) fn selected_recipe(&self, summary: &Summary) -> SelectedRecipe {
         let edges: Vec<_> = self
             .edges
             .iter()
@@ -124,7 +279,11 @@ impl Projection {
                 edge
             })
             .collect();
-        json!({"session":self.session,"turns":self.turns,"edges":edges})
+        SelectedRecipe {
+            session: self.session.clone(),
+            turns: self.turns.clone(),
+            edges,
+        }
     }
 
     pub(crate) fn virtual_transcript(&mut self, key: &str, transcript: &crate::model::Transcript) {
@@ -158,9 +317,9 @@ impl Projection {
             .collect::<Result<_, _>>()
             .map_err(data)?;
         let edges: Vec<_> = row
-            .query
+            .query_recipe
             .as_ref()
-            .and_then(|query| query["selected"]["edges"].as_array())
+            .map(|recipe| &recipe.edges)
             .ok_or(rusqlite::Error::InvalidQuery)?
             .iter()
             .map(serde_json::to_string)
