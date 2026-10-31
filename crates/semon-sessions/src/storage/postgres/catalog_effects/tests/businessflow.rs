@@ -4,7 +4,7 @@ use super::*;
 use crate::events::{EventCache, Outcome};
 use crate::storage::native_events::NativeEventStore;
 use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
-use crate::storage::{LogicalSourceNamespace, postgres::PgPool};
+use crate::storage::{LogicalSourceNamespace, catalog::CatalogSnapshot, postgres::PgPool};
 
 fn stage_inputs(
     options: &Options,
@@ -1486,6 +1486,72 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .map(|i| fs::read(i.full_path(&options)).unwrap())
         .collect::<Vec<_>>();
+    let appended_path = inputs[0].full_path(&options);
+    let appended_key = oracle
+        .rows
+        .iter()
+        .find(|row| row.sources.iter().any(|source| source.path == appended_path))
+        .expect("SQLite prefix oracle owns the appended Claude source")
+        .key
+        .clone();
+    let append_oracle_root = oracle.root.join("oracle-same-append");
+    let mut append_oracle_options = options.clone();
+    append_oracle_options.claude_home = append_oracle_root.join("claude");
+    append_oracle_options.codex_home = append_oracle_root.join("codex");
+    append_oracle_options.copilot_home = append_oracle_root.join("copilot");
+    append_oracle_options.cache = append_oracle_root.join("index.sqlite3");
+    let append_oracle_path = append_oracle_options
+        .claude_home
+        .join("projects/project/one.jsonl");
+    fs::create_dir_all(append_oracle_path.parent().unwrap()).unwrap();
+    fs::create_dir_all(&append_oracle_options.codex_home).unwrap();
+    fs::create_dir_all(&append_oracle_options.copilot_home).unwrap();
+    fs::copy(&claude_parent, &append_oracle_path).unwrap();
+    let mut append_oracle_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(recent_machine.into(), append_oracle_options)]),
+    ));
+    let prefix_list = append_oracle_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .expect("SQLite same-append prefix publication");
+    let prefix_ids = prefix_list["sessions"].as_array().unwrap();
+    assert_eq!(prefix_ids.len(), 1, "append oracle is the original parent only");
+    let append_oracle_key = prefix_ids[0]["id"].as_str().unwrap();
+    let append_prefix_body = append_oracle_query
+        .call_at(
+            "read_transcript",
+            &serde_json::json!({"id":append_oracle_key,"limit":100}),
+            1790812802000,
+        )
+        .expect("SQLite same-append original prefix body");
+    assert_eq!(
+        append_prefix_body,
+        expected_bodies[&appended_key]["body"],
+        "isolated SQLite prefix agrees with the full-source oracle"
+    );
+    let mut append_oracle_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&append_oracle_path)
+        .unwrap();
+    append_oracle_file
+        .write_all(source_append.as_bytes())
+        .unwrap();
+    append_oracle_file.sync_all().unwrap();
+    drop(append_oracle_file);
+    append_oracle_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812803000)
+        .expect("SQLite same-append successor publication");
+    let append_history_body = append_oracle_query
+        .call_at(
+            "read_transcript",
+            &serde_json::json!({"id":append_oracle_key,"limit":100}),
+            1790812802000,
+        )
+        .expect("SQLite same-append retained body");
+    assert_eq!(
+        append_history_body, append_prefix_body,
+        "SQLite History keeps the original exact source prefix after append"
+    );
+    drop(append_oracle_query);
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
@@ -3248,9 +3314,124 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
     assert!(
-        next_bodies
-            .values()
-            .any(|body| body.to_string().contains("sanitized continuation"))
+        next_bodies[&appended_key]["body"] == append_history_body,
+        "PG History-selected body must match SQLite after the same append"
+    );
+    assert_eq!(
+        next_bodies[&appended_key]["body"],
+        expected_bodies[&appended_key]["body"],
+        "PG History-selected body must preserve the original exact prefix"
+    );
+    let successor_current_body = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &continued_generation,
+        |snapshot| {
+            let (row, header, _) = snapshot
+                .selected(&appended_key, false, 0, 100)?
+                .ok_or(StorageError::ScopeChanged)?;
+            if row.lifecycle != crate::model::summary::CatalogLifecycle::Current
+                || !row.sources.iter().any(|source| {
+                    source.path.as_path() == path.as_path()
+                        && source.offset == receipt.consumed_bytes
+                })
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            snapshot
+                .row_runtime_binding(&row)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+            let runtime = crate::native_evidence::query_runtime_generation(&options)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let expected = snapshot
+                .runtime_observation(&options, &row, &runtime)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .ok_or(StorageError::ScopeChanged)?;
+            if !crate::model::summary::query_observation_matches(
+                saved,
+                &row.sources,
+                true,
+                expected.as_deref(),
+            )
+            .map_err(|_| StorageError::ScopeChanged)?
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
+            let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
+                saved["transcript_observation"].clone(),
+            )
+            .map_err(|_| StorageError::ScopeChanged)?;
+            if !observation.valid(total) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let sources = row
+                .sources
+                .iter()
+                .map(|source| {
+                    let relative = crate::catalog::source_relative(&options, &row.harness, source)
+                        .ok_or(StorageError::ScopeChanged)?;
+                    Ok((
+                        source,
+                        crate::SessionSourceRef {
+                            root: row.harness.clone(),
+                            path: relative,
+                            native_id: source.native_id.clone(),
+                            offset: source.offset,
+                            prefix_sha256: source.prefix_sha256,
+                            tail_sha256: source.tail_sha256,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>, StorageError>>()?;
+            let records = super::super::selected_reader::SelectedRecords {
+                tx: &snapshot.tx,
+                generation: &continued_generation,
+                host: &next_host,
+                sources,
+                pins: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                bytes_left: std::sync::Mutex::new(64 * 1024 * 1024),
+            };
+            let page = super::super::snapshot::query::PgPage {
+                snapshot,
+                key: &appended_key,
+                history: false,
+                records: &records,
+            };
+            let body = crate::query::transcript::render_page(
+                &options,
+                &appended_key,
+                &row,
+                &observation,
+                total,
+                false,
+                total,
+                100,
+                1790812803000,
+                &page,
+            )
+            .map_err(|_| StorageError::ScopeChanged)?;
+            records
+                .finish()
+                .map_err(|_| StorageError::ScopeChanged)?;
+            if crate::native_evidence::query_runtime_generation(&options)
+                .map_err(|_| StorageError::ScopeChanged)?
+                != runtime
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(body)
+        },
+    )
+    .expect("successor Current recipe and proof authorize the appended Raw body");
+    assert!(
+        successor_current_body
+            .to_string()
+            .contains("sanitized continuation"),
+        "successor Current body reads the appended continuation from Raw"
     );
     // The old generation keeps its original Current row receipts. Only rows
     // whose exact source cohort includes the appended file lose current

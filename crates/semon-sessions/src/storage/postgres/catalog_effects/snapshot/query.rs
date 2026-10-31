@@ -27,6 +27,17 @@ fn cohort_scope_changed(reason: &'static str) -> StorageError {
     StorageError::ScopeChanged
 }
 
+fn current_runtime_owner<'a>(
+    selected: &crate::model::summary::CatalogRow,
+    selected_history: bool,
+    current: Option<&'a crate::model::summary::CatalogRow>,
+) -> Option<&'a crate::model::summary::CatalogRow> {
+    current.filter(|current| {
+        current.lifecycle == crate::model::summary::CatalogLifecycle::Current
+            && (!selected_history || current.harness == selected.harness)
+    })
+}
+
 /// Query includes retained-only owners without changing the Current Catalog
 /// pager. Preserve each Current header for window/runtime membership before
 /// choosing its proof-owned history, as the SQLite Query reader does.
@@ -270,11 +281,16 @@ impl QueryCatalogStore for QueryCatalog {
             &self.control,
             &self.generation,
             |snapshot| {
-                let current = snapshot.catalog(key, false)?.is_some_and(|row| {
-                    row.lifecycle == crate::model::summary::CatalogLifecycle::Current
-                });
+                let history = snapshot.owner(key)?.is_some();
+                let selected = snapshot.catalog(key, history)?;
+                let current_row = snapshot.catalog(key, false)?;
+                let current = selected
+                    .as_ref()
+                    .and_then(|selected| {
+                        current_runtime_owner(selected, history, current_row.as_ref())
+                    })
+                    .is_some();
                 let retained_window_data = if needs_window && !current {
-                    let history = snapshot.owner(key)?.is_some();
                     snapshot
                         .selected(key, history, 0, 1)?
                         .map(|(row, _, _)| {
@@ -359,17 +375,22 @@ impl QueryCatalogStore for QueryCatalog {
             &self.generation,
             |snapshot| {
                 // The retained composite wins for the same owner, as in the
-                // SQLite Query reader; Current membership remains independent.
+                // SQLite Query reader; live qualification is independent.
                 // Bodies still come only from authorized Raw Source bytes.
                 let history = snapshot.owner(key)?.is_some();
-                // History metadata is frozen with its original lifecycle. Live
-                // runtime qualification follows this generation's membership,
-                // just as the SQLite reader uses session_catalog.lifecycle.
-                let current = snapshot.catalog(key, false)?.is_some_and(|row| {
-                    row.lifecycle == crate::model::summary::CatalogLifecycle::Current
-                });
-                // The admitted generation is immutable. Rechecking membership
-                // here keeps pre-window classification tied to this snapshot.
+                let (row, header, _) = snapshot
+                    .selected(key, history, 0, 1)
+                    .inspect_err(|_error| {
+                        #[cfg(test)]
+                        eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
+                    })?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let current_row = snapshot.catalog(key, false)?;
+                let current_row = current_runtime_owner(&row, history, current_row.as_ref());
+                let current = current_row.is_some();
+                // The admitted generation is immutable. Rechecking the exact
+                // selected owner keeps pre-window classification tied to this
+                // snapshot and does not borrow another harness's runtime.
                 if current != selected_current {
                     return Err(StorageError::ScopeChanged);
                 }
@@ -379,37 +400,42 @@ impl QueryCatalogStore for QueryCatalog {
                 {
                     return Err(StorageError::ScopeChanged);
                 }
-                let (row, header, _) = snapshot
-                    .selected(key, history, 0, 1)
-                    .inspect_err(|_error| {
-                        #[cfg(test)]
-                        eprintln!("pg_selected_snapshot_lookup key={key:?} history={history}: {_error}");
-                    })?
+                // History owns the selected source vector and publication
+                // receipt. A still-Current owner supplies the separate live
+                // runtime observation for that same harness identity.
+                snapshot
+                    .row_runtime_binding(&row)
+                    .map_err(|_| StorageError::ScopeChanged)?
                     .ok_or(StorageError::ScopeChanged)?;
-                let expected = if !self.captured && current {
-                    runtime.as_deref().map(|runtime| {
-                        snapshot.runtime_observation(&self.options, &row, runtime)
-                            .map_err(|_| StorageError::ScopeChanged)
-                    }).transpose()?.flatten()
-                } else {
-                    // Historical summaries retain observation provenance;
-                    // their stored byte custody does not require live CWDs.
-                    snapshot.row_runtime_binding(&row)
-                        .map_err(|_| StorageError::ScopeChanged)?
-                        .ok_or(StorageError::ScopeChanged)?;
-                    None
-                };
+                let selected_saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
                 if !crate::model::summary::query_observation_matches(
-                    row.query.as_ref().ok_or(StorageError::ScopeChanged)?,
+                    selected_saved,
                     &row.sources,
-                    !self.captured && current,
-                    expected.as_deref(),
+                    false,
+                    None,
                 )
                 .map_err(|_| StorageError::ScopeChanged)?
                 {
-                    #[cfg(test)]
-                    eprintln!("pg_selected_runtime_mismatch history={history} saved_present={} expected_present={} runtime_matches={}", row.query.as_ref().and_then(|q| q["runtime"].as_str()).is_some(), expected.is_some(), row.query.as_ref().and_then(|q| q["runtime"].as_str()) == expected.as_deref());
                     return Err(StorageError::ScopeChanged);
+                }
+                if !self.captured && current {
+                    let current_row = current_row.ok_or(StorageError::ScopeChanged)?;
+                    let runtime = runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
+                    let saved = current_row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+                    let expected = snapshot
+                        .runtime_observation(&self.options, current_row, runtime)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                        .ok_or(StorageError::ScopeChanged)?;
+                    if !crate::model::summary::query_observation_matches(
+                        saved,
+                        &current_row.sources,
+                        true,
+                        expected.as_deref(),
+                    )
+                    .map_err(|_| StorageError::ScopeChanged)?
+                    {
+                        return Err(StorageError::ScopeChanged);
+                    }
                 }
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
                 let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
