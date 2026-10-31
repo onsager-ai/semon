@@ -83,6 +83,7 @@ jobs:
               'semon sessions native: observation_stage_refused ',
               'catalog_retained_observation_refused ',
               'catalog_retained_join_probe ',
+              'catalog_retained_grant_probe ',
               'catalog_runtime_refused ',
               'catalog_relative_status_refused ',
           )
