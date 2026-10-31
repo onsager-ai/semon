@@ -1250,7 +1250,9 @@ impl Writer {
         let owner = self
             .owner
             .as_ref()
-            .ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
             .clone();
         let mut store = super::SqliteStore {
             #[cfg(test)]
@@ -1304,7 +1306,9 @@ impl Writer {
         let owner = self
             .owner
             .as_ref()
-            .ok_or(StoreError::Configured(StorageError::NamespaceUpgradePending))?
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
             .clone();
         let mut store = super::SqliteStore {
             #[cfg(test)]
