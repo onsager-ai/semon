@@ -30,12 +30,55 @@ pub(crate) fn qualified(connection: &Connection, row: &CatalogRow) -> rusqlite::
             |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
         )
         .optional()?;
-    let sources = crate::retention::source_generation(&row.sources).map_err(data)?;
+    let source_generation = crate::retention::source_generation(&row.sources).map_err(data)?;
     Ok(header.is_some_and(|(version, recorded, incomplete)| {
-        version == VERSION && recorded == sources && !incomplete
+        qualified_header(&source_generation, version, &recorded, incomplete)
     }))
+}
+
+/// Shared History header check for SQLite and PostgreSQL snapshots.
+pub(crate) fn qualified_header(
+    expected_source_generation: &str,
+    version: u32,
+    recorded_source_generation: &str,
+    incomplete: bool,
+) -> bool {
+    version == VERSION
+        && recorded_source_generation == expected_source_generation
+        && !incomplete
 }
 
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> crate::model::summary::CatalogSource {
+        crate::model::summary::CatalogSource {
+            path: "projects/session.jsonl".into(),
+            native_id: "session".into(),
+            dev: 1,
+            ino: 2,
+            size: 3,
+            modified_ns: 4,
+            changed_ns: Some(5),
+            offset: 3,
+            prefix_sha256: [6; 32],
+            tail_sha256: [7; 32],
+            native_role: None,
+        }
+    }
+
+    #[test]
+    fn retained_header_requires_exact_version_generation_and_completeness() {
+        let sources = [source()];
+        let generation = crate::retention::source_generation(&sources).unwrap();
+        assert!(qualified_header(&generation, VERSION, &generation, false));
+        assert!(!qualified_header(&generation, VERSION + 1, &generation, false));
+        assert!(!qualified_header(&generation, VERSION, "mismatched", false));
+        assert!(!qualified_header(&generation, VERSION, &generation, true));
+    }
 }

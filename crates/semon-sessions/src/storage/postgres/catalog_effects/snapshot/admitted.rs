@@ -587,7 +587,58 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
             .transpose()
     }
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
-        self.has_history(&row.key)
+        self.require_current()?;
+        let Some(owner_generation) = self.owner(&row.key).map_err(failed)? else {
+            return Ok(false);
+        };
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        tx.check().map_err(failed)?;
+        let namespace = tx.namespace.as_str().as_bytes();
+        let rows = tx
+            .driver
+            .query(
+                "SELECT session_key=$4,CASE WHEN octet_length(source_generation)=64 THEN source_generation END,version,incomplete FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3",
+                &[
+                    &namespace,
+                    &owner_generation.as_bytes(),
+                    &digest(row.key.as_bytes()),
+                    &row.key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)
+            .map_err(failed)?;
+        if rows.len() > 1 {
+            return Err(failed(StorageError::ScopeChanged));
+        }
+        let qualified = if let Some(header) = rows.first() {
+            if !header.get::<_, bool>(0) {
+                return Err(failed(StorageError::ScopeChanged));
+            }
+            match header.get::<_, Option<Vec<u8>>>(1) {
+                Some(generation) => {
+                    let generation = String::from_utf8(generation).map_err(io::Error::other)?;
+                    let version = u32::try_from(header.get::<_, i64>(2))
+                        .map_err(|_| failed(StorageError::ScopeChanged))?;
+                    let expected_source_generation =
+                        crate::retention::source_generation(&row.sources)
+                            .map_err(io::Error::other)?;
+                    crate::history_projection::qualified_header(
+                        &expected_source_generation,
+                        version,
+                        &generation,
+                        header.get(3),
+                    )
+                }
+                None => false,
+            }
+        } else {
+            return Err(failed(StorageError::ScopeChanged));
+        };
+        tx.check().map_err(failed)?;
+        Ok(qualified)
     }
     fn selected_details(
         &self,

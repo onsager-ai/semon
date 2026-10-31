@@ -7209,7 +7209,7 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     .unwrap();
     let path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(path).unwrap();
-    facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child]));
+    facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child.clone()]));
     facts.codex_locks.insert("family-child".into(), 77);
     facts.proc_starts.insert(77, 777);
     let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
@@ -7232,6 +7232,15 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     fixture.publish_existing();
     family_owner_phase_diagnostic(&fixture, "status_after_retirement_publish", "family-child");
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
+    let missing_raw_path = fixture.options.codex_home.join(child);
+    fs::remove_file(&missing_raw_path).unwrap();
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    assert_eq!(
+        status(),
+        json!({"state":"off","observation":"retained"}),
+        "qualified History metadata keeps the retained family status without local Raw"
+    );
+    assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), 0);
     // Retirement keeps Catalog's Retained display and preserves the original
     // History metadata. Each physical owner must qualify its own observation.
     use crate::storage::catalog::{CatalogObservationOwner, CatalogSnapshot};
@@ -7254,6 +7263,9 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
         history.lifecycle,
         crate::model::summary::CatalogLifecycle::Retained
     );
+    assert_eq!(selected.sources[0].path, missing_raw_path);
+    assert_eq!(crate::catalog::source_state(&selected.sources[0]), "unavailable");
+    assert!(snapshot.history_qualified(&history).unwrap());
     assert!(
         runtime_source_cwds_if_current(&tx, &selected.sources)
             .unwrap()
@@ -7364,6 +7376,87 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
         .unwrap();
     assert_eq!(history.read_scope, CatalogReadScope::RetainedHistory);
     assert_eq!(history.native_selection.unwrap().state, "retired");
+
+    let db = fixture.db();
+    assert_eq!(
+        db.execute(
+            "UPDATE main.session_history_projections SET incomplete=1 WHERE session_key='family-child'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
+    drop(db);
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+    let history = snapshot.history_catalog("family-child").unwrap().unwrap();
+    let history: crate::model::summary::CatalogRow = serde_json::from_str(&history).unwrap();
+    assert!(!snapshot.history_qualified(&history).unwrap());
+    assert_eq!(
+        snapshot
+            .runtime_observation(
+                &fixture.options,
+                &history,
+                CatalogObservationOwner::History,
+                &runtime,
+            )
+            .unwrap()
+            .as_deref(),
+        Some(expected),
+        "the exact History grant remains valid when its projection header is corrupt"
+    );
+    drop(snapshot);
+    tx.rollback().unwrap();
+    drop(db);
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    assert_eq!(
+        status(),
+        json!({"state":null,"observation":"unavailable"}),
+        "a valid History grant cannot qualify an incomplete History projection"
+    );
+    assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), 0);
+
+    let db = fixture.db();
+    assert_eq!(
+        db.execute(
+            "DELETE FROM main.session_history_catalog WHERE session_key='family-child'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
+    drop(db);
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let mut saw_catalog_retained = false;
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::owned(&tx),
+        "family-parent",
+        &mut |relative, owner| {
+            if relative.key == "family-child" {
+                assert_eq!(owner, Some(CatalogObservationOwner::Catalog));
+                assert_eq!(
+                    relative.lifecycle,
+                    crate::model::summary::CatalogLifecycle::Retained
+                );
+                saw_catalog_retained = true;
+            }
+            json!({"state":null,"observation":"unavailable"})
+        },
+    )
+    .unwrap();
+    assert!(saw_catalog_retained);
+    tx.rollback().unwrap();
+    drop(db);
+    crate::events::CACHE_READS.with(|reads| reads.set(0));
+    assert_eq!(
+        status(),
+        json!({"state":null,"observation":"unavailable"}),
+        "a Retained Catalog owner still requires its Raw source"
+    );
+    assert_eq!(crate::events::CACHE_READS.with(std::cell::Cell::get), 0);
 }
 
 #[test]

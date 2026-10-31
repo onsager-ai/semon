@@ -684,14 +684,14 @@ pub(crate) fn source_state(source: &CatalogSource) -> &'static str {
 pub(crate) fn recorded_status(
     row: &CatalogRow,
     runtime: Option<&str>,
-    cached: bool,
+    sources_qualified: bool,
     facts_known: bool,
     retired_native: bool,
 ) -> Result<Value, serde_json::Error> {
     let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
     if let Some(saved) = &row.query
         && crate::model::summary::query_observation_matches(saved, &row.sources, current, runtime)?
-        && cached
+        && sources_qualified
         && (!current || (facts_known && !retired_native))
     {
         let status = match saved["state"].as_str() {
@@ -718,12 +718,19 @@ pub(crate) fn relative_status(
     runtime: Option<&str>,
     recorded: Option<&dyn crate::facts::source_authority::SourceAuthority>,
     row: &CatalogRow,
+    owner: crate::storage::catalog::CatalogObservationOwner,
+    history_projection_qualified: bool,
 ) -> Value {
     let unavailable = || json!({"state":null,"observation":"unavailable"});
     if row.sources.is_empty() || row.sources.len() > 64 {
         return unavailable();
     }
     let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+    let history_owned = owner == crate::storage::catalog::CatalogObservationOwner::History;
+    if history_owned && (!history_projection_qualified || runtime.is_none()) {
+        return unavailable();
+    }
+    let retained_history = history_owned && !current;
     let facts_known =
         options.facts.is_none() || recorded.is_some_and(|source| source.facts_known());
     if current
@@ -748,7 +755,8 @@ pub(crate) fn relative_status(
                 Err(_) => return unavailable(),
             }
         }
-        if source_state(source) != "cached" {
+        // Current rows and Catalog-owned rows still need their local Raw witness.
+        if !retained_history && source_state(source) != "cached" {
             if cfg!(test) || crate::native_timing::enabled() {
                 eprintln!(
                     "catalog_relative_status_refused stage=source_cached error_class=source_not_cached cached=false"
@@ -1149,12 +1157,24 @@ pub(crate) fn read_page_snapshot_with_search(
                             })
                             .transpose();
                         match expected {
-                            Ok(expected) => relative_status(
-                                options,
-                                expected.flatten().as_deref(),
-                                recorded.as_deref(),
-                                relative,
-                            ),
+                            Ok(expected) => {
+                                let expected = expected.flatten();
+                                let Some(owner) = owner else {
+                                    return json!({"state":null,"observation":"unavailable"});
+                                };
+                                let history_projection_qualified = owner
+                                    == crate::storage::catalog::CatalogObservationOwner::History
+                                    && expected.is_some()
+                                    && transaction.history_qualified(relative).unwrap_or(false);
+                                relative_status(
+                                    options,
+                                    expected.as_deref(),
+                                    recorded.as_deref(),
+                                    relative,
+                                    owner,
+                                    history_projection_qualified,
+                                )
+                            }
                             Err(_) => json!({"state":null,"observation":"unavailable"}),
                         }
                     });
