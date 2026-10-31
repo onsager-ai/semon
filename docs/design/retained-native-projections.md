@@ -200,8 +200,9 @@ are selected when that row contains the exact path; immutable History metadata
 and its own header are used only when the latest row omits the path. The two
 cohorts are never mixed. Pending source observations, ambiguous references,
 missing headers and unsupported/stale versions return not-ready. At most eight
-owner metadata records, each at most 1 MiB with 64 source references, are
-considered. SQLite checks stored byte length before returning metadata;
+owners are considered. Each owner's main and optional History metadata are
+bounded to 1 MiB and 64 source references per record. SQLite checks stored byte
+length before returning metadata;
 over-budget context defers eviction. Their source vectors are necessary
 relationship context for the selected source.
 
