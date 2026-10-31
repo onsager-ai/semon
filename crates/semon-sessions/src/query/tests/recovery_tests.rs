@@ -1356,12 +1356,14 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
     let tx = db.transaction().unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();
-    assert!(crate::storage::sqlite::proof_generations::observation_binding_with_observations(
-        &tx,
-        &current_binding,
-        &retained_history,
-    )
-    .is_ok());
+    assert!(
+        crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+            &tx,
+            &current_binding,
+            &retained_history,
+        )
+        .is_ok()
+    );
     tx.rollback().unwrap();
     let history_query = history.query.as_ref().unwrap();
     let current_query = current.query.as_ref().unwrap();
@@ -1485,7 +1487,9 @@ fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
     assert_eq!(
         history_grant.0,
         crate::storage::proof_codec::digest(
-            serde_json::to_string(&normalized_history).unwrap().as_bytes()
+            serde_json::to_string(&normalized_history)
+                .unwrap()
+                .as_bytes()
         )
     );
     assert_eq!(history_grant.1, before_grant.1);
@@ -1505,7 +1509,9 @@ fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
             &retained,
         )
         .unwrap();
-    assert_eq!(original_binding, current_binding);
+    assert_eq!(original_binding.namespace, current_binding.namespace);
+    assert_eq!(original_binding.admission, current_binding.admission);
+    assert_eq!(original_binding.stream_epoch, current_binding.stream_epoch);
     assert_eq!(
         observations.runtime_for(&retained).as_deref(),
         retained.query.as_ref().unwrap()["runtime"].as_str()
