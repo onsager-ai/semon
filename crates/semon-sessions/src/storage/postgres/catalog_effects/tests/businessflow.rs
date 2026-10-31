@@ -3808,7 +3808,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         &continued_generation,
         |snapshot| {
             let (row, header, _) = snapshot
-                .selected(&appended_key, false, 0, 100)?
+                .selected(&appended_key, false, 0, 64)?
                 .ok_or(StorageError::ScopeChanged)?;
             if row.lifecycle != crate::model::summary::CatalogLifecycle::Current
                 || !row.sources.iter().any(|source| {
