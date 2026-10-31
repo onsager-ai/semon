@@ -102,9 +102,15 @@ impl std::fmt::Display for QueryRecipeLoadError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Storage(error) => std::fmt::Display::fmt(error, formatter),
-            Self::ObservationChanged => formatter.write_str("Selected Query observation residence or authority changed."),
-            Self::MissingPayload => formatter.write_str("Selected Query recipe payload is unavailable."),
-            Self::CorruptPayload => formatter.write_str("Selected Query recipe payload is corrupt."),
+            Self::ObservationChanged => {
+                formatter.write_str("Selected Query observation residence or authority changed.")
+            }
+            Self::MissingPayload => {
+                formatter.write_str("Selected Query recipe payload is unavailable.")
+            }
+            Self::CorruptPayload => {
+                formatter.write_str("Selected Query recipe payload is corrupt.")
+            }
         }
     }
 }
