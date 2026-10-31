@@ -1123,27 +1123,28 @@ pub(crate) fn read_page_snapshot_with_search(
         selected
             .first()
             .map(|row| {
-                let details = transaction.selected_details(&row.key, &row.sources, &mut |relative| {
-                    let expected = runtime
-                        .as_deref()
-                        .map(|runtime| {
-                            let started = measurements.start();
-                            let expected =
-                                transaction.runtime_observation(options, relative, runtime);
-                            measurements.record("catalog_runtime_observation", started, 1);
-                            expected
-                        })
-                        .transpose();
-                    match expected {
-                        Ok(expected) => relative_status(
-                            options,
-                            expected.flatten().as_deref(),
-                            recorded.as_deref(),
-                            relative,
-                        ),
-                        Err(_) => json!({"state":null,"observation":"unavailable"}),
-                    }
-                });
+                let details =
+                    transaction.selected_details(&row.key, &row.sources, &mut |relative| {
+                        let expected = runtime
+                            .as_deref()
+                            .map(|runtime| {
+                                let started = measurements.start();
+                                let expected =
+                                    transaction.runtime_observation(options, relative, runtime);
+                                measurements.record("catalog_runtime_observation", started, 1);
+                                expected
+                            })
+                            .transpose();
+                        match expected {
+                            Ok(expected) => relative_status(
+                                options,
+                                expected.flatten().as_deref(),
+                                recorded.as_deref(),
+                                relative,
+                            ),
+                            Err(_) => json!({"state":null,"observation":"unavailable"}),
+                        }
+                    });
                 details.inspect_err(|_| {
                     #[cfg(test)]
                     eprintln!("catalog_selected_read_failed stage=selected_details");

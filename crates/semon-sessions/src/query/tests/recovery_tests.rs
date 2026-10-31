@@ -1591,8 +1591,11 @@ fn recovery_index_ahead_repriced_get_session_uses_bound_global_runtime() {
     let original_hostname = fs::read(&hostname).unwrap();
     fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
     let changed_global = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    let refused = Query::from_sources(admitted(home.options.clone()))
-        .call_at("get_session", &json!({"id":"first"}), NOW);
+    let refused = Query::from_sources(admitted(home.options.clone())).call_at(
+        "get_session",
+        &json!({"id":"first"}),
+        NOW,
+    );
     fs::write(&hostname, original_hostname).unwrap();
     assert_ne!(changed_global, global);
     assert!(refused.is_err());
