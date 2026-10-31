@@ -4420,6 +4420,12 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     )
     .unwrap()
     .expect("original Current transcript must be readable before append");
+    assert!(
+        original_transcript["entries"]
+            .as_array()
+            .is_some_and(|entries| !entries.is_empty()),
+        "the original body oracle must contain transcript entries"
+    );
     writeln!(
         fs::OpenOptions::new().append(true).open(&source).unwrap(),
         "{}",
