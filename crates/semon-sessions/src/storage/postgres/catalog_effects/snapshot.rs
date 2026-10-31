@@ -272,11 +272,20 @@ pub(in crate::storage::postgres) fn with_generation<T>(
         return Err(StorageError::InvalidArguments);
     }
     pool.transaction(namespace, TxnKind::ReadSnapshot, control, |tx| {
-        read(&Snapshot {
-            tx: std::sync::Mutex::new(tx),
-            generation: generation.to_owned(),
-            runtime_local: std::cell::OnceCell::new(),
-        })
+        in_transaction(tx, generation, read)
+    })
+}
+
+/// Custody uses the same admitted observation verifier inside its fenced writer.
+pub(super) fn in_transaction<T>(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    read: impl FnOnce(&Snapshot<'_, '_>) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    read(&Snapshot {
+        tx: std::sync::Mutex::new(tx),
+        generation: generation.to_owned(),
+        runtime_local: std::cell::OnceCell::new(),
     })
 }
 

@@ -317,7 +317,63 @@ impl OriginalHistoryStore for History<'_, '_> {
         for source in &row.sources {
             self.retain_source(row, source)?;
         }
-        self.write_header(&row.key, metadata, header, !complete, Some(original_header))
+        self.write_header(&row.key, metadata, header, !complete, Some(original_header))?;
+        if !complete {
+            return Ok(());
+        }
+        let Some(query) = &row.query else {
+            return Ok(());
+        };
+        if !crate::model::summary::query_observation_matches(
+            query,
+            &row.sources,
+            false,
+            None,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let mut tx = self.effects.tx.borrow_mut();
+        let origin = snapshot::in_transaction(&mut tx, self.previous, |snapshot| {
+            let (_, observations, origin) = snapshot
+                .row_observation(row, Some(catalog::CatalogObservationOwner::Catalog))
+                .map_err(|error| {
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<StorageError>())
+                        .copied()
+                        .unwrap_or(StorageError::Unavailable)
+                })?
+                .ok_or(StorageError::ScopeChanged)?;
+            let captured = observations
+                .as_ref()
+                .and_then(|observations| observations.runtime_for(row))
+                .ok_or(StorageError::ScopeChanged)?;
+            if query["runtime"].as_str() != Some(captured.as_str()) {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(origin)
+        })?;
+        match origin {
+            observations::Origin::Native(receipt) => observations::issue_history(
+                &mut tx,
+                self.effects.generation,
+                metadata.as_bytes(),
+                row.lifecycle,
+                receipt,
+            ),
+            observations::Origin::Imported(id) => {
+                // Add custody without changing the earlier Current association.
+                // This ID, root/presentation and destination import grant were
+                // authenticated by the same reader above, inside this transaction.
+                let changed = tx.driver.execute("INSERT INTO semon_pg_native_selected_refs(namespace,key_digest,session_key,kind,id) VALUES($1,sha256($2::bytea),$2,'history'::bytea,$3) ON CONFLICT(namespace_digest,key_digest,kind,id) DO UPDATE SET kind=excluded.kind WHERE semon_pg_native_selected_refs.namespace=excluded.namespace AND semon_pg_native_selected_refs.session_key=excluded.session_key", &[&tx.namespace.as_str().as_bytes(),&row.key.as_bytes(),&id.0.as_bytes()]).map_err(sqlstate::error)?;
+                if changed != 1 {
+                    return Err(StorageError::ScopeChanged);
+                }
+                tx.check()
+            }
+        }
     }
 }
 
