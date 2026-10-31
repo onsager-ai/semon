@@ -3703,9 +3703,7 @@ impl SqliteStore {
             }
             for (row, output) in rows.iter().zip(&metadata) {
                 #[cfg(test)]
-                eprintln!(
-                    "catalog_publication_probe stage=observation_grant"
-                );
+                eprintln!("catalog_publication_probe stage=observation_grant");
                 crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
                     &transaction,
                     owner.config().namespace.as_str(),
@@ -8771,10 +8769,7 @@ mod tests {
             )
             .unwrap();
             let stage_before = crate::model::now_ms();
-            assert_eq!(
-                store.begin(&paths, &runtime).unwrap(),
-                Outcome::Written
-            );
+            assert_eq!(store.begin(&paths, &runtime).unwrap(), Outcome::Written);
             let mut written = Vec::new();
             let mut publication_states = Vec::new();
             let mut finished = false;
@@ -8785,10 +8780,7 @@ mod tests {
                     .expect("active real semantic fixture");
                 if batch.paths.is_empty() {
                     if batch.phase == Phase::Publication {
-                        assert_eq!(
-                            store.finish(batch.epoch).unwrap(),
-                            Outcome::Written
-                        );
+                        assert_eq!(store.finish(batch.epoch).unwrap(), Outcome::Written);
                         finished = true;
                         break;
                     }
@@ -8839,12 +8831,10 @@ mod tests {
                         .connection_for_test()
                         .pragma_update(None, "user_version", SCHEMA_VERSION - 1)
                         .unwrap();
-                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
-                        store.connection_for_test(),
-                    );
+                    let raw_before =
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
                     let changes_before = store.connection_for_test().total_changes();
-                    let recording =
-                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert!(matches!(
                         store.publish(&batch, &prepared),
                         Err(StoreError::Configured(
@@ -8852,16 +8842,11 @@ mod tests {
                         ))
                     ));
                     assert_eq!(
-                        crate::native_timing::cleanup_tests::snapshot(
-                            store.connection_for_test()
-                        ),
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test()),
                         raw_before,
                         "unsupported schema refusal must not write"
                     );
-                    assert_eq!(
-                        store.connection_for_test().total_changes(),
-                        changes_before
-                    );
+                    assert_eq!(store.connection_for_test().total_changes(), changes_before);
                     crate::native_timing::catalog_commit_tests::assert_uncommitted();
                     assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
                     drop(recording);
@@ -8876,20 +8861,16 @@ mod tests {
                         .first_mut()
                         .expect("publication captures source claims")
                         .1 = Some(-1);
-                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
-                        store.connection_for_test(),
-                    );
-                    let recording =
-                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    let raw_before =
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
+                    let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert_eq!(
                         store.publish(&batch, &prepared).unwrap(),
                         (Outcome::Conflict, None),
                         "a stale source claim must refuse publication"
                     );
                     assert_eq!(
-                        crate::native_timing::cleanup_tests::snapshot(
-                            store.connection_for_test()
-                        ),
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test()),
                         raw_before
                     );
                     crate::native_timing::catalog_commit_tests::assert_uncommitted();
@@ -8917,11 +8898,9 @@ mod tests {
                              END;",
                         )
                         .unwrap();
-                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
-                        store.connection_for_test(),
-                    );
-                    let recording =
-                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    let raw_before =
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
+                    let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     let error = store.publish(&batch, &prepared).unwrap_err();
                     assert!(
                         error.to_string().contains("FOREIGN KEY constraint failed"),
@@ -8934,9 +8913,7 @@ mod tests {
                     );
                     assert!(store.connection_for_test().is_autocommit());
                     assert_eq!(
-                        crate::native_timing::cleanup_tests::snapshot(
-                            store.connection_for_test()
-                        ),
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test()),
                         raw_before,
                         "all raw MAIN/TEMP rows and schemas restore after failed COMMIT"
                     );
@@ -8962,19 +8939,15 @@ mod tests {
                     drop(recording);
                     cache.publish_session_descriptions();
 
-                    let raw_before = crate::native_timing::cleanup_tests::snapshot(
-                        store.connection_for_test(),
-                    );
-                    let recording =
-                        crate::native_timing::catalog_commit_tests::recording(timing);
+                    let raw_before =
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
+                    let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert_eq!(
                         store.publish(&batch, &prepared).unwrap(),
                         (Outcome::Written, replay_generation)
                     );
                     assert_eq!(
-                        crate::native_timing::cleanup_tests::snapshot(
-                            store.connection_for_test()
-                        ),
+                        crate::native_timing::cleanup_tests::snapshot(store.connection_for_test()),
                         raw_before,
                         "publication replay must not write"
                     );
@@ -8982,10 +8955,7 @@ mod tests {
                     assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
                     drop(recording);
                 } else {
-                    assert_eq!(
-                        store.record(&batch, &prepared).unwrap(),
-                        Outcome::Written
-                    );
+                    assert_eq!(store.record(&batch, &prepared).unwrap(), Outcome::Written);
                 }
                 cache.end_scan();
                 cache.release_published_indexes();
