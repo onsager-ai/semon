@@ -1160,7 +1160,7 @@ fn observation_authority_for_owner(
                 CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,
                 g.prefix,r.base,
                 CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
-                CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
+                CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,
                 ((?11=0 AND EXISTS(
                     SELECT 1 FROM main.meta m JOIN main.meta a
                       ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
