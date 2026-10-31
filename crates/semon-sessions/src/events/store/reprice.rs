@@ -2,6 +2,9 @@
 //! membership, deletes observations, or advances parser/publication witnesses.
 use super::*;
 use crate::pricing::{Cost, CostBuild, EffectiveTable};
+use crate::storage::sqlite::proof_generations::{
+    CatalogObservationOwner, ObservationPreparationError, prepare_repriced_observation,
+};
 use std::sync::Arc;
 
 const WORK: &str = "pricing_recompute_v2";
@@ -131,7 +134,7 @@ pub(crate) fn step(
 }
 
 #[cfg(test)]
-pub(super) fn drain_for_store_test(
+pub(crate) fn drain_for_store_test(
     owner: &configured::NativeOwnership,
     table: Arc<EffectiveTable>,
 ) -> rusqlite::Result<()> {
@@ -145,6 +148,13 @@ pub(super) fn drain_for_store_test(
 
 fn owner_error(error: crate::storage::StorageError) -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+}
+
+fn preparation_error(error: ObservationPreparationError) -> rusqlite::Error {
+    match error {
+        ObservationPreparationError::Evidence(error) => owner_error(error),
+        ObservationPreparationError::Sql(error) => error,
+    }
 }
 
 fn idle(connection: &Connection, fingerprint: &str) -> rusqlite::Result<bool> {
@@ -218,6 +228,15 @@ fn step_inner(
             params![COMPLETED, table.fingerprint],
         )?;
     }
+    let binding = crate::storage::QueryRuntimeBinding {
+        namespace: owner.config().namespace.clone(),
+        admission: owner.admission(),
+        stream_epoch: owner
+            .config()
+            .expected_stream_epoch
+            .clone()
+            .ok_or(rusqlite::Error::InvalidQuery)?,
+    };
     tx.execute_batch("SAVEPOINT pricing_owner")?;
     let full_pass = work.completed_fingerprint != table.fingerprint;
     let migrated_completion = !full_pass
@@ -226,11 +245,11 @@ fn step_inner(
     let result = if full_pass {
         match work.phase {
             0 => source_step(&tx, &mut work, &table, None).map(|_| true),
-            1 => catalog_step(&tx, &mut work, &table, None).map(|_| true),
+            1 => catalog_step(&tx, &binding, &mut work, &table, None).map(|_| true),
             _ => family_step(&tx, &mut work).map(|_| true),
         }
     } else {
-        pending_step(&tx, &mut work, &table)
+        pending_step(&tx, &binding, &mut work, &table)
     };
     let mut made_progress = migrated_completion;
     match result {
@@ -570,6 +589,7 @@ fn retained_cost(
 
 fn catalog_step(
     tx: &Transaction<'_>,
+    binding: &crate::storage::QueryRuntimeBinding,
     work: &mut Work,
     table: &Arc<EffectiveTable>,
     pending_key: Option<&str>,
@@ -603,28 +623,48 @@ fn catalog_step(
     let Some(cost) = retained_cost(tx, &row, table)? else {
         return Ok(false);
     };
+    let original = row.clone();
     let old = row.cost.clone();
     row.cost = cost.clone();
     if let Some(query) = &mut row.query {
         replace_costs(query, &old, &cost)?;
     }
-    tx.execute(
-        "UPDATE session_catalog SET metadata=?2,pricing_fingerprint=?3 WHERE namespace=semon_namespace() AND session_key=?1",
-        params![key, json(&row)?, row.cost.pricing_fingerprint],
-    )?;
+    prepare_repriced_observation(
+        tx,
+        binding,
+        CatalogObservationOwner::Catalog,
+        &original,
+        &cost,
+        row.query.as_ref(),
+    )
+    .map_err(preparation_error)?
+    .publish(tx)?;
     // Same-generation history publications can share the recomputation. An
     // older/different history cohort remains at its original price fingerprint.
     if let Some(encoded) = crate::history_projection::catalog(tx, &key)? {
         let mut history: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
         if history.sources == row.sources {
+            let original_history = history.clone();
             history.cost = cost.clone();
             if let Some(query) = &mut history.query {
                 replace_costs(query, &old, &cost)?;
             }
-            tx.execute(
-                "UPDATE session_history_catalog SET metadata=?2 WHERE namespace=semon_namespace() AND session_key=?1",
-                params![key, json(&history)?],
-            )?;
+            match prepare_repriced_observation(
+                tx,
+                binding,
+                CatalogObservationOwner::History,
+                &original_history,
+                &cost,
+                history.query.as_ref(),
+            ) {
+                Ok(prepared) => prepared.publish(tx)?,
+                Err(ObservationPreparationError::Evidence(
+                    crate::storage::StorageError::ScopeChanged
+                    | crate::storage::StorageError::Unavailable
+                    | crate::storage::StorageError::HistoryRetentionBounds,
+                )) => {}
+                Err(error) => return Err(preparation_error(error)),
+            }
         }
     }
     let description:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(description)<=1048576 THEN description ELSE NULL END FROM session_descriptions WHERE namespace=semon_namespace() AND session_key=?1",[&key],|r|r.get(0)).optional()?.flatten();
@@ -760,6 +800,7 @@ fn clear_cost_checks(value: &mut Value) {
 
 fn pending_step(
     tx: &Transaction<'_>,
+    binding: &crate::storage::QueryRuntimeBinding,
     work: &mut Work,
     table: &Arc<EffectiveTable>,
 ) -> rusqlite::Result<bool> {
@@ -816,7 +857,7 @@ fn pending_step(
             Ok(true)
         }
         "session" => {
-            let changed = catalog_step(tx, work, table, Some(&key))?;
+            let changed = catalog_step(tx, binding, work, table, Some(&key))?;
             if changed {
                 tx.execute(
                     "INSERT OR IGNORE INTO pricing_recompute_pending(namespace,owner_kind,owner_key) SELECT semon_namespace(),'family',?1",
@@ -1017,6 +1058,15 @@ mod tests {
         c.execute(
             "INSERT INTO session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(semon_namespace(),?1,1,?2,?3)",
             params![row.key, row.harness, json(row).unwrap()],
+        )
+        .unwrap();
+        crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+            c,
+            store.owner.config().namespace.as_str(),
+            &row.key,
+            store.owner.admission(),
+            store.owner.config().expected_stream_epoch.as_deref().unwrap(),
+            &json(row).unwrap(),
         )
         .unwrap();
         c.execute(
@@ -2137,7 +2187,17 @@ mod tests {
                             // owner without a write rather than refusing every
                             // Catalog operation before reading its evidence.
                             assert!(
-                                !catalog_step(&tx, &mut Work::default(), &target, Some(family_key))
+                                !catalog_step(
+                                    &tx,
+                                    &crate::storage::QueryRuntimeBinding {
+                                        namespace: crate::storage::LogicalSourceNamespace::new("a").unwrap(),
+                                        admission: 1,
+                                        stream_epoch: "a".repeat(64),
+                                    },
+                                    &mut Work::default(),
+                                    &target,
+                                    Some(family_key),
+                                )
                                     .unwrap()
                             );
                             assert_eq!(
