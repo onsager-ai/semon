@@ -582,7 +582,7 @@ fn native_keys_page(c: &Connection) -> rusqlite::Result<bool> {
                 break 'pairs;
             }
             if !native_occupied(c, &candidate)? {
-                c.execute("INSERT INTO catalog_semantic_keys(harness,native_id,session_key,key_epoch) SELECT ?1,?2,?3,key_epoch FROM catalog_semantic_stage WHERE 1 ON CONFLICT(harness,native_id) DO UPDATE SET session_key=excluded.session_key,key_epoch=excluded.key_epoch",params![harness,native,candidate])?;
+                c.execute("INSERT INTO main.catalog_semantic_keys(namespace,harness,native_id,session_key,key_epoch) SELECT semon_namespace(),?1,?2,?3,key_epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace() ON CONFLICT(namespace,harness,native_id) DO UPDATE SET session_key=excluded.session_key,key_epoch=excluded.key_epoch",params![harness,native,candidate])?;
                 after = (harness, native);
                 candidate.clear();
                 break;
