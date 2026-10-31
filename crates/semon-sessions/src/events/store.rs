@@ -2952,7 +2952,14 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.publish_catalog_with_stage(publication, expected_generation, claims, preserve_complete, semantic.map(CatalogStage::Semantic), writer)
+        self.publish_catalog_with_stage(
+            publication,
+            expected_generation,
+            claims,
+            preserve_complete,
+            semantic.map(CatalogStage::Semantic),
+            writer,
+        )
     }
 
     fn publish_catalog_with_stage(
@@ -3052,8 +3059,14 @@ impl SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
                 if let Some(generation) = crate::storage::sqlite::semantic::origin::replay(
-                    &transaction, owner, token, publication, claims.unwrap_or_default(),
-                ).map_err(StoreError::Configured)? {
+                    &transaction,
+                    owner,
+                    token,
+                    publication,
+                    claims.unwrap_or_default(),
+                )
+                .map_err(StoreError::Configured)?
+                {
                     published = Some(generation);
                     return Ok(Outcome::Written);
                 }
@@ -3085,9 +3098,18 @@ impl SqliteStore {
                 }
             } else if let Some(token) = origin {
                 crate::storage::sqlite::semantic::origin::validate_publication(
-                    &transaction, owner, token, claims.unwrap_or_default(),
-                ).map_err(StoreError::Configured)?;
-                if !crate::storage::sqlite::semantic::origin::empty_current(&transaction, owner.config().namespace.as_str()).map_err(failure)? {
+                    &transaction,
+                    owner,
+                    token,
+                    claims.unwrap_or_default(),
+                )
+                .map_err(StoreError::Configured)?;
+                if !crate::storage::sqlite::semantic::origin::empty_current(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                )
+                .map_err(failure)?
+                {
                     return Ok(Outcome::Conflict);
                 }
             } else if semantic_stage::active(&transaction).map_err(failure)? {
@@ -3625,8 +3647,14 @@ impl SqliteStore {
             // can outstanding source observations be acknowledged atomically.
             if let Some(token) = origin {
                 crate::storage::sqlite::semantic::origin::record(
-                    &transaction, owner, token, publication, claims.unwrap_or_default(), &generation,
-                ).map_err(StoreError::Configured)?;
+                    &transaction,
+                    owner,
+                    token,
+                    publication,
+                    claims.unwrap_or_default(),
+                    &generation,
+                )
+                .map_err(StoreError::Configured)?;
             }
             if semantic.is_none() {
                 if let Some(claims) = claims {

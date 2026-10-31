@@ -824,7 +824,10 @@ impl NativeEvidence {
         if cache.semantic_origin_pending()? {
             let runtime = self.query_runtime()?;
             if self.begin_catalog_stage(cache, &[], &runtime)? != crate::events::Outcome::Written {
-                return Err(io::Error::new(io::ErrorKind::WouldBlock, "cold origin activation changed"));
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "cold origin activation changed",
+                ));
             }
         }
         let use_newest =

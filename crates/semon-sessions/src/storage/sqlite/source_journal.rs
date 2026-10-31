@@ -616,7 +616,9 @@ impl SourceObservationStore for SourceJournal {
         }
         discover(&tx, expected_namespace, paths, complete)
             .map_err(|error| phase_failed("discover-effect", error))?;
-        if self.origin_discovery && let Some(owner) = &self.owner {
+        if self.origin_discovery
+            && let Some(owner) = &self.owner
+        {
             super::semantic::origin::discover(&tx, owner, paths, complete)?;
         }
         insert_receipt(&tx, expected_namespace, operation)?;
