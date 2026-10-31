@@ -8461,13 +8461,19 @@ mod tests {
                     );
                 }
 
+                let db = f.db();
+                let metadata_column = db
+                    .prepare("SELECT * FROM session_catalog LIMIT 0")
+                    .unwrap()
+                    .column_index("metadata")
+                    .unwrap();
                 let old = before["session_catalog"]
                     .iter()
                     .find(|row| {
                         row.first() == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
                             && row.get(1) == Some(&rusqlite::types::Value::Text(key.to_owned()))
                     })
-                    .and_then(|row| row.get(2))
+                    .and_then(|row| row.get(metadata_column))
                     .and_then(|value| match value {
                         rusqlite::types::Value::Text(text) => Some(text.as_str()),
                         _ => None,
@@ -8477,7 +8483,6 @@ mod tests {
                     serde_json::from_str(old).unwrap();
                 old_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
                 let expected = serde_json::to_string(&old_row).unwrap();
-                let db = f.db();
                 let history: String = db
                     .query_row(
                         "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
