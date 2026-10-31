@@ -1152,9 +1152,9 @@ pub fn repair_session_overview_with_control(
                 .map_err(failure)?
                 .is_some()
             {
-                crate::storage::sqlite::proof_generations::CatalogObservationOwner::History
+                crate::storage::catalog::CatalogObservationOwner::History
             } else {
-                crate::storage::sqlite::proof_generations::CatalogObservationOwner::Catalog
+                crate::storage::catalog::CatalogObservationOwner::Catalog
             };
             crate::storage::sqlite::proof_generations::publish_repaired_query_observation(
                 &tx,

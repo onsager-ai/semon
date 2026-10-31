@@ -4,6 +4,7 @@
 use super::failed;
 use crate::events::store::configured::NativeOwnership;
 use crate::model::summary::CatalogRow;
+use crate::storage::catalog::CatalogObservationOwner;
 use crate::storage::proof_codec::{self, LEASE_CAP, PresentationManifest, TTL_MAX};
 use crate::storage::proof_lifetime::{
     ProofGenerationId, ProofReaderLease, ReaderPage, ReaderSnapshot,
@@ -886,7 +887,19 @@ pub(crate) fn observation_binding(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
 ) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
-    observation_binding_for_owner(db, current, selected, None)
+    observation_binding_for_owner(db, current, selected, None, false)
+        .map_err(ObservationPreparationError::into_storage)
+}
+
+/// Runtime qualification knows which physical row was selected. Identity-only
+/// callers above retain their separate original-publication lookup contract.
+pub(crate) fn observation_binding_for_physical_owner(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    owner: CatalogObservationOwner,
+) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
+    observation_binding_for_owner(db, current, selected, Some(owner), false)
         .map_err(ObservationPreparationError::into_storage)
 }
 
@@ -894,6 +907,7 @@ pub(crate) fn observation_binding_with_observations(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
+    owner: CatalogObservationOwner,
 ) -> Result<
     (
         crate::storage::QueryRuntimeBinding,
@@ -901,9 +915,9 @@ pub(crate) fn observation_binding_with_observations(
     ),
     StorageError,
 > {
-    let (reference_kind, owner_kind) = match selected.lifecycle {
-        crate::model::summary::CatalogLifecycle::Current => ("current", "catalog"),
-        crate::model::summary::CatalogLifecycle::Retained => ("history", "history"),
+    let (reference_kind, owner_kind) = match owner {
+        CatalogObservationOwner::Catalog => ("current", "catalog"),
+        CatalogObservationOwner::History => ("history", "history"),
     };
     let mut normalized = selected.clone();
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
@@ -1016,11 +1030,12 @@ fn observation_binding_for_owner(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
-    local_owner: Option<CatalogObservationOwner>,
+    physical_owner: Option<CatalogObservationOwner>,
+    local_only: bool,
 ) -> Result<crate::storage::QueryRuntimeBinding, ObservationPreparationError> {
     let ns = current.namespace.as_str();
-    let owner_kind = local_owner.map(CatalogObservationOwner::kind);
-    let proof_kind = local_owner.map(|owner| match owner {
+    let owner_kind = physical_owner.map(CatalogObservationOwner::kind);
+    let proof_kind = physical_owner.map(|owner| match owner {
         CatalogObservationOwner::Catalog => "current",
         CatalogObservationOwner::History => "history",
     });
@@ -1030,15 +1045,19 @@ fn observation_binding_for_owner(
     let current_metadata =
         serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let retained_metadata =
-        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current {
-            current_metadata.clone()
-        } else {
-            serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
-        };
+    let retained_metadata = if physical_owner.is_some()
+        || selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
+    {
+        current_metadata.clone()
+    } else {
+        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
+    };
     let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
     for (retained, original) in [(false, &current_metadata), (true, &retained_metadata)] {
-        if selected.lifecycle == crate::model::summary::CatalogLifecycle::Current && retained {
+        if (physical_owner.is_some()
+            || selected.lifecycle == crate::model::summary::CatalogLifecycle::Current)
+            && retained
+        {
             continue;
         }
         let native: bool = db
@@ -1077,7 +1096,7 @@ fn observation_binding_for_owner(
                     selected,
                     reference_kind,
                     &prefix,
-                    local_owner.is_some(),
+                    local_only,
                 )?;
             }
             return Ok(current.clone());
@@ -1155,7 +1174,7 @@ fn observation_binding_for_owner(
                 g.prefix,r.base,
                 CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
                 CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
-                ((?10 IS NULL AND EXISTS(
+                ((NOT ?11 AND EXISTS(
                     SELECT 1 FROM main.meta m JOIN main.meta a
                       ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
                     WHERE m.namespace=f.namespace
@@ -1196,7 +1215,8 @@ fn observation_binding_for_owner(
                 retained_digest,
                 admission,
                 current.stream_epoch,
-                proof_kind
+                proof_kind,
+                local_only
             ],
             |r| {
                 let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
@@ -1410,12 +1430,6 @@ pub(crate) fn clear_native_observation_captures_owned_by_proofs(
     Ok(())
 }
 
-#[derive(Clone, Copy)]
-pub(crate) enum CatalogObservationOwner {
-    Catalog,
-    History,
-}
-
 impl CatalogObservationOwner {
     fn table(self) -> &'static str {
         match self {
@@ -1563,7 +1577,13 @@ fn prepare_observation_update(
 
     // Repricing requires this owner's local grant or immutable local Stage
     // proof. Query repair retains its ordinary imported observation contract.
-    let proven = observation_binding_for_owner(db, current, selected, local_only.then_some(owner))?;
+    let proven = observation_binding_for_owner(
+        db,
+        current,
+        selected,
+        local_only.then_some(owner),
+        local_only,
+    )?;
     if proven.namespace.as_str() != current.namespace.as_str()
         || proven.stream_epoch != current.stream_epoch
     {
@@ -2089,7 +2109,7 @@ pub(super) fn capture_presentations(
                 .cloned()
                 .ok_or(StorageError::Unavailable)?;
             let context =
-                CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative| {
+                CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative, _owner| {
                     observations.capture_relative_status(relative, || {
                         super::catalog::runtime_source_cwds(tx, &relative.sources)
                     })

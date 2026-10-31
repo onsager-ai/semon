@@ -344,7 +344,7 @@ mod partial_readers {
         crate::storage::sqlite::proof_generations::prepare_repriced_observation(
             &tx,
             &current_binding,
-            crate::storage::sqlite::proof_generations::CatalogObservationOwner::Catalog,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
             &current,
             &repriced_cost,
             current.query.as_ref(),
@@ -383,7 +383,7 @@ mod partial_readers {
         crate::storage::sqlite::proof_generations::publish_repaired_query_observation(
             &tx,
             &current_binding,
-            crate::storage::sqlite::proof_generations::CatalogObservationOwner::Catalog,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
             &repriced,
             &repaired_query,
         )

@@ -612,7 +612,7 @@ impl QueryCatalogStore for QueryCatalog {
                         .as_ref()
                         .ok_or(StorageError::ScopeChanged)?;
                     let expected = snapshot
-                        .runtime_observation(&self.options, current_row, runtime)
+                        .runtime_observation(&self.options, current_row, crate::storage::catalog::CatalogObservationOwner::Catalog, runtime)
                         .map_err(|_| StorageError::ScopeChanged)?
                         .ok_or(StorageError::ScopeChanged)?;
                     if !crate::model::summary::query_observation_matches(
@@ -819,7 +819,7 @@ impl QueryCatalogStore for QueryCatalog {
             let mut emit = |row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
                 let expected = if current {
-                    snapshot.runtime_observation(&self.options, &row, &runtime)
+                    snapshot.runtime_observation(&self.options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
                         .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?
                 } else {
                     snapshot.row_runtime_binding(&row)

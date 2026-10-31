@@ -3638,7 +3638,7 @@ fn assert_selected_runtime_observation(fixture: &Fixture, key: &str) {
     let runtime = snapshot.runtime_generation(&fixture.options).unwrap();
     assert_eq!(
         snapshot
-            .runtime_observation(&fixture.options, &row, &runtime)
+            .runtime_observation(&fixture.options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
             .unwrap()
             .as_deref(),
         Some(saved)
@@ -6882,6 +6882,40 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     fixture.publish_existing();
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
+    // Native selection retirement publishes a Retained display in Catalog;
+    // there is no immutable History metadata or History observation to borrow.
+    use crate::storage::catalog::{CatalogObservationOwner, CatalogSnapshot};
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+    let mut selected = snapshot.rows(&Request::parse("scope=retained_history&sid=family-child").unwrap()).unwrap();
+    let selected = selected.remove(0);
+    assert_eq!(selected.owner, Some(CatalogObservationOwner::Catalog));
+    assert_eq!(selected.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+    assert!(snapshot.history_catalog("family-child").unwrap().is_none());
+    assert!(runtime_source_cwds_if_current(&tx, &selected.sources).unwrap().is_none());
+    let runtime = snapshot.runtime_generation(&fixture.options).unwrap();
+    let expected = selected.query.as_ref().unwrap()["runtime"].as_str().unwrap();
+    assert_eq!(snapshot.runtime_observation(&fixture.options, &selected, CatalogObservationOwner::Catalog, &runtime).unwrap().as_deref(), Some(expected));
+    assert!(snapshot.runtime_observation(&fixture.options, &selected, CatalogObservationOwner::History, &runtime).is_err());
+    let mut saw_retained_catalog = false;
+    crate::storage::selected::selected_family(
+        &crate::storage::sqlite::selected::Context::owned(&tx),
+        "family-parent",
+        &mut |relative, owner| {
+            if relative.key == "family-child" {
+                assert_eq!(relative.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+                assert_eq!(owner, Some(CatalogObservationOwner::Catalog));
+                assert_eq!(snapshot.runtime_observation(&fixture.options, relative, owner.unwrap(), &runtime).unwrap().as_deref(), Some(expected));
+                saw_retained_catalog = true;
+            }
+            json!({"state":null,"observation":"unavailable"})
+        },
+    ).unwrap();
+    assert!(saw_retained_catalog);
+    tx.rollback().unwrap();
+
     let history = session_catalog_history_identity(&fixture.options, "local", "family-child")
         .unwrap()
         .unwrap();
@@ -8021,7 +8055,8 @@ fn captured_family_qualifies_a_current_relative_outside_its_initial_cohort() {
         &crate::storage::sqlite::selected::Context::owned(&tx),
         &parent,
         &[],
-        &mut |relative| {
+        &mut |relative, owner| {
+            assert_eq!(owner, Some(crate::storage::catalog::CatalogObservationOwner::Catalog));
             observations
                 .capture_relative_status(relative, || runtime_source_cwds(&tx, &relative.sources))
         },
@@ -8030,7 +8065,8 @@ fn captured_family_qualifies_a_current_relative_outside_its_initial_cohort() {
     assert_eq!(observations.captured_source_count(), 2);
     let saved: crate::storage::selected::PresentationObservations =
         serde_json::from_str(&serde_json::to_string(&observations).unwrap()).unwrap();
-    let details = selected_details(&context, &parent.key, &parent.sources, &mut |relative| {
+    let details = selected_details(&context, &parent.key, &parent.sources, &mut |relative, owner| {
+        assert!(owner.is_none());
         saved.relative_statuses[&relative.key].clone()
     })
     .unwrap()

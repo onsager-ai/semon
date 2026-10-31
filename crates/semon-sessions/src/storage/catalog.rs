@@ -6,6 +6,25 @@ use crate::{
 use serde_json::Value;
 use std::io;
 
+/// Physical metadata owner selected by a snapshot, independent of display lifecycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogObservationOwner {
+    Catalog,
+    History,
+}
+
+/// Request-local selection provenance; immutable presentations have no live owner.
+pub(crate) struct SelectedCatalogRow {
+    pub(crate) row: CatalogRow,
+    pub(crate) owner: Option<CatalogObservationOwner>,
+}
+impl std::ops::Deref for SelectedCatalogRow {
+    type Target = CatalogRow;
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
+}
+
 pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 
 /// Physical trace effects in the publisher's existing fenced transaction.
@@ -512,6 +531,7 @@ pub(crate) trait CatalogSnapshot {
         &self,
         _options: &crate::Options,
         _row: &CatalogRow,
+        _owner: CatalogObservationOwner,
         _runtime: &str,
     ) -> io::Result<Option<String>> {
         Err(io::Error::other(super::StorageError::Unavailable))
@@ -531,7 +551,7 @@ pub(crate) trait CatalogSnapshot {
         lookup: &crate::events::CatalogSearchLookup<'_>,
         limit: usize,
     ) -> io::Result<Vec<String>>;
-    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>>;
+    fn rows(&self, request: &Request) -> io::Result<Vec<SelectedCatalogRow>>;
     fn search(
         &self,
         query: crate::catalog_search::Query<'_>,
@@ -543,7 +563,7 @@ pub(crate) trait CatalogSnapshot {
         &self,
         key: &str,
         sources: &[CatalogSource],
-        status: &mut dyn FnMut(&CatalogRow) -> Value,
+        status: &mut dyn FnMut(&CatalogRow, Option<CatalogObservationOwner>) -> Value,
     ) -> io::Result<Option<Value>>;
     fn transcript_observation(
         &self,

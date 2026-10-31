@@ -1011,7 +1011,8 @@ pub(crate) fn read_page_snapshot_with_search(
                                 true,
                             ));
                         }
-                        *current = history;
+                        current.row = history;
+                        current.owner = Some(crate::storage::catalog::CatalogObservationOwner::History);
                     }
                     continue;
                 }
@@ -1040,7 +1041,8 @@ pub(crate) fn read_page_snapshot_with_search(
                         "cost": &current.cost,
                     }));
                 }
-                *current = history;
+                current.row = history;
+                current.owner = Some(crate::storage::catalog::CatalogObservationOwner::History);
             }
         }
     }
@@ -1129,13 +1131,13 @@ pub(crate) fn read_page_snapshot_with_search(
             .first()
             .map(|row| {
                 let details =
-                    transaction.selected_details(&row.key, &row.sources, &mut |relative| {
+                    transaction.selected_details(&row.key, &row.sources, &mut |relative, owner| {
                         let expected = runtime
                             .as_deref()
                             .map(|runtime| {
                                 let started = measurements.start();
                                 let expected =
-                                    transaction.runtime_observation(options, relative, runtime);
+                                    owner.map(|owner| transaction.runtime_observation(options, relative, owner, runtime)).transpose().map(Option::flatten);
                                 measurements.record("catalog_runtime_observation", started, 1);
                                 expected
                             })
@@ -1196,7 +1198,8 @@ pub(crate) fn read_page_snapshot_with_search(
     };
     let mut items = Vec::with_capacity(selected.len());
     let item_loop_started = measurements.start();
-    for (index, row) in selected.into_iter().enumerate() {
+    for (index, selected) in selected.into_iter().enumerate() {
+        let crate::storage::catalog::SelectedCatalogRow { row, owner } = selected;
         let mut retired_native = false;
         let mut refs = Vec::new();
         let mut states = Vec::new();
@@ -1294,7 +1297,7 @@ pub(crate) fn read_page_snapshot_with_search(
             Some(runtime) => Some(runtime),
             None => runtime.as_deref().and_then(|runtime| {
                 let started = measurements.start();
-                let observed = transaction.runtime_observation(options, &row, runtime);
+                let observed = owner.map(|owner| transaction.runtime_observation(options, &row, owner, runtime)).transpose().map(Option::flatten);
                 measurements.record("catalog_runtime_observation", started, 1);
                 observed.ok().flatten()
             }),

@@ -183,7 +183,7 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
             selected_family(
                 snapshot,
                 "family-root",
-                &mut |_| serde_json::json!({"state":"current"}),
+                &mut |_, _owner| serde_json::json!({"state":"current"}),
             )
             .map_err(|_| StorageError::Busy)
         })
@@ -202,7 +202,7 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
             selected_family(
                 snapshot,
                 "fanout-root",
-                &mut |_| serde_json::json!({"state":"current"}),
+                &mut |_, _owner| serde_json::json!({"state":"current"}),
             )
             .map_err(|_| StorageError::Busy)
         })
@@ -222,7 +222,7 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
             selected_family(
                 snapshot,
                 "cycle-a",
-                &mut |_| serde_json::json!({"state":"current"}),
+                &mut |_, _owner| serde_json::json!({"state":"current"}),
             )
             .map_err(|_| StorageError::Busy)
         })
@@ -299,7 +299,7 @@ fn pg_retained_family_harness_reuse_does_not_report_current_history_status() {
             selected_family(
                 snapshot,
                 "family-parent",
-                &mut |_| serde_json::json!({"state":"current"}),
+                &mut |_, _owner| serde_json::json!({"state":"current"}),
             )
             .map_err(|_| StorageError::Busy)
         })
