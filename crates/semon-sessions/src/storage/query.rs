@@ -84,6 +84,33 @@ impl QueryRecipeObservation {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum QueryRecipeLoadError {
+    Storage(super::StorageError),
+    ObservationChanged,
+    MissingPayload,
+    CorruptPayload,
+}
+
+impl From<super::StorageError> for QueryRecipeLoadError {
+    fn from(error: super::StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl std::fmt::Display for QueryRecipeLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => std::fmt::Display::fmt(error, formatter),
+            Self::ObservationChanged => formatter.write_str("Selected Query observation residence or authority changed."),
+            Self::MissingPayload => formatter.write_str("Selected Query recipe payload is unavailable."),
+            Self::CorruptPayload => formatter.write_str("Selected Query recipe payload is corrupt."),
+        }
+    }
+}
+
+impl std::error::Error for QueryRecipeLoadError {}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Work {
@@ -294,6 +321,14 @@ pub(crate) fn history_window(
 }
 
 pub(crate) trait QueryCatalogStore {
+    /// Load only the exact store-issued observation; this grants no source access.
+    fn selected_recipe(
+        &self,
+        _observation: &QueryRecipeObservation,
+    ) -> Result<Option<crate::query_projection::SelectedRecipe>, QueryRecipeLoadError> {
+        Err(super::StorageError::Unavailable.into())
+    }
+
     fn selected_body(
         &self,
         _namespace: &LogicalSourceNamespace,
