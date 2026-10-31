@@ -359,9 +359,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             .as_deref()
             .map(|parent| parent.as_bytes().to_vec());
         if *kind == Current {
-            let query_recipe = values[2]
-                .as_str()
-                .map(|recipe| recipe.as_bytes().to_vec());
+            let query_recipe = values[2].as_str().map(|recipe| recipe.as_bytes().to_vec());
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,query_recipe,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&parent_key,&metadata.as_bytes(),&query_recipe,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
             // Rebuild the producer's physical incident index from the exact
             // transferred metadata; this is content, never publication authority.
@@ -384,9 +382,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             }
         } else {
             let (activity, active) = crate::storage::query::history_activity(&row);
-            let query_recipe = values[2]
-                .as_str()
-                .map(|recipe| recipe.as_bytes().to_vec());
+            let query_recipe = values[2].as_str().map(|recipe| recipe.as_bytes().to_vec());
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,query_recipe,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&query_recipe,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
         }
@@ -757,12 +753,8 @@ mod tests {
             .unwrap();
         let expected =
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
-        let (
-            current_recipe,
-            history_recipe,
-            current_proof_recipe,
-            history_proof_recipe,
-        ) = seed_recipe_cells(&source, &expected[0].key, &initial[0].key);
+        let (current_recipe, history_recipe, current_proof_recipe, history_proof_recipe) =
+            seed_recipe_cells(&source, &expected[0].key, &initial[0].key);
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
         originals(&source, &options, &mut host);
@@ -1303,8 +1295,14 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current_recipe_reversed.as_deref(), Some(current_recipe.as_str()));
-        assert_eq!(history_recipe_reversed.as_deref(), Some(history_recipe.as_str()));
+        assert_eq!(
+            current_recipe_reversed.as_deref(),
+            Some(current_recipe.as_str())
+        );
+        assert_eq!(
+            history_recipe_reversed.as_deref(),
+            Some(history_recipe.as_str())
+        );
         let current_proof_recipe_reversed: Option<String> = reverse_db
             .query_row(
                 "SELECT g.query_recipe FROM storage_proof_refs f JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.query_recipe IS NOT NULL LIMIT 1",

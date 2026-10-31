@@ -505,9 +505,8 @@ mod tests {
 
         let empty_name = metadata(String::new());
         let recipe_len = 1;
-        let exact_name_len = crate::storage::proof_codec::METADATA_MAX
-            - empty_name.len()
-            - recipe_len;
+        let exact_name_len =
+            crate::storage::proof_codec::METADATA_MAX - empty_name.len() - recipe_len;
         let exact = row_record(
             CatalogRowKind::Current,
             metadata("x".repeat(exact_name_len)),
