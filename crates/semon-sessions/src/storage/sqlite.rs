@@ -264,6 +264,48 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.root);
         }
     }
+
+    #[test]
+    fn query_recipe_cells_keep_combined_bound_rollback_and_immutable_original() {
+        let mut fixture = Fixture::new();
+        fixture.publish("recipe-owner");
+        let metadata: String = fixture.db.query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='recipe-owner'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        let payload = "r".repeat(crate::storage::proof_codec::METADATA_MAX - metadata.len());
+        fixture.db.execute(
+            "UPDATE main.session_catalog SET query_recipe=?1 WHERE namespace=semon_namespace() AND session_key='recipe-owner'",
+            [&payload],
+        ).unwrap();
+        assert!(fixture.db.execute(
+            "UPDATE main.session_catalog SET metadata=?1 WHERE namespace=semon_namespace() AND session_key='recipe-owner'",
+            [format!("{metadata} ")],
+        ).is_err());
+        {
+            let tx = fixture.db.transaction().unwrap();
+            tx.execute("UPDATE main.session_catalog SET metadata='{}',query_recipe='replacement' WHERE namespace=semon_namespace() AND session_key='recipe-owner'", []).unwrap();
+            tx.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_recipe) SELECT namespace,session_key,metadata,query_recipe FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='recipe-owner'", []).unwrap();
+            tx.execute("INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix) VALUES(semon_namespace(),'generation','recipe-owner','publication','proof',1,'stream','{}','replacement','[]','prefix')", []).unwrap();
+            assert!(tx.execute("UPDATE main.session_history_catalog SET query_recipe=?1 WHERE namespace=semon_namespace() AND session_key='recipe-owner'", ["r".repeat(crate::storage::proof_codec::METADATA_MAX)]).is_err());
+            // A failed publication rolls back all three cells with its owner transaction.
+        }
+        let stored: (String, String) = fixture.db.query_row(
+            "SELECT metadata,query_recipe FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='recipe-owner'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(stored, (metadata.clone(), payload.clone()));
+        for table in ["session_history_catalog", "storage_proof_generations"] {
+            assert_eq!(fixture.db.query_row(&format!("SELECT count(*) FROM main.{table} WHERE namespace=semon_namespace()"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+        }
+        fixture.db.execute("INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix) VALUES(semon_namespace(),'generation','recipe-owner','publication','proof',1,'stream',?1,?2,'[]','prefix')", rusqlite::params![metadata, payload]).unwrap();
+        assert!(fixture.db.execute("UPDATE storage_proof_generations SET query_recipe='changed' WHERE namespace=semon_namespace() AND session_key='recipe-owner'", []).is_err());
+        let retained: String = fixture.db.query_row("SELECT query_recipe FROM storage_proof_generations WHERE namespace=semon_namespace() AND session_key='recipe-owner'", [], |row| row.get(0)).unwrap();
+        assert_eq!(retained, payload);
+    }
+
     impl MetadataFixture for Fixture {
         fn store(&self) -> Box<dyn SessionMetadataStore> {
             self.config().open().unwrap()

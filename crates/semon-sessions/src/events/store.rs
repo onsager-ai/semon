@@ -254,7 +254,7 @@ fn emit_catalog_publish_attempt(
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: namespace-owned state includes the NOCASE scheduling indexes.
 // Unsupported stores refuse without reset; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 34;
+pub(crate) const SCHEMA_VERSION: i64 = 35;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -303,6 +303,7 @@ CREATE TABLE IF NOT EXISTS session_catalog (
     repo TEXT,
     parent_key TEXT,
     metadata TEXT NOT NULL,
+    query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),
     pricing_fingerprint TEXT,
     PRIMARY KEY(namespace,session_key)
 ) STRICT;
@@ -11414,6 +11415,16 @@ mod tests {
                 "malformed persistent state",
             ),
             (
+                "missing-catalog-query-recipe",
+                "ALTER TABLE session_catalog DROP COLUMN query_recipe",
+                "malformed persistent state",
+            ),
+            (
+                "missing-history-query-recipe",
+                "ALTER TABLE session_history_catalog DROP COLUMN query_recipe",
+                "malformed persistent state",
+            ),
+            (
                 "missing-event-column",
                 "DROP INDEX semantic_index_send; ALTER TABLE events DROP COLUMN reply_m",
                 "malformed persistent state",
@@ -11854,6 +11865,9 @@ mod tests {
         for (table, column) in [
             ("files", "codex_pricing_fingerprint"),
             ("session_catalog", "pricing_fingerprint"),
+            ("session_catalog", "query_recipe"),
+            ("session_history_catalog", "query_recipe"),
+            ("storage_proof_generations", "query_recipe"),
         ] {
             assert!(
                 store

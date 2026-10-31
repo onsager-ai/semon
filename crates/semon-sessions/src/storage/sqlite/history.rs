@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE session_history_catalog (
  namespace TEXT NOT NULL, session_key TEXT NOT NULL, metadata TEXT NOT NULL,
+ query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),
  query_activity INTEGER, query_active INTEGER NOT NULL DEFAULT 0 CHECK(query_active IN (0,1)),
  PRIMARY KEY(namespace,session_key)
 ) STRICT, WITHOUT ROWID;
