@@ -136,7 +136,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     }
     // A successor pins the old physical snapshot; a fresh History selection
     // acquires its own custody reference instead of borrowing Current's grant.
-    snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |held| {
+    let successor = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |held| {
         let next = super::native_history::advance(&options, row, "query-recipe-successor");
         assert_eq!(
             held.load_query_recipe(&token).unwrap(),
@@ -157,9 +157,36 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             ));
             Ok(())
         })?;
-        Ok(())
+        Ok(next)
     })
     .unwrap();
+    let history_token = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
+        let history = view.catalog(&row.key, true)?.unwrap();
+        let token = view.query_recipe_observation(Owner::History, &history).unwrap();
+        assert!(matches!(view.load_query_recipe(&token), Err(Error::MissingPayload)));
+        Ok(token)
+    }).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers h SET query_recipe=$4 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.session_key=$3 AND h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key AND h.metadata=$5", &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &row.key.as_bytes(), &payload.as_bytes(), &history_token.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
+        Ok(())
+    }).unwrap();
+    let history_owner = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |view| {
+        assert_eq!(view.load_query_recipe(&history_token).unwrap(), Some(expected.clone()));
+        Ok(view.owner(&row.key)?.unwrap().generation)
+    }).unwrap();
+    let key = super::super::observations::history_key(&history_owner, history_token.metadata.as_bytes());
+    let mut checked = false;
+    let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        super::super::super::native_keys::delete_meta(tx, key.as_bytes())?;
+        snapshot::in_transaction(tx, &successor, |view| {
+            assert!(matches!(view.load_query_recipe(&history_token), Err(Error::ObservationChanged)));
+            Ok(())
+        })?;
+        checked = true;
+        Err::<(), _>(StorageError::Conflict)
+    });
+    assert_eq!(result, Err(StorageError::Conflict));
+    assert!(checked);
     fs::remove_dir_all(data.root).unwrap();
 }
 
