@@ -215,7 +215,11 @@ impl AdmittedSource {
                 return Err(StorageError::NamespaceUpgradePending);
             }
         }
-        self.validate(db)
+        self.owner
+            .as_ref()
+            .ok_or(StorageError::NamespaceUpgradePending)?
+            .validate_catalog_publication_ready(db)
+            .map(|_| ())
     }
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
         if let Some(owner) = &self.owner {
