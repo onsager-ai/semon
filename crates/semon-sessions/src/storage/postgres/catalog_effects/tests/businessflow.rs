@@ -5,6 +5,7 @@ use crate::events::{EventCache, Outcome};
 use crate::storage::native_events::NativeEventStore;
 use crate::storage::postgres::{catalog_effects::withdrawal, native_keys};
 use crate::storage::{LogicalSourceNamespace, catalog::CatalogSnapshot, postgres::PgPool};
+use sha2::Digest;
 
 fn stage_inputs(
     options: &Options,
@@ -1550,7 +1551,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     retained_options.all = options.all;
     retained_options.since = options.since;
     let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(recent_machine.into(), retained_options)]),
+        crate::SessionSources::with_machines(vec![(recent_machine.into(), retained_options.clone())]),
     ));
     let oracle_retained_reads = oracle_withdrawn
         .iter()
@@ -1568,6 +1569,113 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     1790812802000,
                 )
                 .expect("SQLite retained body through public Query and preserved Raw custody");
+            let binding = crate::storage::local_navigation_binding(&retained_options, "").unwrap();
+            let mut diagnostic_db = binding.connection().unwrap();
+            let diagnostic_tx = diagnostic_db.transaction().unwrap();
+            let context = crate::overview_repair::query_context(
+                &diagnostic_tx,
+                key,
+                crate::CatalogReadScope::RetainedHistory,
+            )
+            .unwrap();
+            let source_proof = |source: &crate::model::summary::CatalogSource| {
+                let identity = format!(
+                    "{:x}",
+                    sha2::Sha256::digest(serde_json::to_vec(source).unwrap())
+                );
+                let prefix = source
+                    .prefix_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                let tail = source
+                    .tail_sha256
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                serde_json::json!({
+                    "identity_sha256": identity,
+                    "native_id": source.native_id,
+                    "size": source.size,
+                    "offset": source.offset,
+                    "prefix_sha256": prefix,
+                    "tail_sha256": tail,
+                })
+            };
+            let target = context.iter().find(|candidate| candidate.key == key).unwrap();
+            let retained_parent_source = parent_source(&parent_history_after_withdrawal);
+            for edge in target
+                .query
+                .as_ref()
+                .and_then(|query| query["selected"]["edges"].as_array())
+                .into_iter()
+                .flatten()
+            {
+                for (field, recipe) in edge["query_content"].as_object().into_iter().flatten() {
+                    if recipe.is_null() {
+                        continue;
+                    }
+                    let Ok(expected) =
+                        serde_json::from_value::<crate::model::summary::CatalogSource>(
+                            recipe["source"].clone(),
+                        )
+                    else {
+                        continue;
+                    };
+                    let exact_match = context
+                        .iter()
+                        .flat_map(|candidate| &candidate.sources)
+                        .any(|source| source == &expected);
+                    let expected_owner = if expected == continued_parent_source {
+                        "Catalog"
+                    } else if expected == retained_parent_source {
+                        "History"
+                    } else if let Some(candidate) = context
+                        .iter()
+                        .find(|candidate| candidate.sources.contains(&expected))
+                    {
+                        if crate::history_projection::catalog(&diagnostic_tx, &candidate.key)
+                            .unwrap()
+                            .is_some()
+                        {
+                            "History"
+                        } else {
+                            "Catalog"
+                        }
+                    } else if withdrawal_prepared
+                        .rows
+                        .iter()
+                        .any(|candidate| candidate.sources.contains(&expected))
+                    {
+                        "Catalog"
+                    } else {
+                        "unresolved"
+                    };
+                    let qualified_context = context
+                        .iter()
+                        .flat_map(|candidate| {
+                            candidate.sources.iter().map(|source| {
+                                serde_json::json!({
+                                    "owner_key": candidate.key,
+                                    "owner_harness": candidate.harness,
+                                    "lifecycle": candidate.lifecycle.as_str(),
+                                    "source": source_proof(source),
+                                })
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "retained_handoff_source key={key} edge={} from={} to={} field={field} recipe_offset={} expected_owner={expected_owner} exact_match={exact_match} recipe_source={} qualified_context={}",
+                        edge["id"].as_str().unwrap_or(""),
+                        edge["query"]["from"].as_str().unwrap_or(""),
+                        edge["query"]["to"].as_str().unwrap_or(""),
+                        recipe["offset"].as_u64().unwrap_or_default(),
+                        source_proof(&expected),
+                        serde_json::Value::Array(qualified_context),
+                    );
+                }
+            }
+            diagnostic_tx.commit().unwrap();
             let fields = retained_query
                 .call_selected_at(
                     recent_machine,
