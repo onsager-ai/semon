@@ -1332,6 +1332,11 @@ impl Stage {
         self.db
     }
 
+    #[cfg(test)]
+    pub(crate) fn connection_for_test(&self) -> &Connection {
+        &self.db
+    }
+
     pub(crate) fn publish(
         &mut self,
         batch: &Batch,
@@ -1360,6 +1365,16 @@ impl Stage {
         {
             return Err(refuse("semantic_publication_trace_missing"));
         }
+        let database = self
+            .source
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
+        let mut commit_boundary = crate::native_timing::CatalogCommitBoundary::new(
+            crate::native_timing::enabled(),
+            database,
+        );
         let projection_rows: std::collections::BTreeMap<_, _> =
             prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
         let mut projection_keys = std::collections::BTreeSet::new();
@@ -1764,6 +1779,7 @@ impl Stage {
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_slots").map_err(error)?;
+        commit_boundary.capture(&tx);
         publication_phase("current_effects");
         let current_effects = super::publication::CurrentWriter::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
@@ -2032,8 +2048,14 @@ impl Stage {
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_head").map_err(error)?;
         publication_phase("commit");
+        commit_boundary.capture(&tx);
         tx.commit().map_err(error)?;
+        commit_boundary.capture(&self.db);
         self.source.generation = Some(generation.clone());
+        // Stage has no temporary timeout override; this final sample follows
+        // installation of its postcommit generation witness.
+        commit_boundary.capture(&self.db);
+        commit_boundary.committed();
         Ok((Outcome::Written, Some(generation)))
     }
 
