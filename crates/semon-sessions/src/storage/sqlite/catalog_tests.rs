@@ -3752,6 +3752,51 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
         );
         let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
         let fresh_body: Value = serde_json::from_slice(&fresh.body).unwrap();
+        if scope == "retained_history" {
+            assert_eq!(fresh.status, 409, "{fresh_body}");
+            assert_eq!(fresh_body["fence_reason"], "local_source_revision");
+            assert_eq!(fresh_body["local_revision_reason"], "size_grew");
+            assert!(fresh_body.get("entries").is_none());
+
+            // History keeps its original consumed prefix. Only the authorized
+            // provider can serve that exact prefix after the local file grows.
+            let retained = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &query,
+                Some(&original),
+            );
+            assert_eq!(retained.status, 200);
+            let retained: Value = serde_json::from_slice(&retained.body).unwrap();
+            assert_eq!(retained["projection"], page["projection"]);
+            assert_eq!(retained["entries"], page["entries"]);
+            assert_eq!(retained["content_observation"]["state"], "cached");
+            let generation = retained["projection"]["generation"].as_str().unwrap();
+            let continuation = format!(
+                "sid=selected&scope={scope}&after=1&limit=1&generation={generation}"
+            );
+            assert_eq!(
+                crate::session_transcript_range(
+                    &fixture.options,
+                    "source",
+                    &continuation,
+                    Some(&original)
+                )
+                .status,
+                200
+            );
+            let stale = crate::session_transcript_range(
+                &fixture.options,
+                "source",
+                &continuation.replace(generation, "wrong"),
+                Some(&original),
+            );
+            assert_eq!(stale.status, 409);
+            let stale: Value = serde_json::from_slice(&stale.body).unwrap();
+            assert_eq!(stale["error"]["code"], "stale_projection");
+            assert!(stale.get("entries").is_none());
+            continue;
+        }
         assert_eq!(
             fresh.status,
             200,
