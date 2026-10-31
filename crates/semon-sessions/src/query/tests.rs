@@ -5592,9 +5592,7 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         ("a".into(), first_options.clone(), first_config.clone()),
         ("b".into(), second_options.clone(), second_config.clone()),
     ];
-    let sources = || {
-        Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap())
-    };
+    let sources = || Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap());
     let mut native = Query::from_sources(sources());
     for args in [
         json!({"text":"needle"}),
