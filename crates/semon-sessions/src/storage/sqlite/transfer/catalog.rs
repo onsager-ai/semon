@@ -6,7 +6,7 @@ use crate::storage::transfer::{
 use rusqlite::types::Value;
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) {
     use CatalogRowKind::*;

@@ -23,67 +23,34 @@ impl InboxTransaction for MemoryInbox {
     }
 }
 
-pub(crate) fn seed_large_presentation(
-    source: &StoreConfig,
-    root: &std::path::Path,
-) -> (crate::Options, String, String) {
-    use crate::storage::transfer::reported::tests::{cache, finish_catalog, seed_catalog};
-    let (options, _) = seed_catalog(source, root);
-    let input = crate::Input {
-        root: crate::InputRoot::Claude,
-        path: "projects/sanitized/catalog.jsonl".into(),
-    };
-    let path = input.full_path(&options);
-    // Claude's native IDs are strings (the ordinary fixture already uses u0,
-    // rather than UUIDv4). Quotes stress the additional context JSON nesting
-    // without adding Raw body bytes to the immutable presentation.
-    let ids = (0..80).map(|i| format!("u{i}-{}", "\"".repeat(1152))).collect::<Vec<_>>();
-    let body = ids.iter().enumerate().map(|(i, id)| format!("{}\n", serde_json::json!({
-        "type":"user", "sessionId":"catalog", "uuid":id,
-        "parentUuid":i.checked_sub(1).map(|previous| &ids[previous]),
-        "timestamp":"2026-10-01T00:00:00Z", "cwd":"/sanitized",
-        "message":{"role":"user", "content":format!("sanitized {i}")}
-    }))).collect::<String>();
-    std::fs::write(&path, body).unwrap();
-    let mut cache = cache(source);
-    cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
-    cache.flush_cold_writes().unwrap();
-    assert_eq!(cache.begin_semantic_stage_with_journal(
-        &[path.to_str().unwrap().to_owned()], "transfer-large-real-model", true,
-    ).unwrap(), crate::events::Outcome::Written);
-    let rows = finish_catalog(&mut cache, &options, std::slice::from_ref(&input));
-    assert_eq!(rows.len(), 1);
-    let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
-    let (id, metadata, slots, presentation): (String, String, String, String) = db.query_row(
-        "SELECT g.id,g.metadata,g.slots,p.metadata FROM storage_proof_refs f JOIN storage_proof_generations g USING(namespace,id,session_key) JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current'",
-        rusqlite::params![source.namespace.as_str(), rows[0].key],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).unwrap();
-    eprintln!("large_catalog_real metadata={} slots={} presentation={}", metadata.len(), slots.len(), presentation.len());
-    assert!(metadata.len() <= MAX_PAGE_BYTES);
-    assert!(slots.len() <= MAX_PAGE_BYTES);
-    assert!(presentation.len() > MAX_PAGE_BYTES);
-    assert!(presentation.len() <= 8 * MAX_PAGE_BYTES);
-    (options, rows[0].key.clone(), id)
-}
-
 pub(crate) fn assert_provider_transcript(
     config: &StoreConfig,
     options: &crate::Options,
-    host: &crate::storage::transfer::reported::tests::selected_receipts::AuthorizedOriginals,
+    host: &dyn crate::SessionSourceReader,
     key: &str,
 ) {
     let mut options = options.clone();
     options.source = crate::storage::HostSource::new(
-        config.namespace.clone(), config.expected_stream_epoch.clone().unwrap(),
-    ).unwrap().with_store(config.clone()).unwrap();
+        config.namespace.clone(),
+        config.expected_stream_epoch.clone().unwrap(),
+    )
+    .unwrap()
+    .with_store(config.clone())
+    .unwrap();
     let mut query = crate::Query::from_sources(std::sync::Arc::new(
         crate::SessionSources::with_machines(vec![(String::new(), options)]),
     ));
-    let body = query.call_selected_at(
-        "local", key, "read_transcript", &serde_json::json!({"id":key,"after":0,"limit":1}),
-        Some(host), crate::SessionSourceReadMode::ProviderOnly, 1_790_000_000_000,
-    ).unwrap();
+    let body = query
+        .call_selected_at(
+            "local",
+            key,
+            "read_transcript",
+            &serde_json::json!({"id":key,"after":0,"limit":1}),
+            Some(host),
+            crate::SessionSourceReadMode::ProviderOnly,
+            1_790_000_000_000,
+        )
+        .unwrap();
     assert!(body.to_string().contains("sanitized 0"));
 }
 
@@ -98,6 +65,32 @@ fn row() -> CatalogRowData {
                 .into(),
         ],
     }
+}
+
+#[test]
+fn current_transfer225_catalog_one_part_and_incomplete_manifest_refusal() {
+    let mut small = row();
+    small.values[1] = "null".into();
+    let records = fragments([7; 32], small.clone()).unwrap();
+    assert_eq!(records.len(), 1);
+    let mut inbox = MemoryInbox::default();
+    let complete = apply_fragment(&mut inbox, &records[0], &[7; 32]).unwrap().unwrap();
+    assert_eq!(complete.values, small.values);
+    require_complete(&mut inbox, &[7; 32]).unwrap();
+
+    let records = fragments([7; 32], row()).unwrap();
+    apply_fragment(&mut inbox, &records[0], &[7; 32]).unwrap();
+    let before = inbox.0.clone();
+    let final_page = reported::ApplyPage {
+        checkpoint: TransferCheckpoint {
+            snapshot: [7; 32], sequence: 1, digest: [0; 32],
+            rows: vec![0; Category::ALL.len()], digests: vec![[0; 32]; Category::ALL.len()],
+        },
+        records: vec![], replayed: false, first: false, complete: true,
+    };
+    assert!(reported::acknowledge_apply(&mut inbox, &final_page).is_err());
+    assert_eq!(inbox.0, before);
+    assert!(!inbox.0.contains_key(IMPORTED_GENERATION));
 }
 
 #[test]
