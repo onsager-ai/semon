@@ -28,23 +28,28 @@ use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::time::Duration;
 
+pub(crate) fn error_class(error: &rusqlite::Error) -> (&'static str, Option<i32>) {
+    let kind = match error {
+        rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
+        rusqlite::Error::QueryReturnedNoRows => "no_rows",
+        rusqlite::Error::UserFunctionError(_) => "user_function",
+        rusqlite::Error::InvalidQuery => "invalid_query",
+        rusqlite::Error::InvalidColumnType(..) => "column_type",
+        rusqlite::Error::FromSqlConversionFailure(..) => "from_sql",
+        _ => "other",
+    };
+    (kind, error.sqlite_error().map(|error| error.extended_code))
+}
+
 pub(super) fn failed(error: rusqlite::Error) -> StorageError {
     #[cfg(test)]
     {
         semantic::diagnose(&error);
         // Static kind and code only: SQLite messages can contain SQL or native data.
-        let kind = match &error {
-            rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
-            rusqlite::Error::QueryReturnedNoRows => "no_rows",
-            rusqlite::Error::UserFunctionError(_) => "user_function",
-            rusqlite::Error::InvalidQuery => "invalid_query",
-            rusqlite::Error::InvalidColumnType(..) => "column_type",
-            rusqlite::Error::FromSqlConversionFailure(..) => "from_sql",
-            _ => "other",
-        };
+        let (kind, extended_code) = error_class(&error);
         eprintln!(
             "storage_sqlite_failure kind={kind} sqlite_extended_code={:?}",
-            error.sqlite_error().map(|e| e.extended_code)
+            extended_code
         );
     }
     match error.sqlite_error_code() {
