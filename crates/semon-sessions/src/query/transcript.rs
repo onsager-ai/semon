@@ -344,6 +344,7 @@ fn qualify_virtual_aliases(summary: &mut Value, context: &[CatalogRow], alias: O
 fn virtual_read(
     options: &Options,
     key: &str,
+    scope: crate::CatalogReadScope,
     args: &Value,
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
@@ -362,7 +363,7 @@ fn virtual_read(
         .map_err(unavailable)?;
     let mut tx = db.transaction().map_err(unavailable)?;
     crate::events::store::require_current(&tx).map_err(unavailable)?;
-    let context = match crate::overview_repair::query_context(&tx, key) {
+    let context = match crate::overview_repair::query_context(&tx, key, scope) {
         Ok(context) => context,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unavailable(error)),
@@ -632,7 +633,7 @@ fn virtual_read(
     let snapshot = db.transaction().map_err(unavailable)?;
     if generation(&snapshot)? != catalog_generation
         || serde_json::to_value(
-            crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?,
+            crate::overview_repair::query_context(&snapshot, key, scope).map_err(unavailable)?,
         )
         .map_err(unavailable)?
             != serde_json::to_value(&context).map_err(unavailable)?
@@ -660,17 +661,19 @@ fn virtual_read(
 pub(crate) fn read(
     options: &Options,
     key: &str,
+    scope: crate::CatalogReadScope,
     args: &Value,
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
     now: i64,
 ) -> Result<Option<Value>, QueryError> {
-    read_inner(options, key, args, provider, mode, now, None)
+    read_inner(options, key, scope, args, provider, mode, now, None)
 }
 
 pub(crate) fn session(
     options: &Options,
     key: &str,
+    scope: crate::CatalogReadScope,
     args: &Value,
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
@@ -678,7 +681,7 @@ pub(crate) fn session(
 ) -> Result<Option<Value>, QueryError> {
     let mut args = args.clone();
     args["_session"] = Value::Bool(true);
-    read_inner(options, key, &args, provider, mode, now, None)
+    read_inner(options, key, scope, &args, provider, mode, now, None)
 }
 
 pub(super) fn search(
@@ -693,6 +696,7 @@ pub(super) fn search(
     Ok(read_inner(
         options,
         key,
+        crate::CatalogReadScope::RetainedHistory,
         &json!({"id":key}),
         provider,
         mode,
@@ -706,6 +710,7 @@ pub(super) fn search(
 fn read_inner(
     options: &Options,
     key: &str,
+    scope: crate::CatalogReadScope,
     args: &Value,
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
@@ -749,7 +754,12 @@ fn read_inner(
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    let history = crate::history_projection::catalog(&tx, key).map_err(unavailable)?;
+    let history = match scope {
+        crate::CatalogReadScope::Current => None,
+        crate::CatalogReadScope::RetainedHistory => {
+            crate::history_projection::catalog(&tx, key).map_err(unavailable)?
+        }
+    };
     let text = match history.as_ref() {
         Some(text) => Some(text.clone()),
         None => tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1", [key], |row|row.get::<_,Option<String>>(0))
@@ -757,8 +767,11 @@ fn read_inner(
     };
     let Some(text) = text else {
         tx.commit().map_err(unavailable)?;
-        return virtual_read(options, key, args, provider, mode, now);
+        return virtual_read(options, key, scope, args, provider, mode, now);
     };
+    if scope == crate::CatalogReadScope::Current && !current {
+        return Ok(None);
+    }
     let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
@@ -780,7 +793,7 @@ fn read_inner(
     // or provisional context keeps the native window resolver.
     if options.scan_window
         && !options.all
-        && !crate::overview_repair::query_window_context_current(&tx, options, key, now)
+        && !crate::overview_repair::query_window_context_current(&tx, options, key, scope, now)
             .map_err(unavailable)?
     {
         return Ok(None);
@@ -881,15 +894,16 @@ fn read_inner(
     // request-owned source retains at most one decoded hash page.
     let session = args["_session"] == true;
     let context = if search.is_some() || session {
-        crate::overview_repair::query_context(&tx, key).map_err(unavailable)?
+        crate::overview_repair::query_context(&tx, key, scope).map_err(unavailable)?
     } else {
         vec![row.clone()]
     };
     let mut query_headers = Vec::new();
     if search.is_some() || session {
         for owner in &context {
-            if let Some(encoded) =
-                crate::history_projection::catalog(&tx, &owner.key).map_err(unavailable)?
+            if scope == crate::CatalogReadScope::RetainedHistory
+                && let Some(encoded) =
+                    crate::history_projection::catalog(&tx, &owner.key).map_err(unavailable)?
             {
                 // History owns its embedded selected recipes. A later Current
                 // publication replaces the mutable Query header for the same
@@ -1038,7 +1052,8 @@ fn read_inner(
                 return Err(unavailable("Native query recipes changed"));
             }
         }
-        let current = crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?;
+        let current =
+            crate::overview_repair::query_context(&snapshot, key, scope).map_err(unavailable)?;
         if serde_json::to_value(&current).map_err(unavailable)?
             != serde_json::to_value(&context).map_err(unavailable)?
         {
@@ -1146,7 +1161,8 @@ fn read_inner(
                 return Err(unavailable("Native query recipes changed"));
             }
         }
-        let current = crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?;
+        let current =
+            crate::overview_repair::query_context(&snapshot, key, scope).map_err(unavailable)?;
         if serde_json::to_value(&current).map_err(unavailable)?
             != serde_json::to_value(&context).map_err(unavailable)?
         {

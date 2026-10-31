@@ -31,7 +31,9 @@ omitted-file turns_truncated semantics. This local resolution grants no source
 authority and does not relax public hosted selected-Catalog-ID validation.
 An existing current owner's changed log or allowlisted Claude sidecar refreshes
 through the same bounded Catalog component producer. Old and new relationships,
-source revisions and publication generation remain fenced. Two tools after an
+source revisions and publication generation remain fenced. Ordinary refresh,
+rendering and completion checks select the same Current cohort; explicit original
+evidence reads keep their History selection and immutable recipes. Two tools after an
 isolated append load five indexes with zero or 256 unrelated sessions (formerly
 one versus 257); a rewrite loads four in both cases. Unsupported identity/role
 changes, missing sources, cold Catalogs and multi-machine automatic selection
