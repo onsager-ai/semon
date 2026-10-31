@@ -3695,10 +3695,7 @@ mod tests {
             ("UPDATE catalog_semantic_sources SET claim=123456", 1),
             ("UPDATE catalog_semantic_stage SET resetting=1", 1),
             ("DELETE FROM catalog_semantic_sources", 0),
-            (
-                "DELETE FROM catalog_semantic_stage; INSERT INTO meta(key,value) VALUES('catalog_semantic_gc','1')",
-                1,
-            ),
+            ("DELETE FROM catalog_semantic_stage", 1),
         ] {
             let (root, store, path) = header_repair_store("ownership");
             acknowledge_repair_source(&store, &path);
