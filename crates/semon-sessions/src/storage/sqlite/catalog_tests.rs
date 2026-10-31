@@ -4465,9 +4465,8 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     drop(statement);
 
     let original_source_path = original_source.path.to_string_lossy().into_owned();
-    let original_source_ledger = crate::source_carrier::ledger_digest(
-        &crate::source_carrier::ledger(&original_source),
-    );
+    let original_source_ledger =
+        crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&original_source));
     let original_history_proof: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_proof_sources s ON s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key WHERE r.namespace=semon_namespace() AND r.session_key='live-history' AND r.kind='history' AND g.prefix=?1 AND g.metadata=?2 AND s.path=?3 AND s.ledger=?4)",
