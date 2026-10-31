@@ -96,9 +96,6 @@ impl ContextLookup for Snapshot<'_, '_> {
         let Some(row) = self.catalog(key, false).map_err(io::Error::other)? else {
             return Ok(None);
         };
-        if crate::retention::source_generation(&row.sources).map_err(io::Error::other)? != source {
-            return Ok(None);
-        }
         let Some(value) = self.trace_value_for_source(key, source)? else {
             return Ok(None);
         };
