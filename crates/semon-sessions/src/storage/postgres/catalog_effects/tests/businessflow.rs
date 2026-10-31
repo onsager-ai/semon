@@ -3862,10 +3862,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         root: crate::InputRoot::Claude,
         path: "sessions/4242.json".into(),
     };
-    assert!(
-        crate::native_evidence::query_runtime_generation(&options).unwrap() == stage_runtime,
-        "the local runtime changed before the recorded PID mutation"
-    );
     fs::create_dir_all(options.claude_home.join("sessions")).unwrap();
     let pid_write = crate::SessionSourceWrite::begin_with_store(
         &facts_options,
@@ -3876,6 +3872,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         None,
     )
     .unwrap();
+    // Earlier fixture mutations restored bytes, not their watched file clocks.
+    // Isolate this PID write from those intentional runtime witness changes.
+    let before_pid_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     fs::write(pid_input.full_path(&facts_options), &pid_bytes).unwrap();
     fs::OpenOptions::new()
         .write(true)
@@ -3885,7 +3884,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     pid_write.complete(pid_bytes.len() as u64).unwrap();
     assert!(
-        crate::native_evidence::query_runtime_generation(&options).unwrap() != stage_runtime,
+        crate::native_evidence::query_runtime_generation(&options).unwrap() != before_pid_runtime,
         "the shared PID mutation must invalidate the old local runtime witness"
     );
     assert_eq!(
