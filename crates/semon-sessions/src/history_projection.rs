@@ -43,9 +43,7 @@ pub(crate) fn qualified_header(
     recorded_source_generation: &str,
     incomplete: bool,
 ) -> bool {
-    version == VERSION
-        && recorded_source_generation == expected_source_generation
-        && !incomplete
+    version == VERSION && recorded_source_generation == expected_source_generation && !incomplete
 }
 
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {
@@ -77,7 +75,12 @@ mod tests {
         let sources = [source()];
         let generation = crate::retention::source_generation(&sources).unwrap();
         assert!(qualified_header(&generation, VERSION, &generation, false));
-        assert!(!qualified_header(&generation, VERSION + 1, &generation, false));
+        assert!(!qualified_header(
+            &generation,
+            VERSION + 1,
+            &generation,
+            false
+        ));
         assert!(!qualified_header(&generation, VERSION, "mismatched", false));
         assert!(!qualified_header(&generation, VERSION, &generation, true));
     }

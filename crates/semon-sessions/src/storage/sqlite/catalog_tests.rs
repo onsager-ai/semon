@@ -7235,7 +7235,10 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     .unwrap();
     let path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(path).unwrap();
-    facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone(), child.clone()]));
+    facts.codex_rollouts = Some(std::collections::BTreeSet::from([
+        parent.clone(),
+        child.clone(),
+    ]));
     facts.codex_locks.insert("family-child".into(), 77);
     facts.proc_starts.insert(77, 777);
     let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
@@ -7290,7 +7293,10 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
         crate::model::summary::CatalogLifecycle::Retained
     );
     assert_eq!(selected.sources[0].path, missing_raw_path);
-    assert_eq!(crate::catalog::source_state(&selected.sources[0]), "unavailable");
+    assert_eq!(
+        crate::catalog::source_state(&selected.sources[0]),
+        "unavailable"
+    );
     assert!(snapshot.history_qualified(&history).unwrap());
     assert!(
         runtime_source_cwds_if_current(&tx, &selected.sources)

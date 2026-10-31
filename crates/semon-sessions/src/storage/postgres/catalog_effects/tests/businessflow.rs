@@ -1231,12 +1231,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         identity
             .source_refs
             .iter()
-            .map(|reference| {
-                (
-                    reference.source.root.clone(),
-                    reference.source.path.clone(),
-                )
-            })
+            .map(|reference| (reference.source.root.clone(), reference.source.path.clone()))
             .collect::<std::collections::BTreeSet<_>>()
     };
     let composite_a_relative = composite_a_path
@@ -1253,30 +1248,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .to_owned();
     let original_listing = refresh(&withdraw_options);
     assert!(original_listing["total"].as_u64().unwrap() > 0);
-    let original_parent_current = crate::session_catalog_identity(
-        &withdraw_options,
-        recent_machine,
-        "one",
-    )
-    .unwrap()
-    .expect("SQLite original parent Current identity");
+    let original_parent_current =
+        crate::session_catalog_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite original parent Current identity");
     assert_eq!(
         original_parent_current.read_scope,
         crate::CatalogReadScope::Current
     );
-    let original_parent_history = crate::session_catalog_history_identity(
-        &withdraw_options,
-        recent_machine,
-        "one",
-    )
-    .unwrap()
-    .expect("SQLite original parent retained identity");
+    let original_parent_history =
+        crate::session_catalog_history_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite original parent retained identity");
     assert_eq!(
         original_parent_history.read_scope,
         crate::CatalogReadScope::RetainedHistory
     );
     let original_parent_source = parent_source(&original_parent_current);
-    assert_eq!(parent_source(&original_parent_history), original_parent_source);
+    assert_eq!(
+        parent_source(&original_parent_history),
+        original_parent_source
+    );
     assert_eq!(
         original_parent_source.offset,
         parent_before_withdrawal.len() as u64,
@@ -1303,13 +1295,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     crate::write_facts(&oracle_facts, &withdrawal_facts, &options.source).unwrap();
     withdraw_options.facts = Some(oracle_facts);
     let continued_listing = refresh(&withdraw_options);
-    let continued_parent_current = crate::session_catalog_identity(
-        &withdraw_options,
-        recent_machine,
-        "one",
-    )
-    .unwrap()
-    .expect("SQLite continued parent Current identity");
+    let continued_parent_current =
+        crate::session_catalog_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite continued parent Current identity");
     assert_eq!(
         continued_parent_current.read_scope,
         crate::CatalogReadScope::Current
@@ -1320,25 +1309,19 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         original_parent_source.offset + (source_append.len() + facts_append.len()) as u64,
         "SQLite Current consumes both parent continuations"
     );
-    let continued_parent_history = crate::session_catalog_history_identity(
-        &withdraw_options,
-        recent_machine,
-        "one",
-    )
-    .unwrap()
-    .expect("SQLite continued parent retained identity");
+    let continued_parent_history =
+        crate::session_catalog_history_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite continued parent retained identity");
     assert_eq!(
         parent_source(&continued_parent_history),
         original_parent_source,
         "SQLite History preserves the original parent source prefix"
     );
-    let composite_before_withdrawal = crate::session_catalog_identity(
-        &withdraw_options,
-        recent_machine,
-        composite_key,
-    )
-    .unwrap()
-    .expect("SQLite prewithdrawal composite Current identity");
+    let composite_before_withdrawal =
+        crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
+            .unwrap()
+            .expect("SQLite prewithdrawal composite Current identity");
     assert_eq!(
         composite_before_withdrawal.read_scope,
         crate::CatalogReadScope::Current
@@ -1393,13 +1376,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         after_withdrawal < before_withdrawal,
         "SQLite withdrawal {before_withdrawal} -> {after_withdrawal}"
     );
-    let composite_after_withdrawal = crate::session_catalog_identity(
-        &withdraw_options,
-        recent_machine,
-        composite_key,
-    )
-    .unwrap()
-    .expect("SQLite postwithdrawal composite Current identity");
+    let composite_after_withdrawal =
+        crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
+            .unwrap()
+            .expect("SQLite postwithdrawal composite Current identity");
     assert_eq!(
         composite_after_withdrawal.read_scope,
         crate::CatalogReadScope::Current
@@ -1409,13 +1389,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         std::collections::BTreeSet::from([("claude".into(), composite_a_relative.clone())]),
         "SQLite Current retains Source A"
     );
-    let composite_history_after_withdrawal = crate::session_catalog_history_identity(
-        &withdraw_options,
-        recent_machine,
-        composite_key,
-    )
-    .unwrap()
-    .expect("SQLite postwithdrawal composite History identity");
+    let composite_history_after_withdrawal =
+        crate::session_catalog_history_identity(&withdraw_options, recent_machine, composite_key)
+            .unwrap()
+            .expect("SQLite postwithdrawal composite History identity");
     assert_eq!(
         composite_history_after_withdrawal.read_scope,
         crate::CatalogReadScope::RetainedHistory
@@ -1441,13 +1418,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>(),
         "SQLite History preserves the exact original composite source identities"
     );
-    let parent_history_after_withdrawal = crate::session_catalog_history_identity(
-        &withdraw_options,
-        recent_machine,
-        "one",
-    )
-    .unwrap()
-    .expect("SQLite postwithdrawal parent History identity");
+    let parent_history_after_withdrawal =
+        crate::session_catalog_history_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite postwithdrawal parent History identity");
     assert_eq!(
         parent_history_after_withdrawal.read_scope,
         crate::CatalogReadScope::RetainedHistory
@@ -4139,37 +4113,35 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             Ok(())
         })
     };
-    let assert_history_header_refused = |version: i64,
-                                        source_generation: Option<Vec<u8>>,
-                                        incomplete: bool,
-                                        reason: &str| {
-        update_history_header(version, source_generation, incomplete)
-            .expect("install exact History header corruption");
-        let qualified = super::super::snapshot::with_admitted_snapshot(
-            &pool,
-            &namespace,
-            &control,
-            &continued_generation,
-            |snapshot| {
-                let history = snapshot
-                    .catalog(&appended_key, true)?
-                    .ok_or(StorageError::ScopeChanged)?;
-                snapshot
-                    .history_qualified(&history)
-                    .map_err(|_| StorageError::ScopeChanged)
-            },
-        );
-        update_history_header(
-            history_version,
-            Some(history_source_generation.clone()),
-            history_incomplete,
-        )
-        .expect("restore exact admitted History header");
-        assert!(
-            !qualified.expect("corrupt History header is read through admitted snapshot"),
-            "{reason}"
-        );
-    };
+    let assert_history_header_refused =
+        |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
+            update_history_header(version, source_generation, incomplete)
+                .expect("install exact History header corruption");
+            let qualified = super::super::snapshot::with_admitted_snapshot(
+                &pool,
+                &namespace,
+                &control,
+                &continued_generation,
+                |snapshot| {
+                    let history = snapshot
+                        .catalog(&appended_key, true)?
+                        .ok_or(StorageError::ScopeChanged)?;
+                    snapshot
+                        .history_qualified(&history)
+                        .map_err(|_| StorageError::ScopeChanged)
+                },
+            );
+            update_history_header(
+                history_version,
+                Some(history_source_generation.clone()),
+                history_incomplete,
+            )
+            .expect("restore exact admitted History header");
+            assert!(
+                !qualified.expect("corrupt History header is read through admitted snapshot"),
+                "{reason}"
+            );
+        };
     assert_history_header_refused(
         history_version + 1,
         Some(history_source_generation.clone()),
