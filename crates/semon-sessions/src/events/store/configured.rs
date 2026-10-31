@@ -8163,7 +8163,153 @@ mod tests {
             f: &Fixture,
             batch: &Batch,
             model: &crate::model::SemanticModelBatch,
+            expected_deferred_owners: &[&str],
         ) {
+            fn without_owner_custody(
+                state: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+                namespace: &str,
+                key: &str,
+            ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+                state
+                    .iter()
+                    .map(|(table, rows)| {
+                        let rows = rows
+                            .iter()
+                            .filter(|row| match table.as_str() {
+                                "session_history_catalog"
+                                | "session_history_projections"
+                                | "session_history_slots"
+                                | "session_history_slot_parts" => {
+                                    !(row.first()
+                                        == Some(&rusqlite::types::Value::Text(
+                                            namespace.to_owned(),
+                                        ))
+                                        && row.get(1)
+                                            == Some(&rusqlite::types::Value::Text(key.to_owned())))
+                                }
+                                "meta" => {
+                                    !(row.first()
+                                        == Some(&rusqlite::types::Value::Text(
+                                            namespace.to_owned(),
+                                        ))
+                                        && row.get(1).and_then(rusqlite::types::Value::as_str)
+                                            .is_some_and(|saved| {
+                                                saved == format!("history_transfer:{key}")
+                                                    || saved
+                                                        == format!("history_original_header:{key}")
+                                                    || saved == format!("overview_needed:{key}")
+                                            }))
+                                }
+                                _ => true,
+                            })
+                            .cloned()
+                            .collect();
+                        (table.clone(), rows)
+                    })
+                    .collect()
+            }
+
+            fn assert_deferred_original_custody(
+                f: &Fixture,
+                namespace: &str,
+                key: &str,
+                before: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+                after: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+            ) {
+                assert_eq!(
+                    without_owner_custody(before, namespace, key),
+                    without_owner_custody(after, namespace, key),
+                    "Deferred custody cannot change Current, the publication head, proofs, or another Source"
+                );
+
+                let old = before["session_catalog"]
+                    .iter()
+                    .find(|row| {
+                        row.first()
+                            == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
+                            && row.get(1)
+                                == Some(&rusqlite::types::Value::Text(key.to_owned()))
+                    })
+                    .and_then(|row| row.get(2))
+                    .and_then(rusqlite::types::Value::as_str)
+                    .expect("deferred owner was previously Current");
+                let mut old_row: crate::model::summary::CatalogRow =
+                    serde_json::from_str(old).unwrap();
+                old_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                let expected = serde_json::to_string(&old_row).unwrap();
+                let db = f.db();
+                let history: String = db
+                    .query_row(
+                        "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+                        rusqlite::params![namespace, key],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(history, expected, "original Query metadata stays exact");
+
+                let current_slots: Vec<(i64, String)> = db
+                    .prepare("SELECT slot,metadata FROM session_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot")
+                    .unwrap()
+                    .query_map(rusqlite::params![namespace, key], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                let history_slots: Vec<(i64, String)> = db
+                    .prepare("SELECT slot,metadata FROM session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot")
+                    .unwrap()
+                    .query_map(rusqlite::params![namespace, key], |row| {
+                        Ok((row.get(0)?, row.get(1)?))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                assert!(!current_slots.is_empty(), "the original recipe is present");
+                assert_eq!(history_slots, current_slots, "exact original slot custody");
+
+                let original_header: Option<(String, i64, Option<String>, i64)> = db
+                    .query_row(
+                        "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                        rusqlite::params![namespace, key],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()
+                    .unwrap();
+                let original_header = original_header.map(|(generation, version, source, total)| {
+                    (
+                        generation,
+                        u32::try_from(version).unwrap(),
+                        source,
+                        total,
+                    )
+                });
+                let expected_header = serde_json::to_string(&original_header).unwrap();
+                let saved_header: String = db
+                    .query_row(
+                        "SELECT value FROM meta WHERE namespace=?1 AND key=?2",
+                        rusqlite::params![namespace, format!("history_original_header:{key}")],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(saved_header, expected_header, "original recipe header stays exact");
+                assert!(db
+                    .query_row(
+                        "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key=?2)",
+                        rusqlite::params![namespace, format!("history_transfer:{key}")],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap(), "small fixture custody completed without a transfer cursor");
+            }
+
+            let namespace = cache
+                .query_runtime_binding()
+                .unwrap()
+                .unwrap()
+                .namespace
+                .as_str()
+                .to_owned();
+            let mut deferred_owners = expected_deferred_owners.to_vec();
             for point in [
                 "semantic_publish_owners",
                 "semantic_publish_retirement",
@@ -8171,42 +8317,75 @@ mod tests {
                 "semantic_publish_generation_refs",
                 "semantic_publish_ack",
             ] {
-                let before = shared_state(f);
                 FAIL_EFFECT.with(|p| p.set(Some(point)));
-                let result = cache.publish_semantic_catalog(batch, model.prepared());
-                if let Ok((outcome, head)) = &result {
-                    eprintln!(
-                        "semantic_fault_not_reached point={point} outcome={outcome:?} head_present={}",
-                        head.is_some()
-                    );
+                let mut reached_fault = false;
+                for _ in 0..64 {
+                    let before = shared_state(f);
+                    match cache.publish_semantic_catalog(batch, model.prepared()) {
+                        Ok((Outcome::Deferred, None)) => {
+                            assert_eq!(
+                                FAIL_EFFECT.with(|p| p.get()),
+                                Some(point),
+                                "Deferred leaves the requested fault armed"
+                            );
+                            let Some(owner) = deferred_owners.first().copied() else {
+                                panic!("unexpected Deferred custody before {point}");
+                            };
+                            let after = shared_state(f);
+                            assert_deferred_original_custody(
+                                f,
+                                &namespace,
+                                owner,
+                                &before,
+                                &after,
+                            );
+                            deferred_owners.remove(0);
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let refusal = if reason.starts_with("semantic_")
+                                && reason.len() < 128
+                                && reason
+                                    .bytes()
+                                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                            {
+                                reason.as_str()
+                            } else {
+                                "injected_or_other"
+                            };
+                            assert!(
+                                deferred_owners.is_empty(),
+                                "injected fault reached before expected custody: {deferred_owners:?}"
+                            );
+                            assert_eq!(
+                                FAIL_EFFECT.with(|p| p.get()),
+                                None,
+                                "fault {point} was not reached; refusal={refusal}; max_slots={}",
+                                model
+                                    .prepared()
+                                    .transcripts
+                                    .iter()
+                                    .map(|p| p.slots.len())
+                                    .max()
+                                    .unwrap_or(0)
+                            );
+                            assert_eq!(
+                                shared_state(f),
+                                before,
+                                "whole-DB rollback at the actual injected failure: {point}"
+                            );
+                            reached_fault = true;
+                            break;
+                        }
+                        Ok((outcome, head)) => {
+                            panic!(
+                                "unexpected publication before injected {point}: {outcome:?}, head_present={}",
+                                head.is_some()
+                            );
+                        }
+                    }
                 }
-                assert!(result.is_err(), "{point}");
-                let reason = result
-                    .as_ref()
-                    .err()
-                    .map(ToString::to_string)
-                    .unwrap_or_default();
-                let refusal = if reason.starts_with("semantic_")
-                    && reason.len() < 128
-                    && reason.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-                {
-                    reason.as_str()
-                } else {
-                    "injected_or_other"
-                };
-                assert_eq!(
-                    FAIL_EFFECT.with(|p| p.get()),
-                    None,
-                    "unconsumed fault {point}; refusal={refusal}; max_slots={}",
-                    model
-                        .prepared()
-                        .transcripts
-                        .iter()
-                        .map(|p| p.slots.len())
-                        .max()
-                        .unwrap_or(0)
-                );
-                assert_eq!(shared_state(f), before, "whole-DB rollback: {point}");
+                assert!(reached_fault, "bounded custody did not reach {point}");
             }
             let first = cache
                 .publish_semantic_catalog(batch, model.prepared())
@@ -8344,7 +8523,7 @@ mod tests {
                         .unwrap();
                 }
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
-                publish(&mut cache, &f, &batch, &model);
+                publish(&mut cache, &f, &batch, &model, &[]);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
             }
             use crate::storage::proof_lifetime::ProofReaderLease;
@@ -8366,17 +8545,27 @@ mod tests {
                     .is_some()
             );
             let foreign = namespace_state(&f, "source-b");
-            let retained = [
-                "session_history_catalog",
-                "session_history_projections",
-                "session_history_slots",
-                "session_slot_projections",
-                "session_slots",
+            let original_slots = rows(&f, "session_slots", "parent");
+            let original_slot_header = rows(&f, "session_slot_projections", "parent");
+            let retained_trace = [
                 "session_trace_headers",
                 "session_trace_edges",
             ]
             .map(|table| (table, rows(&f, table, "parent")));
             let old: String = f.db().query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get(0)).unwrap();
+            let mut expected_retained: crate::model::summary::CatalogRow =
+                serde_json::from_str(&old).unwrap();
+            expected_retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            let expected_retained = serde_json::to_string(&expected_retained).unwrap();
+            let original_proof_refs: Vec<String> = f
+                .db()
+                .prepare("SELECT id FROM storage_proof_refs WHERE namespace='source-a' AND session_key='parent' AND kind='current' ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert!(!original_proof_refs.is_empty());
             write(options, &inputs[0], "successor", None);
             write(options, &inputs[1], "child", Some("successor"));
             crate::facts::write_facts(
@@ -8415,11 +8604,61 @@ mod tests {
                     .values()
                     .any(|r| r.from == "successor" && r.to.as_deref() == Some("child"))
             );
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &["child"]);
             let db = f.db();
-            assert_eq!(db.query_row("SELECT lifecycle FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get::<_,String>(0)).unwrap(),"retained");
+            assert_eq!(db.query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get::<_,String>(0)).unwrap(),expected_retained);
+            assert_eq!(db.query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get::<_,String>(0)).unwrap(),expected_retained);
             assert_eq!(db.query_row("SELECT parent_key FROM session_catalog WHERE namespace='source-a' AND session_key='child'",[],|r|r.get::<_,String>(0)).unwrap(),"successor");
-            for (table, before) in retained {
+            assert_eq!(rows(&f, "session_slots", "parent"), original_slots);
+            assert_eq!(rows(&f, "session_slot_projections", "parent"), original_slot_header);
+            assert_eq!(rows(&f, "session_history_slots", "parent"), original_slots);
+            let history_header: Option<(String, String, i64, i64, bool)> = db
+                .query_row(
+                    "SELECT generation,source_generation,version,total,incomplete FROM session_history_projections WHERE namespace='source-a' AND session_key='parent'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                )
+                .optional()
+                .unwrap();
+            assert!(history_header.is_some_and(|(generation, source, version, total, incomplete)| {
+                let original = &original_slot_header[0];
+                generation == original[2].as_str().unwrap()
+                    && source == original[3].as_str().unwrap_or_default()
+                    && version == original[4].as_i64().unwrap()
+                    && total == original[5].as_i64().unwrap()
+                    && !incomplete
+            }));
+            let original_header: Option<(String, i64, Option<String>, i64)> = db
+                .query_row(
+                    "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE namespace='source-a' AND session_key='parent'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .unwrap();
+            let original_header = original_header.map(|(generation, version, source, total)| {
+                (generation, u32::try_from(version).unwrap(), source, total)
+            });
+            assert_eq!(
+                db.query_row(
+                    "SELECT value FROM meta WHERE namespace='source-a' AND key='history_original_header:parent'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+                serde_json::to_string(&original_header).unwrap(),
+                "retained History records the exact original recipe header"
+            );
+            let history_proof_refs: Vec<String> = db
+                .prepare("SELECT id FROM storage_proof_refs WHERE namespace='source-a' AND session_key='parent' AND kind='history' ORDER BY id")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(history_proof_refs, original_proof_refs);
+            assert_eq!(db.query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND session_key='parent' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+            for (table, before) in retained_trace {
                 assert_eq!(rows(&f, table, "parent"), before, "custody {table}");
             }
             assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND session_key='parent' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
@@ -8484,7 +8723,7 @@ mod tests {
                 .ingest(&"1".repeat(64), &old.full_path(options), "codex")
                 .unwrap();
             let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(old));
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
             let runtime = binding.reader_runtime().unwrap();
             let id = runtime.current_generation("model-0").unwrap();
             let mut lease = runtime
@@ -8519,7 +8758,7 @@ mod tests {
                 model.prepared().rows[0].sources[0].path,
                 moved.full_path(options)
             );
-            publish(&mut cache, &f, &next, &model);
+            publish(&mut cache, &f, &next, &model, &[]);
             assert_eq!(f.db().query_row("SELECT lifecycle FROM session_catalog_sources WHERE namespace='source-a' AND session_key='model-0' AND source_path=?1",[old.full_path(options).to_string_lossy()],|r|r.get::<_,String>(0)).unwrap(),"retained");
             let owner = NativeOwnership::admit(&f.config).unwrap();
             let mut db = SourceJournal::owned(owner).connection().unwrap();
@@ -8552,7 +8791,7 @@ mod tests {
                 .ingest(&"4".repeat(64), &input.full_path(options), "codex")
                 .unwrap();
             let (batch, model) = ready(&mut original, &f, options, std::slice::from_ref(input));
-            publish(&mut original, &f, &batch, &model);
+            publish(&mut original, &f, &batch, &model, &[]);
             original.finish_semantic_stage(batch.epoch).unwrap();
             write(options, input, "replacement", None);
             original
@@ -8623,7 +8862,7 @@ mod tests {
                     .unwrap();
                 let (batch, model) =
                     ready(&mut foreign, &f, &options[1], std::slice::from_ref(input));
-                publish(&mut foreign, &f, &batch, &model);
+                publish(&mut foreign, &f, &batch, &model, &[]);
                 assert_eq!(
                     foreign.finish_semantic_stage(batch.epoch).unwrap(),
                     Outcome::Written
@@ -8657,7 +8896,7 @@ mod tests {
             }
             let (batch, model) = ready(&mut cache, &f, options, &inputs[..64]);
             assert_eq!(model.prepared().rows.len(), 64);
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
             assert_eq!(
                 cache.finish_semantic_stage(batch.epoch).unwrap(),
                 Outcome::Written
@@ -8737,7 +8976,7 @@ mod tests {
                     .unwrap();
                 let (batch, model) =
                     ready(&mut foreign, &f, &options[1], std::slice::from_ref(input));
-                publish(&mut foreign, &f, &batch, &model);
+                publish(&mut foreign, &f, &batch, &model, &[]);
                 foreign.finish_semantic_stage(batch.epoch).unwrap();
             }
             let options = &options[0];
@@ -8764,7 +9003,7 @@ mod tests {
                     .unwrap();
             }
             let (batch, model) = ready(&mut cache, &f, options, &inputs[..3]);
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
             cache.finish_semantic_stage(batch.epoch).unwrap();
             let foreign = namespace_state(&f, "source-b");
             // Hold a fully prepared publication, stronger than merely passing
@@ -8813,6 +9052,18 @@ mod tests {
                 .unwrap()
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()
                 .unwrap();
+            let prior_recipes = prior_current
+                .keys()
+                .map(|key| {
+                    (
+                        key.clone(),
+                        (
+                            rows(&f, "session_slot_projections", key),
+                            rows(&f, "session_slots", key),
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
             let prior_history = f
                 .db()
                 .prepare(
@@ -8906,27 +9157,13 @@ mod tests {
             let (batch, model) = final_model.expect("bounded native restart reaches publication");
             assert_eq!(model.prepared().rows.len(), 4);
             oracle(&cache, options, &inputs, model.prepared());
-            // The admitted writer preserves a differing Current observation
-            // as an original before composing History. With the explicitly
-            // empty prior History above, changed owners therefore retain
-            // their exact prior metadata, including Query facts and sources,
-            // with the explicit Current-to-Retained custody transition.
-            let mut expected_history = prior_history;
-            for current in &model.prepared().rows {
-                let Some(old) = prior_current.get(&current.key) else {
-                    continue;
-                };
-                if old != &serde_json::to_string(current).unwrap() {
-                    let mut retained =
-                        serde_json::from_str::<crate::model::summary::CatalogRow>(old).unwrap();
-                    retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-                    expected_history.insert(
-                        current.key.clone(),
-                        serde_json::to_string(&retained).unwrap(),
-                    );
-                }
-            }
-            publish(&mut cache, &f, &batch, &model);
+            let expected_current = model
+                .prepared()
+                .rows
+                .iter()
+                .map(|row| (row.key.clone(), serde_json::to_string(row).unwrap()))
+                .collect::<BTreeMap<_, _>>();
+            publish(&mut cache, &f, &batch, &model, &[]);
             let db = f.db();
             assert_eq!(
                 db.query_row(
@@ -8937,6 +9174,16 @@ mod tests {
                 .unwrap(),
                 4
             );
+            let current = db
+                .prepare(
+                    "SELECT session_key,metadata FROM session_catalog WHERE namespace='source-a' AND lifecycle='current' ORDER BY session_key",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+                .unwrap();
+            assert_eq!(current, expected_current, "Current metadata matches the restarted cohort");
             let history = db
                 .prepare(
                     "SELECT session_key,metadata FROM session_history_catalog WHERE namespace='source-a' ORDER BY session_key",
@@ -8946,44 +9193,30 @@ mod tests {
                 .unwrap()
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()
                 .unwrap();
-            assert_eq!(history, expected_history, "exact retained custody metadata");
-            assert_eq!(
-                history.len(),
-                1,
-                "one changed parent observation retains original custody"
-            );
-            let (history_key, history_metadata) = history.iter().next().unwrap();
-            let history_row =
-                serde_json::from_str::<crate::model::summary::CatalogRow>(history_metadata)
+            assert_eq!(history, prior_history, "unchanged source revisions add no History");
+            for (key, (header, slots)) in prior_recipes {
+                assert_eq!(rows(&f, "session_slot_projections", &key), header, "Current recipe header for {key}");
+                assert_eq!(rows(&f, "session_slots", &key), slots, "Current recipe for {key}");
+            }
+            for projection in &model.prepared().transcripts {
+                let stored: Vec<String> = db
+                    .prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key=?1 ORDER BY slot")
+                    .unwrap()
+                    .query_map([&projection.key], |r| r.get(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
                     .unwrap();
-            let mut old = serde_json::from_str::<crate::model::summary::CatalogRow>(
-                &prior_current[history_key],
-            )
-            .unwrap();
-            old.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-            assert_eq!(
-                serde_json::to_value(&history_row).unwrap(),
-                serde_json::to_value(&old).unwrap(),
-                "original Query facts, source provenance and consumed prefixes are immutable"
-            );
-            assert!(
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE namespace='source-a' AND session_key=?1 AND total>=0)",
-                    [history_key],
-                    |r| r.get::<_, bool>(0),
-                )
-                .unwrap(),
-                "retained custody has a history recipe header"
-            );
-            assert!(
-                db.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_history_slots WHERE namespace='source-a' AND session_key=?1)",
-                    [history_key],
-                    |r| r.get::<_, bool>(0),
-                )
-                .unwrap(),
-                "retained custody preserves an inspectable slot prefix"
-            );
+                assert_eq!(
+                    stored,
+                    projection
+                        .slots
+                        .iter()
+                        .map(|slot| serde_json::to_string(slot).unwrap())
+                        .collect::<Vec<_>>(),
+                    "Current recipe matches prepared transcript for {}",
+                    projection.key
+                );
+            }
             assert_eq!(db.query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND parent_key='late-0' AND lifecycle='current'",[],|r|r.get::<_,i64>(0)).unwrap(),3);
             assert_eq!(db.query_row("SELECT count(*) FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",[],|r|r.get::<_,i64>(0)).unwrap(),4);
             assert_eq!(namespace_state(&f, "source-b"), foreign);
@@ -9299,7 +9532,7 @@ mod tests {
                     );
                 }
                 oracle(&admitted, options, &inputs, model.prepared());
-                publish(&mut admitted, &f, &batch, &model);
+                publish(&mut admitted, &f, &batch, &model, &[]);
             }
         }
 
@@ -9599,7 +9832,7 @@ mod tests {
                 1
             );
             oracle(&cache, options, &inputs, model.prepared());
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
         }
         #[test]
         fn configured_semantic_domain94_claude_names_real_producer_oracle() {
@@ -9625,7 +9858,7 @@ mod tests {
                 }
                 assert_eq!(shared_state(&f), before);
                 oracle(&cache, options, &inputs, model.prepared());
-                publish(&mut cache, &f, &batch, &model);
+                publish(&mut cache, &f, &batch, &model, &[]);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
             }
         }
@@ -9638,7 +9871,7 @@ mod tests {
             let mut cache = open(&f.config);
             let (batch, model) = claude_ready(&mut cache, options, &inputs);
             oracle(&cache, options, &inputs, model.prepared());
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
             cache.finish_semantic_stage(batch.epoch).unwrap();
             let original_rows = model.prepared().rows.clone();
             let original_current = model
@@ -9728,7 +9961,7 @@ mod tests {
                 owner_reached,
                 "bounded append custody did not reach owner publication"
             );
-            publish(&mut cache, &f, &batch, &model);
+            publish(&mut cache, &f, &batch, &model, &[]);
             cache.finish_semantic_stage(batch.epoch).unwrap();
             drop(cache);
             let cache = open(&f.config);
@@ -9786,11 +10019,11 @@ mod tests {
             let mut cache = open(&f.config);
             let mut other = open(&foreign);
             let (other_batch, other_model) = claude_ready(&mut other, options, &inputs);
-            publish(&mut other, &f, &other_batch, &other_model);
+            publish(&mut other, &f, &other_batch, &other_model, &[]);
             let foreign_before = namespace_state(&f, "source-b");
             let (first, first_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
-            publish(&mut cache, &f, &first, &first_model);
+            publish(&mut cache, &f, &first, &first_model, &[]);
             cache.finish_semantic_stage(first.epoch).unwrap();
             let (batch, model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             assert_eq!(batch.context.endpoints.len(), 1);
@@ -9861,7 +10094,7 @@ mod tests {
                 native_rows
             );
             oracle(&cache, options, &inputs, fresh_model.prepared());
-            publish(&mut cache, &f, &fresh, &fresh_model);
+            publish(&mut cache, &f, &fresh, &fresh_model, &[]);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
         }
 
@@ -9874,7 +10107,7 @@ mod tests {
             let _foreign = open(&foreign);
             let (first, first_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
-            publish(&mut cache, &f, &first, &first_model);
+            publish(&mut cache, &f, &first, &first_model, &[]);
             cache.finish_semantic_stage(first.epoch).unwrap();
             let _ = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let db = f.db();
@@ -9993,14 +10226,14 @@ mod tests {
             .unwrap();
             let mut other = open(&foreign);
             let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs[..1]);
-            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            publish(&mut other, &f, &foreign_batch, &foreign_model, &[]);
             let foreign_before = namespace_state(&f, "source-b");
             let mut cache = open(&f.config);
             // All 64 hinted owners are real, independently published native
             // sessions. The initiator would make their replay a 65-source unit.
             for seeds in [&inputs[1..33], &inputs[33..]] {
                 let (batch, model) = claude_ready_from(&mut cache, options, &inputs, seeds);
-                publish(&mut cache, &f, &batch, &model);
+                publish(&mut cache, &f, &batch, &model, &[]);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
             }
             let (batch, _model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
@@ -10058,7 +10291,7 @@ mod tests {
             .unwrap();
             let mut other = open(&foreign);
             let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs);
-            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            publish(&mut other, &f, &foreign_batch, &foreign_model, &[]);
             let foreign_before = namespace_state(&f, "source-b");
             let mut cache = open(&f.config);
             let (old, model) = claude_ready(&mut cache, options, &inputs[..1]);
@@ -10110,7 +10343,7 @@ mod tests {
                 )
             );
             oracle(&cache, options, &inputs, fresh_model.prepared());
-            publish(&mut cache, &f, &fresh, &fresh_model);
+            publish(&mut cache, &f, &fresh, &fresh_model, &[]);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
         }
 
@@ -10131,12 +10364,12 @@ mod tests {
             .unwrap();
             let mut other = open(&foreign);
             let (foreign_batch, foreign_model) = claude_ready(&mut other, options, &inputs);
-            publish(&mut other, &f, &foreign_batch, &foreign_model);
+            publish(&mut other, &f, &foreign_batch, &foreign_model, &[]);
             let foreign_before = namespace_state(&f, "source-b");
             let mut cache = open(&f.config);
             let (peers, peers_model) =
                 claude_ready_from(&mut cache, options, &inputs, &inputs[1..]);
-            publish(&mut cache, &f, &peers, &peers_model);
+            publish(&mut cache, &f, &peers, &peers_model, &[]);
             cache.finish_semantic_stage(peers.epoch).unwrap();
             let (old, old_model) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let selector = Selector::ClaudeName {
@@ -10279,7 +10512,7 @@ mod tests {
                 )
             );
             oracle(&cache, options, &inputs, fresh_model.prepared());
-            publish(&mut cache, &f, &fresh, &fresh_model);
+            publish(&mut cache, &f, &fresh, &fresh_model, &[]);
             assert_eq!(namespace_state(&f, "source-b"), foreign_before);
         }
 
@@ -10292,7 +10525,7 @@ mod tests {
             let mut cache = open(&f.config);
             for seeds in [&inputs[..32], &inputs[32..]] {
                 let (batch, model) = claude_ready_from(&mut cache, options, &inputs, seeds);
-                publish(&mut cache, &f, &batch, &model);
+                publish(&mut cache, &f, &batch, &model, &[]);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
             }
             let (batch, _) = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
@@ -10712,7 +10945,7 @@ mod tests {
                     assert_eq!(selector_value(actual), selector_value(expected));
                 }
                 oracle(&admitted, options, &inputs, model.prepared());
-                publish(&mut admitted, &f, &batch, &model);
+                publish(&mut admitted, &f, &batch, &model, &[]);
             }
         }
 
@@ -10784,7 +11017,7 @@ mod tests {
                 unchanged,
                 "typed anchored stub must match the recorded producer witness"
             );
-            publish(&mut own, &f, &batch, &model);
+            publish(&mut own, &f, &batch, &model, &[]);
             for table in [
                 "session_catalog",
                 "session_catalog_sources",
@@ -10918,7 +11151,7 @@ mod tests {
                 )
             );
             oracle(&admitted, options, &inputs, model.prepared());
-            publish(&mut admitted, &f, &batch, &model);
+            publish(&mut admitted, &f, &batch, &model, &[]);
         }
 
         fn peer_inputs(options: &crate::Options, copies: usize, peer: &str) -> Vec<crate::Input> {
@@ -10970,7 +11203,7 @@ mod tests {
                     projection_rows(&reference, None)
                 );
                 oracle(&admitted, options, &inputs, model.prepared());
-                publish(&mut admitted, &f, &batch, &model);
+                publish(&mut admitted, &f, &batch, &model, &[]);
             }
         }
         #[test]
@@ -11013,7 +11246,7 @@ mod tests {
                 f.db().prepare("SELECT kind,value,harness,after_key,after_edge,done FROM catalog_semantic_frontier WHERE namespace=?1 ORDER BY kind,value,harness").unwrap().query_map([namespace], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,bool>(5)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
             };
             let control_frontier = frontier("source-b");
-            publish(&mut foreign, &f, &foreign_batch, &foreign_model);
+            publish(&mut foreign, &f, &foreign_batch, &foreign_model, &[]);
             foreign.finish_semantic_stage(foreign_batch.epoch).unwrap();
             let before = namespace_state(&f, "source-b");
             let mut admitted = open(&f.config);
@@ -11024,7 +11257,7 @@ mod tests {
                 "populated foreign Current/dependencies cannot alter the complete local frontier compared with the same Raw control"
             );
             oracle(&admitted, options, &inputs, model.prepared());
-            publish(&mut admitted, &f, &batch, &model);
+            publish(&mut admitted, &f, &batch, &model, &[]);
             admitted.finish_semantic_stage(batch.epoch).unwrap();
             assert_eq!(namespace_state(&f, "source-b"), before);
             // Repeat through actual published Current/dependency authority.
@@ -11032,7 +11265,7 @@ mod tests {
                 claude_ready_from(&mut admitted, options, &inputs, &inputs[..1]);
             assert!(f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_frontier WHERE namespace='source-a' AND kind IN ('native','dependency','nativeall') AND done=1)",[],|r|r.get::<_,bool>(0)).unwrap());
             oracle(&admitted, options, &inputs, next_model.prepared());
-            publish(&mut admitted, &f, &next, &next_model);
+            publish(&mut admitted, &f, &next, &next_model, &[]);
             assert_eq!(
                 namespace_state(&f, "source-b"),
                 before,
