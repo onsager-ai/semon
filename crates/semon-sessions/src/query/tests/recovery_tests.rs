@@ -172,10 +172,7 @@ fn publish_semantic_stage(home: &Home, input: &crate::Input) {
     ];
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     crate::storage::transfer::reported::tests::begin_active_catalog(
-        &mut cache,
-        &paths,
-        &runtime,
-        false,
+        &mut cache, &paths, &runtime, false,
     );
     let mut published = false;
     for _ in 0..128 {
