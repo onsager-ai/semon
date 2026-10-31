@@ -2440,28 +2440,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .key
         .clone();
-    let (pid_original_source, pid_original_proof) =
-        super::super::snapshot::with_admitted_snapshot(
-            &pool,
-            &namespace,
-            &control,
-            &generation,
-            |snapshot| {
-                let original = snapshot
-                    .catalog(&pid_owner_key, false)?
-                    .ok_or(StorageError::ScopeChanged)?;
-                let source = original
-                    .sources
-                    .iter()
-                    .find(|source| source.native_id == "one")
-                    .ok_or(StorageError::ScopeChanged)?
-                    .clone();
-                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
-                let proof = native_proof_tuple(&mut tx, &generation, &source)?;
-                Ok((source, proof))
-            },
-        )
-        .unwrap();
+    let (pid_original_source, pid_original_proof) = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            let original = snapshot
+                .catalog(&pid_owner_key, false)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let source = original
+                .sources
+                .iter()
+                .find(|source| source.native_id == "one")
+                .ok_or(StorageError::ScopeChanged)?
+                .clone();
+            let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            let proof = native_proof_tuple(&mut tx, &generation, &source)?;
+            Ok((source, proof))
+        },
+    )
+    .unwrap();
     assert!(!pg.note_catalog_audit(Some("stale"), 1790812802000).unwrap());
     assert!(
         pg.note_catalog_audit(Some(&generation), 1790812802000)
@@ -5550,8 +5549,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let agent = claude_agent.to_str().unwrap().to_owned();
     let agent_removal = vec![(agent.clone(), store.ledger(&agent).unwrap())];
     let composite_b = composite_b_path.to_str().unwrap().to_owned();
-    let composite_b_removal =
-        vec![(composite_b.clone(), store.ledger(&composite_b).unwrap())];
+    let composite_b_removal = vec![(composite_b.clone(), store.ledger(&composite_b).unwrap())];
     let gone = bulk[1].full_path(&facts_options);
     let gone_path = gone.to_str().unwrap().to_owned();
     let gone_removal = vec![(gone_path.clone(), store.ledger(&gone_path).unwrap())];
@@ -5786,11 +5784,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .ok_or(StorageError::ScopeChanged)?
                     .clone();
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
-                let proof = native_proof_tuple(
-                    &mut tx,
-                    qualified.as_deref().unwrap(),
-                    &withdrawn_source,
-                )?;
+                let proof =
+                    native_proof_tuple(&mut tx, qualified.as_deref().unwrap(), &withdrawn_source)?;
                 Ok((current_source, withdrawn_source, proof))
             },
         )
