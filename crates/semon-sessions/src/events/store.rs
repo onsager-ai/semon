@@ -3472,20 +3472,19 @@ impl SqliteStore {
                         let (row, size) = match value {
                             Some(Some(value)) => {
                                 let size = value.len();
-                                let row = serde_json::from_str::<crate::model::summary::CatalogRow>(
-                                    &value,
-                                )
-                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                                let row =
+                                    serde_json::from_str::<crate::model::summary::CatalogRow>(
+                                        &value,
+                                    )
+                                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
                                 (row, size)
                             }
                             Some(None) => {
                                 // Reuse the typed publication row when it is
                                 // available; an oversized affected neighbor
                                 // cannot be rebuilt safely within this bound.
-                                let Some((row, metadata)) = rows
-                                    .iter()
-                                    .zip(&metadata)
-                                    .find(|(row, _)| row.key == key)
+                                let Some((row, metadata)) =
+                                    rows.iter().zip(&metadata).find(|(row, _)| row.key == key)
                                 else {
                                     return Err(StoreError::Data(
                                         "scoped catalog search metadata exceeds 1 MiB for an affected row absent from the publication"
@@ -8943,9 +8942,8 @@ mod tests {
         assert!(catalog_batch_bytes(&oversized, &metadata, CatalogWriter::Auto).is_none());
         catalog_write_pair(&mut batch, &mut row_wise, &oversized, &projections, true);
         for store in [&batch, &row_wise] {
-            let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(
-                store.owner.clone(),
-            );
+            let admitted =
+                crate::storage::sqlite::semantic::AdmittedSource::native(store.owner.clone());
             let history = crate::storage::sqlite::history::OriginalHistory::admitted(
                 &store.connection,
                 &admitted,

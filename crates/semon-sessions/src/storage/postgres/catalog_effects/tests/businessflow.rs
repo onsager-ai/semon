@@ -1537,12 +1537,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .expect("SQLite same-append original Catalog publication")
         .expect("SQLite original Catalog generation");
-    let mut append_oracle_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(
-            recent_machine.into(),
-            append_oracle_options.clone(),
-        )]),
-    ));
+    let mut append_oracle_query =
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(recent_machine.into(), append_oracle_options.clone())],
+        )));
     let prefix_list = append_oracle_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite same-append prefix Query");
@@ -1647,9 +1645,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(saved_prefixes.iter().any(|(source, _)| {
-        source.root == "claude" && source.path == append_relative_path
-    }));
+    assert!(
+        saved_prefixes
+            .iter()
+            .any(|(source, _)| { source.root == "claude" && source.path == append_relative_path })
+    );
     let append_history_reader = SavedPrefix(saved_prefixes);
     let append_history_query = format!(
         "sid={}&scope=retained_history&after=0&limit=100",
@@ -1725,14 +1725,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite same-append successor Catalog publication")
         .expect("SQLite successor Catalog generation");
     assert_ne!(append_successor_generation, append_prefix_generation);
-    let append_current_identity = crate::session_catalog_identity(
-        &append_oracle_options,
-        recent_machine,
-        &appended_key,
-    )
-    .unwrap()
-    .expect("SQLite append successor has a Current identity");
-    assert_eq!(append_current_identity.generation, append_successor_generation);
+    let append_current_identity =
+        crate::session_catalog_identity(&append_oracle_options, recent_machine, &appended_key)
+            .unwrap()
+            .expect("SQLite append successor has a Current identity");
+    assert_eq!(
+        append_current_identity.generation,
+        append_successor_generation
+    );
     let appended_offset = |identity: &crate::CatalogSessionIdentity| {
         identity
             .source_refs
