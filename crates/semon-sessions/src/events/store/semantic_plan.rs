@@ -18,7 +18,7 @@ fn source_budget() -> rusqlite::Error {
 }
 
 pub(crate) trait OwnerClosurePort {
-    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>>;
+    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool, String)>>;
     fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)>;
     fn members(&self, kind: &str, id: &str) -> rusqlite::Result<Vec<String>>;
     fn native_members(&self, harness: &str, id: &str) -> rusqlite::Result<Vec<String>>;
@@ -28,11 +28,10 @@ pub(crate) fn owner_closure_with(
     port: &impl OwnerClosurePort,
     seed: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    let Some((harness, top)) = port.input(seed)? else {
+    let Some((harness, top, id)) = port.input(seed)? else {
         return Ok(vec![seed.to_owned()]);
     };
-    if harness == "codex" && top {
-        let (id, _) = port.links(seed)?;
+    if harness == "codex" {
         let paths = port
             .native_members(&harness, &id)?
             .into_iter()

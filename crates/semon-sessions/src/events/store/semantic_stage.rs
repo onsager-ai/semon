@@ -821,12 +821,12 @@ fn frontier_page(c: &Connection) -> rusqlite::Result<bool> {
 /// native continuation, session and bridge links. Semantic neighbours are excluded.
 struct OrdinaryOwnerPlan<'a>(&'a Connection);
 impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
-    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>> {
+    fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool, String)>> {
         self.0
             .query_row(
-                "SELECT harness,is_top FROM catalog_semantic_inputs WHERE source_path=?1",
+                "SELECT harness,is_top,native_id FROM catalog_semantic_inputs WHERE source_path=?1",
                 [path],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
     }
@@ -837,7 +837,7 @@ impl OwnerClosurePort for OrdinaryOwnerPlan<'_> {
         self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness='claude' AND is_top=1 AND (native_id=?1 AND ?2='lineage:claude' OR source_path IN (SELECT source_path FROM catalog_native_dependencies WHERE harness=?2 AND native_id=?1)) ORDER BY source_path LIMIT 65")?.query_map(params![id,kind], |r| r.get(0))?.collect()
     }
     fn native_members(&self, harness: &str, id: &str) -> rusqlite::Result<Vec<String>> {
-        self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness COLLATE BINARY=?1 COLLATE BINARY AND native_id COLLATE BINARY=?2 COLLATE BINARY ORDER BY source_path COLLATE BINARY LIMIT 65")?.query_map(params![harness,id], |r| r.get(0))?.collect()
+        self.0.prepare("SELECT source_path FROM catalog_semantic_inputs WHERE harness COLLATE BINARY=?1 COLLATE BINARY AND native_id COLLATE BINARY=?2 COLLATE BINARY ORDER BY is_top,source_path COLLATE BINARY LIMIT 65")?.query_map(params![harness,id], |r| r.get(0))?.collect()
     }
 }
 impl PublicationPlanPort for OrdinaryOwnerPlan<'_> {
@@ -3008,20 +3008,24 @@ mod tests {
     fn physical_owner_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE catalog_semantic_inputs(source_path TEXT PRIMARY KEY,harness TEXT COLLATE NOCASE NOT NULL,native_id TEXT COLLATE NOCASE NOT NULL,is_top INTEGER NOT NULL);
-             CREATE TABLE files(path TEXT PRIMARY KEY,links TEXT NOT NULL);",
+            "CREATE TABLE catalog_semantic_inputs(source_path TEXT PRIMARY KEY,harness TEXT COLLATE NOCASE NOT NULL,native_id TEXT COLLATE NOCASE NOT NULL,is_top INTEGER NOT NULL);",
         )
         .unwrap();
         db
     }
 
-    fn add_physical_owner_input(db: &Connection, path: &str, harness: &str, native_id: &str) {
+    fn add_physical_owner_input(
+        db: &Connection,
+        path: &str,
+        harness: &str,
+        native_id: &str,
+        is_top: bool,
+    ) {
         db.execute(
-            "INSERT INTO catalog_semantic_inputs VALUES(?1,?2,?3,1)",
-            params![path, harness, native_id],
+            "INSERT INTO catalog_semantic_inputs VALUES(?1,?2,?3,?4)",
+            params![path, harness, native_id, is_top],
         )
         .unwrap();
-        db.execute("INSERT INTO files VALUES(?1,'{}')", [path]).unwrap();
     }
 
     #[test]
@@ -3035,6 +3039,7 @@ mod tests {
                     &format!("group-{count}/source-{i:02}"),
                     "codex",
                     &id,
+                    i % 2 == 1,
                 );
             }
             let expected = (0..count)
@@ -3052,6 +3057,7 @@ mod tests {
                 &format!("overflow/source-{i:02}"),
                 "codex",
                 "rollout-overflow",
+                i % 2 == 1,
             );
         }
         let error = owner_closure_with(&OrdinaryOwnerPlan(&db), "overflow/source-00")
@@ -3067,14 +3073,14 @@ mod tests {
     #[test]
     fn codex_physical_owner_closure_uses_binary_id_and_harness_equality() {
         let db = physical_owner_db();
-        for (path, harness, id) in [
-            ("rollout/a", "codex", "Case-ID"),
-            ("rollout/b", "codex", "Case-ID"),
-            ("rollout/case", "codex", "case-id"),
-            ("rollout/other", "codex", "other-id"),
-            ("rollout/claude", "claude", "Case-ID"),
+        for (path, harness, id, is_top) in [
+            ("rollout/a", "codex", "Case-ID", false),
+            ("rollout/b", "codex", "Case-ID", true),
+            ("rollout/case", "codex", "case-id", false),
+            ("rollout/other", "codex", "other-id", true),
+            ("rollout/claude", "claude", "Case-ID", false),
         ] {
-            add_physical_owner_input(&db, path, harness, id);
+            add_physical_owner_input(&db, path, harness, id, is_top);
         }
         assert_eq!(
             owner_closure_with(&OrdinaryOwnerPlan(&db), "rollout/a").unwrap(),
