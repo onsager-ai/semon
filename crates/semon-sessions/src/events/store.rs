@@ -6743,7 +6743,9 @@ mod tests {
         for mutation in [
             Some("ALTER TABLE main.meta ADD COLUMN unexpected TEXT;"),
             Some("DROP TABLE main.meta;"),
-            Some("UPDATE main.storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='fixture-source';"),
+            Some(
+                "UPDATE main.storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace='fixture-source';",
+            ),
             None,
         ] {
             let root = scratch("cold-discovery-refusal");
@@ -6756,10 +6758,7 @@ mod tests {
                 None => change_parser_version_for_test(&store.connection, "unsupported").unwrap(),
             }
             let before = store.connection.total_changes();
-            assert!(
-                store.discover_recovery_sources().is_err(),
-                "{mutation:?}"
-            );
+            assert!(store.discover_recovery_sources().is_err(), "{mutation:?}");
             assert!(
                 store
                     .discover_catalog_sources(&["/refused.jsonl".into()], false)
