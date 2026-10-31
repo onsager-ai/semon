@@ -990,7 +990,7 @@ impl crate::events::store::semantic_stage::QualificationPort for ScopedQualifica
 
 fn event_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError> {
     let c = layout.db;
-    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness NOT IN ('codex','claude') OR (harness='claude' AND is_top=0)))",[ns],|r|r.get(0)).map_err(error)?;
+    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND harness NOT IN ('codex','claude'))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported {
         return Err(refuse("semantic_nonprimitive_event_harness"));
     }
