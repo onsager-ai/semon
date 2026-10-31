@@ -8909,7 +8909,6 @@ mod tests {
         use crate::model::relation_stage::Phase;
         let root = scratch("catalog-commit-boundary-semantic");
         let (options, rows, _) = catalog_native_fixture(&root, 4, false);
-        let (disabled_path, enabled_path) = catalog_semantic_stage_paths(&options);
         let paths = rows
             .iter()
             .flat_map(|row| &row.sources)
@@ -8918,8 +8917,80 @@ mod tests {
             .into_iter()
             .collect::<Vec<_>>();
         let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+
+        // Host indexing captures a fresh operation identity for each source.
+        // Run that producer phase once, then fork both commit-boundary passes
+        // from its committed state so their complete authority rows match.
+        let indexed_path = crate::events::EventCache::path(&options.cache)
+            .with_file_name("semantic_indexed.sqlite3");
+        fs::copy(crate::events::EventCache::path(&options.cache), &indexed_path).unwrap();
+        let indexed_options = crate::Options {
+            cache: indexed_path.with_extension("json"),
+            ..options.clone()
+        };
+        {
+            let mut cache = crate::events::EventCache::open_scoped(
+                &indexed_options.cache,
+                &indexed_options.source,
+            )
+            .unwrap();
+            assert_eq!(
+                cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+                Outcome::Written
+            );
+            let config = indexed_options.source.config(&indexed_options.cache).unwrap();
+            let mut store = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap();
+            let mut indexing_complete = false;
+            for _ in 0..128 {
+                let batch = store
+                    .batch(64)
+                    .unwrap()
+                    .expect("active real semantic fixture");
+                if batch.phase == Phase::Identity {
+                    indexing_complete = true;
+                    break;
+                }
+                assert_eq!(batch.phase, Phase::Indexing);
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let inputs = batch
+                    .paths
+                    .iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(Path::new(path), &indexed_options)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let prepared = crate::model::prepare_semantic_batch(
+                    &indexed_options,
+                    &mut cache,
+                    &inputs,
+                    &batch,
+                    CATALOG_FIXTURE_NOW,
+                )
+                .unwrap();
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&batch, prepared.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
+                cache.end_scan();
+                cache.release_published_indexes();
+            }
+            assert!(
+                indexing_complete,
+                "shared real semantic indexing phase must complete"
+            );
+        }
+        let (disabled_path, enabled_path) = catalog_semantic_stage_paths(&indexed_options);
         let mut outcomes = Vec::new();
         let mut states = Vec::new();
+        let mut starting_states = Vec::new();
         for (path, timing) in [(&disabled_path, false), (&enabled_path, true)] {
             let scoped_options = crate::Options {
                 cache: path.with_extension("json"),
@@ -8931,15 +9002,14 @@ mod tests {
             )
             .unwrap();
             let stage_before = crate::model::now_ms();
-            assert_eq!(
-                cache.begin_semantic_stage(&paths, &runtime).unwrap(),
-                Outcome::Written
-            );
             let config = scoped_options.source.config(&scoped_options.cache).unwrap();
             let mut store = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
             )
             .unwrap();
+            starting_states.push(crate::native_timing::cleanup_tests::snapshot(
+                store.connection_for_test(),
+            ));
             let mut written = Vec::new();
             let mut publication_states = Vec::new();
             let mut finished = false;
@@ -9157,6 +9227,10 @@ mod tests {
         assert_eq!(
             outcomes[0], outcomes[1],
             "exact semantic outcomes and generations"
+        );
+        assert_eq!(
+            starting_states[0], starting_states[1],
+            "full MAIN/TEMP semantic authority state before commit-boundary passes"
         );
         assert_eq!(
             states[0], states[1],
