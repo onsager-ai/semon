@@ -230,7 +230,7 @@ impl ContextLookup for Snapshot<'_, '_> {
                             + session_key.len(),
                     )
                     .map_err(|_| io::Error::other(StorageError::Busy))?;
-                    next.insert(text(Some(session_key)).map_err(io::Error::other)?);
+                    next.insert(text(session_key).map_err(io::Error::other)?);
                 }
             }
             known.extend(next.iter().cloned());

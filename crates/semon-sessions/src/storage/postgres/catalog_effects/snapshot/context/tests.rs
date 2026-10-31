@@ -84,11 +84,11 @@ fn insert_raw_key(
                 &super::digest(key),
                 &key,
                 &parent,
-                &b"{}"[..],
+                &&b"{}"[..],
                 &0i64,
-                &b"claude"[..],
-                &b""[..],
-                &b""[..],
+                &&b"claude"[..],
+                &&b""[..],
+                &&b""[..],
             ],
         )
         .map(|_| ())
