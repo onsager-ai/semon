@@ -1430,7 +1430,7 @@ pub(crate) fn load_query_recipe(
                     CASE WHEN octet_length(g.metadata)+coalesce(octet_length(g.query_recipe),0)<=1048576 THEN g.query_recipe END,
                     CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,
                     CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
-                    CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
+                    CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,
                     octet_length(g.metadata)+coalesce(octet_length(g.query_recipe),0)<=1048576
                  FROM storage_proof_refs f
                  JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key
@@ -1460,6 +1460,7 @@ pub(crate) fn load_query_recipe(
             let metadata = metadata.ok_or(Error::CorruptPayload)?;
             let slots = slots.ok_or(StorageError::HistoryRetentionBounds)?;
             let manifest = manifest.ok_or(StorageError::HistoryRetentionBounds)?;
+            // Presentation observations retain their independent 8 MiB bound.
             let presentation = presentation.ok_or(StorageError::HistoryRetentionBounds)?;
             crate::selected_read::charge(
                 64,
