@@ -3976,7 +3976,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap_err();
         assert_eq!(
             (error.code, error.message.as_str()),
-            ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+            (
+                "unavailable",
+                StorageError::ScopeChanged.to_string().as_str()
+            ),
             "the previously qualified PID owner must refuse {tool}"
         );
     }
@@ -4015,7 +4018,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let error = result.unwrap_err();
                 assert_eq!(
                     (error.code, error.message.as_str()),
-                    ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+                    (
+                        "unavailable",
+                        StorageError::ScopeChanged.to_string().as_str()
+                    ),
                     "affected original Current {tool} {}",
                     row.key
                 );
@@ -4031,7 +4037,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     }
     assert!(affected_owners > 0, "fixture has a PID-dependent owner");
-    assert!(unaffected_owners > 0, "fixture has unchanged qualified owners");
+    assert!(
+        unaffected_owners > 0,
+        "fixture has unchanged qualified owners"
+    );
     assert_eq!(captured_bodies(&pool), expected_bodies);
     recorded.hostname = "source-write-after158".into();
     recorded.proc_starts.insert(4242, 1234);
@@ -5523,7 +5532,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap_err();
         assert_eq!(
             (error.code, error.message.as_str()),
-            ("unavailable", StorageError::ScopeChanged.to_string().as_str()),
+            (
+                "unavailable",
+                StorageError::ScopeChanged.to_string().as_str()
+            ),
             "changed canonical Facts must refuse live Current {tool}"
         );
     }
