@@ -4724,7 +4724,7 @@ mod tests {
         let path = inputs[1].full_path(&options[1]);
         let raw = fs::read_to_string(&path).unwrap().replace(
             "\"model\":\"sanitized-model\"",
-            "\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}",
+            "\"id\":\"reprice-answer\",\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}",
         );
         fs::write(&path, raw).unwrap();
         let mut cache = EventCache::open_semantic(
@@ -4763,6 +4763,7 @@ mod tests {
         );
         cache.finish_semantic_stage(batch.epoch).unwrap();
         let original = model.prepared().rows[0].clone();
+        assert!(original.cost.usd.is_some_and(|cost| cost > 0.0));
         assert_ne!(
             retained.sources, original.sources,
             "actual append publishes a divergent source cohort"
