@@ -2132,7 +2132,10 @@ fn recovery_immutable_corruption_blocks_selected_bytes_and_preimage_publication(
             recovery_catalog_metadata(&db, "session_catalog", "first"),
             metadata_before
         );
-        assert_eq!(recovery_publication_snapshot(&db, "first"), publication_before);
+        assert_eq!(
+            recovery_publication_snapshot(&db, "first"),
+            publication_before
+        );
         assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
         assert_eq!(catalog_generation(&home), generation_before);
         assert!(db

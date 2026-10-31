@@ -5471,11 +5471,8 @@ mod tests {
             .clone()
             .with_store(b.clone())
             .unwrap();
-        crate::invalidate_session_sources(
-            &invalidation_options,
-            std::slice::from_ref(&inputs[1]),
-        )
-        .unwrap();
+        crate::invalidate_session_sources(&invalidation_options, std::slice::from_ref(&inputs[1]))
+            .unwrap();
         let mut invalidated_budget = 8 * 1024 * 1024;
         assert!(
             restored_port
