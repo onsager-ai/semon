@@ -214,9 +214,7 @@ fn selected_edge_context(
                 if !compatible || context_sources.len() + additions.len() > 64 {
                     continue;
                 }
-                if !context.iter().any(|prior| prior == &candidate) {
-                    context.push(candidate.clone());
-                }
+                context.push(candidate.clone());
                 for source in additions {
                     context_sources.insert(source.path.clone(), source);
                 }
