@@ -6410,10 +6410,8 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
         let original_response: Value = serde_json::from_slice(&original_response.body).unwrap();
         assert_eq!(original_response["entries"].as_array().unwrap().len(), 1);
         let original_identity = original_response["identity"].clone();
-        let original_source: crate::SessionSourceRef = serde_json::from_value(
-            original_identity["source_refs"][0]["source"].clone(),
-        )
-        .unwrap();
+        let original_source: crate::SessionSourceRef =
+            serde_json::from_value(original_identity["source_refs"][0]["source"].clone()).unwrap();
         assert_eq!(original_source.path, active);
         assert_eq!(original_source.native_id, "native-session");
         assert_eq!(original_source.offset, original_bytes.len() as u64);
@@ -6559,17 +6557,12 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 None,
             );
             let retained_query = "sid=native-session&scope=retained_history&limit=100";
-            let default_history = crate::session_transcript_range(
-                &fixture.options,
-                "local",
-                retained_query,
-                None,
-            );
+            let default_history =
+                crate::session_transcript_range(&fixture.options, "local", retained_query, None);
             assert_eq!(current.status, 200);
             let history = if append {
                 assert_eq!(
-                    default_history.status,
-                    409,
+                    default_history.status, 409,
                     "ProviderOnly must refuse a changed retained source"
                 );
                 let stale: Value = serde_json::from_slice(&default_history.body).unwrap();
@@ -6607,13 +6600,21 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 assert_eq!(current_entries[1]["text"], "synthetic appended response");
                 assert_eq!(history_entries[0]["text"], original_entry["text"]);
                 assert_eq!(history_entries[0]["entry_id"], original_entry["entry_id"]);
-                assert_eq!(history_entries[0]["provenance"], original_entry["provenance"]);
-                assert_eq!(history["projection"]["generation"], original_recipe_generation);
+                assert_eq!(
+                    history_entries[0]["provenance"],
+                    original_entry["provenance"]
+                );
+                assert_eq!(
+                    history["projection"]["generation"],
+                    original_recipe_generation
+                );
                 assert_eq!(history["projection"]["total"], 1);
-                assert!(!history_entries[0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("synthetic appended response"));
+                assert!(
+                    !history_entries[0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("synthetic appended response")
+                );
             } else {
                 assert_eq!(history_entries[0]["text"], "");
                 assert_eq!(history_entries[0]["freshness"]["state"], "incomplete");
