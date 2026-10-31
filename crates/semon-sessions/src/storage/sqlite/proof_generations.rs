@@ -918,8 +918,9 @@ pub(super) fn reusable_presentations(
         // Inner joins in the verifier must not hide a broken relevant ref
         // beside a valid owner. Older, unrelated source generations can remain
         // after an ordinary Index advance and do not qualify this selection.
+        // Exact metadata, however, must encode the same source prefix.
         let broken: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key LEFT JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission LEFT JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest LEFT JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND (g.id IS NULL OR (g.stream=?3 AND (g.prefix=?4 OR g.metadata=?5) AND (p.generation IS NULL OR r.digest IS NULL OR v.id IS NULL))))",
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key LEFT JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission LEFT JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest LEFT JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND (g.id IS NULL OR (g.stream=?3 AND (g.prefix=?4 OR g.metadata=?5) AND ((g.metadata=?5 AND g.prefix<>?4) OR p.generation IS NULL OR r.digest IS NULL OR v.id IS NULL))))",
             params![ns, row.key, current.stream_epoch, prefix, metadata],
             |row| row.get(0),
         ).map_err(failed)?;

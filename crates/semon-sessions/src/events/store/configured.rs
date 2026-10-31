@@ -6172,6 +6172,9 @@ mod tests {
             "DELETE FROM meta WHERE namespace='source-a' AND key LIKE 'catalog_native_observation:%'",
             "UPDATE storage_proof_refs SET id='dangling' WHERE namespace='source-a' AND kind='current'",
             "INSERT INTO storage_proof_refs SELECT namespace,session_key,kind,'dangling' FROM storage_proof_refs WHERE namespace='source-a' AND kind='current'",
+            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix) SELECT namespace,'wrong-prefix',session_key,publication,proof,admission,stream,metadata,slots,'wrong-prefix' FROM storage_proof_generations WHERE namespace='source-a';
+             INSERT INTO storage_proof_presentations SELECT namespace,'wrong-prefix',session_key,metadata FROM storage_proof_presentations WHERE namespace='source-a';
+             INSERT INTO storage_proof_refs SELECT namespace,session_key,kind,'wrong-prefix' FROM storage_proof_refs WHERE namespace='source-a' AND kind='current';",
         ] {
             let (a, _, _) = same_db_sources();
             let mut store = owned_semantic(&a.config);
@@ -6190,7 +6193,7 @@ mod tests {
             )
             .unwrap()
             .into_test_connection();
-            db.execute(corruption, []).unwrap();
+            db.execute_batch(corruption).unwrap();
             let before = shared_state(&a);
             assert!(
                 store.publish_semantic_catalog(&next, &prepared).is_err(),
