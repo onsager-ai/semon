@@ -2502,10 +2502,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         retained_transcript["projection"],
         original_transcript["projection"]
     );
-    assert_eq!(
-        retained_transcript["entries"],
-        original_transcript["entries"]
-    );
+    assert_eq!(retained_transcript["entries"], original_transcript["entries"]);
     assert_eq!(
         retained_transcript["entries"].as_array().unwrap().len(),
         original_transcript["entries"].as_array().unwrap().len()
