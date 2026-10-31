@@ -608,11 +608,16 @@ mod tests {
     };
     use crate::storage::transfer::reported::tests::{apply, root, sqlite, stage};
 
+    const RECIPE_SESSION_ID: &str = "catalog-é \t漢字";
+
     fn publish_catalog_with_recipes(
         cache: &mut crate::events::EventCache,
         options: &crate::Options,
         inputs: &[crate::Input],
-    ) -> (Vec<crate::model::summary::CatalogRow>, Vec<(String, String)>) {
+    ) -> (
+        Vec<crate::model::summary::CatalogRow>,
+        Vec<(String, String)>,
+    ) {
         use crate::model::relation_stage::Phase;
         use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
 
@@ -628,7 +633,7 @@ mod tests {
                 &batch,
                 1_790_000_000_000,
             )
-                .unwrap();
+            .unwrap();
             let mut recipes = Vec::new();
             if batch.phase == Phase::Publication {
                 assert!(
@@ -653,7 +658,9 @@ mod tests {
                 }
             }
             assert_eq!(
-                cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                cache
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
                 crate::events::Outcome::Written
             );
             if batch.phase != Phase::Publication {
@@ -707,25 +714,16 @@ mod tests {
         Vec<crate::model::summary::CatalogRow>,
         Vec<(String, String)>,
     ) {
-        let (options, input) = crate::storage::transfer::reported::tests::seed_catalog_input(
-            source, root,
-        );
+        let (options, input) =
+            crate::storage::transfer::reported::tests::seed_catalog_input(source, root);
         let path = input.full_path(&options);
         let body = std::fs::read_to_string(&path).unwrap();
-        let producer_id = r#"u0-é \t漢字 "#;
-        assert!(body.contains("\"uuid\":\"u0\""));
-        assert!(body.contains("\"parentUuid\":\"u0\""));
-        let body = body
-            .replacen(
-                "\"uuid\":\"u0\"",
-                &format!("\"uuid\":\"{producer_id}\""),
-                1,
-            )
-            .replacen(
-                "\"parentUuid\":\"u0\"",
-                &format!("\"parentUuid\":\"{producer_id}\""),
-                1,
-            );
+        assert!(body.contains("\"sessionId\":\"catalog\""));
+        let session_id = serde_json::to_string(RECIPE_SESSION_ID).unwrap();
+        let body = body.replace(
+            "\"sessionId\":\"catalog\"",
+            &format!("\"sessionId\":{session_id}"),
+        );
         std::fs::write(&path, body).unwrap();
 
         let mut cache = crate::storage::transfer::reported::tests::cache(source);
@@ -738,11 +736,8 @@ mod tests {
                 .unwrap(),
             crate::events::Outcome::Written
         );
-        let (rows, recipes) = publish_catalog_with_recipes(
-            &mut cache,
-            &options,
-            std::slice::from_ref(&input),
-        );
+        let (rows, recipes) =
+            publish_catalog_with_recipes(&mut cache, &options, std::slice::from_ref(&input));
         assert_eq!(rows[0].repo.as_deref(), Some("facts-transfer-repo"));
         (options, rows, recipes)
     }
@@ -750,7 +745,10 @@ mod tests {
     fn advance_catalog_with_recipes(
         config: &StoreConfig,
         options: &crate::Options,
-    ) -> (Vec<crate::model::summary::CatalogRow>, Vec<(String, String)>) {
+    ) -> (
+        Vec<crate::model::summary::CatalogRow>,
+        Vec<(String, String)>,
+    ) {
         let old = crate::Input {
             root: crate::InputRoot::Claude,
             path: "projects/sanitized/catalog.jsonl".into(),
@@ -764,7 +762,7 @@ mod tests {
         let mut body = std::fs::read_to_string(&old_path).unwrap();
         body.push_str(&format!(
             "{}\n",
-            serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})
+            serde_json::json!({"type":"user","sessionId":RECIPE_SESSION_ID,"uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})
         ));
         std::fs::remove_file(&old_path).unwrap();
         let mut cache = crate::storage::transfer::reported::tests::cache(config);
@@ -829,9 +827,10 @@ mod tests {
         );
         let binding = reader.runtime_binding_at(&tx).unwrap();
         let (table, owner) = match owner {
-            crate::storage::catalog::CatalogObservationOwner::Catalog => {
-                ("session_catalog", crate::storage::catalog::CatalogObservationOwner::Catalog)
-            }
+            crate::storage::catalog::CatalogObservationOwner::Catalog => (
+                "session_catalog",
+                crate::storage::catalog::CatalogObservationOwner::Catalog,
+            ),
             crate::storage::catalog::CatalogObservationOwner::History => (
                 "session_history_catalog",
                 crate::storage::catalog::CatalogObservationOwner::History,
@@ -844,8 +843,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let selected: crate::model::summary::CatalogRow =
-            serde_json::from_str(&metadata).unwrap();
+        let selected: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
         let _observation = query_recipe_observation(&tx, &binding, owner, &selected).unwrap();
         crate::storage::proof_codec::validate_query_recipe_cell(&metadata, Some(payload)).unwrap();
         crate::query_projection::SelectedRecipe::decode(&selected, payload).unwrap();
@@ -945,8 +943,8 @@ mod tests {
         let (expected, current_recipes) = advance_catalog_with_recipes(&source, &options);
         let history_recipe = recipe_for(&initial_recipes, &initial[0].key);
         let current_recipe = recipe_for(&current_recipes, &expected[0].key);
-        assert!(history_recipe.contains(r#"u0-é \t漢字 "#));
-        assert!(current_recipe.contains(r#"u0-é \t漢字 "#));
+        assert!(history_recipe.contains(r#"catalog-é \t漢字"#));
+        assert!(current_recipe.contains(r#"catalog-é \t漢字"#));
         assert_ne!(
             current_recipe, history_recipe,
             "the successor publication owns a distinct selected recipe"
