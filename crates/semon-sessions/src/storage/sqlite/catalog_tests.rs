@@ -919,8 +919,7 @@ fn archived_event_index_survives_absence_without_current_membership() {
         "the current and immutable History headers belong to different generations"
     );
     assert_ne!(main_before.3, history_before.3);
-    let main_row: crate::model::summary::CatalogRow =
-        serde_json::from_str(&main_before.0).unwrap();
+    let main_row: crate::model::summary::CatalogRow = serde_json::from_str(&main_before.0).unwrap();
     let history_row: crate::model::summary::CatalogRow =
         serde_json::from_str(&history_before.0).unwrap();
     let main_source = main_row
@@ -1059,8 +1058,7 @@ fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let history_row: crate::model::summary::CatalogRow =
-        serde_json::from_str(&history.0).unwrap();
+    let history_row: crate::model::summary::CatalogRow = serde_json::from_str(&history.0).unwrap();
     let history_source = history_row
         .sources
         .iter()
@@ -1118,8 +1116,8 @@ fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
         "claude",
         "projects/project/session-00000.jsonl",
     )
-        .unwrap()
-        .unwrap();
+    .unwrap()
+    .unwrap();
     assert_eq!(fallback.lifecycle, "retained");
     assert_eq!(fallback.source.native_id, history_source.native_id);
     assert_eq!(fallback.source.offset, history_source.offset);
@@ -1141,8 +1139,8 @@ fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
             "claude",
             "projects/project/session-00001.jsonl"
         )
-            .unwrap()
-            .is_none()
+        .unwrap()
+        .is_none()
     );
 }
 

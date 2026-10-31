@@ -1065,7 +1065,12 @@ mod tests {
             store.owner.config().namespace.as_str(),
             &row.key,
             store.owner.admission(),
-            store.owner.config().expected_stream_epoch.as_deref().unwrap(),
+            store
+                .owner
+                .config()
+                .expected_stream_epoch
+                .as_deref()
+                .unwrap(),
             &json(row).unwrap(),
         )
         .unwrap();
@@ -2190,7 +2195,8 @@ mod tests {
                                 !catalog_step(
                                     &tx,
                                     &crate::storage::QueryRuntimeBinding {
-                                        namespace: crate::storage::LogicalSourceNamespace::new("a").unwrap(),
+                                        namespace: crate::storage::LogicalSourceNamespace::new("a")
+                                            .unwrap(),
                                         admission: 1,
                                         stream_epoch: "a".repeat(64),
                                     },
@@ -2198,7 +2204,7 @@ mod tests {
                                     &target,
                                     Some(family_key),
                                 )
-                                    .unwrap()
+                                .unwrap()
                             );
                             assert_eq!(
                                 tx.query_row("SELECT total_changes()", [], |r| r.get::<_, i64>(0))
@@ -2261,19 +2267,24 @@ mod tests {
                     let tx = db.transaction().unwrap();
                     let target = table("openai", "gpt-6.1-sol", 7.0, 1);
                     let mut work = Work::default();
+                    let binding = crate::storage::QueryRuntimeBinding {
+                        namespace: crate::storage::LogicalSourceNamespace::new("a").unwrap(),
+                        admission: 1,
+                        stream_epoch: "a".repeat(64),
+                    };
                     // Keep only the source owner to exercise actual pending selection
                     // and deletion without invoking the unqualified Catalog producer.
                     tx.execute("DELETE FROM pricing_recompute_pending WHERE namespace=semon_namespace() AND owner_kind='session'", []).unwrap();
-                    assert!(pending_step(&tx, &mut work, &target).unwrap());
-                    assert!(!pending_step(&tx, &mut work, &target).unwrap());
+                    assert!(pending_step(&tx, &binding, &mut work, &target).unwrap());
+                    assert!(!pending_step(&tx, &binding, &mut work, &target).unwrap());
                     let child_key = { "same-child" };
                     tx.execute("INSERT INTO pricing_recompute_pending(namespace,owner_kind,owner_key) VALUES(semon_namespace(),'family',?1)", [child_key]).unwrap();
                     let mut family_target = (*target).clone();
                     family_target.fingerprint = "family-price".into();
                     let family_target = Arc::new(family_target);
-                    assert!(pending_step(&tx, &mut work, &family_target).unwrap());
-                    assert!(pending_step(&tx, &mut work, &family_target).unwrap());
-                    assert!(!pending_step(&tx, &mut work, &family_target).unwrap());
+                    assert!(pending_step(&tx, &binding, &mut work, &family_target).unwrap());
+                    assert!(pending_step(&tx, &binding, &mut work, &family_target).unwrap());
+                    assert!(!pending_step(&tx, &binding, &mut work, &family_target).unwrap());
                     work = Work {
                         target_fingerprint: "family-price".into(),
                         ..Work::default()
