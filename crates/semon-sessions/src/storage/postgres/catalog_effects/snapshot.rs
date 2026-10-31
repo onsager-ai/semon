@@ -511,14 +511,3 @@ impl Snapshot<'_, '_> {
         Ok(Some((header, texts)))
     }
 }
-
-#[cfg(test)]
-#[test]
-fn history_display_lifecycle_preserves_composites_only_while_current() {
-    use crate::model::summary::CatalogLifecycle::{Current, Retained};
-
-    assert_eq!(history_display_lifecycle(false, true, Current), Current);
-    assert_eq!(history_display_lifecycle(false, false, Current), Retained);
-    assert_eq!(history_display_lifecycle(true, true, Current), Retained);
-    assert_eq!(history_display_lifecycle(false, true, Retained), Retained);
-}

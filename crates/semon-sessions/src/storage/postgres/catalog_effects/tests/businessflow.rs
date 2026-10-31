@@ -7160,6 +7160,146 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(journal.claims(&[selected_path]).unwrap()[0].1, None);
     assert_eq!(journal.claims(&paths[..1]).unwrap(), revisions[..1]);
+    // Withdraw the remaining Source A through the normal source journal and
+    // semantic producer. The same new composite History now has no Current
+    // owner, while both source identities and their original proof tuples stay
+    // attached to physical History.
+    let composite_a = composite_a_path.to_str().unwrap().to_owned();
+    let composite_a_removal = vec![(
+        composite_a.clone(),
+        store.ledger(&composite_a).unwrap(),
+    )];
+    fs::rename(&composite_a_path, oracle.root.join("retained-fresh-composite-a.jsonl"))
+        .unwrap();
+    assert_eq!(
+        store.remove_files(&composite_a_removal).unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(upgraded.as_str())
+    );
+    let mut final_catchup =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    let final_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    final_catchup
+        .begin_semantic_stage(&paths, &final_runtime)
+        .unwrap();
+    let (final_batch, final_model) = loop {
+        let batch = final_catchup.semantic_batch(64).unwrap().unwrap();
+        let model = final_catchup
+            .prepare_semantic_model_batch(
+                &facts_options,
+                &stage_inputs(&facts_options, &batch),
+                &batch,
+                1790812812000,
+            )
+            .unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            break (batch, model);
+        }
+    };
+    let mut final_deferrals = 0;
+    let final_ack = loop {
+        let ack = final_catchup
+            .publish_semantic_catalog(&final_batch, final_model.prepared())
+            .unwrap();
+        if ack.0 != crate::events::Outcome::Deferred {
+            break ack;
+        }
+        assert_eq!(ack.1, None);
+        final_deferrals += 1;
+        assert!(final_deferrals < 64, "Source A custody makes bounded progress");
+    };
+    assert_eq!(final_ack.0, crate::events::Outcome::Written);
+    final_catchup
+        .finish_semantic_stage(final_batch.epoch)
+        .unwrap();
+    let final_generation = final_ack.1.unwrap();
+    assert_ne!(final_generation, upgraded);
+    assert_eq!(
+        final_catchup.session_catalog_generation().unwrap(),
+        final_generation
+    );
+    let (display, physical, source_a_proof, source_b_proof, page) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &final_generation,
+            |snapshot| {
+                let owner = snapshot
+                    .owner(composite_key)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(!owner.original, "the same composite History owner survives");
+                assert!(!owner.has_current, "Source A removal leaves no Current row");
+                assert!(snapshot.catalog(composite_key, false)?.is_none());
+
+                let physical = snapshot
+                    .catalog(composite_key, true)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(physical.sources.contains(&composite_current_source));
+                assert!(physical.sources.contains(&composite_withdrawn_source));
+                assert_eq!(physical.sources.len(), 2);
+                assert!(snapshot
+                    .history_qualified(&physical)
+                    .map_err(|_| StorageError::ScopeChanged)?);
+                snapshot::query::qualify_context_candidate(
+                    snapshot,
+                    &facts_options,
+                    &physical,
+                    true,
+                )?;
+                let (selected, _, _) = snapshot
+                    .selected(composite_key, true, 0, 64)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(selected.sources, physical.sources);
+
+                let display = snapshot
+                    .history_display_catalog(composite_key)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(
+                    display.lifecycle,
+                    crate::model::summary::CatalogLifecycle::Retained
+                );
+                let (source_a_proof, source_b_proof) = {
+                    let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                    (
+                        native_proof_tuple(
+                            &mut tx,
+                            &final_generation,
+                            &composite_current_source,
+                        )?,
+                        native_proof_tuple(
+                            &mut tx,
+                            &final_generation,
+                            &composite_withdrawn_source,
+                        )?,
+                    )
+                };
+                let reply = crate::catalog::read_page_snapshot(
+                    &facts_options,
+                    recent_machine,
+                    &crate::catalog::Request::parse(&format!(
+                        "sid={composite_key}&scope=retained_history&limit=50"
+                    ))
+                    .unwrap(),
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)?;
+                Ok((display, physical, source_a_proof, source_b_proof, reply))
+            },
+        )
+        .unwrap();
+    assert_eq!(source_a_proof, current_a_proof);
+    assert_eq!(source_b_proof, history_b_proof);
+    assert_eq!(display.key, composite_key);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["key"], composite_key);
+    assert_eq!(page["items"][0]["lifecycle"], "retained");
+    assert_eq!(physical.key, composite_key);
+
     // A retained-only owner remains readable from its publication proof when
     // the configured current Facts file has moved on. The same change refuses
     // Current selected rows above, where live runtime qualification applies.
