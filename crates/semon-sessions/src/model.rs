@@ -8772,13 +8772,23 @@ fn build_sources_inner(
     measurements.record("projection_query_summaries", started, 1);
     let started = measurements.start();
     let slot_projections = catalog.as_ref().map(|rows| {
-        crate::slot_projection::capture(
+        let mut projections = crate::slot_projection::capture(
             &tx,
             rows,
             Some(&source_records),
             history_records,
             (history_records.is_none()).then_some((&*builder.cache, catalog_base.as_deref())),
-        )
+        );
+        if staged_relationships.is_some() {
+            // External staged endpoints supply graph context, not this group's
+            // transcript publication. Genuine unmatched stubs still carry their
+            // explicit relationship witness and must retain their projections.
+            projections.retain(|projection| {
+                builder.sessions[builder.by_key[&projection.key]].kind != SessKind::Stub
+                    || !builder.staged_endpoints.contains_key(&projection.key)
+            });
+        }
+        projections
     });
     measurements.record(
         "projection_slots",
@@ -9081,6 +9091,38 @@ fn build_sources_inner(
                 published_facts.as_ref(),
                 sender_turns.as_deref().unwrap_or(&turns),
             );
+            if let Some(replay) =
+                staged_relationships.filter(|context| !context.replay_owners.is_empty())
+            {
+                let epoch = replay
+                    .epoch
+                    .ok_or_else(|| io::Error::other("semantic replay epoch missing"))?;
+                let mut after = String::new();
+                loop {
+                    let page =
+                        builder
+                            .cache
+                            .semantic_replay_page(epoch, &replay.replay_owners, &after)?;
+                    let Some(last) = page.relations.keys().next_back() else {
+                        break;
+                    };
+                    after.clone_from(last);
+                    for (id, mut recorded) in page.relations {
+                        let captured = relationships
+                            .relations
+                            .get_mut(&id)
+                            .ok_or_else(|| io::Error::other("replayed native relation missing"))?;
+                        // Local rendering omits foreign locations and endpoints.
+                        // Keep the complete durable relation, enriching only its
+                        // parent-turn witness from the physical sender observation.
+                        recorded.source_turn = recorded
+                            .source_turn
+                            .merge(&captured.source_turn)
+                            .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+                        *captured = recorded;
+                    }
+                }
+            }
             relationships.presentation = presentation;
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;

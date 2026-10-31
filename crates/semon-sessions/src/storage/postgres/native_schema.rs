@@ -16,7 +16,7 @@ const TABLES: &[Table] = &[
     Table {
         name: "semantic_publications",
         columns: "generation bytea,epoch bigint,admission bigint,base_generation bytea?,source_revision bigint,proof_digest bytea,claims bytea,metadata bytea",
-        key: "epoch",
+        key: "generation",
     },
     Table {
         name: "selected_roots",

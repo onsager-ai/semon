@@ -118,7 +118,7 @@ impl CatalogRowKind {
         match self {
             Self::ProofGeneration | Self::Presentation => &[0, 1],
             Self::ProofSource | Self::ProofRef => &[0, 1, 2],
-            Self::PublicationReceipt => &[1],
+            Self::PublicationReceipt => &[0],
             Self::PresentationRoot => &[3],
             Self::Slot
             | Self::HistorySlot

@@ -88,6 +88,16 @@ current native facts and independent durable ownership still bind it. Retired
 native manifests remain outside Current scope. Explicit retained-history reads
 can inspect past identity without gaining current control authority.
 
+Semantic publication keeps external staged endpoints as graph context across
+bounded physical owner groups. Their virtual transcripts do not enter that
+group's publication recipes. Every real owner retains its transcript projection;
+genuine unmatched call or receipt stubs retain their explicit relationship and
+projection witnesses without gaining Catalog ownership or Raw membership.
+Publication materializes its complete relationship witness from bounded durable
+replay pages, preserving nonlocal source locations and native ordering. A selected
+physical sender may enrich its recorded parent-turn witness only through the
+existing strict merge; local rendering omissions cannot replace staged evidence.
+
 SQLite semantic catch-up accepts a removed path only with its durable ordinary
 producer removal invalidation and no remaining live ledger. An exact index
 retained by the ordinary removal writer remains historical custody; staging
@@ -418,3 +428,41 @@ remain independent requirements; neither owner can borrow the other's authority.
 Same-key composite History preserves its captured Current display lifecycle while
 Current remains, then displays Retained after Current disappears. Original History
 displays Retained even when the key is reused by a Current owner.
+
+## Physical owner groups in semantic staging (qualification pending)
+
+SQLite staging enrolls the original Current owners and exact source memberships
+in private normalized records, with durable neighbor/member discovery cursors.
+The original Catalog generation stays separate from the moving publication
+head. Discovery and complete identity reduction precede relationship negatives
+and publication. Source validation advances in pages of at most 64 observations
+and 1 MiB of metadata; a journal revision change invalidates that validation.
+The existing native owner-closure, context and publication grouping algorithms
+are shared through typed physical lookup ports.
+
+A semantic family may span publication pages. Each atomic physical group joins
+an original owner to its replacement and every owner sharing its consumed
+sources. Native parent and message companions supply observations without
+expanding source acknowledgement authority. One physical group still admits at
+most 64 sources and 64 owners; metadata and projection payloads retain their
+independent 1 MiB limits. An indivisible owner exceeding a bound is unavailable,
+with no publication or acknowledgement for that unfinished stage.
+
+Each prepared group binds its original generation, epoch, moving head, exact
+paths and claims, observation revision, runtime, model and presentation witness.
+Publication rechecks complete original/replacement memberships, source ledgers,
+roles and durable removal or withdrawal evidence before effects. It commits the
+selected Catalog rows, recipes, search, proofs, retained custody, immutable
+receipt, head and eligible exact acknowledgements together. A source retains
+its claim while any enrolled owner effect needs it. Deferred original-custody
+copying advances only private progress. Completed stage authority retires with
+its pointer; bounded garbage collection precedes another stage.
+
+Receipts use immutable publication generation as their physical and logical
+transfer key, allowing multiple committed groups in one epoch. SQLite schema 35
+and stage recipe v6 are one current contract, with no compatibility reader or
+migration. PostgreSQL shares the receipt key contract but retains its existing
+explicit large-family stage refusal; normalized PostgreSQL group staging and
+full backend parity remain unqualified. SQLite changes also remain unqualified
+until the existing large-family, stale-witness, restart, custody and physical
+owner refusal regressions pass CI and independent review.
