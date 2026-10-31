@@ -4165,7 +4165,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .ok_or(StorageError::ScopeChanged)?;
             let owner_generation = snapshot
                 .owner(&appended_key)?
-                .ok_or(StorageError::ScopeChanged)?;
+                .ok_or(StorageError::ScopeChanged)?
+                .generation;
             let qualified = snapshot
                 .history_qualified(&history)
                 .map_err(|_| StorageError::ScopeChanged)?;
@@ -6398,7 +6399,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &caught,
             |snapshot| {
-                assert!(snapshot.owner(composite_key)?.is_some());
+                let history_owner = snapshot
+                    .owner(composite_key)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(!history_owner.original, "composite History owner");
+                assert!(history_owner.has_current, "composite still has Current");
                 let current = snapshot
                     .catalog(composite_key, false)?
                     .ok_or(StorageError::ScopeChanged)?;
@@ -6678,7 +6683,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let history = snapshot
                 .catalog(&history_only_key, true)?
                 .ok_or(StorageError::ScopeChanged)?;
-            assert!(snapshot.owner(&history_only_key)?.is_some());
+            let owner = snapshot
+                .owner(&history_only_key)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(!owner.has_current, "history-only owner has no Current row");
             assert!(snapshot.catalog(&history_only_key, false)?.is_none());
             snapshot
                 .history_qualified(&history)
@@ -6719,12 +6727,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("appended Claude parent in retained list");
     let exact_history_request =
         crate::catalog::Request::parse("sid=one&scope=retained_history&limit=50").unwrap();
-    let pg_parent_exact = super::super::snapshot::with_admitted_generation(
+    let pg_parent_exact = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
         &control,
         &caught,
         |snapshot| {
+            let owner = snapshot.owner("one")?.ok_or(StorageError::ScopeChanged)?;
+            assert!(owner.original, "reused key selects original History");
+            assert!(owner.has_current, "reused key also has Current");
             crate::catalog::read_page_snapshot(
                 &options,
                 recent_machine,

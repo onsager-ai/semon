@@ -62,6 +62,24 @@ pub(in crate::storage::postgres) struct Snapshot<'a, 'tx> {
     runtime_local: std::cell::OnceCell<crate::native_evidence::RuntimeObservations>,
 }
 
+pub(in crate::storage::postgres) struct HistoryOwner {
+    pub(in crate::storage::postgres) generation: String,
+    pub(in crate::storage::postgres) original: bool,
+    pub(in crate::storage::postgres) has_current: bool,
+}
+
+fn history_display_lifecycle(
+    original: bool,
+    has_current: bool,
+    captured: crate::model::summary::CatalogLifecycle,
+) -> crate::model::summary::CatalogLifecycle {
+    if original || !has_current {
+        crate::model::summary::CatalogLifecycle::Retained
+    } else {
+        captured
+    }
+}
+
 /// Select pending native paths for one ASCII Catalog identity. The fixed-size
 /// digest keys keep long native ids out of B-tree entries; each branch checks
 /// its full folded value after the indexed digest match.
@@ -314,11 +332,11 @@ impl Snapshot<'_, '_> {
     pub(in crate::storage::postgres) fn owner(
         &self,
         key: &str,
-    ) -> Result<Option<String>, StorageError> {
+    ) -> Result<Option<HistoryOwner>, StorageError> {
         let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
-        let rows = tx.driver.query("SELECT session_key=$4,CASE WHEN octet_length(owner_generation)=64 THEN owner_generation END FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        let rows = tx.driver.query("SELECT o.session_key=$4,CASE WHEN octet_length(o.owner_generation)=64 THEN o.owner_generation END,o.original,EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace AND r.generation=o.generation AND r.key_digest=o.key_digest AND r.session_key=o.session_key) FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=$3", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
         tx.check()?;
         rows.first()
             .map(|row| {
@@ -332,7 +350,11 @@ impl Snapshot<'_, '_> {
                 if !owner.bytes().all(|b| b.is_ascii_hexdigit()) {
                     return Err(StorageError::ScopeChanged);
                 }
-                Ok(owner)
+                Ok(HistoryOwner {
+                    generation: owner,
+                    original: row.get(2),
+                    has_current: row.get(3),
+                })
             })
             .transpose()
     }
@@ -346,10 +368,33 @@ impl Snapshot<'_, '_> {
             let Some(owner) = self.owner(key)? else {
                 return Ok(None);
             };
-            owner
+            owner.generation
         } else {
             self.generation.clone()
         };
+        self.catalog_at(key, &owner, history)
+    }
+
+    pub(in crate::storage::postgres) fn history_display_catalog(
+        &self,
+        key: &str,
+    ) -> Result<Option<CatalogRow>, StorageError> {
+        let Some(owner) = self.owner(key)? else {
+            return Ok(None);
+        };
+        let Some(mut row) = self.catalog_at(key, &owner.generation, true)? else {
+            return Ok(None);
+        };
+        row.lifecycle = history_display_lifecycle(owner.original, owner.has_current, row.lifecycle);
+        Ok(Some(row))
+    }
+
+    fn catalog_at(
+        &self,
+        key: &str,
+        owner: &str,
+        history: bool,
+    ) -> Result<Option<CatalogRow>, StorageError> {
         let table = if history {
             "semon_pg_native_catalog_history_headers"
         } else {
@@ -397,7 +442,7 @@ impl Snapshot<'_, '_> {
             let Some(owner) = self.owner(key)? else {
                 return Ok(None);
             };
-            owner
+            owner.generation
         } else {
             self.generation.clone()
         };
@@ -465,4 +510,15 @@ impl Snapshot<'_, '_> {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Some((header, texts)))
     }
+}
+
+#[cfg(test)]
+#[test]
+fn history_display_lifecycle_preserves_composites_only_while_current() {
+    use crate::model::summary::CatalogLifecycle::{Current, Retained};
+
+    assert_eq!(history_display_lifecycle(false, true, Current), Current);
+    assert_eq!(history_display_lifecycle(false, false, Current), Retained);
+    assert_eq!(history_display_lifecycle(true, true, Current), Retained);
+    assert_eq!(history_display_lifecycle(false, true, Retained), Retained);
 }
