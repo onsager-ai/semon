@@ -6283,8 +6283,11 @@ mod tests {
                     .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
                     .unwrap();
             } else {
+                let forbidden = "UPDATE main.meta SET value='unsupported' WHERE namespace='' AND key='cache_version'";
+                assert!(external.execute(forbidden, []).is_err());
                 change_parser_version_for_test(&external, &(CACHE_VERSION + 1).to_string())
                     .unwrap();
+                assert!(external.execute(forbidden, []).is_err());
             }
             assert_eq!(
                 store
@@ -6452,23 +6455,28 @@ mod tests {
         connection: &Connection,
         version: &str,
     ) -> rusqlite::Result<()> {
-        // Parser-version upgrades belong to physical-store setup. Temporarily
-        // remove only the UPDATE guards so the fixture can model that external
-        // contract change, then restore the exact installed trigger SQL.
+        // opened() uses NativeOwnership admission, whose prepare_owned setup
+        // installs the persistent main guard for meta updates. The separate
+        // configured::prepare Event profile is not installed here. Model
+        // physical-store corruption by removing only the owned UPDATE guard,
+        // then restoring its exact SQL in the same transaction; every error
+        // rolls the fixture change back.
         let transaction = connection.unchecked_transaction()?;
-        let mut guards = Vec::new();
-        for name in [
-            "storage_event_guard_meta_UPDATE",
-            "storage_owned_guard_meta_UPDATE",
-        ] {
-            let sql = transaction.query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
-                [name],
-                |row| row.get::<_, String>(0),
-            )?;
-            transaction.execute_batch(&format!("DROP TRIGGER main.{name};"))?;
-            guards.push((name, sql));
+        let name = "storage_owned_guard_meta_UPDATE";
+        let guard = transaction.query_row(
+            "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
+            [name],
+            |row| row.get::<_, String>(0),
+        )?;
+        let single_store_version: bool = transaction.query_row(
+            "SELECT count(*)=1 AND min(namespace)='' FROM main.meta WHERE key='cache_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        if !single_store_version {
+            return Err(rusqlite::Error::InvalidQuery);
         }
+        transaction.execute_batch(&format!("DROP TRIGGER main.{name};"))?;
         let changed = transaction.execute(
             "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
             [version],
@@ -6476,16 +6484,14 @@ mod tests {
         if changed != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        for (name, guard) in guards {
-            transaction.execute_batch(&guard)?;
-            let restored = transaction.query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
-                [name],
-                |row| row.get::<_, String>(0),
-            )?;
-            if restored != guard {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+        transaction.execute_batch(&guard)?;
+        let restored = transaction.query_row(
+            "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
+            [name],
+            |row| row.get::<_, String>(0),
+        )?;
+        if restored != guard {
+            return Err(rusqlite::Error::InvalidQuery);
         }
         transaction.commit()
     }
