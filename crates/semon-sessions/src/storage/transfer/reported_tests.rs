@@ -645,12 +645,9 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         "the destination's actual transfer receipt selects imported Query authority"
     );
     assert!(
-        crate::storage::sqlite::catalog::runtime_source_cwds_if_current(
-            &db,
-            &original.sources
-        )
-        .unwrap()
-        .is_none(),
+        crate::storage::sqlite::catalog::runtime_source_cwds_if_current(&db, &original.sources)
+            .unwrap()
+            .is_none(),
         "the imported Current row has no matching local Index ledger"
     );
     assert!(
@@ -668,11 +665,7 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     );
     assert!(imported_observations.runtime_for(original).is_some());
     let mut target_options = options.clone();
-    target_options.source = options
-        .source
-        .clone()
-        .with_store(target.clone())
-        .unwrap();
+    target_options.source = options.source.clone().with_store(target.clone()).unwrap();
     let mut query = crate::Query::with_machines(vec![("target".into(), target_options)]);
     crate::events::FILE_READS.with(|reads| reads.set(0));
     crate::events::HASHED_BYTES.with(|reads| reads.set(0));
@@ -696,7 +689,10 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     );
     assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), 0);
     assert_eq!(crate::events::HASHED_BYTES.with(std::cell::Cell::get), 0);
-    assert_eq!(crate::source_chunks::READ_BYTES.with(std::cell::Cell::get), 0);
+    assert_eq!(
+        crate::source_chunks::READ_BYTES.with(std::cell::Cell::get),
+        0
+    );
     drop(query);
     let before: String = db
         .query_row(

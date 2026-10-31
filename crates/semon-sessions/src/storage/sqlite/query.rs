@@ -499,7 +499,9 @@ fn read(
                 }
                 None if imported_origin => {
                     if crate::native_timing::enabled() {
-                        eprintln!("semon sessions native: observation_stage_refused boundary=query_current_source_cwds");
+                        eprintln!(
+                            "semon sessions native: observation_stage_refused boundary=query_current_source_cwds"
+                        );
                     }
                     return Err(unavailable(crate::storage::StorageError::ScopeChanged));
                 }

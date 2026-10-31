@@ -5276,8 +5276,7 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
         let refused = refused.unwrap_err();
         assert_eq!(refused.code, "unavailable");
         assert_eq!(
-            refused.message,
-            "Native Query runtime observations changed during the query",
+            refused.message, "Native Query runtime observations changed during the query",
             "changed global runtime must hit the Query observation fence: {refused:?}"
         );
         assert_eq!(query_reads, (0, 0, 0));
