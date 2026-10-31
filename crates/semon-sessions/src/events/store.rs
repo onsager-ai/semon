@@ -3192,6 +3192,8 @@ impl SqliteStore {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=preserve_rows_complete");
             crate::storage::catalog::publish_history_rows(
                 &history,
                 publication.rows,
