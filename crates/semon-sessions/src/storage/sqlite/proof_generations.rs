@@ -943,12 +943,11 @@ pub(crate) fn observation_binding_with_observations(
         )
         .map_err(ObservationPreparationError::into_storage)?
     };
-    if !proof_candidate {
-        if let Some(observations) =
+    if !proof_candidate
+        && let Some(observations) =
             direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
-        {
-            return Ok((current.clone(), observations));
-        }
+    {
+        return Ok((current.clone(), observations));
     }
     let verified =
         verify_immutable_observation(db, current, selected, reference_kind, &prefix, false)
@@ -968,12 +967,12 @@ pub(crate) fn observation_binding_with_observations(
     }
     let selected_runtime = observations.runtime_for(selected);
     if selected_runtime.as_deref() != Some(original_runtime.as_str()) {
-        if !exact_original_metadata && exact_owner_grant {
-            if let Some(direct) =
+        if !exact_original_metadata
+            && exact_owner_grant
+            && let Some(direct) =
                 direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
-            {
-                return Ok((current.clone(), direct));
-            }
+        {
+            return Ok((current.clone(), direct));
         }
         return Err(StorageError::ScopeChanged);
     }
@@ -1743,14 +1742,14 @@ pub(crate) fn reconcile_native_observation_owners(
             })
         })
     };
-    if catalog_proof_owned {
-        if let Some(digest) = catalog_digest.as_ref() {
-            db.execute(
-                "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
-                params![namespace, session_key, digest, admission, stream],
-            )
-            .map_err(failed)?;
-        }
+    if catalog_proof_owned
+        && let Some(digest) = catalog_digest.as_ref()
+    {
+        db.execute(
+            "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
+            params![namespace, session_key, digest, admission, stream],
+        )
+        .map_err(failed)?;
     }
     if !owned("catalog", catalog_digest.as_ref()) {
         db.execute(
@@ -1771,14 +1770,14 @@ pub(crate) fn reconcile_native_observation_owners(
             })
             .map(|grant| grant.4.clone())
     });
-    if history_proof_owned {
-        if let Some(digest) = history_digest.as_ref() {
-            db.execute(
-                "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
-                params![namespace, session_key, digest, admission, stream],
-            )
-            .map_err(failed)?;
-        }
+    if history_proof_owned
+        && let Some(digest) = history_digest.as_ref()
+    {
+        db.execute(
+            "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
+            params![namespace, session_key, digest, admission, stream],
+        )
+        .map_err(failed)?;
     }
     if !history_proof_owned && !catalog_proof_owned && !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
