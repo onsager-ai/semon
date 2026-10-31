@@ -5130,7 +5130,10 @@ mod tests {
                 .0,
             Outcome::Written
         );
-        cache.finish_semantic_stage(retirement_batch.epoch).unwrap();
+        assert_eq!(
+            cache.finish_semantic_stage(retirement_batch.epoch).unwrap(),
+            Outcome::Written
+        );
         let mut finite = options.clone();
         finite.all = false;
         finite.since = std::time::Duration::from_millis(1);
