@@ -821,12 +821,9 @@ pub(crate) fn observation_binding_with_observations(
         )?
     };
     if !proof_candidate {
-        if let Some(observations) = direct_capture_for_row(
-            current,
-            selected,
-            imported,
-            direct_grant.as_ref(),
-        )? {
+        if let Some(observations) =
+            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
+        {
             return Ok((current.clone(), observations));
         }
     }
@@ -940,12 +937,9 @@ pub(crate) fn observation_binding_with_observations(
     let selected_runtime = observations.runtime_for(selected);
     if selected_runtime.as_deref() != Some(original_runtime.as_str()) {
         if !exact_original_metadata && exact_owner_grant {
-            if let Some(direct) = direct_capture_for_row(
-                current,
-                selected,
-                imported,
-                direct_grant.as_ref(),
-            )? {
+            if let Some(direct) =
+                direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
+            {
                 return Ok((current.clone(), direct));
             }
         }
@@ -1546,15 +1540,13 @@ fn prepare_observation_update(
             .as_ref()
             .and_then(|(_, _, _, capture, _)| capture.as_ref())
             .and_then(|capture| {
-                serde_json::from_str::<crate::storage::selected::PresentationObservations>(
-                    capture,
-                )
-                .ok()
-                .filter(|observations| {
-                    observations.is_runtime_capture_for(repaired)
-                        && observations.runtime_for(repaired).is_some()
-                })
-                .map(|_| capture.clone())
+                serde_json::from_str::<crate::storage::selected::PresentationObservations>(capture)
+                    .ok()
+                    .filter(|observations| {
+                        observations.is_runtime_capture_for(repaired)
+                            && observations.runtime_for(repaired).is_some()
+                    })
+                    .map(|_| capture.clone())
             })
     };
 
@@ -1732,11 +1724,7 @@ pub(crate) fn reconcile_native_observation_owners(
             .map_err(failed)?;
         }
     }
-    if !history_proof_owned
-        && !catalog_proof_owned
-        && !history_owned
-        && history_capture.is_some()
-    {
+    if !history_proof_owned && !catalog_proof_owned && !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
         db.execute(
             "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",

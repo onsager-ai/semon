@@ -113,7 +113,7 @@ mod partial_readers {
             calls: AtomicUsize::new(0),
         };
         let config = options.source.config(&options.cache).unwrap();
-        let db = crate::storage::sqlite::semantic::Stage::open(
+        let mut db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
         )
         .unwrap()
