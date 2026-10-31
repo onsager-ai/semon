@@ -15,6 +15,7 @@ fn row(key: &str, parent: Option<&str>) -> CatalogRow {
     CatalogRow {
         overview: None,
         trace: None,
+        query_recipe: None,
         query: None,
         lifecycle: Default::default(),
         key: key.to_owned(),
