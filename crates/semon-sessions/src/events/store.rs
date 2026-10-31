@@ -7647,6 +7647,25 @@ mod tests {
             "the direct Catalog publication grants its exact Current row"
         );
 
+        let mut retained = original.clone();
+        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        store.connection.execute(
+            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
+            params![binding.namespace.as_str(), original.key, serde_json::to_string(&retained).unwrap()],
+        ).unwrap();
+        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+            &store.connection,
+            binding.namespace.as_str(),
+            &original.key,
+            binding.admission,
+            &binding.stream_epoch,
+        ).unwrap();
+        let snapshot = Connection::open(&store.path).unwrap();
+        snapshot.execute_batch("BEGIN DEFERRED").unwrap();
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(
+            &snapshot, &binding, &original,
+        ).is_ok());
+
         let mut fixture: Value =
             serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
         fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
@@ -7680,6 +7699,105 @@ mod tests {
             "repricing must preserve authority for the exact Current metadata it publishes"
         );
 
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(
+            &store.connection, &binding, &original,
+        ).is_err(), "the old Current preimage loses both mutable owner slots");
+        let encoded_history: String = store.connection.query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![binding.namespace.as_str(), original.key],
+            |row| row.get(0),
+        ).unwrap();
+        let repriced_history: crate::model::summary::CatalogRow = serde_json::from_str(&encoded_history).unwrap();
+        assert_eq!(repriced_history.cost.pricing_fingerprint, table.fingerprint);
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(
+            &store.connection, &binding, &repriced_history,
+        ).is_ok(), "same-source History gets its own exact updated grant");
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(
+            &snapshot, &binding, &original,
+        ).is_ok(), "a stale WAL snapshot retains the coherent old row/grant pair");
+        assert!(crate::storage::sqlite::proof_generations::observation_binding(
+            &snapshot, &binding, &repriced,
+        ).is_err());
+        drop(snapshot);
+
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_catalog_reprice_refuses_missing_or_tampered_authority() {
+        for corrupt in [false, true] {
+            let root = scratch("direct-catalog-reprice-refusal");
+            let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+            let config = options.source.config(&options.cache).unwrap();
+            let mut store = current_test_store_with_epoch(
+                &crate::events::EventCache::path(&options.cache),
+                &config.namespace,
+                config.expected_stream_epoch.as_deref().unwrap(),
+            );
+            assert_eq!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap().0, Outcome::Written);
+            let namespace = config.namespace.as_str();
+            let before: String = store.connection.query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, rows[0].key], |r| r.get(0),
+            ).unwrap();
+            let publisher = crate::storage::sqlite::semantic::pricing_connection(&store.owner).unwrap();
+            if corrupt {
+                publisher.execute(
+                    "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?3 WHERE namespace=?1 AND session_key=?2",
+                    params![namespace, rows[0].key, "0".repeat(64)],
+                ).unwrap();
+            } else {
+                publisher.execute(
+                    "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+                    params![namespace, rows[0].key],
+                ).unwrap();
+            }
+            let mut fixture: Value = serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
+            fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
+            let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+            crate::events::store::reprice::drain_for_store_test(&store.owner, table).unwrap();
+            let after: String = store.connection.query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, rows[0].key], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(after, before, "unproved rows retain their honest original metadata");
+            let digest: Option<String> = publisher.query_row(
+                "SELECT metadata_digest FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+                params![namespace, rows[0].key], |r| r.get(0),
+            ).optional().unwrap();
+            assert_eq!(digest, corrupt.then(|| "0".repeat(64)), "repricing cannot mint or repair authority");
+            drop(publisher);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn direct_catalog_reprice_grant_failure_rolls_back_progress() {
+        let root = scratch("direct-catalog-reprice-grant-failure");
+        let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
+        let config = options.source.config(&options.cache).unwrap();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &config.namespace,
+            config.expected_stream_epoch.as_deref().unwrap(),
+        );
+        assert_eq!(catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto).unwrap().0, Outcome::Written);
+        store.connection.execute_batch("CREATE TRIGGER test_reprice_grant_failure BEFORE UPDATE ON storage_catalog_native_observation_grants BEGIN SELECT RAISE(ABORT,'injected reprice grant failure'); END;").unwrap();
+        let mut fixture: Value = serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
+        fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
+        let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+        let prior = catalog_comparable_state(&store.connection);
+        assert!(crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).is_err());
+        // Earlier bounded source/phase ticks may commit. Repeating the failed
+        // Catalog tick must preserve all rows, grants and durable progress.
+        let failed = catalog_comparable_state(&store.connection);
+        assert!(crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone()).is_err());
+        assert_eq!(catalog_comparable_state(&store.connection), failed);
+        assert_ne!(failed, prior);
+        store.connection.execute_batch("DROP TRIGGER test_reprice_grant_failure").unwrap();
+        crate::events::store::reprice::drain_for_store_test(&store.owner, table).unwrap();
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
