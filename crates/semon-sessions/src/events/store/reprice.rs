@@ -2,8 +2,9 @@
 //! membership, deletes observations, or advances parser/publication witnesses.
 use super::*;
 use crate::pricing::{Cost, CostBuild, EffectiveTable};
+use crate::storage::catalog::CatalogObservationOwner;
 use crate::storage::sqlite::proof_generations::{
-    CatalogObservationOwner, ObservationPreparationError, prepare_repriced_observation,
+    ObservationPreparationError, prepare_repriced_observation,
 };
 use std::sync::Arc;
 

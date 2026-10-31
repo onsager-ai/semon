@@ -1,6 +1,6 @@
 //! Native Catalog SQL and snapshot lifecycle. Rendering/identity stay shared.
 use crate::CatalogReadScope;
-use crate::storage::catalog::CatalogSnapshot;
+use crate::storage::catalog::{CatalogObservationOwner, CatalogSnapshot, SelectedCatalogRow};
 use crate::{
     Options,
     catalog::Request,
@@ -382,6 +382,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         options: &Options,
         row: &CatalogRow,
+        owner: CatalogObservationOwner,
         runtime: &str,
     ) -> io::Result<Option<String>> {
         let diagnose = |stage: &'static str, error: &io::Error| {
@@ -399,17 +400,11 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .inspect_err(|error| diagnose("current_source_cwds", error))?
         {
             Some(cwds) => {
-                let Some(binding) = self
-                    .row_runtime_binding(row)
-                    .inspect_err(|error| diagnose("current_row_binding", error))?
-                else {
-                    if cfg!(test) || crate::native_timing::enabled() {
-                        eprintln!(
-                            "catalog_runtime_refused stage=current_row_binding error_class=missing"
-                        );
-                    }
-                    return Ok(None);
-                };
+                let binding = super::proof_generations::observation_binding_for_physical_owner(
+                    self.0, &self.2, row, owner,
+                )
+                .map_err(io::Error::other)
+                .inspect_err(|error| diagnose("current_row_binding", error))?;
                 let scoped = self
                     .3
                     .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
@@ -423,7 +418,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             None => {
                 let (binding, observations) =
                     super::proof_generations::observation_binding_with_observations(
-                        self.0, &self.2, row,
+                        self.0, &self.2, row, owner,
                     )
                     .map_err(io::Error::other)
                     .inspect_err(|error| diagnose("captured_observation_binding", error))?;
@@ -518,8 +513,17 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         )
         .map_err(io::Error::other)
     }
-    fn rows(&self, request: &Request) -> io::Result<Vec<CatalogRow>> {
-        rows(self.0, request).map_err(io::Error::other)
+    fn rows(&self, request: &Request) -> io::Result<Vec<SelectedCatalogRow>> {
+        rows(self.0, request)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|row| SelectedCatalogRow {
+                        row,
+                        owner: Some(CatalogObservationOwner::Catalog),
+                    })
+                    .collect()
+            })
+            .map_err(io::Error::other)
     }
     fn search(
         &self,
@@ -547,14 +551,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         key: &str,
         sources: &[CatalogSource],
-        status: &mut dyn FnMut(&CatalogRow) -> Value,
+        status: &mut dyn FnMut(&CatalogRow, Option<CatalogObservationOwner>) -> Value,
     ) -> io::Result<Option<Value>> {
         // The owned lookup scopes every selected table to this namespace.
         crate::storage::selected::selected_details(
             &super::selected::Context::owned(self.0),
             key,
             sources,
-            &mut |row| status(row),
+            &mut |row, owner| status(row, owner),
         )
     }
     fn transcript_observation(

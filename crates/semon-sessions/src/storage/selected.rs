@@ -1,5 +1,6 @@
 //! Immutable selected-presentation metadata. This port contains no SQL or Raw bytes.
 #![allow(dead_code)] // Private qualification only; public factories stay closed.
+use super::catalog::CatalogObservationOwner;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -12,7 +13,10 @@ pub(crate) trait ContextLookup {
         key: &str,
         source_generation: &str,
     ) -> io::Result<Option<(Option<String>, bool)>>;
-    fn relative(&self, key: &str) -> io::Result<Option<String>>;
+    fn relative(
+        &self,
+        key: &str,
+    ) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>>;
     fn descendants(&self, key: &str) -> io::Result<Vec<String>>;
     fn header(&self, key: &str) -> io::Result<Option<(String, bool)>>;
     fn turn(&self, key: &str, id: &str) -> io::Result<Option<String>>;
@@ -26,7 +30,10 @@ pub(crate) fn selected_details(
     lookup: &dyn ContextLookup,
     key: &str,
     sources: &[crate::model::summary::CatalogSource],
-    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
+    relative_status: &mut impl FnMut(
+        &crate::model::summary::CatalogRow,
+        Option<CatalogObservationOwner>,
+    ) -> Value,
 ) -> io::Result<Option<Value>> {
     let expected = crate::retention::source_generation(sources).map_err(io::Error::other)?;
     let encoded = lookup.details(key, &expected)?;
@@ -46,13 +53,16 @@ pub(crate) fn selected_details(
 pub(crate) fn selected_family(
     lookup: &dyn ContextLookup,
     key: &str,
-    relative_status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
+    relative_status: &mut impl FnMut(
+        &crate::model::summary::CatalogRow,
+        Option<CatalogObservationOwner>,
+    ) -> Value,
 ) -> io::Result<Value> {
     let mut bytes = 0;
     let incomplete = std::cell::Cell::new(false);
     let mut read = |sid: &str| -> io::Result<Option<Value>> {
         let text = lookup.relative(sid)?;
-        let Some(text) = text else {
+        let Some((text, owner)) = text else {
             incomplete.set(true);
             return Ok(None);
         };
@@ -72,7 +82,7 @@ pub(crate) fn selected_family(
             });
         row["status"] = scope
             .filter(|scope| scope.key == sid && row["harness"] == scope.harness)
-            .map(|scope| relative_status(&scope))
+            .map(|scope| relative_status(&scope, owner))
             .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
         Ok(Some(row))
     };
@@ -276,16 +286,44 @@ struct Capture<'a> {
     source: &'a dyn ContextLookup,
     data: std::cell::RefCell<CapturedContext>,
     bytes: std::cell::Cell<usize>,
+    relative_owners: std::cell::RefCell<BTreeMap<String, Option<CatalogObservationOwner>>>,
+}
+impl CapturedContext {
+    fn captured_relative(&self, key: &str) -> io::Result<Option<String>> {
+        let key = serde_json::to_string(&(key,)).map_err(io::Error::other)?;
+        self.relative
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| io::Error::other("missing immutable context witness"))
+    }
 }
 macro_rules! captured_methods {
     ($($name:ident($($arg:ident),*) -> $result:ty;)+) => {
         impl ContextLookup for CapturedContext {
+            fn relative(&self, key: &str) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>> {
+                Ok(self.captured_relative(key)?.map(|text| (text, None)))
+            }
             $(fn $name(&self, $($arg: &str),*) -> io::Result<$result> {
                 let key = serde_json::to_string(&($($arg,)* )).map_err(io::Error::other)?;
                 self.$name.get(&key).cloned().ok_or_else(|| io::Error::other("missing immutable context witness"))
             })+
         }
         impl ContextLookup for Capture<'_> {
+            fn relative(&self, sid: &str) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>> {
+                let key = serde_json::to_string(&(sid,)).map_err(io::Error::other)?;
+                if let Some(value) = self.data.borrow().relative.get(&key) {
+                    let owner = self.relative_owners.borrow().get(&key).copied().flatten();
+                    return Ok(value.clone().map(|text| (text, owner)));
+                }
+                let value = self.source.relative(sid)?;
+                let text = value.as_ref().map(|(text, _)| text.clone());
+                let bytes = self.bytes.get().saturating_add(key.len()).saturating_add(serde_json::to_vec(&text).map_err(io::Error::other)?.len());
+                if bytes > 8 * 1048576 { return Err(io::Error::other("selected witness capacity")); }
+                self.bytes.set(bytes);
+                self.relative_owners.borrow_mut().insert(key.clone(), value.as_ref().and_then(|(_, owner)| *owner));
+                self.data.borrow_mut().relative.insert(key, text);
+                Ok(value)
+            }
             $(fn $name(&self, $($arg: &str),*) -> io::Result<$result> {
                 let key = serde_json::to_string(&($($arg,)* )).map_err(io::Error::other)?;
                 if let Some(value) = self.data.borrow().$name.get(&key) { return Ok(value.clone()); }
@@ -301,7 +339,6 @@ macro_rules! captured_methods {
 }
 captured_methods! {
     details(key, source) -> Option<(Option<String>, bool)>;
-    relative(key) -> Option<String>;
     descendants(key) -> Vec<String>;
     header(key) -> Option<(String, bool)>;
     turn(key, id) -> Option<String>;
@@ -316,12 +353,16 @@ impl CapturedContext {
         lookup: &dyn ContextLookup,
         row: &crate::model::summary::CatalogRow,
         slots: &[crate::slot_projection::SavedSlot],
-        status: &mut impl FnMut(&crate::model::summary::CatalogRow) -> Value,
+        status: &mut impl FnMut(
+        &crate::model::summary::CatalogRow,
+        Option<CatalogObservationOwner>,
+    ) -> Value,
     ) -> io::Result<Self> {
         let capture = Capture {
             source: lookup,
             data: Default::default(),
             bytes: std::cell::Cell::new(0),
+            relative_owners: Default::default(),
         };
         selected_details(&capture, &row.key, &row.sources, status)?;
         // Capture dependencies of every possible bounded window, including the
@@ -904,7 +945,7 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
     fn rows(
         &self,
         request: &crate::catalog::Request,
-    ) -> io::Result<Vec<crate::model::summary::CatalogRow>> {
+    ) -> io::Result<Vec<super::catalog::SelectedCatalogRow>> {
         if request.sid.as_deref() != Some(self.row.key.as_str()) {
             return Err(io::Error::other("immutable selected scope"));
         }
@@ -912,7 +953,10 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
         // immutable selection semantics are deliberately implemented here.
         match request.scope {
             crate::CatalogReadScope::Current | crate::CatalogReadScope::RetainedHistory => {
-                Ok(vec![self.row.clone()])
+                Ok(vec![super::catalog::SelectedCatalogRow {
+                    row: self.row.clone(),
+                    owner: None,
+                }])
             }
         }
     }
@@ -939,9 +983,12 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
         &self,
         key: &str,
         sources: &[crate::model::summary::CatalogSource],
-        _status: &mut dyn FnMut(&crate::model::summary::CatalogRow) -> Value,
+        _status: &mut dyn FnMut(
+            &crate::model::summary::CatalogRow,
+            Option<CatalogObservationOwner>,
+        ) -> Value,
     ) -> io::Result<Option<Value>> {
-        selected_details(&self.witness.context, key, sources, &mut |row| {
+        selected_details(&self.witness.context, key, sources, &mut |row, _owner| {
             self.witness.observations.relative_status(row)
         })
     }

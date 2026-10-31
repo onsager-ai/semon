@@ -402,3 +402,14 @@ storage contract. Recognized obsolete stores are discarded by writable producers
 without rebinding old rows, headers, archives or facts. Custody preservation of an
 unsupported individual recipe in a current store is distinct from whole-index
 invalidation; neither permits deletion of original native or archive bytes.
+
+Catalog runtime qualification carries the physical metadata owner selected by
+its snapshot separately from display lifecycle. A Retained row can still be
+stored in Catalog; selecting History metadata instead requires History's own
+observation grants and immutable references. Family lookups carry the owner of
+the metadata they actually selected even when they copy Catalog's lifecycle for
+display. Request-local ownership is never persisted into Catalog rows or captured
+presentation context. Immutable presentation replay keeps its authenticated
+captured observations and acquires no live physical owner. Current source CWD,
+immutable proof, admission, source generation and live global runtime fences
+remain independent requirements; neither owner can borrow the other's authority.

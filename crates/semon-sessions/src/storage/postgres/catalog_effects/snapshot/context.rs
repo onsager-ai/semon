@@ -105,7 +105,10 @@ impl ContextLookup for Snapshot<'_, '_> {
         details["content_generation"] = value["content_generation"].clone();
         Ok(Some((Some(details.to_string()), current)))
     }
-    fn relative(&self, key: &str) -> io::Result<Option<String>> {
+    fn relative(
+        &self,
+        key: &str,
+    ) -> io::Result<Option<(String, Option<crate::storage::catalog::CatalogObservationOwner>)>> {
         let current = self.catalog(key, false).map_err(io::Error::other)?;
         let current_harness = current.as_ref().map(|row| row.harness.clone());
         let lifecycle = if current_harness.is_some() {
@@ -113,18 +116,20 @@ impl ContextLookup for Snapshot<'_, '_> {
         } else {
             crate::model::summary::CatalogLifecycle::Retained
         };
-        let Some(mut row) = self
-            .catalog(key, true)
-            .map_err(io::Error::other)?
-            .or(current)
-        else {
+        let history = self.catalog(key, true).map_err(io::Error::other)?;
+        let owner = if history.is_some() {
+            crate::storage::catalog::CatalogObservationOwner::History
+        } else {
+            crate::storage::catalog::CatalogObservationOwner::Catalog
+        };
+        let Some(mut row) = history.or(current) else {
             return Ok(None);
         };
         row.lifecycle = lifecycle;
         let harness = current_harness.as_deref().unwrap_or(&row.harness);
         let value = serde_json::to_value(&row).map_err(io::Error::other)?;
         Ok(Some(
-            json!({"key":row.key,"name":row.name,"harness":harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string(),
+            (json!({"key":row.key,"name":row.name,"harness":harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string(), Some(owner)),
         ))
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
