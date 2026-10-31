@@ -753,6 +753,9 @@ pub(crate) fn session_causal_trace_with_gate(
             }
             versions.push(json!([sid, version]));
             if relay_peers.contains(&sid) {
+                let history_projection_qualified = observation_owner
+                    == crate::storage::catalog::CatalogObservationOwner::History
+                    && snapshot.history_qualified(&row).unwrap_or(false);
                 let status = runtime_generation
                     .as_deref()
                     .and_then(|runtime| {
@@ -767,6 +770,8 @@ pub(crate) fn session_causal_trace_with_gate(
                             Some(runtime.as_str()),
                             recorded.as_deref(),
                             &row,
+                            observation_owner,
+                            history_projection_qualified,
                         )
                     })
                     .unwrap_or_else(|| json!({"state":null,"observation":"unavailable"}));
