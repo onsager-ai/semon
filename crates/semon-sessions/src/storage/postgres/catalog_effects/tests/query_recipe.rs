@@ -9,17 +9,33 @@ use crate::storage::{
 #[test]
 fn pg_selected_recipe_large_fixture_measurement() {
     let (pool, _) = fixture(|_| {});
+    let control = PgCancellation::default();
     let config = crate::storage::StoreConfig {
         backend: crate::storage::StoreBackend::Postgres {
-            pool,
-            control: PgCancellation::default(),
+            pool: pool.clone(),
+            control: control.clone(),
         },
         namespace: ns("selected-large-fixture"),
         expected_stream_epoch: Some("a".repeat(64)),
     };
     config.create_native_store().unwrap();
     let root = crate::storage::transfer::reported::tests::root();
-    crate::storage::transfer::reported::tests::large_catalog::measure(&config, &root);
+    crate::storage::transfer::reported::tests::large_catalog::measure(&config, &root, |key, path| {
+        pool.transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            use crate::storage::postgres::{model_cache, native_keys, native_reader};
+            let generation = model_cache::generation(tx)?.unwrap();
+            let current: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3)", &[&config.namespace.as_str().as_bytes(), &generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert!(!current, "ordinary PG removal already published the withdrawal");
+            let claims = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&config.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
+            assert!(claims.is_empty(), "ordinary PG removal acknowledged the exact old path");
+            let retired = native_keys::read_meta(tx, format!("source-retired:{path}").as_bytes(), 16384)?;
+            let ledger = native_reader::ledger(tx, path)?.map(|(_, ledger)| ledger);
+            assert!(ledger.is_some(), "withdrawal retains native custody");
+            assert_eq!(retired, Some(serde_json::to_vec(&ledger).unwrap()));
+            eprintln!("selected_large_fixture pg_initial_withdrawal current_absent=true claim_acknowledged=true retired_ledger_retained=true");
+            Ok(())
+        }).unwrap();
+    });
     fs::remove_dir_all(root).unwrap();
 }
 

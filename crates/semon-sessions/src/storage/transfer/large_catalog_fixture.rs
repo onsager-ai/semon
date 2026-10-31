@@ -3,7 +3,11 @@ use super::{begin_active_catalog, cache, root, seed_catalog_input, sqlite};
 use crate::storage::{StoreConfig, native_events::NativeEventStore};
 use serde_json::json;
 
-pub(crate) fn measure(config: &StoreConfig, root: &std::path::Path) {
+pub(crate) fn measure(
+    config: &StoreConfig,
+    root: &std::path::Path,
+    verify_completed_withdrawal: impl FnOnce(&str, &str),
+) {
     const CHILDREN: usize = 16;
     const USAGE_REPORTS: usize = 1000;
     let (options, initial_input) = seed_catalog_input(config, root);
@@ -52,13 +56,16 @@ pub(crate) fn measure(config: &StoreConfig, root: &std::path::Path) {
             &crate::facts::MachineFacts::Local,
         )
         .unwrap();
-    begin_active_catalog(
-        &mut cache,
-        &[old_path.to_str().unwrap().to_owned()],
-        &runtime,
-        true,
-    );
-    assert!(finish_measured(&mut cache, &options, std::slice::from_ref(&old_input)).is_empty());
+    verify_completed_withdrawal(&initial[0].key, old_path.to_str().unwrap());
+    if matches!(&config.backend, crate::storage::StoreBackend::Sqlite { .. }) {
+        begin_active_catalog(
+            &mut cache,
+            &[old_path.to_str().unwrap().to_owned()],
+            &runtime,
+            true,
+        );
+        assert!(finish_measured(&mut cache, &options, std::slice::from_ref(&old_input)).is_empty());
+    }
     let mut inputs = vec![input];
     let children = (0..CHILDREN)
         .map(|index| format!("large-child-{index:02}"))
@@ -359,6 +366,6 @@ fn finish_measured(
 fn selected_recipe_large_fixture_sqlite_measurement() {
     let root = root();
     let source = sqlite(&root, "selected-large-fixture");
-    measure(&source, &root);
+    measure(&source, &root, |_, _| {});
     std::fs::remove_dir_all(root).unwrap();
 }
