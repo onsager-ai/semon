@@ -26,7 +26,7 @@ pub(crate) fn sqlite(name: &str) -> Option<Disposition> {
         "storage_proof_generations" => &[Proofs, Recipes],
         "storage_catalog_native_observation_grants" => {
             return Some(Disposition::LocalOnly(
-                "Direct SQLite Catalog observation grants bind a destination-local admission and stream; they are minted only by its admitted publisher, never copied or inferred from transferred metadata.",
+                "Direct SQLite Catalog observation grants and their runtime captures bind a destination-local admission and stream; they are minted only by its admitted publisher, never copied or inferred from transferred metadata.",
             ));
         }
         "storage_proof_presentations" => &[Metadata],

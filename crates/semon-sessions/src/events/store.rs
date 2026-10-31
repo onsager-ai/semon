@@ -3645,6 +3645,11 @@ impl SqliteStore {
                     owner.admission(),
                     stream,
                     output,
+                    if semantic.is_none() {
+                        publication.observations
+                    } else {
+                        None
+                    },
                 )
                 .map_err(StoreError::Configured)?;
             }
