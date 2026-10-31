@@ -3411,14 +3411,32 @@ mod tests {
                     header_repair_invalidate(&store, &path, "changed");
                 }
                 "witness_ledger" => {
+                    let observed_revision = revision(&store.connection).unwrap();
+                    let staged_claim = header_repair_claim(&store, &path);
+                    let original_ledger = store.ledger(&path).unwrap().unwrap();
                     store
                         .connection
-                        .execute("UPDATE files SET size=size+1 WHERE path=?1", [&path])
+                        .execute(
+                            "UPDATE main.files SET size=size+1 WHERE namespace=semon_namespace() AND path=?1",
+                            [&path],
+                        )
                         .unwrap();
-                    store.connection.execute("UPDATE meta SET value=CAST(CAST(value AS INTEGER)+1 AS TEXT) WHERE key='catalog_source_revision'", []).unwrap();
+                    assert_ne!(store.ledger(&path).unwrap().unwrap(), original_ledger);
+                    header_repair_invalidate(&store, &format!("{path}.unrelated"), "changed");
+                    assert_eq!(revision(&store.connection).unwrap(), observed_revision + 1);
+                    assert_eq!(header_repair_claim(&store, &path), staged_claim);
                 }
                 "catalog_generation" => {
-                    store.connection.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_generation','synthetic-other-generation')", []).unwrap();
+                    assert_eq!(
+                        store
+                            .connection
+                            .execute(
+                                "UPDATE main.meta SET value=?1 WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                                ["synthetic-other-generation"],
+                            )
+                            .unwrap(),
+                        1
+                    );
                 }
                 _ => unreachable!(),
             }
