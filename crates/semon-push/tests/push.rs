@@ -121,7 +121,7 @@ fn native_query_corpus(options: &Options, now: i64) -> serde_json::Value {
 }
 
 fn native_reply_content(reply: &semon_sessions::ViewerReply) -> serde_json::Value {
-    assert_eq!(reply.status, 200);
+    assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
     let mut body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(body["api"], 1);
     let generation = body["identity"]["generation"].as_str().unwrap();
