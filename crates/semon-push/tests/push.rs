@@ -1372,14 +1372,20 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
             assert!(!String::from_utf8_lossy(&bytes).contains(secret));
             let destination = mirrored.root.join(&path);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
-            fs::write(destination, bytes).unwrap();
+            // A receiver restart keeps an unchanged file's physical witness.
+            if fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+                fs::write(destination, bytes).unwrap();
+            }
         }
         for (path, _) in files {
             let source = fs::read_to_string(home.root.join(path)).unwrap();
             assert!(source.contains(secret));
             let destination = expected.root.join(path);
             fs::create_dir_all(destination.parent().unwrap()).unwrap();
-            fs::write(destination, redacted(&source)).unwrap();
+            let bytes = redacted(&source);
+            if fs::read(&destination).ok().as_deref() != Some(bytes.as_slice()) {
+                fs::write(destination, bytes).unwrap();
+            }
         }
         let configure = |home: &Home| {
             let options = semon_sessions::Options {
@@ -1616,7 +1622,9 @@ fn native_compressed_history_keeps_paginated_query_and_web_parity_after_restart(
             for destination in [&mirrored, &expected] {
                 let path = destination.root.join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
-                fs::write(path, bytes).unwrap();
+                if fs::read(&path).ok().as_deref() != Some(bytes.as_slice()) {
+                    fs::write(path, bytes).unwrap();
+                }
             }
         }
         let facts = state.facts.clone().unwrap();
