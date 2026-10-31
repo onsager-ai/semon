@@ -7152,8 +7152,8 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     fixture.publish_existing();
     family_owner_phase_diagnostic(&fixture, "status_after_retirement_publish", "family-child");
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
-    // Native selection retirement publishes a Retained display in Catalog;
-    // there is no immutable History metadata or History observation to borrow.
+    // Retirement keeps Catalog's Retained display and preserves the original
+    // History metadata. Each physical owner must qualify its own observation.
     use crate::storage::catalog::{CatalogObservationOwner, CatalogSnapshot};
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let mut db = fixture.db();
@@ -7168,7 +7168,12 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
         selected.lifecycle,
         crate::model::summary::CatalogLifecycle::Retained
     );
-    assert!(snapshot.history_catalog("family-child").unwrap().is_none());
+    let history = snapshot.history_catalog("family-child").unwrap().unwrap();
+    let history: crate::model::summary::CatalogRow = serde_json::from_str(&history).unwrap();
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
     assert!(
         runtime_source_cwds_if_current(&tx, &selected.sources)
             .unwrap()
@@ -7190,17 +7195,64 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
             .as_deref(),
         Some(expected)
     );
-    assert!(
+    assert_eq!(
+        snapshot
+            .runtime_observation(
+                &fixture.options,
+                &history,
+                CatalogObservationOwner::History,
+                &runtime
+            )
+            .unwrap()
+            .as_deref(),
+        Some(expected)
+    );
+    // This direct-capture fixture has no immutable History ref that could
+    // independently authorize the row after its exact owner grant is removed.
+    let history_ref: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=semon_namespace() AND session_key='family-child' AND kind='history')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!history_ref);
+    tx.execute_batch("SAVEPOINT missing_history_grant").unwrap();
+    assert_eq!(
+        tx.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='family-child' AND owner_kind='history'",
+            [],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
         snapshot
             .runtime_observation(
                 &fixture.options,
                 &selected,
+                CatalogObservationOwner::Catalog,
+                &runtime
+            )
+            .unwrap()
+            .as_deref(),
+        Some(expected),
+        "the valid Catalog grant remains available"
+    );
+    assert!(
+        snapshot
+            .runtime_observation(
+                &fixture.options,
+                &history,
                 CatalogObservationOwner::History,
                 &runtime
             )
-            .is_err()
+            .is_err(),
+        "History cannot borrow Catalog's valid grant"
     );
-    let mut saw_retained_catalog = false;
+    tx.execute_batch("ROLLBACK TO missing_history_grant; RELEASE missing_history_grant")
+        .unwrap();
+    let mut saw_retained_history = false;
     crate::storage::selected::selected_family(
         &crate::storage::sqlite::selected::Context::owned(&tx),
         "family-parent",
@@ -7210,7 +7262,7 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
                     relative.lifecycle,
                     crate::model::summary::CatalogLifecycle::Retained
                 );
-                assert_eq!(owner, Some(CatalogObservationOwner::Catalog));
+                assert_eq!(owner, Some(CatalogObservationOwner::History));
                 assert_eq!(
                     snapshot
                         .runtime_observation(&fixture.options, relative, owner.unwrap(), &runtime)
@@ -7218,13 +7270,13 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
                         .as_deref(),
                     Some(expected)
                 );
-                saw_retained_catalog = true;
+                saw_retained_history = true;
             }
             json!({"state":null,"observation":"unavailable"})
         },
     )
     .unwrap();
-    assert!(saw_retained_catalog);
+    assert!(saw_retained_history);
     tx.rollback().unwrap();
 
     let history = session_catalog_history_identity(&fixture.options, "local", "family-child")
