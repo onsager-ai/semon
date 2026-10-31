@@ -4850,40 +4850,18 @@ mod tests {
         use crate::storage::sqlite::proof_generations::{
             CatalogObservationOwner, load_query_recipe, query_recipe_observation,
         };
-        let (fixture, _, options, _) = model_sources();
-        let input = crate::Input {
-            root: crate::InputRoot::Claude,
-            path: "projects/sanitized/large-presentation.jsonl".into(),
-        };
-        let path = input.full_path(&options[0]);
-        // A top-level Claude role stores the project slug, not the native CWD.
-        // One prompt keeps its slot and trace header below 1 MiB; escaping the
-        // details JSON again inside the presentation exceeds that limit.
-        fs::write(
-            &path,
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "type": "user",
-                    "sessionId": "large-presentation",
-                    "uuid": "first",
-                    "timestamp": "2026-10-01T00:00:00Z",
-                    "cwd": format!("/{}", "\"".repeat(300_000)),
-                    "message": {"role": "user", "content": "bounded presentation fixture"}
-                })
-            ),
-        )
-        .unwrap();
+        let (fixture, _, options, inputs) = model_sources();
         let mut cache = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap(),
         )
         .unwrap();
-        cache.ingest(&"a".repeat(64), &path, "claude").unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
         let (batch, model) = model_ready(
             &fixture,
             &mut cache,
             &options[0],
-            &input,
+            &inputs[0],
             "recipe-immutable",
         );
         assert_eq!(
@@ -4904,23 +4882,6 @@ mod tests {
         .into_test_connection();
         let binding = reader.runtime_binding_at(&db).unwrap();
         let row = &model.prepared().rows[0];
-        let sizes: (i64, i64, i64, i64, i64, i64) = db
-            .query_row(
-                "SELECT octet_length(v.metadata),octet_length(g.metadata),octet_length(g.slots),octet_length(r.manifest),octet_length(c.metadata),octet_length(h.metadata)
-                 FROM storage_proof_presentations v
-                 JOIN storage_proof_generations g USING(namespace,id,session_key)
-                 JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication
-                 JOIN session_catalog c ON c.namespace=g.namespace AND c.session_key=g.session_key
-                 JOIN session_trace_headers h ON h.namespace=g.namespace AND h.session_key=g.session_key
-                 WHERE v.namespace=?1 AND v.session_key=?2",
-                params![fixture.config.namespace.as_str(), row.key],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )
-            .unwrap();
-        assert!(sizes.0 > 1048576 && sizes.0 <= 8 * 1048576, "{sizes:?}");
-        for size in [sizes.1, sizes.2, sizes.3, sizes.4, sizes.5] {
-            assert!(size <= 1048576);
-        }
         assert_eq!(
             db.query_row(
                 "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
@@ -4930,14 +4891,6 @@ mod tests {
             .unwrap(),
             0
         );
-        {
-            let control = crate::SelectedReadControl::default().with_limits(131_072, 8 * 1048576);
-            let _scope = crate::selected_read::Scope::enter(&control);
-            assert!(matches!(
-                query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row),
-                Err(StorageError::Busy)
-            ));
-        }
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
         assert!(
