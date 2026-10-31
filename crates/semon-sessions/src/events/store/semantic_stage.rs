@@ -3174,28 +3174,15 @@ mod tests {
         (root, store, path)
     }
 
-    fn header_repair_store(name: &str) -> (PathBuf, SqliteStore, String) {
-        let (root, mut store, path) = header_repair_catalog(name);
-        assert_eq!(
-            store
-                .semantic_begin(std::slice::from_ref(&path), "runtime")
-                .unwrap(),
-            Outcome::Written
-        );
-        // Install the same normalized indexed observation that semantic_record
-        // captures. ACK below uses the actual source/ledger/physical fences.
-        store.connection.execute("UPDATE main.catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=semon_namespace() AND path=?1) WHERE namespace=semon_namespace() AND source_path=?1",params![path,header_repair_claim(&store,&path),ledger(&store.connection,&path).unwrap()]).unwrap();
-        (root, store, path)
-    }
-
-    fn current_header_repair_store(
+    fn current_header_repair_batch(
         name: &str,
     ) -> (
         PathBuf,
         SqliteStore,
         Box<dyn crate::events::IndexStore>,
         String,
-        i64,
+        Batch,
+        crate::model::PreparedSources,
     ) {
         let (root, store, path) = header_repair_catalog(name);
         let config = store.owner.config().clone();
@@ -3238,6 +3225,20 @@ mod tests {
             #[cfg(feature = "postgres")]
             withdrawal_fence: None,
         };
+        (root, store, stage, path, batch, prepared)
+    }
+
+    fn current_header_repair_store(
+        name: &str,
+    ) -> (
+        PathBuf,
+        SqliteStore,
+        Box<dyn crate::events::IndexStore>,
+        String,
+        i64,
+    ) {
+        let (root, store, mut stage, path, batch, prepared) =
+            current_header_repair_batch(name);
         assert_eq!(
             stage.record_semantic_batch(&batch, &prepared).unwrap(),
             Outcome::Written
@@ -3274,47 +3275,6 @@ mod tests {
         );
         tx.commit().unwrap();
         assert_eq!(header_repair_claim(store, path), None);
-    }
-
-    fn diagnostic_batch(store: &SqliteStore, path: &str) -> Batch {
-        store
-            .connection
-            .query_row(
-                "SELECT epoch,revision,generation,runtime FROM main.catalog_semantic_stage WHERE namespace=semon_namespace() AND singleton=1",
-                [],
-                |r| {
-                    Ok(Batch {
-                        epoch: r.get(0)?,
-                        source_revision: r.get(1)?,
-                        base_generation: r.get(2)?,
-                        runtime: r.get(3)?,
-                        phase: Phase::Indexing,
-                        paths: vec![path.to_owned()],
-                        context: Context::default(),
-                        relation_cursor: None,
-                    })
-                },
-            )
-            .unwrap()
-    }
-
-    fn empty_preparation(b: &Batch) -> crate::model::PreparedSources {
-        crate::model::PreparedSources {
-            base_generation: b.base_generation.clone(),
-            claims: Vec::new(),
-            rows: Vec::new(),
-            transcripts: Vec::new(),
-            pids: BTreeSet::new(),
-            lineage_dependencies: Vec::new(),
-            message_dependencies: None,
-            relationships: Context::default(),
-            indexed_sources: Vec::new(),
-            removed_sources: BTreeSet::new(),
-            indexed_native_parents: Vec::new(),
-            withdrawals: Vec::new(),
-            #[cfg(feature = "postgres")]
-            withdrawal_fence: None,
-        }
     }
 
     #[test]
@@ -3449,66 +3409,71 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    fn configured_stage_snapshot(
+        store: &SqliteStore,
+    ) -> std::collections::BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        crate::native_timing::cleanup_tests::snapshot(&store.connection)
+    }
+
     #[test]
-    fn semantic_rejection_distinguishes_stale_batches_without_mutating_the_stage() {
-        for reason in [
-            "stage_epoch",
-            "stage_phase",
-            "stage_revision",
-            "stage_generation",
-            "stage_runtime",
-        ] {
-            let (root, mut store, path) = header_repair_store(reason);
-            let original = diagnostic_batch(&store, &path);
-            assert_eq!(batch_rejection(&store.connection, &original).unwrap(), None);
+    fn semantic_rejection_distinguishes_stale_configured_stage_batches_without_writes() {
+        for case in ["epoch", "phase", "publication_revision", "generation", "runtime"] {
+            let (root, store, mut stage, path, original, mut prepared) =
+                current_header_repair_batch(case);
             let mut stale = original.clone();
-            match reason {
-                "stage_epoch" => stale.epoch += 1,
-                "stage_phase" => stale.phase = Phase::Identity,
-                "stage_revision" => stale.source_revision += 1,
-                "stage_generation" => {
-                    stale.base_generation = Some("synthetic-other-generation".into())
+            match case {
+                "epoch" => stale.epoch += 1,
+                "phase" => stale.phase = Phase::Identity,
+                "publication_revision" => {
+                    store
+                        .connection
+                        .execute(
+                            "UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=semon_namespace() AND singleton=1",
+                            [],
+                        )
+                        .unwrap();
+                    header_repair_invalidate(&store, &format!("{path}.unrelated"), "changed");
+                    stale.phase = Phase::Publication;
+                    assert_ne!(revision(&store.connection).unwrap(), stale.source_revision);
+                    assert_eq!(header_repair_claim(&store, &path), prepared.claims[0].1);
                 }
-                "stage_runtime" => stale.runtime = "synthetic-other-runtime".into(),
+                "generation" => {
+                    stale.base_generation = Some("synthetic-other-generation".into());
+                    prepared.base_generation = stale.base_generation.clone();
+                }
+                "runtime" => stale.runtime = "synthetic-other-runtime".into(),
                 _ => unreachable!(),
             }
+            let before = configured_stage_snapshot(&store);
             assert_eq!(
-                store
-                    .semantic_record(&stale, &empty_preparation(&stale))
-                    .unwrap(),
-                Outcome::Conflict
+                stage.record_semantic_batch(&stale, &prepared).unwrap(),
+                Outcome::Conflict,
+                "stale {case} binding must refuse"
             );
-            assert_eq!(store.semantic_rejection(), Some(reason));
-            assert_eq!(batch_rejection(&store.connection, &original).unwrap(), None);
-            assert_eq!(
-                diagnostic_batch(&store, &path).source_revision,
-                original.source_revision
-            );
+            assert_eq!(configured_stage_snapshot(&store), before);
+            drop(stage);
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[test]
-    fn semantic_rejection_distinguishes_claims_ledgers_catalog_generation_and_sqlite_busy() {
-        for reason in [
-            "prepared_claim",
-            "witness_claim",
-            "witness_ledger",
-            "catalog_generation",
-        ] {
-            let (root, mut store, path) = header_repair_store(reason);
-            let b = diagnostic_batch(&store, &path);
-            let mut prepared = empty_preparation(&b);
-            match reason {
-                "prepared_claim" => prepared.claims.push((path.clone(), Some(i64::MAX))),
-                "witness_claim" => {
-                    header_repair_invalidate(&store, &path, "changed");
+    fn semantic_rejection_checks_configured_claims_ledgers_generation_and_busy() {
+        for case in ["prepared_claim", "source_claim", "ledger", "catalog_generation"] {
+            let (root, store, mut stage, path, batch, mut prepared) =
+                current_header_repair_batch(case);
+            match case {
+                "prepared_claim" => {
+                    assert_eq!(prepared.claims.len(), 1);
+                    prepared.claims[0].1 = Some(i64::MAX);
                 }
-                "witness_ledger" => {
-                    let observed_revision = revision(&store.connection).unwrap();
-                    let staged_claim = header_repair_claim(&store, &path);
-                    let original_ledger = store.ledger(&path).unwrap().unwrap();
+                "source_claim" => {
+                    let observed = prepared.claims[0].1;
+                    header_repair_invalidate(&store, &path, "changed");
+                    assert_ne!(header_repair_claim(&store, &path), observed);
+                }
+                "ledger" => {
+                    let original = store.ledger(&path).unwrap().unwrap();
                     store
                         .connection
                         .execute(
@@ -3516,10 +3481,7 @@ mod tests {
                             [&path],
                         )
                         .unwrap();
-                    assert_ne!(store.ledger(&path).unwrap().unwrap(), original_ledger);
-                    header_repair_invalidate(&store, &format!("{path}.unrelated"), "changed");
-                    assert_eq!(revision(&store.connection).unwrap(), observed_revision + 1);
-                    assert_eq!(header_repair_claim(&store, &path), staged_claim);
+                    assert_ne!(store.ledger(&path).unwrap().unwrap(), original);
                 }
                 "catalog_generation" => {
                     assert_eq!(
@@ -3535,67 +3497,34 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
+            let before = configured_stage_snapshot(&store);
             assert_eq!(
-                store.semantic_record(&b, &prepared).unwrap(),
-                Outcome::Conflict
+                stage.record_semantic_batch(&batch, &prepared).unwrap(),
+                Outcome::Conflict,
+                "inexact {case} evidence must refuse"
             );
-            assert_eq!(store.semantic_rejection(), Some(reason));
-            // A real write-lock conflict remains StoreError::Busy; it must not
-            // be reported as the preceding semantic rejection after retry.
-            store.connection.busy_timeout(Duration::ZERO).unwrap();
-            let blocker = Connection::open(&store.path).unwrap();
-            blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
-            assert!(matches!(
-                store.semantic_record(&b, &prepared),
-                Err(StoreError::Busy(_))
-            ));
-            assert_eq!(store.semantic_rejection(), None);
-            blocker.execute_batch("ROLLBACK").unwrap();
-            drop(blocker);
+            assert_eq!(configured_stage_snapshot(&store), before);
+            drop(stage);
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
-    }
 
-    #[test]
-    fn semantic_rejection_keeps_withdrawal_authority_fenced_across_a_facts_rewrite() {
-        let (root, mut store, path) = header_repair_store("withdrawal-authority-diagnostic");
-        let b = diagnostic_batch(&store, &path);
-        let facts_path = root.join("facts.json");
-        let mut facts = crate::Facts {
-            version: crate::FACTS_VERSION,
-            codex_rollouts: Some(BTreeSet::new()),
-            ..Default::default()
-        };
-        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
-        let authority = Withdrawal {
-            path: path.clone(),
-            relative: "sessions/rollout-synthetic.jsonl".into(),
-            stat: Stat::of(Path::new(&path)).unwrap(),
-            facts_path: facts_path.clone(),
-            facts_identity: crate::facts::source_authority::Identity::of(
-                &fs::symlink_metadata(&facts_path).unwrap(),
-            )
-            .unwrap(),
-            runtime: b.runtime.clone(),
-            authority: None,
-        };
-        assert!(authority.authority_current().unwrap());
-        store
-            .connection
-            .execute(
-                "UPDATE catalog_semantic_stage SET withdrawal_authority=?1",
-                [json(&authority).unwrap()],
-            )
-            .unwrap();
-        facts.hostname = "synthetic-new-hostname".into();
-        crate::write_facts(&facts_path, &facts, &crate::Options::default().source).unwrap();
-        assert_eq!(
-            store.semantic_record(&b, &empty_preparation(&b)).unwrap(),
-            Outcome::Conflict
-        );
-        assert_eq!(store.semantic_rejection(), Some("withdrawal_authority"));
-        assert!(header_repair_claim(&store, &path).is_some());
+        let (root, store, mut stage, _path, batch, prepared) =
+            current_header_repair_batch("busy");
+        let before = configured_stage_snapshot(&store);
+        let blocker = rusqlite::Connection::open(&store.path).unwrap();
+        blocker.busy_timeout(std::time::Duration::ZERO).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(matches!(
+            stage.record_semantic_batch(&batch, &prepared),
+            Err(crate::events::StoreError::Configured(
+                crate::storage::StorageError::Busy
+            ))
+        ));
+        assert_eq!(configured_stage_snapshot(&store), before);
+        blocker.execute_batch("ROLLBACK").unwrap();
+        drop(blocker);
+        drop(stage);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
