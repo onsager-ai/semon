@@ -70,9 +70,9 @@ jobs:
         run: |
           result=0
           for test in \
-            native_evidence::tests::stale_catalog_search_is_reported_then_rebuilt_after_audit \
-            catalog_search::tests::scoped_changes_preserve_independent_history_and_counts \
-            catalog_search::tests::scoped_search_lookup_uses_catalog_metadata_and_rejects_history_orphans \
+            native_evidence::catalog_owner_tests::stale_catalog_search_is_reported_then_rebuilt_after_audit \
+            catalog_search::sqlite_tests::scoped_changes_preserve_independent_history_and_counts \
+            catalog_search::sqlite_tests::scoped_search_lookup_uses_catalog_metadata_and_rejects_history_orphans \
             events::store::configured::tests::configured_semantic_scoped_search_effects_replace_and_rollback \
             query::tests::published_catalog_search_matches_shared_five_tool_oracles; do
             case_result=0
