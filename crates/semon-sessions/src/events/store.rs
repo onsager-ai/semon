@@ -7647,12 +7647,9 @@ mod tests {
             "the direct Catalog publication grants its exact Current row"
         );
 
-        let mut fixture: Value = serde_json::from_slice(include_bytes!(
-            "../pricing/fixtures/models-dev.json"
-        ))
-        .unwrap();
-        fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] =
-            Value::from(300.0);
+        let mut fixture: Value =
+            serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();
+        fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
         let table = std::sync::Arc::new(
             crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap(),
         );
@@ -7661,13 +7658,12 @@ mod tests {
         let encoded: String = store
             .connection
             .query_row(
-                "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
                 rusqlite::params![binding.namespace.as_str(), original.key],
                 |row| row.get(0),
             )
             .unwrap();
-        let repriced: crate::model::summary::CatalogRow =
-            serde_json::from_str(&encoded).unwrap();
+        let repriced: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).unwrap();
         assert_eq!(repriced.cost.pricing_fingerprint, table.fingerprint);
         assert_ne!(
             repriced.cost.usd, original.cost.usd,
