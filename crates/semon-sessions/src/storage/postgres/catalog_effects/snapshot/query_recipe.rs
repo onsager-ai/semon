@@ -1,7 +1,7 @@
 //! Inactive selected Query payload reads over the already admitted snapshot.
 use super::*;
 use crate::storage::{
-    catalog::{CatalogObservationOwner, CatalogSnapshot},
+    catalog::CatalogObservationOwner,
     query::{
         QueryRecipeLoadError as Error, QueryRecipeObservation, QueryRecipeOwner,
         QueryRecipeResidence,
@@ -35,7 +35,6 @@ impl Snapshot<'_, '_> {
             .row_observation(selected, Some(owner))
             .map_err(authority)?
             .ok_or(Error::ObservationChanged)?;
-        let destination = self.runtime_binding().ok_or(Error::ObservationChanged)?;
         let history = owner == CatalogObservationOwner::History;
         let generation = if history {
             self.owner(&selected.key)?
@@ -49,8 +48,9 @@ impl Snapshot<'_, '_> {
         } else {
             "semon_pg_native_catalog_rows"
         };
-        let tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
+        let mut tx = self.tx.lock().map_err(|_| StorageError::Unavailable)?;
         tx.check()?;
+        let destination = super::super::super::model_cache::binding(&mut tx)?;
         let ns = tx.namespace.as_str().as_bytes();
         let row = tx.driver.query(&format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3"), &[&ns, &generation.as_bytes(), &selected.key.as_bytes()]).map_err(sqlstate::error)?.into_iter().next().ok_or(Error::ObservationChanged)?;
         let metadata = text(
