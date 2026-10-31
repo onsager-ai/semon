@@ -60,6 +60,7 @@
     "storage/postgres/transfer.rs",
     "storage/postgres/transfer/catalog.rs",
     "storage/postgres/catalog_effects/tests.rs",
+    "storage/postgres/catalog_effects/tests/query_recipe.rs",
     "catalog_observer.rs",
     "catalog_search.rs",
     "causal_trace.rs",
