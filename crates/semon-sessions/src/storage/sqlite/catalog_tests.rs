@@ -8600,6 +8600,91 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
 }
 
 #[test]
+fn cold_origin_committed_response_loss_reopens_and_replays_exact_facade_request() {
+    let fixture = Fixture::new();
+    let inputs = (0..81).map(|n| {
+        let id = format!("origin-replay-{n:03}");
+        fixture.source(&id);
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: format!("projects/project/{id}.jsonl"),
+        }
+    }).collect::<Vec<_>>();
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    evidence.prepare_events(&mut work, crate::model::now_ms()).unwrap();
+    let mut cache = work.events.take().unwrap();
+    drop(work);
+    evidence.retire();
+    cache.discover_catalog_sources(&fixture.options, &inputs[..64], false).unwrap();
+    cache.discover_catalog_sources(&fixture.options, &inputs[64..], true).unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+    assert_eq!(cache.begin_semantic_stage(&[], &runtime).unwrap(), crate::events::Outcome::Written);
+    // The caller retains the actual immutable first request across producer
+    // teardown. Re-running model preparation is a new request, not an exact retry.
+    let mut prepared = crate::model::prepare_sources(
+        &fixture.options, &mut cache, &inputs[..64], crate::model::now_ms(),
+    ).unwrap();
+    assert_eq!(prepared.rows.len(), 64);
+    assert_eq!(prepared.claims.len(), 64);
+    assert!(prepared.base_generation.is_none());
+    let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    let generation = generation.unwrap();
+    // Discard the successful producer and its response-side state. Only the
+    // caller's exact request and the committed receipt survive this boundary.
+    drop(cache);
+    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let mut resumed = EventCache::open_semantic(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    ).unwrap();
+    // Exercise normal takeover too: replay must find the original receipt's
+    // held epoch even after the live stage's held epoch has advanced.
+    assert_eq!(resumed.begin_semantic_stage(&[], &runtime).unwrap(), crate::events::Outcome::Written);
+    let db = fixture.db();
+    assert!(db.query_row("SELECT stage.epoch>receipt.held_epoch FROM catalog_semantic_stage stage JOIN catalog_semantic_origin_publications receipt USING(namespace,origin_epoch)", [], |row| row.get::<_, bool>(0)).unwrap());
+    let tables = [
+        "catalog_semantic_stage", "catalog_semantic_sources", "catalog_semantic_frontier",
+        "catalog_semantic_origin_owners", "catalog_semantic_origin_sources",
+        "catalog_semantic_origin_publications", "session_catalog_invalidations",
+        "session_catalog", "session_catalog_sources", "storage_proof_refs",
+        "storage_catalog_native_observation_grants", "files", "storage_source_journal",
+    ];
+    let snapshot = || tables.iter().map(|table| {
+        let mut statement = db.prepare(&format!("SELECT * FROM {table} ORDER BY 1,2")).unwrap();
+        let columns = statement.column_count();
+        let rows = statement.query_map([], |row| (0..columns).map(|column| row.get::<_, SqlValue>(column)).collect::<rusqlite::Result<Vec<_>>>()).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        rows
+    }).collect::<Vec<_>>();
+    let before = snapshot();
+    for table in &tables {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            db.execute_batch(&format!("CREATE TRIGGER origin_replay_no_write_{table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'exact replay must not write'); END;")).unwrap();
+        }
+    }
+    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap(), (crate::events::Outcome::Written, Some(generation.clone())));
+    assert_eq!(snapshot(), before, "replay changed Current, ACKs, receipts or stage progress");
+    // A still-enrolled but different cohort cannot use the committed token.
+    let original_claim = prepared.claims[0].clone();
+    prepared.claims[0].0 = inputs[64].full_path(&fixture.options).to_string_lossy().into_owned();
+    assert!(resumed.publish_partial_catalog_fenced(&prepared).is_err());
+    prepared.claims[0] = original_claim;
+    prepared.transcripts[0].repair = !prepared.transcripts[0].repair;
+    assert!(resumed.publish_partial_catalog_fenced(&prepared).is_err());
+    prepared.transcripts[0].repair = !prepared.transcripts[0].repair;
+    prepared.base_generation = Some(generation.clone());
+    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap().0, crate::events::Outcome::Conflict);
+    prepared.base_generation = None;
+    assert_eq!(resumed.publish_partial_catalog_fenced(&prepared).unwrap(), (crate::events::Outcome::Written, Some(generation)));
+    assert_eq!(snapshot(), before);
+    // A durable receipt never substitutes for the caller's current capability.
+    db.execute("UPDATE storage_namespaces SET admission_generation=admission_generation+1 WHERE namespace=semon_namespace()", []).unwrap();
+    assert!(resumed.publish_partial_catalog_fenced(&prepared).is_err());
+    assert_eq!(snapshot(), before);
+}
+
+#[test]
 fn cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin() {
     let fixture = Fixture::new();
     for n in 0..81 {

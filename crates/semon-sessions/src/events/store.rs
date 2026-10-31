@@ -3048,6 +3048,9 @@ impl SqliteStore {
                 return Ok(Outcome::Stale);
             }
             if let Some(token) = origin {
+                if expected_generation.is_some() || claims.is_none() || preserve_complete {
+                    return Ok(Outcome::Conflict);
+                }
                 if let Some(generation) = crate::storage::sqlite::semantic::origin::replay(
                     &transaction, owner, token, publication, claims.unwrap_or_default(),
                 ).map_err(StoreError::Configured)? {
@@ -3081,9 +3084,6 @@ impl SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
             } else if let Some(token) = origin {
-                if expected_generation.is_some() || claims.is_none() || preserve_complete {
-                    return Ok(Outcome::Conflict);
-                }
                 crate::storage::sqlite::semantic::origin::validate_publication(
                     &transaction, owner, token, claims.unwrap_or_default(),
                 ).map_err(StoreError::Configured)?;
