@@ -334,13 +334,20 @@ impl QueryCatalogStore for QueryCatalog {
     fn selected_recipe(
         &self,
         observation: &crate::storage::query::QueryRecipeObservation,
-    ) -> Result<Option<crate::query_projection::SelectedRecipe>, crate::storage::query::QueryRecipeLoadError> {
+    ) -> Result<
+        Option<crate::query_projection::SelectedRecipe>,
+        crate::storage::query::QueryRecipeLoadError,
+    > {
         if observation.destination.namespace != self.namespace {
             return Err(crate::storage::query::QueryRecipeLoadError::ObservationChanged);
         }
-        with_admitted_snapshot(&self.pool, &self.namespace, &self.control, &self.generation, |snapshot| {
-            Ok(snapshot.load_query_recipe(observation))
-        })?
+        with_admitted_snapshot(
+            &self.pool,
+            &self.namespace,
+            &self.control,
+            &self.generation,
+            |snapshot| Ok(snapshot.load_query_recipe(observation)),
+        )?
     }
 
     fn selected_body(
