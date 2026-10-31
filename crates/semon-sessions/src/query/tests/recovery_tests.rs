@@ -1799,10 +1799,43 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     assert_eq!(recovery_selected_transcript(&home, "first").status, 503);
     publish(&home);
     assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+    // Restoring hostname bytes changes its stat-based global observation.
+    // Capture that observation through the real Stage before repricing it.
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
     let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let proof_snapshot = recovery_proof_snapshot(&db, "first");
+    let proof_provenance = recovery_stage_provenance(&db, "first");
+    let direct_capture_before_reprice: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_capture_before_reprice.is_none());
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
     let tx = db.transaction().unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    let (_, observations) =
+        crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+            &tx,
+            &current_binding,
+            &selected,
+        )
+        .unwrap();
+    let captured_source_runtime =
+        crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(
+        observations.source_runtime.as_deref(),
+        Some(captured_source_runtime.as_str()),
+        "the authenticated Stage publication must capture the current raw global observation"
+    );
     let mut cost = selected.cost.clone();
     cost.usd = Some(cost.usd.unwrap_or_default() + 1.0);
     prepare_repriced_observation(
@@ -1820,6 +1853,16 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     let repriced = recovery_catalog_row(&db, "session_catalog", "first");
     assert_ne!(repriced.cost.usd, selected.cost.usd);
     assert_eq!(repriced.query, selected.query);
+    assert_eq!(recovery_proof_snapshot(&db, "first"), proof_snapshot);
+    assert_eq!(recovery_stage_provenance(&db, "first"), proof_provenance);
+    let direct_capture_after_reprice: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(direct_capture_after_reprice.is_none());
 
     let path = repriced.sources[0].path.to_string_lossy().into_owned();
     assert_eq!(
@@ -1839,6 +1882,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     let tx = db.transaction().unwrap();
     let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
     let global = snapshot.runtime_generation(&home.options).unwrap();
+    assert_eq!(global, captured_source_runtime);
     let captured_runtime = selected
         .query
         .as_ref()
