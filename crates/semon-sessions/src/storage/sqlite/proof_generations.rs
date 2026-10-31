@@ -116,7 +116,7 @@ pub(crate) fn with_prepared_query_recipe_for_test<T>(publish: impl FnOnce() -> T
 }
 
 #[cfg(test)]
-fn prepared_query_recipe_for_test(
+pub(super) fn prepared_query_recipe_for_test(
     row: &CatalogRow,
     metadata: &str,
 ) -> Result<Option<String>, StorageError> {

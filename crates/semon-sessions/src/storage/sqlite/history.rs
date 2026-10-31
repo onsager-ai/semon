@@ -89,8 +89,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
             params![self.namespace, row.key],
             |record| Ok((record.get(0)?, record.get(1)?)),
         )?;
-        let stored: CatalogRow = serde_json::from_str(&metadata)
-            .map_err(<Self as OriginalHistoryStore>::data)?;
+        let stored: CatalogRow =
+            serde_json::from_str(&metadata).map_err(<Self as OriginalHistoryStore>::data)?;
         if serde_json::to_value(&stored).map_err(<Self as OriginalHistoryStore>::data)?
             != serde_json::to_value(row).map_err(<Self as OriginalHistoryStore>::data)?
         {

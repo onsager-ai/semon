@@ -8361,12 +8361,17 @@ mod tests {
             .unwrap()
             .into_test_connection();
             let tx = db.transaction().unwrap();
-            let source = crate::storage::sqlite::semantic::AdmittedSource::native(store.owner.clone());
-            let custody = crate::storage::sqlite::history::OriginalHistory::admitted(&tx, &source)
-                .unwrap();
+            let source =
+                crate::storage::sqlite::semantic::AdmittedSource::native(store.owner.clone());
+            let custody =
+                crate::storage::sqlite::history::OriginalHistory::admitted(&tx, &source).unwrap();
             let changes = tx.total_changes();
             assert!(crate::storage::catalog::preserve_original(&custody, &rows[0]).is_err());
-            assert_eq!(tx.total_changes(), changes, "missing payload refuses before custody effects");
+            assert_eq!(
+                tx.total_changes(),
+                changes,
+                "missing payload refuses before custody effects"
+            );
             let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
             assert!(!retained);
             tx.commit().unwrap();
@@ -8406,18 +8411,33 @@ mod tests {
         store.connection.execute_batch("CREATE TEMP TRIGGER recipe_custody_rollback BEFORE UPDATE ON main.session_catalog BEGIN SELECT RAISE(ABORT,'recipe custody rollback'); END;").unwrap();
         let mut rolled_back = false;
         for _ in 0..128 {
-            if catalog_write(&mut store, &next, &next_projections, false, CatalogWriter::Auto)
-                .is_err()
+            if catalog_write(
+                &mut store,
+                &next,
+                &next_projections,
+                false,
+                CatalogWriter::Auto,
+            )
+            .is_err()
             {
                 rolled_back = true;
                 break;
             }
         }
-        assert!(rolled_back, "failure must reach replacement after original custody");
+        assert!(
+            rolled_back,
+            "failure must reach replacement after original custody"
+        );
         let (current_payload, history_exists): (String, bool) = store.connection.query_row("SELECT query_recipe,EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2) FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), rows[0].key], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(current_payload, payload);
-        assert!(!history_exists, "failed replacement rolls back paired History custody");
-        store.connection.execute_batch("DROP TRIGGER recipe_custody_rollback").unwrap();
+        assert!(
+            !history_exists,
+            "failed replacement rolls back paired History custody"
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER recipe_custody_rollback")
+            .unwrap();
         for tick in 0..128 {
             if catalog_write(
                 &mut store,
@@ -8447,7 +8467,10 @@ mod tests {
         )
         .unwrap();
         let retained_payload: String = store.connection.query_row("SELECT query_recipe FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
-        assert_eq!(retained_payload, payload, "custody preserves exact payload bytes");
+        assert_eq!(
+            retained_payload, payload,
+            "custody preserves exact payload bytes"
+        );
         assert_eq!(port.selected_recipe(&history).unwrap(), Some(expected));
         assert!(
             query_recipe_observation(
@@ -10548,7 +10571,10 @@ mod tests {
         assert_eq!(history.sources, old.sources);
         assert!(history.query.is_none());
         let payload: Option<String> = batch.connection.query_row("SELECT query_recipe FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1", [&old.key], |row| row.get(0)).unwrap();
-        assert!(payload.is_none(), "query-less composite carries no selected payload");
+        assert!(
+            payload.is_none(),
+            "query-less composite carries no selected payload"
+        );
         assert!(crate::history_projection::qualified(&batch.connection, &history).unwrap());
         let recipes = catalog_recipes(&batch.connection, "session_history_slots", &old.key)
             .into_iter()

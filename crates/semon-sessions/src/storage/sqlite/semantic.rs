@@ -1808,6 +1808,26 @@ impl Stage {
                 return Ok((Outcome::Conflict, None));
             }
         }
+        let selected_paths =
+            serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+        if prepared
+            .rows
+            .iter()
+            .any(|row| row.query.is_some() || row.trace.is_some())
+            || !prepared.transcripts.is_empty()
+            || !prepared.withdrawals.is_empty()
+            || !prepared.relationships.relations.is_empty()
+            || !prepared.pids.is_empty()
+            || !prepared.lineage_dependencies.is_empty()
+            || !prepared.relationships.retired_owners.is_empty()
+        {
+            let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS (SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1))",params![ns,batch.epoch,coordinator_metadata,producer_witness,claims_text,batch.base_generation,batch.source_revision,batch.runtime,selected_paths],|r|r.get(0)).map_err(error)?;
+            if !exact {
+                #[cfg(test)]
+                eprintln!("semantic_publication_conflict reason=staged_model_witness");
+                return Ok((Outcome::Conflict, None));
+            }
+        }
         let replay:Option<(String,String)>=tx.query_row("SELECT generation,proof_digest FROM storage_semantic_publications WHERE namespace=?1 AND epoch=?2 AND base_generation IS ?3 AND claims=?4 AND metadata=?5",params![ns,batch.epoch,batch.base_generation,claims_text,metadata_text],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(error)?;
         if let Some((generation, digest)) = replay {
             if previous.as_deref() == Some(generation.as_str())
@@ -1845,8 +1865,6 @@ impl Stage {
             eprintln!("semantic_publication_conflict reason=source_revision");
             return Ok((Outcome::Conflict, None));
         }
-        let selected_paths =
-            serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
         let staged:Vec<String>=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65").map_err(error)?.query_map(params![ns,selected_paths],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
         let mut requested = batch.paths.clone();
         requested.sort();
@@ -1936,24 +1954,6 @@ impl Stage {
             return Ok((Outcome::Conflict, None));
         }
         let retired = retirement_plan(&tx, &self.source, prepared)?;
-        if prepared
-            .rows
-            .iter()
-            .any(|row| row.query.is_some() || row.trace.is_some())
-            || !prepared.transcripts.is_empty()
-            || !prepared.withdrawals.is_empty()
-            || !prepared.relationships.relations.is_empty()
-            || !prepared.pids.is_empty()
-            || !prepared.lineage_dependencies.is_empty()
-            || !prepared.relationships.retired_owners.is_empty()
-        {
-            let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS (SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1))",params![ns,batch.epoch,coordinator_metadata,producer_witness,claims_text,batch.base_generation,batch.source_revision,batch.runtime,selected_paths],|r|r.get(0)).map_err(error)?;
-            if !exact {
-                #[cfg(test)]
-                eprintln!("semantic_publication_conflict reason=staged_model_witness");
-                return Ok((Outcome::Conflict, None));
-            }
-        }
         // All stale/scope/Raw/claim checks precede the first durable write.
         let old_epoch:Option<String>=tx.query_row("SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_publication_epoch'",[ns],|r|r.get(0)).optional().map_err(error)?;
         let mut projections_unchanged = true;

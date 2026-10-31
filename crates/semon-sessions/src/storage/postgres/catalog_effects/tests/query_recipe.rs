@@ -156,12 +156,23 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 },
                 previous: &generation,
             };
-            assert_eq!(catalog::preserve_original(&store, row), Err(StorageError::ScopeChanged));
+            assert_eq!(
+                catalog::preserve_original(&store, row),
+                Err(StorageError::ScopeChanged)
+            );
         }
-        assert_eq!(super::super::BOUNDARIES.with(|count| count.get()), boundaries);
-        assert_eq!(super::snapshot(tx)?, before, "missing payload refuses before custody effects");
+        assert_eq!(
+            super::super::BOUNDARIES.with(|count| count.get()),
+            boundaries
+        );
+        assert_eq!(
+            super::snapshot(tx)?,
+            before,
+            "missing payload refuses before custody effects"
+        );
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     let payload = format!("{}\n", compact.query_recipe.unwrap());
     // The only physical seam supplies the nullable payload, after normal
     // publication authenticated the exact compact metadata and native receipt.
@@ -270,7 +281,10 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             let token = view
                 .query_recipe_observation(Owner::History, &history)
                 .unwrap();
-            assert_eq!(view.load_query_recipe(&token).unwrap(), Some(expected.clone()));
+            assert_eq!(
+                view.load_query_recipe(&token).unwrap(),
+                Some(expected.clone())
+            );
             Ok(token)
         })
         .unwrap();
@@ -373,8 +387,8 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         }
         let mut complete = false;
         for _ in 0..256 {
-            // Author the payload at its immutable INSERT from this exact
-            // prepared model; all ordinary publication checks still run.
+            // Author the exact pair at Current and immutable INSERTs from
+            // this prepared model; ordinary publication checks still run.
             let result = with_prepared_query_recipe_for_test(|| {
                 cache.publish_semantic_catalog(&batch, model.prepared())
             })
@@ -423,10 +437,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             |row| row.get(0),
         )
         .unwrap();
-    assert!(
-        current_payload.is_none(),
-        "the production Current writer stays inactive"
-    );
+    assert_eq!(current_payload.as_ref(), Some(payload));
     let immutable_payload: Option<String> = tx
         .query_row(
             "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND metadata=?3 AND id=?4",

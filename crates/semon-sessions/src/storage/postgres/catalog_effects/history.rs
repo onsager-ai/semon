@@ -109,7 +109,10 @@ impl History<'_, '_> {
         incomplete: bool,
         original: Option<&str>,
     ) -> Result<(), StorageError> {
-        if metadata.len().saturating_add(query_recipe.map_or(0, str::len)) > MAX
+        if metadata
+            .len()
+            .saturating_add(query_recipe.map_or(0, str::len))
+            > MAX
             || original.is_some_and(|value| value.len() > MAX)
         {
             return Err(StorageError::Busy);
@@ -222,7 +225,9 @@ impl OriginalHistoryStore for History<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         let metadata: CatalogRow = serde_json::from_slice(
-            &record.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?,
+            &record
+                .get::<_, Option<Vec<u8>>>(1)
+                .ok_or(StorageError::Busy)?,
         )
         .map_err(|_| StorageError::ScopeChanged)?;
         if encoded(&metadata)? != encoded(row)? {

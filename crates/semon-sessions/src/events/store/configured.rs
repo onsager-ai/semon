@@ -4758,6 +4758,13 @@ mod tests {
                 Outcome::Written
             );
             let published = shared_state(&a);
+            let recipe = model.prepared().rows[0].query_recipe.clone().unwrap();
+            model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["busy"] = serde_json::json!([[1, 2]]);
+            assert_eq!(serde_json::to_string(&model.prepared().rows).unwrap(), inline);
+            assert_eq!(model.prepared().staged_model_witness().unwrap(), old_model_witness);
+            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap(), (Outcome::Conflict, None));
+            assert_eq!(shared_state(&a), published, "changed detached bytes cannot replay publication");
+            model.prepared_mut_for_test().rows[0].query_recipe = Some(recipe);
             assert_eq!(
                 caches[i]
                     .publish_semantic_catalog(&batch, model.prepared())
@@ -6192,6 +6199,13 @@ mod tests {
             store.finish_semantic_stage(batch.epoch).unwrap(),
             Outcome::Written
         );
+        let finished = shared_state(&a);
+        assert_eq!(
+            store.publish_semantic_catalog(&batch, &prepared).unwrap(),
+            (Outcome::Conflict, None),
+            "replay is scoped to the retained publication stage"
+        );
+        assert_eq!(shared_state(&a), finished);
         let (next, prepared) = publication_ready(&mut *store, &a.raw, "replay-again");
         let proof_state = |db: &Connection| {
             db.prepare("SELECT json_array(g.id,g.publication,g.proof,g.metadata,g.slots,r.base,r.manifest,r.digest,v.metadata,p.epoch,p.base_generation,p.claims,p.metadata) FROM storage_proof_generations g JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE g.namespace='source-a' ORDER BY g.id,g.session_key").unwrap()

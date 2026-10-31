@@ -40,6 +40,17 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         row: &crate::model::summary::CatalogRow,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
+        // The inactive selected-recipe fixture authors the same pair in Current
+        // and the immutable original, inside ordinary guarded publication.
+        #[cfg(test)]
+        if let Some(payload) = super::proof_generations::prepared_query_recipe_for_test(row, metadata)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+        {
+            return self.db.execute(
+                "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES(?1,?2,'current',?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata,query_recipe=excluded.query_recipe WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key OR session_catalog.query_recipe IS NOT excluded.query_recipe",
+                params![self.namespace, row.key, row.last.unwrap_or(0), row.harness, row.repo, row.parent, metadata, payload],
+            ).map(|n| n > 0);
+        }
         let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
         self.db
             .prepare_cached(sql)?

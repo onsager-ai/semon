@@ -412,3 +412,9 @@ SQLite oracles are tracked separately in the writer inventory.
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
+
+Inactive SQLite coordinator qualification precedes publication replay as well as
+first publication. Exact replay is scoped to the retained publication stage:
+finishing removes both that stage and its paired model witness, and a subsequent
+publish with the finished batch conflicts before effects. Immutable proof and
+presentation encodings remain unchanged by this private coordinator check.

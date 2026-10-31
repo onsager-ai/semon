@@ -36,10 +36,7 @@ pub(crate) struct SelectedRecipePublication {
 impl SelectedRecipe {
     /// Custody never turns a detached reference with missing bytes into History.
     /// This does not read inactive inline producer metadata as a payload.
-    pub(crate) fn validate_custody(
-        row: &CatalogRow,
-        payload: Option<&str>,
-    ) -> std::io::Result<()> {
+    pub(crate) fn validate_custody(row: &CatalogRow, payload: Option<&str>) -> std::io::Result<()> {
         if let Some(payload) = payload {
             return Self::decode(row, payload).map(|_| ());
         }
@@ -51,7 +48,9 @@ impl SelectedRecipe {
                 <SelectedRecipeRef as serde::Deserialize>::deserialize(selected).is_ok()
             })
         {
-            return Err(std::io::Error::other("Selected Query recipe payload unavailable"));
+            return Err(std::io::Error::other(
+                "Selected Query recipe payload unavailable",
+            ));
         }
         Ok(())
     }
