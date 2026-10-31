@@ -6,12 +6,15 @@ fn current_transfer225_unsupported_catalog_custody_preserves_capture_cursor_and_
     let root = root();
     let source = sqlite(&root, "unsupported-custody-source");
     let _ = seed_catalog(&source, &root);
-    let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
     let length = catalog_rows::MAX_CATALOG_ROW_BYTES as i64 + 1;
-    db.execute(
-        "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_original_header:unsupported',CAST(zeroblob(?2) AS TEXT))",
-        params![source.namespace.as_str(), length],
-    ).unwrap();
+    super::super::fixture_transaction(&source, |db| {
+        db.execute(
+            "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_original_header:unsupported',CAST(zeroblob(?2) AS TEXT))",
+            params![source.namespace.as_str(), length],
+        ).unwrap();
+        Ok(())
+    }).unwrap();
+    let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
     let operation = [182; 32];
     let cursor_key = transfer::key(&operation, "capture");
     let mut previous: Option<String> = None;
@@ -120,33 +123,32 @@ fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() 
     let _ = seed_catalog(&source, &root);
     let value = serde_json::to_string(&"\0\\\"界".repeat(160_000)).unwrap();
     assert!(value.len() > transfer::MAX_PAGE_BYTES);
-    let source_path = match &source.backend {
-        crate::storage::StoreBackend::Sqlite { database } => database,
-        #[cfg(feature = "postgres")]
-        _ => unreachable!(),
-    };
-    let db = rusqlite::Connection::open(source_path).unwrap();
-    db.execute(
-        "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_transfer:large-row',?2)",
-        params![source.namespace.as_str(), value],
-    )
-    .unwrap();
-    // Its raw cells fit one page, but escaped JSON and wire byte arrays span
-    // several pages. The following row must wait for this row's final part.
+    // Payload-only custody fixtures still use the adapter's restored owner and
+    // ordinary guarded transaction; no publication or proof authority is minted.
     let escaped = serde_json::to_string(&"\\".repeat(250_000)).unwrap();
     assert!(escaped.len() < transfer::MAX_PAGE_BYTES);
-    for (key, metadata) in [("00-escaped", escaped.as_str()), ("01-following", "null")] {
+    super::super::fixture_transaction(&source, |db| {
         db.execute(
-            "INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",
-            params![
-                source.namespace.as_str(),
-                format!("history_transfer:{key}"),
-                metadata
-            ],
+            "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_transfer:large-row',?2)",
+            params![source.namespace.as_str(), value],
         )
         .unwrap();
-    }
-    drop(db);
+        // Its raw cells fit one page, but escaped JSON and wire byte arrays span
+        // several pages. The following row must wait for this row's final part.
+        for (key, metadata) in [("00-escaped", escaped.as_str()), ("01-following", "null")] {
+            db.execute(
+                "INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",
+                params![
+                    source.namespace.as_str(),
+                    format!("history_transfer:{key}"),
+                    metadata
+                ],
+            )
+            .unwrap();
+        }
+        Ok(())
+    })
+    .unwrap();
     let manifest = stage(&source, &target, &[177; 32]);
     let source_inbox = source.transfer_inbox();
     let count = source_inbox.checkpoint(&manifest).unwrap().sequence;
