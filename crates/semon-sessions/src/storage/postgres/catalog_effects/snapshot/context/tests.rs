@@ -239,6 +239,89 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
 }
 
 #[test]
+fn pg_retained_family_harness_reuse_does_not_report_current_history_status() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("selected-family-harness-reuse");
+    let control = PgCancellation::default();
+    let generation = "a".repeat(64);
+    let mut parent = row("family-parent", None);
+    parent.harness = "codex".into();
+    let mut current = row("reused-key", Some("family-parent"));
+    current.harness = "codex".into();
+    let mut history = row("reused-key", Some("history-parent"));
+    history.harness = "claude".into();
+    history.name = "old History name".into();
+    history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        insert(tx, ns, &generation, &parent, None)?;
+        insert(tx, ns, &generation, &current, None)?;
+
+        let metadata = serde_json::to_vec(&history).map_err(|_| StorageError::Unavailable)?;
+        let key = history.key.as_bytes();
+        let parent_key = history.parent.as_deref().map(str::as_bytes);
+        tx.driver.execute(
+            "INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$2,NULL,1,0,false,$4,NULL,$5,$6,$7,$8,NULL,false,$9)",
+            &[
+                &ns,
+                &generation.as_bytes(),
+                &key,
+                &metadata,
+                &history.last.unwrap_or(0),
+                &history.harness.as_bytes(),
+                &history.repo.as_deref().unwrap_or("").as_bytes(),
+                &history.model.as_bytes(),
+                &parent_key,
+            ],
+        )
+        .map_err(|_| StorageError::Unavailable)?;
+        tx.driver.execute(
+            "INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7,NULL,false,$8)",
+            &[
+                &ns,
+                &generation.as_bytes(),
+                &key,
+                &history.last.unwrap_or(0),
+                &history.harness.as_bytes(),
+                &history.repo.as_deref().unwrap_or("").as_bytes(),
+                &history.model.as_bytes(),
+                &parent_key,
+            ],
+        )
+        .map_err(|_| StorageError::Unavailable)?;
+        Ok(())
+    })
+    .unwrap();
+
+    let family = super::super::with_generation(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            selected_family(snapshot, "family-parent", &mut |_| {
+                serde_json::json!({"state":"current"})
+            })
+            .map_err(|_| StorageError::Busy)
+        },
+    )
+    .unwrap();
+    assert_eq!(family["state"], "complete");
+    assert_eq!(family["runs"].as_array().unwrap().len(), 1);
+    let child = &family["runs"].as_array().unwrap()[0];
+    assert_eq!(child["key"], "reused-key");
+    assert_eq!(child["name"], "old History name");
+    assert_eq!(child["parent"], "history-parent");
+    assert_eq!(child["harness"], "codex");
+    assert_eq!(
+        child["status"],
+        serde_json::json!({"state":null,"observation":"unavailable"}),
+        "a different-harness History row cannot report Current status"
+    );
+}
+
+#[test]
 fn pg_selected_family_bounds_candidate_bytes_and_charges_visited_binds() {
     let (pool, _) = fixture(|_| {});
     let namespace = ns("selected-family-byte-budget");
