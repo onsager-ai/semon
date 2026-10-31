@@ -372,7 +372,10 @@ mod tests {
         assert!(prepared.metadata.len() + payload.len() < super::super::proof_codec::METADATA_MAX);
         assert_eq!(serde_json::to_string(&row).unwrap(), active);
         let compact = serde_json::from_str(&prepared.metadata).unwrap();
-        assert_eq!(crate::query_projection::SelectedRecipe::decode(&compact, &payload).unwrap(), recipe);
+        assert_eq!(
+            crate::query_projection::SelectedRecipe::decode(&compact, &payload).unwrap(),
+            recipe
+        );
         row.query_recipe = None;
         assert!(crate::query_projection::SelectedRecipe::prepare(&row).is_err());
     }

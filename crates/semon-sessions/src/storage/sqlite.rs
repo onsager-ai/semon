@@ -298,7 +298,19 @@ mod tests {
         ).unwrap();
         assert_eq!(stored, (metadata.clone(), payload.clone()));
         for table in ["session_history_catalog", "storage_proof_generations"] {
-            assert_eq!(fixture.db.query_row(&format!("SELECT count(*) FROM main.{table} WHERE namespace=semon_namespace()"), [], |row| row.get::<_, i64>(0)).unwrap(), 0);
+            assert_eq!(
+                fixture
+                    .db
+                    .query_row(
+                        &format!(
+                            "SELECT count(*) FROM main.{table} WHERE namespace=semon_namespace()"
+                        ),
+                        [],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
         }
         fixture.db.execute("INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix) VALUES(semon_namespace(),'generation','recipe-owner','publication','proof',1,'stream',?1,?2,'[]','prefix')", rusqlite::params![metadata, payload]).unwrap();
         assert!(fixture.db.execute("UPDATE storage_proof_generations SET query_recipe='changed' WHERE namespace=semon_namespace() AND session_key='recipe-owner'", []).is_err());
