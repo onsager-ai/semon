@@ -237,10 +237,14 @@ jobs:
         shell: bash
         run: |
           result=0
-          for test in oversized_catalog_publication_refuses_without_changing_published_proofs published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop; do
+          for test in \
+            events::store::chunk_proofs::tests::oversized_catalog_publication_refuses_without_changing_published_proofs \
+            events::store::chunk_proofs::tests::published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop \
+            events::store::configured::tests::selected57::configured_semantic_selected57_real_two_source_native_range_and_field_oracle \
+            events::store::configured::tests::selected57::configured_semantic_selected57_claude_original_provenance_survives_current_reference_move; do
             case_result=0
-            cargo test --locked -p semon-sessions --lib "events::store::chunk_proofs::tests::$test" -- --exact --nocapture > "$RUNNER_TEMP/published-proof-case.log" 2>&1 || case_result=$?
-            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/published-proof-case.log"; then case_result=1; fi
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/published-proof-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/published-proof-case.log"; then case_result=1; fi
             cat "$RUNNER_TEMP/published-proof-case.log" >> "$RUNNER_TEMP/published-proof-tests.log"
             echo "CASE name=$test status=$case_result" >> "$RUNNER_TEMP/published-proof-tests.log"
             if [ "$case_result" -ne 0 ]; then result=1; fi
