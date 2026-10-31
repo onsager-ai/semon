@@ -294,19 +294,16 @@ fn pg_retained_family_harness_reuse_does_not_report_current_history_status() {
     })
     .unwrap();
 
-    let family = super::super::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
-            selected_family(snapshot, "family-parent", &mut |_| {
-                serde_json::json!({"state":"current"})
-            })
+    let family =
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            selected_family(
+                snapshot,
+                "family-parent",
+                &mut |_| serde_json::json!({"state":"current"}),
+            )
             .map_err(|_| StorageError::Busy)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert_eq!(family["state"], "complete");
     assert_eq!(family["runs"].as_array().unwrap().len(), 1);
     let child = &family["runs"].as_array().unwrap()[0];
