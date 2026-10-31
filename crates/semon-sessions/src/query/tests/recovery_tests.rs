@@ -1524,6 +1524,24 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         ],
     );
     publish_semantic(&home);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let direct_before_stage = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let direct_capture_before_stage: Option<String> = direct_before_stage
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        direct_capture_before_stage.is_some(),
+        "ordinary Catalog publication owns its row runtime capture before semantic Stage"
+    );
+    drop(direct_before_stage);
     publish_semantic_stage(
         &home,
         &crate::Input {
@@ -1541,6 +1559,17 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     .unwrap()
     .into_test_connection();
     let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let direct_capture_after_stage: Option<String> = db
+        .query_row(
+            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        direct_capture_after_stage.is_none(),
+        "semantic Stage keeps runtime observations in its immutable presentation proof"
+    );
     let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
     let tx = db.transaction().unwrap();
     let current_binding = binding.runtime_binding_at(&tx).unwrap();

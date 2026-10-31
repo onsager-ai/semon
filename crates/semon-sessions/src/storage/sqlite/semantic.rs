@@ -1932,6 +1932,22 @@ impl Stage {
             )
             .map_err(StoreError::Configured)?;
         }
+        let stream = self
+            .source
+            .config
+            .expected_stream_epoch
+            .as_deref()
+            .ok_or_else(|| refuse("semantic_stream_epoch"))?;
+        for row in &prepared.rows {
+            super::proof_generations::clear_native_catalog_observation_capture(
+                &tx,
+                ns,
+                &row.key,
+                self.source.admission,
+                stream,
+            )
+            .map_err(StoreError::Configured)?;
+        }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_generation_refs")
             .map_err(error)?;
