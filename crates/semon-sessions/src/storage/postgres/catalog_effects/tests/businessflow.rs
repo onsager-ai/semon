@@ -3653,7 +3653,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                             .into_iter()
                             .flat_map(|recipes| recipes.values())
                     })
-                    .filter(|recipe| recipe["path"].as_str() == Some(append_relative_path))
+                    .filter(|recipe| {
+                        recipe["path"].as_str().is_some_and(|path| {
+                            std::path::Path::new(path) == appended_path.as_path()
+                        })
+                    })
                     .map(|recipe| recipe["source"].clone())
                     .collect::<Vec<_>>();
                 Ok((row.harness, sources))
