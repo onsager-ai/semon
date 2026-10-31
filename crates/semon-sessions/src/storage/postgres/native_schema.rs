@@ -95,12 +95,12 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_owners",
-        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean",
+        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean,parent_key bytea?",
         key: "generation,key_digest",
     },
     Table {
         name: "catalog_history_headers",
-        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean,parent_key bytea?",
         key: "generation,key_digest",
     },
     Table {
@@ -398,6 +398,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     (
+        "catalog_history_parent",
+        "catalog_history_owners",
+        "generation,parent_digest,key_digest",
+        false,
+    ),
+    (
         "catalog_operation_generation",
         "catalog_operations",
         "generation",
@@ -582,7 +588,7 @@ const WORKSPACE_TABLES: &[&str] = &[
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v9");
+    hash.update(b"semon-private-native-v10");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());

@@ -5299,6 +5299,57 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         sqlite_parent["last"], sqlite_parent_exact["items"][0]["last"],
         "parent append must move the retained list position"
     );
+    let current_only_key = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            for row in prepared.rows.iter().filter(|row| row.harness == "codex") {
+                if snapshot.catalog(&row.key, false)?.is_some()
+                    && snapshot.owner(&row.key)?.is_none()
+                {
+                    return Ok(Some(row.key.clone()));
+                }
+            }
+            Ok(None)
+        },
+    )
+    .unwrap()
+    .expect("a Current Codex row without a History owner");
+    let selected_item = |request: &str| {
+        let request = crate::catalog::Request::parse(request).unwrap();
+        let reply = super::super::snapshot::with_admitted_generation(
+            &pool,
+            &namespace,
+            &control,
+            &caught,
+            |snapshot| {
+                crate::catalog::read_page_snapshot(&options, recent_machine, &request, snapshot)
+                    .map_err(|_| StorageError::ScopeChanged)
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        page["items"][0].clone()
+    };
+    let current_only = crate::viewer::percent_encode(&current_only_key);
+    let current_item = selected_item(&format!("sid={current_only}&limit=50"));
+    let retained_item =
+        selected_item(&format!("sid={current_only}&scope=retained_history&limit=50"));
+    assert!(current_item["transcript"]["generation"].is_string());
+    assert!(current_item["transcript"]["total"].is_number());
+    assert_eq!(
+        retained_item["transcript"]["generation"],
+        current_item["transcript"]["generation"],
+        "retained scope uses the Current transcript when this key has no History owner"
+    );
+    assert_eq!(
+        retained_item["transcript"]["total"],
+        current_item["transcript"]["total"],
+        "retained scope falls back to the Current transcript when this key has no History owner"
+    );
     let pg_parent = scoped_items(&caught, "scope=retained_history&")
         .into_iter()
         .find(|item| item["key"] == "one")

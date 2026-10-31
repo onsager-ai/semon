@@ -106,10 +106,24 @@ impl ContextLookup for Snapshot<'_, '_> {
         Ok(Some((Some(details.to_string()), current)))
     }
     fn relative(&self, key: &str) -> io::Result<Option<String>> {
-        self.catalog(key, false).map_err(io::Error::other)?.map(|row| {
-            let value = serde_json::to_value(&row).map_err(io::Error::other)?;
-            Ok(json!({"key":row.key,"name":row.name,"harness":row.harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string())
-        }).transpose()
+        let current = self.catalog(key, false).map_err(io::Error::other)?;
+        let lifecycle = if current.is_some() {
+            crate::model::summary::CatalogLifecycle::Current
+        } else {
+            crate::model::summary::CatalogLifecycle::Retained
+        };
+        let Some(mut row) = self
+            .catalog(key, true)
+            .map_err(io::Error::other)?
+            .or(current)
+        else {
+            return Ok(None);
+        };
+        row.lifecycle = lifecycle;
+        let value = serde_json::to_value(&row).map_err(io::Error::other)?;
+        Ok(Some(
+            json!({"key":row.key,"name":row.name,"harness":row.harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string(),
+        ))
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
         let _scope = crate::selected_read::Scope::ensure();
@@ -162,6 +176,18 @@ impl ContextLookup for Snapshot<'_, '_> {
                                 WHERE namespace_digest=sha256($1::bytea)
                                   AND namespace=$1 AND generation=$2 AND parent_digest=$3
                                   AND NOT (session_key=ANY($5::bytea[]))
+                                UNION ALL
+                                SELECT h.parent_key,h.parent_digest,h.key_digest,h.session_key
+                                FROM semon_pg_native_catalog_history_owners h
+                                WHERE h.namespace_digest=sha256($1::bytea)
+                                  AND h.namespace=$1 AND h.generation=$2 AND h.parent_digest=$3
+                                  AND NOT (h.session_key=ANY($5::bytea[]))
+                                  AND NOT EXISTS (
+                                    SELECT 1 FROM semon_pg_native_catalog_rows c
+                                    WHERE c.namespace_digest=h.namespace_digest
+                                      AND c.namespace=h.namespace AND c.generation=$2
+                                      AND c.key_digest=h.key_digest AND c.session_key=h.session_key
+                                  )
                                 ORDER BY key_digest LIMIT $4
                             ), measured AS (
                                 SELECT coalesce(sum(
