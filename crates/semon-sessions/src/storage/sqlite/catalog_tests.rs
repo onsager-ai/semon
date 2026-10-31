@@ -4359,15 +4359,154 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     )
     .unwrap();
     fixture.publish_existing();
-    let db = fixture.db();
-    // Preserve an exact original recipe beside its still-Current owner. This
-    // isolates history selection from source revision or proof mismatches.
-    db.execute_batch(
-        "INSERT INTO session_history_catalog(namespace,session_key,metadata) SELECT namespace,session_key,metadata FROM session_catalog WHERE session_key='live-history';
-         INSERT INTO session_history_projections SELECT namespace,session_key,generation,source_generation,version,total,0 FROM session_slot_projections WHERE session_key='live-history';
-         INSERT INTO session_history_slots SELECT namespace,session_key,slot,metadata FROM session_slots WHERE session_key='live-history';",
+    let (
+        original_metadata,
+        original_source,
+        original_source_generation,
+        original_projection,
+        original_slots,
+    ) = {
+        let db = fixture.db();
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE session_key='live-history' AND lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut original: CatalogRow = serde_json::from_str(&metadata).unwrap();
+        original.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+        let original_metadata = serde_json::to_string(&original).unwrap();
+        let original_source = original.sources.first().unwrap().clone();
+        let original_source_generation =
+            crate::retention::source_generation(&original.sources).unwrap();
+        let original_projection: (String, String, i64, i64) = db
+            .query_row(
+                "SELECT generation,source_generation,version,total FROM main.session_slot_projections WHERE session_key='live-history'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let mut statement = db
+            .prepare(
+                "SELECT metadata FROM main.session_slots WHERE session_key='live-history' ORDER BY slot",
+            )
+            .unwrap();
+        let original_slots = statement
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .unwrap();
+        (
+            original_metadata,
+            original_source,
+            original_source_generation,
+            original_projection,
+            original_slots,
+        )
+    };
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&source).unwrap(),
+        "{}",
+        json!({
+            "type":"assistant",
+            "sessionId":"live-history",
+            "uuid":"progress",
+            "parentUuid":"question",
+            "timestamp":"2026-10-01T00:00:02Z",
+            "message":{"role":"assistant","content":[{"type":"text","text":"Checking the available choices."}]}
+        })
     )
     .unwrap();
+    fixture.publish_existing();
+
+    let mut db = fixture.db();
+    let current_lifecycle: String = db
+        .query_row(
+            "SELECT lifecycle FROM main.session_catalog WHERE session_key='live-history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_lifecycle, "current");
+    let history_text: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE session_key='live-history'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut history: CatalogRow = serde_json::from_str(&history_text).unwrap();
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    assert_eq!(serde_json::to_string(&history).unwrap(), original_metadata);
+    assert_eq!(history.sources[0], original_source);
+    let history_projection: (String, String, i64, i64) = db
+        .query_row(
+            "SELECT generation,source_generation,version,total FROM main.session_history_projections WHERE session_key='live-history'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(history_projection, original_projection);
+    let mut statement = db
+        .prepare(
+            "SELECT metadata FROM main.session_history_slots WHERE session_key='live-history' ORDER BY slot",
+        )
+        .unwrap();
+    let history_slots = statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>()
+        .unwrap();
+    assert_eq!(history_slots, original_slots);
+
+    let original_source_path = original_source.path.to_string_lossy().into_owned();
+    let original_source_ledger = crate::source_carrier::ledger_digest(
+        &crate::source_carrier::ledger(&original_source),
+    );
+    let original_history_proof: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_proof_sources s ON s.namespace=g.namespace AND s.id=g.id AND s.session_key=g.session_key WHERE r.namespace=semon_namespace() AND r.session_key='live-history' AND r.kind='history' AND g.prefix=?1 AND g.metadata=?2 AND s.path=?3 AND s.ledger=?4)",
+            rusqlite::params![
+                original_source_generation,
+                original_metadata,
+                original_source_path,
+                original_source_ledger,
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        original_history_proof,
+        "the producer must retain the original source proof and digests"
+    );
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let tx = db.transaction().unwrap();
+    let current = binding.runtime_binding_at(&tx).unwrap();
+    let admission = i64::try_from(current.admission).unwrap();
+    let original_digest = crate::storage::proof_codec::digest(original_metadata.as_bytes());
+    let history_grant: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='live-history' AND owner_kind='history' AND metadata_digest=?2 AND admission=?3 AND stream=?4)",
+            rusqlite::params![
+                current.namespace.as_str(),
+                original_digest,
+                admission,
+                current.stream_epoch,
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        history_grant,
+        "the producer must mint an exact History observation grant"
+    );
+    tx.commit().unwrap();
+
     let mut query = crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
     let live_fields = query
         .call_selected(
@@ -4386,6 +4525,19 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     );
     assert_eq!(live_fields["session"]["state"], "waiting-question");
     assert!(live_fields["session"]["open_question"].is_object());
+    let current_read = crate::query::transcript::read(
+        &fixture.options,
+        "live-history",
+        crate::CatalogReadScope::Current,
+        &json!({"id":"live-history"}),
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+        crate::model::now_ms(),
+    );
+    assert!(
+        current_read.unwrap().is_some(),
+        "the Current MCP recipe must remain qualified beside History"
+    );
     let read = || {
         crate::query::transcript::read(
             &fixture.options,
