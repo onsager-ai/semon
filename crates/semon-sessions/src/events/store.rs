@@ -8923,8 +8923,12 @@ mod tests {
         rows[4].parent = None;
         rows[5].name = "Updated native description".into();
         // Shared source paths must preserve last-writer dependency order.
-        // Change only dependency rows; keep the prepared Query envelope and
-        // selected trace recipes required by the publisher.
+        // Adding a source also requires original custody before Current writes.
+        // Keep the prepared Query envelope and selected trace recipes.
+        let mut original = rows[6].clone();
+        original.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let original_recipes = catalog_recipes(&batch.connection, "session_slots", &original.key);
+        assert!(!original_recipes.is_empty());
         let shared_source = rows[7].sources[0].clone();
         rows[6].sources.push(shared_source);
         rows[6].query.as_mut().expect("prepared query envelope")["rows"] =
@@ -8942,17 +8946,27 @@ mod tests {
             .unwrap();
         eprintln!("catalog_publication_probe round=repair");
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        assert_eq!(
+            crate::history_projection::catalog(&batch.connection, &original.key)
+                .unwrap()
+                .unwrap(),
+            json(&original).unwrap(),
+            "adding a source preserves the exact original owner metadata"
+        );
+        assert_eq!(
+            catalog_recipes(&batch.connection, "session_history_slots", &original.key),
+            original_recipes,
+            "adding a source preserves original recipe bytes and slot order"
+        );
         let feed = batch.connection.prepare("SELECT session_key,read_scope FROM session_catalog_changes WHERE revision>?1 ORDER BY revision").unwrap().query_map([feed_before], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let expected = [0, 2, 4, 5, 6, 7]
-            .into_iter()
-            .flat_map(|position| {
-                ["current", "retained_history"]
-                    .map(|scope| (rows[position].key.clone(), scope.to_owned()))
-            })
-            .collect::<Vec<_>>();
+        let mut expected = vec![(original.key.clone(), "retained_history".to_owned())];
+        expected.extend([0, 2, 4, 5, 6, 7].into_iter().flat_map(|position| {
+            ["current", "retained_history"]
+                .map(|scope| (rows[position].key.clone(), scope.to_owned()))
+        }));
         assert_eq!(
             feed, expected,
-            "caller order and parent-only no-feed semantics"
+            "original custody before caller order; parent-only and search-only repairs emit no feed"
         );
         let pids = batch.connection.prepare("SELECT native_id FROM catalog_native_dependencies WHERE source_path=?1 AND harness='runtime:pid'").unwrap().query_map([shared.to_string_lossy()], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert_eq!(
