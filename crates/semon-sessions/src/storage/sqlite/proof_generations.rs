@@ -747,6 +747,12 @@ struct VerifiedObservation {
     observations: Option<crate::storage::selected::PresentationObservations>,
 }
 
+fn diagnose_observation_refusal(stage: &'static str) {
+    if cfg!(test) || crate::native_timing::enabled() {
+        eprintln!("catalog_retained_observation_refused stage={stage}");
+    }
+}
+
 /// A relevant immutable owner must authenticate before a mutable grant can
 /// authorize its row. Runtime observations remain optional for row authority.
 fn verify_immutable_observation(
@@ -801,6 +807,12 @@ fn verify_immutable_observation(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ObservationPreparationError::Sql)?;
     let [(record, base, manifest, presentation)] = rows.as_slice() else {
+        if cfg!(test) || crate::native_timing::enabled() {
+            eprintln!(
+                "catalog_retained_observation_refused stage=immutable_candidate_cardinality count={}",
+                rows.len()
+            );
+        }
         return Err(StorageError::ScopeChanged.into());
     };
     crate::selected_read::charge(
@@ -816,15 +828,18 @@ fn verify_immutable_observation(
         base,
         manifest,
         &record.proof,
-    )?;
+    )
+    .inspect_err(|_| diagnose_observation_refusal("immutable_presentation"))?;
     let original: CatalogRow =
         serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
-    let original_binding = proof_codec::observation_binding(record.clone(), current, &original)?;
+    let original_binding = proof_codec::observation_binding(record.clone(), current, &original)
+        .inspect_err(|_| diagnose_observation_refusal("immutable_original_binding"))?;
     if original.lifecycle != crate::model::summary::CatalogLifecycle::Current
         || crate::retention::source_generation(&original.sources)
             .map_err(|_| StorageError::Unavailable)?
             != prefix
     {
+        diagnose_observation_refusal("immutable_original_lifecycle_or_prefix");
         return Err(StorageError::ScopeChanged.into());
     }
     let grant = format!("{}:{}", current.admission, current.stream_epoch);
@@ -854,6 +869,7 @@ fn verify_immutable_observation(
         false
     };
     if !stage_grant && !transfer_grant {
+        diagnose_observation_refusal("immutable_destination_or_local_grant");
         return Err(StorageError::ScopeChanged.into());
     }
     Ok(VerifiedObservation {
@@ -945,7 +961,8 @@ pub(crate) fn observation_binding_with_observations(
     };
     if !proof_candidate
         && let Some(observations) =
-            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
+            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
+                .inspect_err(|_| diagnose_observation_refusal("direct_capture"))?
     {
         return Ok((current.clone(), observations));
     }
@@ -954,15 +971,20 @@ pub(crate) fn observation_binding_with_observations(
             .map_err(ObservationPreparationError::into_storage)?;
     let original = verified.row;
     let original_binding = verified.binding;
-    let observations = verified.observations.ok_or(StorageError::ScopeChanged)?;
+    let observations = verified
+        .observations
+        .ok_or(StorageError::ScopeChanged)
+        .inspect_err(|_| diagnose_observation_refusal("immutable_observations_present"))?;
     let original_runtime = observations
         .runtime_for(&original)
-        .ok_or(StorageError::ScopeChanged)?;
+        .ok_or(StorageError::ScopeChanged)
+        .inspect_err(|_| diagnose_observation_refusal("immutable_original_row_runtime"))?;
     normalized.lifecycle = original.lifecycle;
     let exact_original_metadata = serde_json::to_value(&original)
         .map_err(|_| StorageError::Unavailable)?
         == serde_json::to_value(&normalized).map_err(|_| StorageError::Unavailable)?;
     if !exact_original_metadata && !exact_owner_grant {
+        diagnose_observation_refusal("selected_metadata_or_exact_owner_grant");
         return Err(StorageError::ScopeChanged);
     }
     let selected_runtime = observations.runtime_for(selected);
@@ -970,10 +992,12 @@ pub(crate) fn observation_binding_with_observations(
         if !exact_original_metadata
             && exact_owner_grant
             && let Some(direct) =
-                direct_capture_for_row(current, selected, imported, direct_grant.as_ref())?
+                direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
+                    .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
         {
             return Ok((current.clone(), direct));
         }
+        diagnose_observation_refusal("selected_row_runtime_equality");
         return Err(StorageError::ScopeChanged);
     }
     if !imported {
