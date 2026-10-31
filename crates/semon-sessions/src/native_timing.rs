@@ -137,6 +137,52 @@ fn thread_writes() -> Option<ThreadWrites> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadCpuTimeNs(u128);
+
+/// Calling-thread CPU time. Callers pass the existing timing gate so disabled
+/// diagnostics never issue the clock syscall.
+pub(crate) fn thread_cpu_time_ns(enabled: bool) -> Option<ThreadCpuTimeNs> {
+    if !enabled {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut value = std::mem::MaybeUninit::<libc::timespec>::uninit();
+        // SAFETY: `clock_gettime` initializes the supplied timespec on success.
+        let result =
+            unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, value.as_mut_ptr()) };
+        if result != 0 {
+            return None;
+        }
+        // SAFETY: the successful call above initialized the timespec.
+        let value = unsafe { value.assume_init() };
+        let seconds = u128::try_from(value.tv_sec).ok()?;
+        let nanoseconds = u128::try_from(value.tv_nsec).ok()?;
+        if nanoseconds >= 1_000_000_000 {
+            return None;
+        }
+        seconds
+            .checked_mul(1_000_000_000)?
+            .checked_add(nanoseconds)
+            .map(ThreadCpuTimeNs)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
+fn thread_cpu_delta_us(
+    start: Option<ThreadCpuTimeNs>,
+    end: Option<ThreadCpuTimeNs>,
+) -> Option<u128> {
+    start
+        .zip(end)
+        .and_then(|(start, end)| end.0.checked_sub(start.0))
+        .map(|nanoseconds| nanoseconds / 1_000)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WriteSample {
     thread: Option<ThreadWrites>,
@@ -649,7 +695,11 @@ pub(crate) fn discovery_count(update: impl FnOnce(&mut DiscoveryCounts)) {
         }
     });
 }
-pub(crate) struct DiscoveryProbe(Option<(String, &'static str, Instant)>);
+pub(crate) struct DiscoveryProbe {
+    state: Option<(String, &'static str, Instant)>,
+    diagnostic_emit_wall_us: Option<u128>,
+}
+
 impl DiscoveryProbe {
     pub(crate) fn new(index: &Path, phase: &'static str) -> Self {
         let state = enabled().then(|| {
@@ -658,18 +708,29 @@ impl DiscoveryProbe {
             });
             (id(index), phase, Instant::now())
         });
-        Self(state)
+        Self {
+            state,
+            diagnostic_emit_wall_us: None,
+        }
+    }
+
+    pub(crate) fn record_diagnostic_emit(&mut self, started: Instant) {
+        if self.state.is_some() {
+            self.diagnostic_emit_wall_us = Some(started.elapsed().as_micros());
+        }
     }
 }
+
 impl Drop for DiscoveryProbe {
     fn drop(&mut self) {
-        if let Some((producer, phase, start)) = &self.0 {
+        if let Some((producer, phase, start)) = &self.state {
             let counts = DISCOVERY_COUNTS
                 .with(|cell| cell.take())
                 .unwrap_or_default();
             eprintln!(
-                "semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",
+                "semon sessions native: producer={producer} discovery_detail={phase} elapsed_us={} diagnostic_emit_wall_us={:?} authored_statements={} schema_probes={} source_input_or_selected_rows={} recovery_source_fullscan_steps={} committed_changes={} changed_state={} selected_factory_opens={} witness_skipped={}",
                 start.elapsed().as_micros(),
+                self.diagnostic_emit_wall_us,
                 counts.statements,
                 counts.schema_probes,
                 counts.rows,
@@ -696,6 +757,7 @@ pub(crate) fn take_discovery_records() -> Vec<(&'static str, DiscoveryCounts)> {
 pub(crate) struct Measurements {
     enabled: bool,
     values: BTreeMap<&'static str, (u128, usize)>,
+    cpu_values: BTreeMap<&'static str, (Option<u128>, usize)>,
     #[cfg(test)]
     uncached_cleanup_reference: bool,
 }
@@ -906,6 +968,24 @@ impl Measurements {
         }
     }
 
+    pub(crate) fn record_cpu(
+        &mut self,
+        name: &'static str,
+        started_ns: Option<ThreadCpuTimeNs>,
+        ended_ns: Option<ThreadCpuTimeNs>,
+        units: usize,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let entry = self.cpu_values.entry(name).or_insert((Some(0), 0));
+        entry.0 = entry
+            .0
+            .zip(thread_cpu_delta_us(started_ns, ended_ns))
+            .map(|(total, elapsed)| total.saturating_add(elapsed));
+        entry.1 = entry.1.saturating_add(units);
+    }
+
     pub(crate) fn count(&mut self, name: &'static str, units: usize) {
         if self.enabled {
             let entry = self.values.entry(name).or_default();
@@ -921,10 +1001,17 @@ impl Measurements {
                     records.push((group, self.values.clone()));
                 }
             });
-            eprintln!(
-                "semon sessions native: producer={producer} breakdown={group} us_units={:?}",
-                self.values
-            );
+            if self.cpu_values.is_empty() {
+                eprintln!(
+                    "semon sessions native: producer={producer} breakdown={group} us_units={:?}",
+                    self.values
+                );
+            } else {
+                eprintln!(
+                    "semon sessions native: producer={producer} breakdown={group} us_units={:?} cpu_us_units={:?}",
+                    self.values, self.cpu_values
+                );
+            }
         }
     }
 }
@@ -1087,16 +1174,52 @@ pub(crate) struct ColdDiscoveryProgress {
     examined: usize,
     candidates: usize,
     active_us: u128,
+    // Unavailable if timing is disabled or any page's CPU clock sample failed.
+    active_thread_cpu_us: Option<u128>,
     between_pages_us: u128,
     previous_end: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ColdDiscoveryStart {
+    wall: Instant,
+    thread_cpu_ns: Option<ThreadCpuTimeNs>,
+}
+
 impl ColdDiscoveryProgress {
-    fn record(&mut self, start: Instant, end: Instant, examined: usize, candidates: usize) {
-        if let Some(previous_end) = self.previous_end {
-            self.between_pages_us += start.saturating_duration_since(previous_end).as_micros();
+    pub(crate) fn start(enabled: bool) -> Option<ColdDiscoveryStart> {
+        if !enabled {
+            return None;
         }
-        self.active_us += end.saturating_duration_since(start).as_micros();
+        Some(ColdDiscoveryStart {
+            wall: Instant::now(),
+            thread_cpu_ns: thread_cpu_time_ns(true),
+        })
+    }
+
+    fn record(
+        &mut self,
+        start: ColdDiscoveryStart,
+        end: Instant,
+        end_thread_cpu_ns: Option<ThreadCpuTimeNs>,
+        examined: usize,
+        candidates: usize,
+    ) {
+        if let Some(previous_end) = self.previous_end {
+            self.between_pages_us += start
+                .wall
+                .saturating_duration_since(previous_end)
+                .as_micros();
+        }
+        self.active_us += end.saturating_duration_since(start.wall).as_micros();
+        let cpu_us = thread_cpu_delta_us(start.thread_cpu_ns, end_thread_cpu_ns);
+        self.active_thread_cpu_us = if self.pages == 0 {
+            cpu_us
+        } else {
+            self.active_thread_cpu_us
+                .zip(cpu_us)
+                .map(|(total, elapsed)| total.saturating_add(elapsed))
+        };
         self.pages += 1;
         self.examined += examined;
         self.candidates += candidates;
@@ -1106,7 +1229,7 @@ impl ColdDiscoveryProgress {
     pub(crate) fn page(
         &mut self,
         cache: &Path,
-        start: Option<Instant>,
+        start: Option<ColdDiscoveryStart>,
         examined: usize,
         candidates: usize,
         complete: (bool, bool),
@@ -1114,14 +1237,17 @@ impl ColdDiscoveryProgress {
         let Some(start) = start else {
             return;
         };
-        self.record(start, Instant::now(), examined, candidates);
+        let end_thread_cpu_ns = thread_cpu_time_ns(true);
+        let end = Instant::now();
+        self.record(start, end, end_thread_cpu_ns, examined, candidates);
         let producer = id(&crate::events::EventCache::path(cache));
         eprintln!(
-            "semon sessions native: producer={producer} cold_discovery_progress pages={} examined={} candidates={} active_us={} between_pages_us={} paths_complete={} recovery_complete={}",
+            "semon sessions native: producer={producer} cold_discovery_progress pages={} examined={} candidates={} active_us={} active_thread_cpu_us={:?} between_pages_us={} paths_complete={} recovery_complete={}",
             self.pages,
             self.examined,
             self.candidates,
             self.active_us,
+            self.active_thread_cpu_us,
             self.between_pages_us,
             complete.0,
             complete.1,
@@ -1129,7 +1255,9 @@ impl ColdDiscoveryProgress {
     }
 }
 
-pub(crate) struct Phase(Option<(String, &'static str, Instant)>);
+pub(crate) struct Phase(
+    Option<(String, &'static str, Instant, Option<ThreadCpuTimeNs>)>,
+);
 
 impl Phase {
     pub(crate) fn new(cache: &Path, name: &'static str) -> Self {
@@ -1138,6 +1266,7 @@ impl Phase {
                 id(&crate::events::EventCache::path(cache)),
                 name,
                 Instant::now(),
+                thread_cpu_time_ns(true),
             )
         }))
     }
@@ -1145,10 +1274,13 @@ impl Phase {
 
 impl Drop for Phase {
     fn drop(&mut self) {
-        if let Some((id, name, started)) = &self.0 {
+        if let Some((id, name, started, thread_cpu_started_ns)) = &self.0 {
+            let thread_cpu_ended_ns = thread_cpu_time_ns(true);
+            let ended = Instant::now();
             eprintln!(
-                "semon sessions native: producer={id} phase={name} us={}",
-                started.elapsed().as_micros()
+                "semon sessions native: producer={id} phase={name} us={} thread_cpu_us={:?}",
+                ended.saturating_duration_since(*started).as_micros(),
+                thread_cpu_delta_us(*thread_cpu_started_ns, thread_cpu_ended_ns)
             );
         }
     }
@@ -1164,16 +1296,33 @@ mod tests {
 
         let start = Instant::now();
         let mut progress = ColdDiscoveryProgress::default();
-        progress.record(start, start + Duration::from_micros(10), 64, 64);
         progress.record(
-            start + Duration::from_micros(13),
+            ColdDiscoveryStart {
+                wall: start,
+                thread_cpu_ns: Some(ThreadCpuTimeNs(0)),
+            },
+            start + Duration::from_micros(10),
+            Some(ThreadCpuTimeNs(10_000)),
+            64,
+            64,
+        );
+        progress.record(
+            ColdDiscoveryStart {
+                wall: start + Duration::from_micros(13),
+                thread_cpu_ns: Some(ThreadCpuTimeNs(13_000)),
+            },
             start + Duration::from_micros(20),
+            Some(ThreadCpuTimeNs(20_000)),
             512,
             0,
         );
         progress.record(
-            start + Duration::from_micros(25),
+            ColdDiscoveryStart {
+                wall: start + Duration::from_micros(25),
+                thread_cpu_ns: Some(ThreadCpuTimeNs(25_000)),
+            },
             start + Duration::from_micros(30),
+            Some(ThreadCpuTimeNs(30_000)),
             60,
             60,
         );
@@ -1181,6 +1330,7 @@ mod tests {
         assert_eq!(progress.examined, 636);
         assert_eq!(progress.candidates, 124);
         assert_eq!(progress.active_us, 22);
+        assert_eq!(progress.active_thread_cpu_us, Some(22));
         assert_eq!(progress.between_pages_us, 8);
         assert_eq!(progress.active_us + progress.between_pages_us, 30);
     }
