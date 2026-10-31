@@ -742,7 +742,11 @@ removed their endpoint rows; the pre-cleanup seal is the proof of those exact
 queue contents. Only then may it mark the Catalog complete and remove the
 active stage row. If any input changes during finish, keep completeness partial,
 atomically clear the seal and finish cursors, and resume or reset with the same
-OriginId; cleanup never ACKs a source claim. Reset or origin invalidation clears
+OriginId. A same-binding reset atomically changes `origin_phase` from
+`finishing` back to `draining` and restarts the existing derived indexing phase
+under the new held and key epochs. Runtime, admission or stream replacement
+instead leaves the origin `invalid`; it cannot resume publication. Cleanup
+never ACKs a source claim. Reset or origin invalidation clears
 all six seal fields before rebuilding and cannot treat cleanup-induced empty
 queues as completion. Group receipts are excluded from derived cleanup and
 retained with the origin for the exact-replay lifetime. During `Finishing` they
