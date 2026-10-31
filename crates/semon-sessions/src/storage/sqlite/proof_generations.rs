@@ -501,6 +501,93 @@ pub(crate) fn imported_catalog(
     db.query_row("SELECT EXISTS(SELECT 1 FROM main.meta p WHERE p.namespace=?1 AND p.key='native_transfer_v1:catalog-admission' AND CASE WHEN octet_length(p.value)<=?4 THEN json_extract(p.value,'$[0]')='catalog-import-v1' AND json_extract(p.value,'$[1].namespace')=?1 AND json_extract(p.value,'$[1].stream_epoch')=?2 AND json_extract(p.value,'$[3]')=?3 AND EXISTS(SELECT 1 FROM main.meta a WHERE a.namespace=p.namespace AND a.key='native_transfer_v1:catalog-owner:'||json_extract(p.value,'$[2]') AND a.value=?5) ELSE 0 END)", params![binding.namespace.as_str(), binding.stream_epoch, admission, max_bytes, format!("{}:{}",binding.admission,binding.stream_epoch)], |r| r.get(0)).map_err(failed)
 }
 
+#[derive(Debug)]
+struct ObservationFieldMatches {
+    query: bool,
+    sources: bool,
+    native_ids: bool,
+    lifecycle: bool,
+    harness: bool,
+    last: bool,
+    repo: bool,
+    model: bool,
+}
+
+struct ObservationRowComparison {
+    selected_equal: bool,
+    fields: ObservationFieldMatches,
+}
+
+fn observation_row_metadata(
+    db: &Connection,
+    namespace: &str,
+    key: &str,
+    history: bool,
+) -> Option<CatalogRow> {
+    let sql = if history {
+        "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2"
+    } else {
+        "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2"
+    };
+    let metadata = db
+        .query_row(sql, params![namespace, key], |row| row.get::<_, Option<String>>(0))
+        .optional()
+        .ok()?
+        .flatten()?;
+    serde_json::from_str(&metadata).ok()
+}
+
+fn observation_row_comparison(
+    selected: &CatalogRow,
+    actual: &CatalogRow,
+) -> Option<ObservationRowComparison> {
+    let mut selected = selected.clone();
+    selected.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let mut normalized_actual = actual.clone();
+    normalized_actual.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let selected_equal = serde_json::to_string(&selected).ok()?
+        == serde_json::to_string(&normalized_actual).ok()?;
+    Some(ObservationRowComparison {
+        selected_equal,
+        fields: ObservationFieldMatches {
+            query: selected.query == actual.query,
+            sources: selected.sources == actual.sources,
+            native_ids: selected.native_ids == actual.native_ids,
+            lifecycle: selected.lifecycle == actual.lifecycle,
+            harness: selected.harness == actual.harness,
+            last: selected.last == actual.last,
+            repo: selected.repo == actual.repo,
+            model: selected.model == actual.model,
+        },
+    })
+}
+
+fn log_observation_row_comparison(
+    label: &'static str,
+    comparison: Option<ObservationRowComparison>,
+) {
+    if let Some(comparison) = comparison {
+        let ObservationFieldMatches {
+            query,
+            sources,
+            native_ids,
+            lifecycle,
+            harness,
+            last,
+            repo,
+            model,
+        } = comparison.fields;
+        eprintln!(
+            "semon sessions native: observation_direct_grant_fields {label}={} query={query} sources={sources} native_ids={native_ids} lifecycle={lifecycle} harness={harness} last={last} repo={repo} model={model}",
+            comparison.selected_equal
+        );
+    } else {
+        eprintln!(
+            "semon sessions native: observation_direct_grant_fields {label}=unavailable query=unavailable sources=unavailable native_ids=unavailable lifecycle=unavailable harness=unavailable last=unavailable repo=unavailable model=unavailable"
+        );
+    }
+}
+
 /// Query observations use original producer coordinates only after the same
 /// destination admission grant that qualifies a retained selected lease.
 pub(crate) fn observation_binding(
@@ -590,6 +677,20 @@ pub(crate) fn observation_binding(
                 eprintln!("semon sessions native: observation_direct_grant_diagnostic=unavailable");
             }
         }
+        let current_row = observation_row_metadata(db, ns, &selected.key, false);
+        let history_row = observation_row_metadata(db, ns, &selected.key, true);
+        log_observation_row_comparison(
+            "selected_current_equal",
+            current_row
+                .as_ref()
+                .and_then(|row| observation_row_comparison(selected, row)),
+        );
+        log_observation_row_comparison(
+            "selected_history_equal",
+            history_row
+                .as_ref()
+                .and_then(|row| observation_row_comparison(selected, row)),
+        );
     }
     // Stage grants hash the exact metadata and bind its admission/stream. The
     // joined immutable presentation root is checked below against g.metadata.
