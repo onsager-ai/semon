@@ -338,8 +338,13 @@ fn read(
         // Retained Query rows keep their provenance checks above, but their
         // recorded summaries do not require a live runtime or source ledger.
         let row_runtime = if lifecycle == "current" {
-            let cwds =
-                super::catalog::runtime_source_cwds(db, &row.sources).map_err(unavailable)?;
+            let cwds = super::catalog::runtime_source_cwds(db, &row.sources)
+                .inspect_err(|_| {
+                    if crate::native_timing::enabled() {
+                        eprintln!("semon sessions native: observation_stage_refused boundary=query_current_source_cwds");
+                    }
+                })
+                .map_err(unavailable)?;
             let scoped = runtime_observations
                 .scope(&row, &cwds)
                 .map_err(unavailable)?;

@@ -798,15 +798,28 @@ pub(crate) fn observation_binding(
         record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
     )
     .map_err(|_| StorageError::Busy)?;
-    proof_codec::verify_presentation_digest(&base, &manifest, &record.proof)?;
+    proof_codec::verify_presentation_digest(&base, &manifest, &record.proof).inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: observation_stage_refused boundary=presentation_digest");
+        }
+    })?;
     proof_codec::verify_presentation_entry(
         &selected.key,
         &record.metadata,
         &record.slots,
         &presentation,
         &manifest,
-    )?;
-    proof_codec::observation_binding(record, current, selected)
+    )
+    .inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: observation_stage_refused boundary=presentation_entry");
+        }
+    })?;
+    proof_codec::observation_binding(record, current, selected).inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
+        }
+    })
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable
