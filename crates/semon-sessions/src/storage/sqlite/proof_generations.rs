@@ -96,44 +96,6 @@ pub(super) struct PreparedPresentations<'a> {
     pub(super) rows: &'a [(String, String)],
 }
 
-#[cfg(test)]
-std::thread_local! {
-    static PREPARED_QUERY_RECIPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Qualify an inactive payload writer in one fixture's ordinary publication.
-/// The guard changes no authority and never escapes the calling thread.
-#[cfg(test)]
-pub(crate) fn with_prepared_query_recipe_for_test<T>(publish: impl FnOnce() -> T) -> T {
-    struct Restore(bool);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            PREPARED_QUERY_RECIPE.with(|enabled| enabled.set(self.0));
-        }
-    }
-    let _restore = Restore(PREPARED_QUERY_RECIPE.with(|enabled| enabled.replace(true)));
-    publish()
-}
-
-#[cfg(test)]
-pub(super) fn prepared_query_recipe_for_test(
-    row: &CatalogRow,
-    metadata: &str,
-) -> Result<Option<String>, StorageError> {
-    if !PREPARED_QUERY_RECIPE.with(std::cell::Cell::get) {
-        return Ok(None);
-    }
-    let recipe = row
-        .query_recipe
-        .as_ref()
-        .ok_or(StorageError::ScopeChanged)?;
-    let payload = serde_json::to_string(recipe).map_err(|_| StorageError::Unavailable)?;
-    proof_codec::validate_query_recipe_cell(metadata, Some(&payload))?;
-    crate::query_projection::SelectedRecipe::decode(row, &payload)
-        .map_err(|_| StorageError::ScopeChanged)?;
-    Ok(Some(payload))
-}
-
 pub(super) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
@@ -148,7 +110,8 @@ pub(super) fn publish(
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     for row in &prepared.rows {
-        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        let publication = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?;
+        let metadata = publication.metadata;
         let projection = prepared.transcripts.iter().find(|p| p.key == row.key);
         let slots = serde_json::to_string(&projection.map(|p| &p.slots))
             .map_err(|_| StorageError::Unavailable)?;
@@ -166,12 +129,7 @@ pub(super) fn publish(
             slots,
             prefix,
         };
-        // These values came directly from the prepared model in this owner
-        // transaction. Production does not decode this freshly encoded row.
-        #[cfg(not(test))]
-        let query_recipe: Option<String> = None;
-        #[cfg(test)]
-        let query_recipe = prepared_query_recipe_for_test(row, &record.metadata)?;
+        let query_recipe = publication.query_recipe;
         tx.execute(
             "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
@@ -1569,6 +1527,21 @@ pub(crate) fn query_recipe_observation(
     )
 }
 
+/// Hydrate the physically selected owner inside its already admitted snapshot.
+/// The qualified loader preserves the compact authoritative row and exact origin.
+pub(crate) fn hydrate_query_recipe(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    owner: CatalogObservationOwner,
+    row: &mut CatalogRow,
+) -> Result<(), StorageError> {
+    if row.query.is_none() { return Ok(()); }
+    let observation = query_recipe_observation(db, current, owner, row)?;
+    row.query_recipe = load_query_recipe_at(db, current.clone(), &observation)
+        .map_err(crate::storage::query::QueryRecipeLoadError::into_storage)?;
+    Ok(())
+}
+
 /// The reader owns the admitted snapshot. A token never reselects another
 /// residence when its original owner, generation or grant no longer qualifies.
 pub(crate) fn load_query_recipe(
@@ -1579,10 +1552,17 @@ pub(crate) fn load_query_recipe(
     Option<crate::query_projection::SelectedRecipe>,
     crate::storage::query::QueryRecipeLoadError,
 > {
+    load_query_recipe_at(db, reader.runtime_binding_at(db)?, observation)
+}
+
+fn load_query_recipe_at(
+    db: &Connection,
+    current: crate::storage::QueryRuntimeBinding,
+    observation: &crate::storage::query::QueryRecipeObservation,
+) -> Result<Option<crate::query_projection::SelectedRecipe>, crate::storage::query::QueryRecipeLoadError> {
     use crate::storage::query::{
         QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
     };
-    let current = reader.runtime_binding_at(db)?;
     if current != observation.destination {
         return Err(Error::ObservationChanged);
     }
@@ -1918,7 +1898,9 @@ pub(crate) struct PreparedObservationUpdate {
     key: String,
     owner: CatalogObservationOwner,
     stored: String,
+    stored_recipe: Option<String>,
     metadata: String,
+    query_recipe: Option<String>,
     before_digest: String,
     after_digest: String,
     admission: i64,
@@ -1932,12 +1914,12 @@ impl PreparedObservationUpdate {
     pub(crate) fn publish(self, db: &Transaction<'_>) -> rusqlite::Result<()> {
         let changed = match self.owner {
             CatalogObservationOwner::History => db.execute(
-                "UPDATE main.session_history_catalog SET metadata=?3,query_activity=?5,query_active=?6 WHERE namespace=?1 AND session_key=?2 AND metadata=?4",
-                params![self.namespace, self.key, self.metadata, self.stored, self.history_activity.0, self.history_activity.1],
+                "UPDATE main.session_history_catalog SET metadata=?3,query_activity=?5,query_active=?6,query_recipe=?7 WHERE namespace=?1 AND session_key=?2 AND metadata=?4 AND query_recipe IS ?8",
+                params![self.namespace, self.key, self.metadata, self.stored, self.history_activity.0, self.history_activity.1, self.query_recipe, self.stored_recipe],
             ),
             CatalogObservationOwner::Catalog => db.execute(
-                "UPDATE main.session_catalog SET metadata=?3 WHERE namespace=?1 AND session_key=?2 AND metadata=?4",
-                params![self.namespace, self.key, self.metadata, self.stored],
+                "UPDATE main.session_catalog SET metadata=?3,query_recipe=?5 WHERE namespace=?1 AND session_key=?2 AND metadata=?4 AND query_recipe IS ?6",
+                params![self.namespace, self.key, self.metadata, self.stored, self.query_recipe, self.stored_recipe],
             ),
         }?;
         if changed != 1 {
@@ -1981,6 +1963,7 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = selected.clone();
     repaired.query = Some(query.clone());
+    repaired.query_recipe = Some(serde_json::from_value(query["selected"].clone()).map_err(|_| StorageError::ScopeChanged)?);
     let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
         .map_err(ObservationPreparationError::into_storage)?;
     if selected.query.as_ref() == Some(query) {
@@ -1998,10 +1981,12 @@ pub(crate) fn prepare_repriced_observation(
     selected: &CatalogRow,
     cost: &crate::pricing::Cost,
     query: Option<&serde_json::Value>,
+    query_recipe: Option<&crate::query_projection::SelectedRecipe>,
 ) -> Result<PreparedObservationUpdate, ObservationPreparationError> {
     let mut repriced = selected.clone();
     repriced.cost = cost.clone();
     repriced.query = query.cloned();
+    repriced.query_recipe = query_recipe.cloned();
     prepare_observation_update(db, current, owner, selected, &repriced, true)
 }
 
@@ -2018,26 +2003,28 @@ fn prepare_observation_update(
     let table = owner.table();
     let owner_kind = owner.kind();
     let namespace = current.namespace.as_str();
-    let stored: Option<Option<String>> = db
+    let stored: Option<(Option<String>, Option<String>)> = db
         .query_row(
-            &format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{table} WHERE namespace=?1 AND session_key=?2"),
+            &format!("SELECT CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END FROM main.{table} WHERE namespace=?1 AND session_key=?2"),
             params![namespace, selected.key],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(ObservationPreparationError::Sql)?;
-    let stored = match stored {
-        Some(Some(stored)) => stored,
-        Some(None) => return Err(StorageError::HistoryRetentionBounds.into()),
+    let (stored, stored_recipe) = match stored {
+        Some((Some(stored), payload)) => (stored, payload),
+        Some((None, _)) => return Err(StorageError::HistoryRetentionBounds.into()),
         None => return Err(StorageError::ScopeChanged.into()),
     };
-    let stored_row: CatalogRow =
+    let mut stored_row: CatalogRow =
         serde_json::from_str(&stored).map_err(|_| StorageError::Unavailable)?;
     if serde_json::to_value(&stored_row).map_err(|_| StorageError::Unavailable)?
         != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
     {
         return Err(StorageError::ScopeChanged.into());
     }
+
+    crate::query_projection::SelectedRecipe::hydrate(&mut stored_row, stored_recipe.as_deref()).map_err(|_| StorageError::ScopeChanged)?;
 
     // Repricing requires this owner's local grant or immutable local Stage
     // proof. Query repair retains its ordinary imported observation contract.
@@ -2113,8 +2100,10 @@ fn prepare_observation_update(
             })
     };
 
-    let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
-    let mut normalized = repaired.clone();
+    let publication = crate::query_projection::SelectedRecipe::prepare(repaired).map_err(|_| StorageError::HistoryRetentionBounds)?;
+    let metadata = publication.metadata;
+    let query_recipe = if publication.row.query == stored_row.query && repaired.query_recipe == stored_row.query_recipe { stored_recipe.clone() } else { publication.query_recipe };
+    let mut normalized = publication.row;
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let normalized = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
     if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
@@ -2125,7 +2114,9 @@ fn prepare_observation_update(
         key: selected.key.clone(),
         owner,
         stored,
+        stored_recipe,
         metadata,
+        query_recipe,
         before_digest,
         after_digest: proof_codec::digest(normalized.as_bytes()),
         admission,
@@ -2621,7 +2612,7 @@ pub(super) fn bind_presentations(
             .iter()
             .find(|row| &row.key == key)
             .ok_or(StorageError::Unavailable)?;
-        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        let metadata = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?.metadata;
         let projection = prepared
             .transcripts
             .iter()

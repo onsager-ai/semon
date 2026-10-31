@@ -96,6 +96,12 @@ pub(crate) enum QueryRecipeLoadError {
     CorruptPayload,
 }
 
+impl QueryRecipeLoadError {
+    pub(crate) fn into_storage(self) -> super::StorageError {
+        match self { Self::Storage(error) => error, _ => super::StorageError::ScopeChanged }
+    }
+}
+
 impl From<super::StorageError> for QueryRecipeLoadError {
     fn from(error: super::StorageError) -> Self {
         Self::Storage(error)
@@ -164,11 +170,7 @@ struct EdgeSourceNeed {
 fn edge_source_needs(
     row: &CatalogRow,
 ) -> Result<(Vec<EdgeSourceNeed>, BTreeSet<String>), StorageError> {
-    let edges = row
-        .query
-        .as_ref()
-        .and_then(|query| query["selected"]["edges"].as_array())
-        .ok_or(StorageError::ScopeChanged)?;
+    let edges = &row.query_recipe.as_ref().ok_or(StorageError::ScopeChanged)?.edges;
     let mut needs = Vec::<EdgeSourceNeed>::new();
     let mut endpoint_owners = BTreeSet::new();
     for edge in edges {
@@ -401,7 +403,7 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     };
     let mut last = query["last"].as_i64();
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
-    for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
+    for edge in row.query_recipe.as_ref().into_iter().flat_map(|recipe| &recipe.edges) {
         let edge = &edge["query"];
         for at in [edge["at"].as_i64(), edge["done"].as_i64()]
             .into_iter()
@@ -441,13 +443,9 @@ pub(crate) fn history_window(
     cutoff: Option<i64>,
 ) -> Result<HistoryWindow, &'static str> {
     let saved = row.query.as_ref().ok_or("retained_query_missing")?;
-    let selected = &saved["selected"];
-    let edges = selected["edges"]
-        .as_array()
-        .ok_or("retained_query_edges_missing")?;
-    let turns = selected["turns"]
-        .as_array()
-        .ok_or("retained_query_turns_missing")?;
+    let selected = row.query_recipe.as_ref().ok_or("retained_query_recipe_missing")?;
+    let edges = &selected.edges;
+    let turns = &selected.turns;
     let mut edge_ids = BTreeMap::new();
     let mut timed_edges = BTreeSet::new();
     for recipe in edges {
@@ -681,7 +679,8 @@ mod tests {
     }
 
     fn retained_row(query: Value) -> crate::model::summary::CatalogRow {
-        serde_json::from_value(json!({
+        let recipe = query.get("selected").and_then(|selected| serde_json::from_value(selected.clone()).ok());
+        let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "lifecycle":"retained",
             "key":"owner",
             "name":"owner",
@@ -701,7 +700,9 @@ mod tests {
             "sources":[],
             "query":query
         }))
-        .unwrap()
+        .unwrap();
+        row.query_recipe = recipe;
+        row
     }
 
     #[test]
@@ -785,18 +786,11 @@ mod tests {
         let persisted = observation
             .metadata
             .expect("admitted persisted Catalog metadata");
-        assert!(
-            persisted.len() > 8192,
-            "growing producer Catalog metadata should exceed the cell bound: {} bytes",
-            persisted.len()
-        );
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&persisted).unwrap(),
-            serde_json::to_value(&producer_row).unwrap(),
-            "the captured in-memory row must be the exact persisted producer row"
-        );
+        assert!(serde_json::to_string(&producer_row).unwrap().len() > 8192, "raw producer keeps complete inline observations");
+        assert!(persisted.len() <= 8192);
 
         let prepared = crate::query_projection::SelectedRecipe::prepare(&producer_row).unwrap();
+        assert_eq!(persisted, prepared.metadata);
         assert!(prepared.metadata.len() < 8192);
         let payload = prepared.query_recipe.as_deref().unwrap();
         assert!(prepared.metadata.len() + payload.len() <= super::super::proof_codec::METADATA_MAX);

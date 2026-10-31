@@ -193,7 +193,9 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=original_complete");
         let key = &row.key;
-        let (activity, active) = crate::storage::query::history_activity(row);
+        let mut original = row.clone();
+        crate::query_projection::SelectedRecipe::hydrate(&mut original, query_recipe).map_err(<Self as OriginalHistoryStore>::data)?;
+        let (activity, active) = crate::storage::query::history_activity(&original);
         self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_recipe,query_activity,query_active) VALUES(?1,?2,?3,?4,?5,?6)",params![self.namespace,key,metadata,query_recipe,activity,active])?;
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_original_header:{key}"),original_header])?;
         if let Some((generation, version, sources, total)) = header {

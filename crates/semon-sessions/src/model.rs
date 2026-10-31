@@ -7498,6 +7498,7 @@ pub(crate) fn observe_catalog_fenced(
 
 /// Native producer output captured before output-window trimming.
 /// Scoped preparation does not publish or prune unrelated source membership.
+#[derive(Clone)]
 pub(crate) struct PreparedSources {
     pub(crate) base_generation: Option<String>,
     pub(crate) claims: Vec<(String, Option<i64>)>,

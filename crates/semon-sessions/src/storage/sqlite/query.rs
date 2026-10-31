@@ -51,9 +51,9 @@ pub(crate) fn selected_query_context(
             };
             let text = text.ok_or(StorageError::Busy)?;
             crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
-            serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|_| StorageError::ScopeChanged)
+            let mut candidate = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+            super::proof_generations::hydrate_query_recipe(tx, &current, if history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &mut candidate)?;
+            Ok(Some(candidate))
         },
         |candidate, history| qualify_context_candidate(tx, &current, options, candidate, history),
     )
@@ -245,6 +245,7 @@ fn load_catalog_row(
     key: &str,
     history: bool,
     bytes_left: &mut usize,
+    binding: &crate::storage::QueryRuntimeBinding,
 ) -> Result<Option<crate::model::summary::CatalogRow>, QueryError> {
     let table = if history {
         "session_history_catalog"
@@ -266,8 +267,9 @@ fn load_catalog_row(
     };
     let text = text.ok_or_else(|| unavailable("Catalog metadata exceeds its bound"))?;
     spend(bytes_left, text.len())?;
-    let row: crate::model::summary::CatalogRow =
+    let mut row: crate::model::summary::CatalogRow =
         serde_json::from_str(&text).map_err(unavailable)?;
+    super::proof_generations::hydrate_query_recipe(db, binding, if history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &mut row).map_err(unavailable)?;
     if row.key != key {
         return Err(unavailable("Catalog metadata identity changed"));
     }
@@ -376,7 +378,7 @@ fn read(
     let mut selected_rows = BTreeMap::new();
     let mut history_selected = BTreeSet::new();
     for key in candidates {
-        let current = load_catalog_row(db, &key, false, bytes_left)?;
+        let current = load_catalog_row(db, &key, false, bytes_left, admitted_binding)?;
         let current_eligible = cutoff.is_some_and(|cutoff| {
             current.as_ref().is_some_and(|row| {
                 row.lifecycle == crate::model::summary::CatalogLifecycle::Current
@@ -390,7 +392,7 @@ fn read(
         // A missing Current row leaves a finite History candidate eligible;
         // an eligible Current row takes priority.
         if (cutoff.is_none() || !current_eligible)
-            && let Some(row) = load_catalog_row(db, &key, true, bytes_left)?
+            && let Some(row) = load_catalog_row(db, &key, true, bytes_left, admitted_binding)?
         {
             let member = history_window(&row, cutoff).map_err(unavailable)?.member;
             if select_history(cutoff, current_eligible, true, member) {
@@ -565,12 +567,12 @@ fn read(
             row
         } else if history_required_owners.contains(&key) {
             (
-                load_catalog_row(db, &key, true, bytes_left)?
+                load_catalog_row(db, &key, true, bytes_left, admitted_binding)?
                     .ok_or_else(|| unavailable("History relationship owner is unavailable"))?,
                 true,
             )
         } else if current_graph_owners.contains(&key) {
-            let Some(row) = load_catalog_row(db, &key, false, bytes_left)? else {
+            let Some(row) = load_catalog_row(db, &key, false, bytes_left, admitted_binding)? else {
                 continue;
             };
             (row, false)

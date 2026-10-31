@@ -1628,6 +1628,9 @@ impl Stage {
         if batch.phase != Phase::Publication || batch.base_generation != prepared.base_generation {
             return Ok((Outcome::Conflict, None));
         }
+        let mut publication_model = prepared.clone();
+        publication_model.rows = prepared.selected_publications().map_err(|error| StoreError::Data(error.to_string()))?.into_iter().map(|publication| publication.row).collect();
+        let prepared = &publication_model;
         if prepared.rows.len() > 64
             || prepared.claims.len() > 64
             || (prepared.rows.is_empty()
@@ -1732,12 +1735,7 @@ impl Stage {
         {
             return Err(refuse("semantic_context_budget"));
         }
-        let metadata = prepared
-            .rows
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| StoreError::Data(e.to_string()))?;
+        let metadata = publications.iter().map(|publication| publication.metadata.clone()).collect::<Vec<_>>();
         if metadata.iter().map(String::len).sum::<usize>() > 1048576 {
             return Err(refuse("semantic_publication_metadata_budget"));
         }

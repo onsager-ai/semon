@@ -1,4 +1,4 @@
-//! Inactive selected Query payload reads over the already admitted snapshot.
+//! Selected Query payload reads over the already admitted snapshot.
 use super::*;
 use crate::storage::{
     catalog::CatalogObservationOwner,
@@ -24,6 +24,13 @@ fn authority(error: std::io::Error) -> Error {
 }
 
 impl Snapshot<'_, '_> {
+    pub(in crate::storage::postgres) fn hydrate_query_recipe(&self, row: &mut CatalogRow, history: bool) -> Result<(), StorageError> {
+        if row.query.is_none() { return Ok(()); }
+        let observation = self.query_recipe_observation(if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }, row).map_err(Error::into_storage)?;
+        row.query_recipe = self.load_query_recipe(&observation).map_err(Error::into_storage)?;
+        Ok(())
+    }
+
     /// `owner` is supplied by the physical selection, independently of display
     /// lifecycle. Authentication reuses the native receipt or imported proof.
     pub(in crate::storage::postgres) fn query_recipe_observation(

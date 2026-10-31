@@ -254,7 +254,7 @@ fn emit_catalog_publish_attempt(
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: namespace-owned state includes the NOCASE scheduling indexes.
 // Unsupported stores refuse without reset; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 35;
+pub(crate) const SCHEMA_VERSION: i64 = 36;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -2969,6 +2969,8 @@ impl SqliteStore {
             return Ok((Outcome::Conflict, None));
         }
         self.semantic_rejection = None;
+        let stored_rows = publication.rows.iter().map(crate::query_projection::SelectedRecipe::prepare).collect::<Result<Vec<_>, _>>().map_err(|error| StoreError::Data(error.to_string()))?.into_iter().map(|publication| publication.row).collect::<Vec<_>>();
+        let publication = &crate::slot_projection::Publication { rows: &stored_rows, transcripts: publication.transcripts, observations: publication.observations };
         let rows = publication.rows;
         #[cfg(test)]
         {
@@ -3008,7 +3010,7 @@ impl SqliteStore {
         let version = crate::model::summary::CATALOG_VERSION.to_string();
         let metadata: Vec<_> = rows
             .iter()
-            .map(json)
+            .map(|row| crate::query_projection::SelectedRecipe::prepare(row).map(|publication| publication.metadata).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error))))
             .collect::<Result<_, _>>()
             .map_err(failure)?;
         let batch_bytes = catalog_batch_bytes(rows, &metadata, writer);
@@ -8292,8 +8294,8 @@ mod tests {
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
         use crate::storage::sqlite::proof_generations::query_recipe_observation;
         // The ordinary producer authors metadata, source witnesses and grants.
-        // Until its payload hook exists, the admitted fixture writer supplies
-        // only the matching payload cell; it never writes observation authority.
+        // The ordinary producer authors the pair. This mutable Current seam
+        // adds insignificant whitespace to check exact original-byte custody.
         let supply_payload = |store: &SqliteStore,
                               owner: CatalogObservationOwner,
                               metadata: &str,
@@ -8349,10 +8351,7 @@ mod tests {
             options: options.clone(),
             binding: reader.clone(),
         };
-        assert!(matches!(
-            port.selected_recipe(&original),
-            Err(QueryRecipeLoadError::MissingPayload)
-        ));
+        assert_eq!(port.selected_recipe(&original).unwrap(), Some(expected.clone()));
         {
             let mut db = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
@@ -8365,6 +8364,8 @@ mod tests {
                 crate::storage::sqlite::semantic::AdmittedSource::native(store.owner.clone());
             let custody =
                 crate::storage::sqlite::history::OriginalHistory::admitted(&tx, &source).unwrap();
+            tx.execute_batch("SAVEPOINT missing_recipe").unwrap();
+            tx.execute("UPDATE main.session_catalog SET query_recipe=NULL WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), rows[0].key]).unwrap();
             let changes = tx.total_changes();
             assert!(crate::storage::catalog::preserve_original(&custody, &rows[0]).is_err());
             assert_eq!(
@@ -8374,6 +8375,7 @@ mod tests {
             );
             let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
             assert!(!retained);
+            tx.execute_batch("ROLLBACK TO missing_recipe; RELEASE missing_recipe").unwrap();
             tx.commit().unwrap();
         }
         let payload = format!("{}\n", prepared.query_recipe.unwrap());

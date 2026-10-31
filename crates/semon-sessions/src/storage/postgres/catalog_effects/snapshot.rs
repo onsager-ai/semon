@@ -316,9 +316,10 @@ impl Snapshot<'_, '_> {
         start: i64,
         limit: i64,
     ) -> Result<Option<(CatalogRow, catalog::OriginalHeader, Vec<String>)>, StorageError> {
-        let Some(row) = self.catalog(key, history)? else {
+        let Some(mut row) = self.catalog(key, history)? else {
             return Ok(None);
         };
+        self.hydrate_query_recipe(&mut row, history)?;
         let (header, slots) = self
             .recipe(key, history, start, limit)?
             .ok_or(StorageError::ScopeChanged)?;

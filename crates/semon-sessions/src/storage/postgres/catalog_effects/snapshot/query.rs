@@ -103,7 +103,11 @@ fn selected_edge_context(
     crate::storage::query::selected_edge_context(
         row,
         history,
-        |owner, history| snapshot.catalog(owner, history),
+        |owner, history| {
+            let mut row = snapshot.catalog(owner, history)?;
+            if let Some(row) = &mut row { snapshot.hydrate_query_recipe(row, history)?; }
+            Ok(row)
+        },
         |candidate, history| qualify_context_candidate(snapshot, options, candidate, history),
     )
     .map(|context| context.into_iter().map(|(row, _history)| row).collect())
@@ -183,6 +187,8 @@ fn cohort_page(
         output.push((metadata, row.get::<_, bool>(3)));
     }
     tx.check()?;
+    drop(tx);
+    for (row, catalog_member) in &mut output { snapshot.hydrate_query_recipe(row, !*catalog_member)?; }
     Ok(output)
 }
 
@@ -207,8 +213,9 @@ fn finite_history_page(
         *bytes_left = bytes_left
             .checked_sub(64 + key.len() + metadata.len())
             .ok_or(StorageError::Busy)?;
-        let row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
+        let mut row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
             .map_err(|_| cohort_scope_changed("finite_history_metadata_invalid"))?;
+        snapshot.hydrate_query_recipe(&mut row, true)?;
         let key_digest = record.get::<_, Vec<u8>>(3);
         if row.key.as_bytes() != key || digest(row.key.as_bytes()) != key_digest {
             return Err(cohort_scope_changed("finite_history_identity_mismatch"));
@@ -741,7 +748,8 @@ impl QueryCatalogStore for QueryCatalog {
             let mut current_rows = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
-            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+            let mut emit = |mut row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+                snapshot.hydrate_query_recipe(&mut row, selected_history)?;
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
                 let expected = if current {
                     snapshot.runtime_observation(&self.options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
@@ -800,7 +808,8 @@ impl QueryCatalogStore for QueryCatalog {
                 Ok(match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
                     Some(text) => {
                         *bytes_left = bytes_left.checked_sub(64 + row.key.len() + text.len()).ok_or(StorageError::Busy)?;
-                        let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| cohort_scope_changed("history_metadata_invalid"))?;
+                        let mut history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| cohort_scope_changed("history_metadata_invalid"))?;
+                        snapshot.hydrate_query_recipe(&mut history, true)?;
                         if history.key != row.key { return Err(cohort_scope_changed("history_identity_mismatch")); }
                         (history, true)
                     }
@@ -875,9 +884,10 @@ impl QueryCatalogStore for QueryCatalog {
             for key in &history_required_owners {
                 if let Some(text) = snapshot.history_catalog(key).map_err(|_| StorageError::Unavailable)? {
                     *bytes_left = bytes_left.checked_sub(64 + key.len() + text.len()).ok_or(StorageError::Busy)?;
-                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&text)
+                    let mut row: crate::model::summary::CatalogRow = serde_json::from_str(&text)
                         .map_err(|_| cohort_scope_changed("history_context_metadata_invalid"))?;
                     if row.key != *key { return Err(cohort_scope_changed("history_context_identity_mismatch")); }
+                    snapshot.hydrate_query_recipe(&mut row, true)?;
                     if !loaded.get(key).is_some_and(|(_, current, _)| *current) {
                         loaded.insert(key.clone(), (row, false, true));
                     }

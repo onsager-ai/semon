@@ -78,10 +78,11 @@ pub(crate) fn validate_query_recipe_cell(
     metadata: &str,
     query_recipe: Option<&str>,
 ) -> Result<(), StorageError> {
-    if metadata.len() + query_recipe.map_or(0, str::len) > METADATA_MAX {
+    if metadata.len() > 8192 || metadata.len() + query_recipe.map_or(0, str::len) > METADATA_MAX {
         return Err(StorageError::HistoryRetentionBounds);
     }
-    Ok(())
+    let row: CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+    crate::query_projection::SelectedRecipe::validate_custody(&row, query_recipe).map_err(|_| StorageError::ScopeChanged)
 }
 
 pub(crate) fn digest(bytes: &[u8]) -> String {

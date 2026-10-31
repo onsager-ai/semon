@@ -351,8 +351,9 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     }
     if matches!(kind, Current | History) {
         let metadata = text(1)?;
-        let row: crate::model::summary::CatalogRow =
+        let mut row: crate::model::summary::CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        crate::query_projection::SelectedRecipe::hydrate(&mut row, values[2].as_str()).map_err(|_| StorageError::ScopeChanged)?;
         let key = row.key.as_bytes();
         let parent_key = row
             .parent
@@ -364,9 +365,9 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             // Rebuild the producer's physical incident index from the exact
             // transferred metadata; this is content, never publication authority.
             let edges = row
-                .query
+                .query_recipe
                 .as_ref()
-                .and_then(|query| query["selected"]["edges"].as_array())
+                .map(|recipe| &recipe.edges)
                 .into_iter()
                 .flatten()
                 .flat_map(|edge| ["from", "to"].map(move |field| edge["query"][field].as_str()));

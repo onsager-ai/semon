@@ -45,36 +45,32 @@ formal union path; mixed or different-pool PG workspaces refuse explicitly.
 The existing source and metadata limits remain, and exact CI qualification of
 the new SQL, isolation and presentation path is pending.
 
-The PG native physical contract is now v11. It includes nullable `bytea`
+The PG native physical contract is now v12. It includes nullable `bytea`
 `query_recipe` cells on current Catalog rows, retained History headers and
-immutable selected proof generations for typed Catalog transfer. These cells
-are inactive paired storage: Current publication, rendering and repair remain
-inline. The v11 marker and native shape hash refuse v10 stores;
-there is no migration or dual-read path. Shared Catalog version 5 and PG
-publication envelope v1 remain unchanged, with no format activation in this
-prerequisite.
+immutable selected proof generations form one paired current format. Publishers
+prepare compact typed metadata and its complete selected payload without changing
+the raw producer's inline model. Persisted Catalog metadata is at most 8192 bytes;
+metadata plus payload is at most 1 MiB. A selected reference without its matching
+payload is refused. There is no inline reader fallback or format migration.
 
-Original History custody now carries a detached selected Query cell when one
-is present in the exact Current publication. Both adapters read metadata and
-payload under the publisher's existing transaction, qualify the pair against
-that row and its combined 1 MiB bound, and insert the original payload bytes
-with the retained header. Query-less composite History carries no selected
-payload. This custody prerequisite does not activate detached Current writers,
-renderers, repair, immutable proof publication or a new format marker; those
-hooks must change together before activation. Existing inline producer rows
-remain the current active publication contract.
+Original custody copies the exact Current payload bytes into the original History
+INSERT within the publisher transaction. Query-less composite History has no
+sidecar. Immutable original proof, presentation and receipt bytes remain unchanged
+after their first publication. Snapshot readers authenticate the physical owner
+and load its payload into the serde-skipped `row.query_recipe` within that same
+admitted snapshot; compact `row.query` remains authoritative for hashes and grants.
+Session, edge and retained-window results consume only that qualified payload.
+Repair and repricing compare and replace both Current/History cells together and
+update the matching native observation grant in the same transaction.
 
-Private semantic coordinators bind each key's exact prepared compact metadata
-and detached payload bytes together with the existing model/projection and
-presentation witness. Record and publication compare the same ordered cells;
-the compact typed row is retained by preparation without decoding its freshly
-encoded metadata. SQLite charges the encoded cell vector and existing witness
-against its unchanged 2 MiB coordinator limit. PostgreSQL includes both in its
-unchanged 1 MiB whole-Stage limit. Preparation retains the combined 1 MiB limit
-per metadata/payload pair. Digest references never replace payload byte charges.
-Earlier private witness shapes cannot satisfy this exact comparison. Current
-rows, Query header hashes, observation grants and immutable proof/presentation
-bytes remain inline in this prerequisite; this is not detached-format activation.
+Private SQLite model coordinators bind keyed compact metadata/payload cells plus
+the complete model witness under the unchanged 2 MiB limit. PostgreSQL retains the
+unchanged 1 MiB whole-Stage limit. Source, transcript, relation and trace evidence
+remain complete. Exact SQLite replay is scoped to the retained publication stage;
+finish removes both stage and model witness, and later publication with that batch
+conflicts before effects. SQLite schema, PostgreSQL schema, Catalog and semantic
+recipe admission markers advance together; unsupported stores are refused without
+resetting custody or native facts. Public PostgreSQL factory admission stays closed.
 
 ## One current SQLite contract
 
@@ -394,7 +390,7 @@ SQLite oracles are tracked separately in the writer inventory.
 | `retention.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `selected_read.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `storage/postgres/catalog_effects/tests.rs` | direct | Catalog124 real parser/model and ordinary SQLite Current/recipe producer oracle runs before private PG immutable effects; no complete Catalog or no-SQLite backend qualification. |
-| `storage/postgres/catalog_effects/tests/query_recipe.rs` | direct | Test-only admitted SQLite producer and transfer oracle for original immutable compact payloads and private PG Current/History recipe reads; no public factory or production recipe activation. |
+| `storage/postgres/catalog_effects/tests/query_recipe.rs` | direct | Test-only admitted SQLite producer and transfer oracle for original immutable compact payloads and private PG Current/History recipe reads; public factory remains closed. |
 | `storage/postgres/native_bundle/tests.rs` | direct | Real-parser SQLite metadata oracle for the connected private partial bundle; no ingest ACK or public qualification. |
 | `storage/postgres/tree_writer/tests.rs` | direct | Independent SQLite oracle for private Tree scalar publication; public qualification remains zero. |
 | `storage/postgres/native_core/tests.rs` | direct | Real-parser SQLite oracle for the private PG core row family; no ingest ACK or public qualification. |
@@ -412,9 +408,3 @@ SQLite oracles are tracked separately in the writer inventory.
 | `test_hooks.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `transcript_range.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
 | `viewer.rs` | direct | Remaining SQL/path coupling (including tests); see ownership below. |
-
-Inactive SQLite coordinator qualification precedes publication replay as well as
-first publication. Exact replay is scoped to the retained publication stage:
-finishing removes both that stage and its paired model witness, and a subsequent
-publish with the finished batch conflicts before effects. Immutable proof and
-presentation encodings remain unchanged by this private coordinator check.

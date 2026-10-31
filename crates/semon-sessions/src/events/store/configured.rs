@@ -4419,7 +4419,11 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(stored, serde_json::to_string(row).unwrap());
+            let publication = crate::query_projection::SelectedRecipe::prepare(row).unwrap();
+            assert!(stored.len() <= 8192);
+            assert_eq!(stored, publication.metadata);
+            let payload: Option<String> = db.query_row("SELECT query_recipe FROM session_catalog WHERE namespace=?1 AND session_key=?2", params![config.namespace.as_str(), row.key], |record| record.get(0)).unwrap();
+            assert_eq!(payload, publication.query_recipe);
         }
         for projection in &prepared.transcripts {
             let slots: Vec<String> = db.prepare("SELECT metadata FROM session_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot").unwrap().query_map(params![config.namespace.as_str(),projection.key],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
@@ -5084,7 +5088,6 @@ mod tests {
     #[test]
     fn configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority() {
         use crate::storage::catalog::CatalogObservationOwner;
-        use crate::storage::query::QueryRecipeLoadError;
         use crate::storage::sqlite::proof_generations::{
             load_query_recipe, query_recipe_observation,
         };
@@ -5119,7 +5122,8 @@ mod tests {
         .unwrap()
         .into_test_connection();
         let binding = reader.runtime_binding_at(&db).unwrap();
-        let row = &model.prepared().rows[0];
+        let compact = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0]).unwrap();
+        let row = &compact.row;
         assert_eq!(
             db.query_row(
                 "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
@@ -5131,13 +5135,7 @@ mod tests {
         );
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
-        assert!(
-            matches!(
-                load_query_recipe(&db, &reader, &token),
-                Err(QueryRecipeLoadError::MissingPayload)
-            ),
-            "the real immutable producer authenticates; its payload hook remains unconnected"
-        );
+        assert_eq!(load_query_recipe(&db, &reader, &token).unwrap(), model.prepared().rows[0].query_recipe);
         let namespace = fixture.config.namespace.as_str();
         for sql in [
             "DELETE FROM main.meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
@@ -5154,10 +5152,7 @@ mod tests {
             db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
                 .unwrap();
         }
-        assert!(matches!(
-            load_query_recipe(&db, &reader, &token),
-            Err(QueryRecipeLoadError::MissingPayload)
-        ));
+        assert_eq!(load_query_recipe(&db, &reader, &token).unwrap(), model.prepared().rows[0].query_recipe);
     }
 
     #[test]
@@ -5257,7 +5252,8 @@ mod tests {
                     CatalogObservationOwner::Catalog,
                     &original,
                     &original.cost,
-                    original.query.as_ref()
+                    original.query.as_ref(),
+                    original.query_recipe.as_ref()
                 )
                 .is_err()
             );

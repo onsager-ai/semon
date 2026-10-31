@@ -112,7 +112,7 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
-      - name: Inactive PostgreSQL selected Query recipe loader
+      - name: PostgreSQL selected Query recipe loader
         id: query_recipe
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash

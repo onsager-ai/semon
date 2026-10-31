@@ -121,12 +121,13 @@ impl History<'_, '_> {
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
         let original = original.map(|value| value.as_bytes().to_vec());
-        let query_recipe = query_recipe.map(|value| value.as_bytes().to_vec());
+        let query_recipe_bytes = query_recipe.map(|value| value.as_bytes().to_vec());
         // Header columns mirror catalog_rows so retained history filters,
         // family traversal and keysets in SQL; the reader re-checks them
         // against the metadata.
-        let row: CatalogRow =
+        let mut row: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        crate::query_projection::SelectedRecipe::hydrate(&mut row, query_recipe).map_err(|_| StorageError::ScopeChanged)?;
         if row.key != key {
             return Err(StorageError::ScopeChanged);
         }
@@ -166,7 +167,7 @@ impl History<'_, '_> {
                 total,
                 &incomplete,
                 &metadata.as_bytes(),
-                &query_recipe,
+                &query_recipe_bytes,
                 &original,
                 &row.last.unwrap_or(0),
                 &row.harness.as_bytes(),

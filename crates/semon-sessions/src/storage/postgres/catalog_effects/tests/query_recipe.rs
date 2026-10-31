@@ -137,15 +137,14 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 token.residence,
                 QueryRecipeResidence::NativeCatalog { .. }
             ));
-            assert!(matches!(
-                view.load_query_recipe(&token),
-                Err(Error::MissingPayload)
-            ));
+            assert_eq!(view.load_query_recipe(&token).unwrap(), Some(expected.clone()));
             assert!(view.query_recipe_observation(Owner::History, row).is_err());
             Ok(token)
         })
         .unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver.batch_execute("SAVEPOINT missing_recipe").map_err(sqlstate::error)?;
+        tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=NULL WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&namespace.as_str().as_bytes(), &generation.as_bytes()]).map_err(sqlstate::error)?;
         let before = super::snapshot(tx)?;
         let boundaries = super::super::BOUNDARIES.with(|count| count.get());
         {
@@ -170,12 +169,13 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             before,
             "missing payload refuses before custody effects"
         );
+        tx.driver.batch_execute("ROLLBACK TO missing_recipe; RELEASE missing_recipe").map_err(sqlstate::error)?;
         Ok(())
     })
     .unwrap();
     let payload = format!("{}\n", compact.query_recipe.unwrap());
-    // The only physical seam supplies the nullable payload, after normal
-    // publication authenticated the exact compact metadata and native receipt.
+    // Preserve insignificant Current whitespace byte-for-byte through custody;
+    // normal publication already authored the pair and its native receipt.
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 AND metadata=$5", &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &row.key.as_bytes(), &payload.as_bytes(), &compact.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
         Ok(())
@@ -324,7 +324,6 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
 
 #[test]
 fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt() {
-    use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
     use crate::storage::transfer::reported::tests::{
         apply, root, seed_catalog_input, sqlite, stage,
     };
@@ -389,10 +388,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         for _ in 0..256 {
             // Author the exact pair at Current and immutable INSERTs from
             // this prepared model; ordinary publication checks still run.
-            let result = with_prepared_query_recipe_for_test(|| {
-                cache.publish_semantic_catalog(&batch, model.prepared())
-            })
-            .unwrap();
+            let result = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
             if result.0 == crate::events::Outcome::Written {
                 assert!(result.1.is_some());
                 complete = true;

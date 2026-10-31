@@ -40,19 +40,12 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         row: &crate::model::summary::CatalogRow,
         metadata: &str,
     ) -> rusqlite::Result<bool> {
-        // The inactive selected-recipe fixture authors the same pair in Current
-        // and the immutable original, inside ordinary guarded publication.
-        #[cfg(test)]
-        if let Some(payload) =
-            super::proof_generations::prepared_query_recipe_for_test(row, metadata)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?
-        {
-            return self.db.execute(
-                "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES(?1,?2,'current',?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata,query_recipe=excluded.query_recipe WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key OR session_catalog.query_recipe IS NOT excluded.query_recipe",
-                params![self.namespace, row.key, row.last.unwrap_or(0), row.harness, row.repo, row.parent, metadata, payload],
-            ).map(|n| n > 0);
+        let publication = crate::query_projection::SelectedRecipe::prepare(row)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if publication.metadata != metadata {
+            return Err(rusqlite::Error::InvalidQuery);
         }
-        let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
+        let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES(?1,?2,'current',?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata,query_recipe=excluded.query_recipe WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key OR session_catalog.query_recipe IS NOT excluded.query_recipe";
         self.db
             .prepare_cached(sql)?
             .execute(params![
@@ -62,7 +55,8 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
                 row.harness,
                 row.repo,
                 row.parent,
-                metadata
+                metadata,
+                publication.query_recipe
             ])
             .map(|n| n > 0)
     }
@@ -213,8 +207,8 @@ impl CatalogPublicationHead for BoundPublicationHead<'_, '_> {
     }
 }
 
-const CATALOG_INSERT: &str = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES ";
-const CATALOG_CONFLICT: &str = " ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
+const CATALOG_INSERT: &str = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES ";
+const CATALOG_CONFLICT: &str = " ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current', last_ms=excluded.last_ms, harness=excluded.harness, repo=excluded.repo, parent_key=excluded.parent_key, metadata=excluded.metadata, query_recipe=excluded.query_recipe WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key OR session_catalog.query_recipe IS NOT excluded.query_recipe";
 pub(crate) fn put_catalog_batch(
     transaction: &Transaction<'_>,
     rows: &[crate::model::summary::CatalogRow],
@@ -223,15 +217,16 @@ pub(crate) fn put_catalog_batch(
 ) -> rusqlite::Result<Vec<bool>> {
     let values = (0..rows.len())
         .map(|position| {
-            let first = position * 6 + 1;
+            let first = position * 7 + 1;
             format!(
-                "(?{},?{first},'current',?{},?{},?{},?{},?{})",
-                rows.len() * 6 + 1,
+                "(?{},?{first},'current',?{},?{},?{},?{},?{},?{})",
+                rows.len() * 7 + 1,
                 first + 1,
                 first + 2,
                 first + 3,
                 first + 4,
-                first + 5
+                first + 5,
+                first + 6
             )
         })
         .collect::<Vec<_>>()
@@ -239,15 +234,19 @@ pub(crate) fn put_catalog_batch(
     let sql = format!("{CATALOG_INSERT}{values}{CATALOG_CONFLICT} RETURNING session_key");
     let mut statement = transaction.prepare(&sql)?;
     for (position, (row, metadata)) in rows.iter().zip(metadata).enumerate() {
-        let first = position * 6 + 1;
+        let first = position * 7 + 1;
         statement.raw_bind_parameter(first, &row.key)?;
         statement.raw_bind_parameter(first + 1, row.last.unwrap_or(0))?;
         statement.raw_bind_parameter(first + 2, &row.harness)?;
         statement.raw_bind_parameter(first + 3, &row.repo)?;
         statement.raw_bind_parameter(first + 4, &row.parent)?;
+        let publication = crate::query_projection::SelectedRecipe::prepare(row)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if publication.metadata != *metadata { return Err(rusqlite::Error::InvalidQuery); }
         statement.raw_bind_parameter(first + 5, metadata)?;
+        statement.raw_bind_parameter(first + 6, publication.query_recipe)?;
     }
-    statement.raw_bind_parameter(rows.len() * 6 + 1, namespace)?;
+    statement.raw_bind_parameter(rows.len() * 7 + 1, namespace)?;
     let mut changed = vec![false; rows.len()];
     {
         let mut returned = statement.raw_query();

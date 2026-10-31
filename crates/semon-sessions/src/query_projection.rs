@@ -26,7 +26,7 @@ pub(crate) struct SelectedRecipeRef {
 }
 
 /// A single publication's compact metadata and complete selected payload.
-/// Coordinators bind these cells; Current writers/readers activate together later.
+/// Coordinators, Current writers and proofs bind these exact paired cells.
 pub(crate) struct SelectedRecipePublication {
     pub(crate) row: CatalogRow,
     pub(crate) metadata: String,
@@ -47,7 +47,7 @@ impl SelectedRecipePublication {
 
 impl SelectedRecipe {
     /// Custody never turns a detached reference with missing bytes into History.
-    /// This does not read inactive inline producer metadata as a payload.
+    /// Inline producer metadata is never read as a stored payload.
     pub(crate) fn validate_custody(row: &CatalogRow, payload: Option<&str>) -> std::io::Result<()> {
         if let Some(payload) = payload {
             return Self::decode(row, payload).map(|_| ());
@@ -56,9 +56,7 @@ impl SelectedRecipe {
             .query
             .as_ref()
             .and_then(|query| query.get("selected"))
-            .is_some_and(|selected| {
-                <SelectedRecipeRef as serde::Deserialize>::deserialize(selected).is_ok()
-            })
+            .is_some()
         {
             return Err(std::io::Error::other(
                 "Selected Query recipe payload unavailable",
@@ -82,7 +80,7 @@ impl SelectedRecipe {
         let mut compact = row.clone();
         let query_recipe = Self::detach(&mut compact)?;
         let metadata = serde_json::to_string(&compact).map_err(std::io::Error::other)?;
-        if metadata
+        if metadata.len() > 8192 || metadata
             .len()
             .saturating_add(query_recipe.as_ref().map_or(0, String::len))
             > crate::storage::proof_codec::METADATA_MAX
@@ -96,6 +94,14 @@ impl SelectedRecipe {
             metadata,
             query_recipe,
         })
+    }
+
+    /// Attach only authenticated payload bytes; authoritative compact metadata
+    /// remains unchanged for grants, hashes and presentation qualification.
+    pub(crate) fn hydrate(row: &mut CatalogRow, payload: Option<&str>) -> std::io::Result<()> {
+        Self::validate_custody(row, payload)?;
+        row.query_recipe = payload.map(|payload| Self::decode(row, payload)).transpose()?;
+        Ok(())
     }
 
     /// Replace selected result metadata with its exact publication reference.
@@ -447,7 +453,7 @@ impl Projection {
         let identity = identity(row);
         let query_generation = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&row.query).map_err(data)?)
+            Sha256::digest(serde_json::to_vec(&SelectedRecipe::prepare(row).map_err(data)?.row.query).map_err(data)?)
         );
         let mut hash = Sha256::new();
         hash.update(serde_json::to_vec(&(1, &source, trace)).map_err(data)?);
