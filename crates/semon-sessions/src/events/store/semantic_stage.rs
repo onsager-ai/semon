@@ -3068,7 +3068,7 @@ mod tests {
         transaction.commit().unwrap();
     }
 
-    fn header_repair_store(name: &str) -> (PathBuf, SqliteStore, String) {
+    fn header_repair_catalog(name: &str) -> (PathBuf, SqliteStore, String) {
         let root = std::env::temp_dir().join(format!(
             "semon-header-repair-{name}-{}-{}",
             std::process::id(),
@@ -3170,7 +3170,12 @@ mod tests {
         // follows its complete generation markers until a stage is active.
         assert!(store.qualified_catalog().unwrap());
         assert_eq!(header_repair_claim(&store, &path), pending);
-        assert!(store.connection.query_row("SELECT lifecycle='current' AND EXISTS(SELECT 1 FROM session_catalog_sources WHERE session_key='old' AND source_path=?1 AND lifecycle='current') FROM session_catalog WHERE session_key='old'", [&path], |row| row.get::<_, bool>(0)).unwrap());
+        assert!(store.connection.query_row("SELECT lifecycle='current' AND EXISTS(SELECT 1 FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND session_key='old' AND source_path=?1 AND lifecycle='current') FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='old'", [&path], |row| row.get::<_, bool>(0)).unwrap());
+        (root, store, path)
+    }
+
+    fn header_repair_store(name: &str) -> (PathBuf, SqliteStore, String) {
+        let (root, mut store, path) = header_repair_catalog(name);
         assert_eq!(
             store
                 .semantic_begin(std::slice::from_ref(&path), "runtime")
@@ -3179,15 +3184,104 @@ mod tests {
         );
         // Install the same normalized indexed observation that semantic_record
         // captures. ACK below uses the actual source/ledger/physical fences.
-        store.connection.execute("UPDATE catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM files WHERE path=?1) WHERE source_path=?1",params![path,header_repair_claim(&store,&path),ledger(&store.connection,&path).unwrap()]).unwrap();
+        store.connection.execute("UPDATE main.catalog_semantic_sources SET index_done=1,claim=?2,ledger=?3,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=semon_namespace() AND path=?1) WHERE namespace=semon_namespace() AND source_path=?1",params![path,header_repair_claim(&store,&path),ledger(&store.connection,&path).unwrap()]).unwrap();
         (root, store, path)
+    }
+
+    fn current_header_repair_store(
+        name: &str,
+    ) -> (
+        PathBuf,
+        SqliteStore,
+        Box<dyn crate::events::IndexStore>,
+        String,
+        i64,
+    ) {
+        let (root, store, path) = header_repair_catalog(name);
+        let config = store.owner.config().clone();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+        let mut stage = crate::storage::sqlite::configured_index::open_semantic(capability)
+            .unwrap();
+        assert_eq!(
+            stage
+                .begin_semantic_stage(std::slice::from_ref(&path), "runtime", false)
+                .unwrap(),
+            Outcome::Written
+        );
+        let batch = stage.semantic_batch(64).unwrap().unwrap();
+        assert_eq!(batch.phase, Phase::Indexing);
+        assert_eq!(batch.paths, vec![path.clone()]);
+        let claims = header_repair_journal(&store).claims(&batch.paths).unwrap();
+        let mut source = store
+            .ledger(&path)
+            .unwrap()
+            .unwrap()
+            .source(Path::new(&path), "old");
+        // This diagnostic fixture has a deliberately empty raw file. A valid
+        // primitive Codex role is sufficient for the real Stage source checks.
+        source.native_role = Some(serde_json::json!({
+            "Codex": { "subagent": false, "guardian_review": false }
+        }));
+        let prepared = crate::model::PreparedSources {
+            base_generation: batch.base_generation.clone(),
+            claims,
+            rows: Vec::new(),
+            transcripts: Vec::new(),
+            pids: Default::default(),
+            lineage_dependencies: Vec::new(),
+            message_dependencies: None,
+            relationships: Default::default(),
+            indexed_sources: vec![("codex".into(), source)],
+            removed_sources: Default::default(),
+            indexed_native_parents: Vec::new(),
+            withdrawals: Vec::new(),
+            #[cfg(feature = "postgres")]
+            withdrawal_fence: None,
+        };
+        assert_eq!(
+            stage.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written
+        );
+        (root, store, stage, path, batch.epoch)
+    }
+
+    fn acknowledge_current_header_repair(store: &SqliteStore, path: &str) {
+        let claim = header_repair_claim(store, path).unwrap();
+        let tx = store.connection.unchecked_transaction().unwrap();
+        assert_eq!(
+            tx.execute(
+                "DELETE FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND revision=?2",
+                params![path, claim],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute(
+                "UPDATE main.catalog_semantic_sources SET claim=NULL,publication_done=1,ack_done=1 WHERE namespace=semon_namespace() AND source_path=?1 AND claim=?2 AND index_done=1",
+                params![path, claim],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            tx.execute(
+                "UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=semon_namespace() AND singleton=1 AND resetting=0",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
+        assert_eq!(header_repair_claim(store, path), None);
     }
 
     fn diagnostic_batch(store: &SqliteStore, path: &str) -> Batch {
         store
             .connection
             .query_row(
-                "SELECT epoch,revision,generation,runtime FROM catalog_semantic_stage",
+                "SELECT epoch,revision,generation,runtime FROM main.catalog_semantic_stage WHERE namespace=semon_namespace() AND singleton=1",
                 [],
                 |r| {
                     Ok(Batch {
@@ -3507,22 +3601,6 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn acknowledge_repair_source(store: &SqliteStore, path: &str) {
-        let tx = store.connection.unchecked_transaction().unwrap();
-        acknowledge_source(&tx, path).unwrap();
-        tx.commit().unwrap();
-        let observed: (Option<i64>, bool) = store
-            .connection
-            .query_row(
-                "SELECT claim,ack_done FROM catalog_semantic_sources WHERE source_path=?1",
-                [path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(observed, (None, true));
-        assert_eq!(header_repair_claim(store, path), None);
-    }
-
     #[test]
     fn unsupported_publication_recipe_refuses_without_erasing_history() {
         let root = std::env::temp_dir().join(format!(
@@ -3584,8 +3662,8 @@ mod tests {
 
     #[test]
     fn current_header_repair_cannot_borrow_another_namespace_stage() {
-        let (root, store, path) = header_repair_store("namespace");
-        acknowledge_repair_source(&store, &path);
+        let (root, store, mut stage, path, epoch) = current_header_repair_store("namespace");
+        acknowledge_current_header_repair(&store, &path);
         assert!(owns_header_repair(&store.connection, &path).unwrap());
         let foreign = crate::storage::LogicalSourceNamespace::new("foreign-header-repair").unwrap();
         crate::storage::sqlite::catalog_namespace::register(&store.connection, &foreign).unwrap();
@@ -3596,13 +3674,17 @@ mod tests {
         )
         .unwrap();
         assert!(owns_header_repair(&store.connection, &path).unwrap());
+        assert_eq!(stage.finish_semantic_stage(epoch).unwrap(), Outcome::Written);
+        assert!(!owns_header_repair(&store.connection, &path).unwrap());
+        drop(stage);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn current_header_repair_preserves_pending_and_live_ack_observations() {
-        let (root, mut store, path) = header_repair_store("ack");
+        let (root, mut store, mut stage, path, old_epoch) =
+            current_header_repair_store("ack");
         let observed = revision(&store.connection).unwrap();
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
@@ -3612,37 +3694,40 @@ mod tests {
                 store
                     .connection
                     .query_row(
-                        "SELECT reason FROM session_catalog_invalidations WHERE source_path=?1",
+                        "SELECT reason FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
                         [&path],
                         |row| row.get::<_, String>(0)
                     )
                     .unwrap(),
                 "removed"
             );
+            assert!(owns_header_repair(&store.connection, &path).unwrap());
         }
-        acknowledge_repair_source(&store, &path);
+        acknowledge_current_header_repair(&store, &path);
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed);
             assert_eq!(header_repair_claim(&store, &path), None);
+            assert!(owns_header_repair(&store.connection, &path).unwrap());
         }
-        let old_epoch: i64 = store
-            .connection
-            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
+        assert_eq!(stage.finish_semantic_stage(old_epoch).unwrap(), Outcome::Written);
         // Ordinary source observations remain independent of projection repair.
         header_repair_invalidate(&store, &path, "changed");
         assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
+        assert_eq!(
+            stage
+                .begin_semantic_stage(std::slice::from_ref(&path), "runtime", false)
+                .unwrap(),
+            Outcome::Written
+        );
         assert!(!store.qualified_catalog().unwrap());
         assert_eq!(revision(&store.connection).unwrap(), observed + 1);
-        let replay = store.semantic_next(64).unwrap().unwrap();
+        let replay = stage.semantic_batch(64).unwrap().unwrap();
         assert!(
             replay.epoch > old_epoch,
-            "fresh observation did not reset the stage"
+            "fresh observation did not start a new stage"
         );
-        let header: (String, Option<String>, i64) = store.connection.query_row("SELECT generation,source_generation,version FROM session_slot_projections WHERE session_key='old'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+        let header: (String, Option<String>, i64) = store.connection.query_row("SELECT generation,source_generation,version FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key='old'",[],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
         assert_eq!(
             header,
             (
@@ -3651,6 +3736,7 @@ mod tests {
                 i64::from(crate::slot_projection::VERSION)
             )
         );
+        drop(stage);
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -3667,13 +3753,13 @@ mod tests {
             "head_sha256=zeroblob(32)",
             "tail_sha256=zeroblob(32)",
         ] {
-            let (root, store, path) = header_repair_store("witness");
-            acknowledge_repair_source(&store, &path);
+            let (root, store, stage, path, _) = current_header_repair_store("witness");
+            acknowledge_current_header_repair(&store, &path);
             let observed = revision(&store.connection).unwrap();
             store
                 .connection
                 .execute(
-                    &format!("UPDATE files SET {assignment} WHERE path=?1"),
+                    &format!("UPDATE main.files SET {assignment} WHERE namespace=semon_namespace() AND path=?1"),
                     [&path],
                 )
                 .unwrap();
@@ -3685,6 +3771,7 @@ mod tests {
             assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
             assert!(!store.qualified_catalog().unwrap());
             assert_eq!(revision(&store.connection).unwrap(), observed + 1);
+            drop(stage);
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
@@ -3693,21 +3780,36 @@ mod tests {
     #[test]
     fn current_header_repair_requires_live_indexed_stage_ownership() {
         for (transition, remaining) in [
-            ("UPDATE catalog_semantic_sources SET index_done=0", 1),
-            ("UPDATE catalog_semantic_sources SET claim=123456", 1),
-            ("UPDATE catalog_semantic_stage SET resetting=1", 1),
-            ("DELETE FROM catalog_semantic_sources", 0),
-            ("DELETE FROM catalog_semantic_stage", 1),
+            (
+                "UPDATE main.catalog_semantic_sources SET index_done=0 WHERE namespace=semon_namespace()",
+                1,
+            ),
+            (
+                "UPDATE main.catalog_semantic_sources SET claim=123456 WHERE namespace=semon_namespace()",
+                1,
+            ),
+            (
+                "UPDATE main.catalog_semantic_stage SET resetting=1 WHERE namespace=semon_namespace() AND singleton=1",
+                1,
+            ),
+            (
+                "DELETE FROM main.catalog_semantic_sources WHERE namespace=semon_namespace()",
+                0,
+            ),
+            (
+                "DELETE FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()",
+                1,
+            ),
         ] {
-            let (root, store, path) = header_repair_store("ownership");
-            acknowledge_repair_source(&store, &path);
+            let (root, store, stage, path, _) = current_header_repair_store("ownership");
+            acknowledge_current_header_repair(&store, &path);
             let observed = revision(&store.connection).unwrap();
             store.connection.execute_batch(transition).unwrap();
             assert_eq!(
                 store
                     .connection
                     .query_row(
-                        "SELECT COUNT(*) FROM catalog_semantic_sources WHERE source_path=?1",
+                        "SELECT COUNT(*) FROM main.catalog_semantic_sources WHERE namespace=semon_namespace() AND source_path=?1",
                         [&path],
                         |row| row.get::<_, i64>(0)
                     )
@@ -3718,10 +3820,16 @@ mod tests {
                 !owns_header_repair(&store.connection, &path).unwrap(),
                 "{transition} lent repair ownership"
             );
-            assert!(!store.qualified_catalog().unwrap());
+            // Without any live stage, the newly pending repair leaves the
+            // previously qualified Current Catalog visible until a stage is
+            // begun. Every other transition leaves the active stage in place.
+            let remains_qualified = transition
+                == "DELETE FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()";
+            assert_eq!(store.qualified_catalog().unwrap(), remains_qualified);
             assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
-            assert!(!store.qualified_catalog().unwrap());
+            assert_eq!(store.qualified_catalog().unwrap(), remains_qualified);
             assert_eq!(revision(&store.connection).unwrap(), observed + 1);
+            drop(stage);
             drop(store);
             fs::remove_dir_all(root).unwrap();
         }
