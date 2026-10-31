@@ -66,6 +66,17 @@ pub(crate) fn turn_kept(turn: &Value, cutoff: i64, timed_edges: &BTreeSet<String
             .is_some_and(|id| timed_edges.contains(id))
 }
 
+/// All-time Queries retain History preference; finite windows use History only
+/// when it qualifies and no eligible Current row is available.
+pub(crate) fn select_history(
+    cutoff: Option<i64>,
+    current_eligible: bool,
+    history_available: bool,
+    history_member: bool,
+) -> bool {
+    history_available && (cutoff.is_none() || (!current_eligible && history_member))
+}
+
 /// Derive retained membership and required peer context from the exact saved
 /// Query graph. `None` preserves the all time retained cohort.
 pub(crate) fn history_window(
@@ -202,4 +213,87 @@ pub(crate) trait QueryCatalogStore {
         since: Option<i64>,
     ) -> Result<bool, QueryError>;
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn summary(id: &str) -> Value {
+        json!({"summary":{"id":id}})
+    }
+
+    fn retained_row(query: Value) -> crate::model::summary::CatalogRow {
+        serde_json::from_value(json!({
+            "lifecycle":"retained",
+            "key":"owner",
+            "name":"owner",
+            "harness":"claude",
+            "kind":"session",
+            "native_ids":[],
+            "parent":null,
+            "parent_source":null,
+            "repo":null,
+            "branch":null,
+            "model":"",
+            "effort":null,
+            "start":100,
+            "last":100,
+            "tokens":[0,0,0],
+            "cost":{"usd":null,"unpriced_models":[],"split_unknown_messages":0,"by_model":{},"by_day":{}},
+            "sources":[],
+            "query":query
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn finite_history_window_uses_only_saved_edge_and_turn_ids() {
+        let row = retained_row(json!({
+            "last":100,
+            "state":"idle",
+            "rows":{
+                "owner":summary("owner"),
+                "recent-peer":summary("recent-peer"),
+                "start-peer":summary("start-peer"),
+                "sent-peer":summary("sent-peer"),
+                "expired-peer":summary("expired-peer")
+            },
+            "selected":{
+                "edges":[
+                    {"id":"expired-edge","query":{"at":100,"status":"done","from":"owner","to":"expired-peer"}},
+                    {"id":"recent-edge","query":{"at":950,"status":"done","from":"owner","to":"recent-peer"}},
+                    {"id":"turn-start","query":{"at":100,"status":"done","from":"owner","to":"start-peer"}},
+                    {"id":"turn-sent","query":{"at":110,"status":"done","from":"owner","to":"sent-peer"}}
+                ],
+                "turns":[
+                    {"id":"expired-turn","query":{"at":100,"last":false,"start":"expired-edge","sent":[]}},
+                    {"id":"last-turn","query":{"at":100,"last":true,"start":"turn-start","sent":["turn-sent"]}},
+                    {"id":"recent-turn","query":{"at":950,"last":false,"start":"recent-edge","sent":[]}}
+                ]
+            }
+        }));
+
+        let window = history_window(&row, Some(900)).unwrap();
+        assert!(window.member, "a recent saved edge admits an old History owner");
+        assert_eq!(
+            window.edges,
+            BTreeSet::from([
+                "recent-edge".to_owned(),
+                "turn-sent".to_owned(),
+                "turn-start".to_owned(),
+            ])
+        );
+        assert_eq!(
+            window.turns,
+            BTreeSet::from(["last-turn".to_owned(), "recent-turn".to_owned()])
+        );
+        assert!(!window.rows.contains_key("expired-peer"));
+        assert!(window.context.is_empty());
+        assert!(select_history(Some(900), false, true, window.member));
+        assert!(!select_history(Some(900), true, true, window.member));
+        assert!(!select_history(Some(900), false, false, window.member));
+        assert!(select_history(None, false, true, window.member));
+    }
 }
