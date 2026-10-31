@@ -971,12 +971,19 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let repaired_digest = proof_codec::digest(repaired_metadata.as_bytes());
 
-    let changed = db
-        .execute(
+    let changed = match owner {
+        CatalogObservationOwner::History => {
+            let (activity, active) = crate::storage::query::history_activity(&repaired);
+            db.execute(
+                "UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.query',json(?3)),query_activity=?5,query_active=?6 WHERE namespace=?1 AND session_key=?2 AND metadata=?4",
+                params![namespace, selected.key, query.to_string(), stored, activity, active],
+            )
+        }
+        CatalogObservationOwner::Catalog => db.execute(
             &format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?3)) WHERE namespace=?1 AND session_key=?2 AND metadata=?4"),
             params![namespace, selected.key, query.to_string(), stored],
-        )
-        .map_err(failed)?;
+        ),
+    }.map_err(failed)?;
     if changed != 1 {
         return Err(StorageError::ScopeChanged);
     }

@@ -217,49 +217,49 @@ fn read(
     let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     let cutoff = (!options.all)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
-    let base_sql = if cutoff.is_some() {
-        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace() AND (last_ms>=?1 OR json_extract(metadata,'$.query.last')>=?1 OR (lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait'))) UNION SELECT h.session_key FROM main.session_history_catalog h WHERE h.namespace=semon_namespace() AND (json_extract(h.metadata,'$.query.last')>=?1 OR json_extract(h.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM json_each(h.metadata,'$.query.selected.edges') q WHERE json_extract(q.value,'$.query.at')>=?1 OR json_extract(q.value,'$.query.done')>=?1 OR json_extract(q.value,'$.query.status') IN ('work','wait','new')))"
+    // Each branch is an indexed stream. Charge every candidate before set
+    // insertion, including duplicates, rather than letting UNION materialize
+    // an unbounded temporary key set before request accounting begins.
+    let branches: &[&str] = if cutoff.is_some() {
+        &[
+            "SELECT session_key FROM main.session_catalog INDEXED BY session_catalog_current_order WHERE namespace=semon_namespace() AND lifecycle='current' AND last_ms>=?1",
+            "SELECT session_key FROM main.session_catalog INDEXED BY session_catalog_query_last WHERE namespace=semon_namespace() AND lifecycle='current' AND json_extract(metadata,'$.query.last')>=?1",
+            "SELECT session_key FROM main.session_catalog INDEXED BY session_catalog_query_current_state WHERE namespace=semon_namespace() AND lifecycle='current' AND json_extract(metadata,'$.query.state') IN ('work','wait') AND ?1 IS NOT NULL",
+            "SELECT session_key FROM main.session_history_catalog INDEXED BY session_history_query_activity WHERE namespace=semon_namespace() AND query_activity>=?1",
+            "SELECT session_key FROM main.session_history_catalog INDEXED BY session_history_query_active WHERE namespace=semon_namespace() AND query_active=1 AND ?1 IS NOT NULL",
+        ]
     } else {
-        "SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"
+        &["SELECT session_key FROM main.session_catalog WHERE namespace=semon_namespace()"]
     };
-    let mut base = db.prepare(base_sql).map_err(unavailable)?;
-    let mut keep: BTreeSet<String> = base
-        .query_map(rusqlite::params_from_iter(cutoff), |row| row.get(0))
-        .map_err(unavailable)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(unavailable)?;
-    #[cfg(test)]
-    measured(0, 0, 0, base.get_status(rusqlite::StatementStatus::VmStep));
-    drop(base);
-    let candidates = std::mem::take(&mut keep);
+    let mut candidates = BTreeSet::new();
+    for sql in branches {
+        let mut statement = db.prepare(sql).map_err(unavailable)?;
+        let mut records = statement
+            .query(rusqlite::params_from_iter(cutoff))
+            .map_err(unavailable)?;
+        while let Some(record) = records.next().map_err(unavailable)? {
+            let key = record.get_ref(0).map_err(unavailable)?.as_str().map_err(unavailable)?;
+            spend(bytes_left, 64 + key.len())?;
+            candidates.insert(key.to_owned());
+        }
+        drop(records);
+        #[cfg(test)]
+        measured(0, 0, 0, statement.get_status(rusqlite::StatementStatus::VmStep));
+    }
+    let mut keep = BTreeSet::new();
     let mut selected_rows = BTreeMap::new();
     let mut history_selected = BTreeSet::new();
-    let mut current_header = db
-        .prepare(
-            "SELECT lifecycle,last_ms,json_extract(metadata,'$.query.last'),json_extract(metadata,'$.query.state') FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
-        )
-        .map_err(unavailable)?;
     for key in candidates {
-        let current = current_header
-            .query_row([&key], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                ))
-            })
-            .optional()
-            .map_err(unavailable)?;
+        let current = load_catalog_row(db, &key, false, bytes_left)?;
         let current_eligible = cutoff.is_some_and(|cutoff| {
-            current
-                .as_ref()
-                .is_some_and(|(lifecycle, last, query_last, state)| {
-                    lifecycle == crate::model::summary::CatalogLifecycle::Current.as_str()
-                        && (last.as_ref().is_some_and(|last| *last >= cutoff)
-                            || query_last.as_ref().is_some_and(|last| *last >= cutoff)
-                            || matches!(state.as_deref(), Some("work" | "wait")))
-                })
+            current.as_ref().is_some_and(|row| {
+                row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                    && (row.last.is_some_and(|last| last >= cutoff)
+                        || row.query.as_ref().is_some_and(|query| {
+                            query["last"].as_i64().is_some_and(|last| last >= cutoff)
+                                || matches!(query["state"].as_str(), Some("work" | "wait"))
+                        }))
+            })
         });
         // A missing Current row leaves a finite History candidate eligible;
         // an eligible Current row takes priority.
@@ -274,14 +274,11 @@ fn read(
                 }
             }
         }
-        if current_eligible || cutoff.is_none() {
-            if let Some(row) = load_catalog_row(db, &key, false, bytes_left)? {
-                selected_rows.insert(key.clone(), (row, false));
-                keep.insert(key);
-            }
+        if (current_eligible || cutoff.is_none()) && let Some(row) = current {
+            selected_rows.insert(key.clone(), (row, false));
+            keep.insert(key);
         }
     }
-    drop(current_header);
     let mut needed = keep.clone();
     let mut edges = BTreeSet::new();
     let mut turns = BTreeSet::new();
