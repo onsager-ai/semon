@@ -3399,33 +3399,27 @@ impl SqliteStore {
                 crate::storage::catalog::SearchPublicationStore::begin(&search, &[])
                     .map_err(failure)?;
                 #[allow(unused_mut)]
-                let mut refresh = |encoded: &[String]| -> Result<(), StoreError> {
-                    let refreshed = encoded
-                        .iter()
-                        .map(|value| {
-                            serde_json::from_str::<crate::model::summary::CatalogRow>(value)
-                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    let refs = refreshed.iter().collect::<Vec<_>>();
-                    #[cfg(test)]
-                    if let CatalogWriter::Traversal { owners, measured } = writer {
-                        return crate::catalog_search::publish_current_rows_effects(
+                let mut refresh =
+                    |refreshed: &[crate::model::summary::CatalogRow]| -> Result<(), StoreError> {
+                        let refs = refreshed.iter().collect::<Vec<_>>();
+                        #[cfg(test)]
+                        if let CatalogWriter::Traversal { owners, measured } = writer {
+                            return crate::catalog_search::publish_current_rows_effects(
+                                &transaction,
+                                &search,
+                                &refs,
+                                owners,
+                                measured.then_some(&mut search_observation),
+                            )
+                            .map_err(failure);
+                        }
+                        crate::catalog_search::publish_current_rows_with_store(
                             &transaction,
-                            &search,
                             &refs,
-                            owners,
-                            measured.then_some(&mut search_observation),
+                            &search,
                         )
-                        .map_err(failure);
-                    }
-                    crate::catalog_search::publish_current_rows_with_store(
-                        &transaction,
-                        &refs,
-                        &search,
-                    )
-                    .map_err(failure)
-                };
+                        .map_err(failure)
+                    };
                 if claims.is_none() {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
                     let mut after = String::new();
@@ -3452,26 +3446,65 @@ impl SqliteStore {
                         if encoded.is_empty() {
                             break;
                         }
-                        refresh(&encoded)?;
+                        let refreshed = encoded
+                            .iter()
+                            .map(|value| {
+                                serde_json::from_str::<crate::model::summary::CatalogRow>(value)
+                                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        refresh(&refreshed)?;
                     }
                 } else {
                     let mut keys = affected.clone();
                     keys.extend(rows.iter().map(|row| row.key.clone()));
-                    let mut encoded = Vec::new();
+                    let mut refreshed = Vec::new();
                     let mut bytes = 0usize;
                     for key in keys {
-                        let value = transaction.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1", [&key], |r|r.get::<_, String>(0)).optional().map_err(failure)?;
-                        if let Some(value) = value {
-                            if bytes + value.len() > 1048576 || encoded.len() == 64 {
-                                refresh(&encoded)?;
-                                encoded.clear();
-                                bytes = 0;
+                        let value: Option<Option<String>> = transaction
+                            .query_row(
+                                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
+                                [&key],
+                                |row| row.get(0),
+                            )
+                            .optional()
+                            .map_err(failure)?;
+                        let (row, size) = match value {
+                            Some(Some(value)) => {
+                                let size = value.len();
+                                let row = serde_json::from_str::<crate::model::summary::CatalogRow>(
+                                    &value,
+                                )
+                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                                (row, size)
                             }
-                            bytes += value.len();
-                            encoded.push(value);
+                            Some(None) => {
+                                // Reuse the typed publication row when it is
+                                // available; an oversized affected neighbor
+                                // cannot be rebuilt safely within this bound.
+                                let Some((row, metadata)) = rows
+                                    .iter()
+                                    .zip(&metadata)
+                                    .find(|(row, _)| row.key == key)
+                                else {
+                                    return Err(StoreError::Data(
+                                        "scoped catalog search metadata exceeds 1 MiB for an affected row absent from the publication"
+                                            .into(),
+                                    ));
+                                };
+                                ((*row).clone(), metadata.len())
+                            }
+                            None => continue,
+                        };
+                        if bytes + size > 1048576 || refreshed.len() == 64 {
+                            refresh(&refreshed)?;
+                            refreshed.clear();
+                            bytes = 0;
                         }
+                        bytes += size;
+                        refreshed.push(row);
                     }
-                    refresh(&encoded)?;
+                    refresh(&refreshed)?;
                 }
                 transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;
             }
@@ -8775,7 +8808,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "DELETE FROM session_catalog WHERE session_key=?1",
+                    "DELETE FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
                     [&new_key],
                 )
                 .unwrap();
@@ -8783,15 +8816,15 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE session_catalog SET parent_key='wrong-parent' WHERE session_key=?1",
+                    "UPDATE main.session_catalog SET parent_key='wrong-parent' WHERE namespace=semon_namespace() AND session_key=?1",
                     [&parent_only],
                 )
                 .unwrap();
-            store.connection.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&retained]).unwrap();
+            store.connection.execute("UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE namespace=semon_namespace() AND session_key=?1", [&retained]).unwrap();
             store
                 .connection
                 .execute(
-                    "DELETE FROM session_search_documents WHERE session_key=?1",
+                    "DELETE FROM main.session_search_documents WHERE namespace=semon_namespace() AND session_key=?1",
                     [&rows[3].key],
                 )
                 .unwrap();
@@ -8840,14 +8873,14 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE meta SET value=?1 WHERE key='catalog_version'",
+                    "UPDATE main.meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
                     [(crate::model::summary::CATALOG_VERSION - 1).to_string()],
                 )
                 .unwrap();
             store
                 .connection
                 .execute(
-                    "UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1",
+                    "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=semon_namespace() AND session_key=?1",
                     [&rows[8].key],
                 )
                 .unwrap();
@@ -8905,6 +8938,88 @@ mod tests {
             .unwrap();
         assert!(catalog_batch_bytes(&oversized, &metadata, CatalogWriter::Auto).is_none());
         catalog_write_pair(&mut batch, &mut row_wise, &oversized, &projections, true);
+        for store in [&batch, &row_wise] {
+            let documents = store
+                .connection
+                .prepare(
+                    "SELECT read_scope,complete FROM main.session_search_documents WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY read_scope",
+                )
+                .unwrap()
+                .query_map([&oversized[1].key], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                documents,
+                [
+                    ("current".to_owned(), 0),
+                    ("retained_history".to_owned(), 0),
+                ],
+                "oversized search fields remain explicitly incomplete in both scopes"
+            );
+            assert_eq!(
+                store.connection.query_row(
+                    "SELECT COUNT(*) FROM main.session_search_memberships WHERE namespace=semon_namespace() AND session_key=?1",
+                    [&oversized[1].key],
+                    |row| row.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "incomplete replacement removes the old search postings"
+            );
+            let coverage = store
+                .connection
+                .prepare(
+                    "SELECT read_scope,incomplete FROM main.session_search_coverage WHERE namespace=semon_namespace() ORDER BY read_scope",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                coverage,
+                [
+                    ("current".to_owned(), 1),
+                    ("retained_history".to_owned(), 1),
+                ],
+                "search coverage does not claim the oversized row is fully indexed"
+            );
+        }
+        let mut affected_without_row = rows[2].clone();
+        affected_without_row
+            .sources
+            .push(oversized[1].sources[0].clone());
+        for (store, writer) in [
+            (&mut batch, CatalogWriter::Auto),
+            (&mut row_wise, CatalogWriter::RowWise),
+        ] {
+            let before = catalog_state(&store.connection);
+            let error = catalog_write(
+                store,
+                &[affected_without_row.clone()],
+                &projections,
+                true,
+                writer,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    StoreError::Data(message)
+                        if message == "scoped catalog search metadata exceeds 1 MiB for an affected row absent from the publication"
+                ),
+                "oversized affected metadata without an incoming row must refuse explicitly: {error}"
+            );
+            assert_eq!(
+                catalog_state(&store.connection),
+                before,
+                "bounded-metadata refusal rolls back the entire scoped publication"
+            );
+        }
         let duplicate = vec![rows[0].clone(), rows[0].clone()];
         for (store, writer) in [
             (&mut batch, CatalogWriter::Auto),
@@ -8992,7 +9107,7 @@ mod tests {
                 invalidate_catalog_source(&tx, &source.path.to_string_lossy(), "changed").unwrap();
             }
             tx.execute(
-                "UPDATE session_catalog_invalidations SET observed_at=?1",
+                "UPDATE main.session_catalog_invalidations SET observed_at=?1 WHERE namespace=semon_namespace()",
                 [CATALOG_FIXTURE_NOW],
             )
             .unwrap();
@@ -9000,7 +9115,7 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DELETE FROM session_slots; UPDATE session_slot_projections SET version=0;",
+                    "DELETE FROM main.session_slots WHERE namespace=semon_namespace(); UPDATE main.session_slot_projections SET version=0 WHERE namespace=semon_namespace();",
                 )
                 .unwrap();
         }
@@ -9010,10 +9125,10 @@ mod tests {
         );
         let fail_key = &rows[2].key;
         let failures = [
-            format!("CREATE TEMP TRIGGER publisher_failure BEFORE UPDATE ON session_catalog WHEN NEW.session_key={} BEGIN SELECT RAISE(ABORT,'middle catalog'); END;", quoted(fail_key)),
-            format!("CREATE TEMP TRIGGER publisher_failure BEFORE INSERT ON session_catalog_sources WHEN NEW.session_key={} BEGIN SELECT RAISE(ABORT,'source tail'); END;", quoted(fail_key)),
-            format!("CREATE TEMP TRIGGER publisher_failure BEFORE INSERT ON session_slots WHEN NEW.session_key={} BEGIN SELECT RAISE(ABORT,'slot tail'); END;", quoted(fail_key)),
-            "CREATE TEMP TRIGGER publisher_failure BEFORE DELETE ON session_catalog_invalidations BEGIN SELECT RAISE(ABORT,'ack tail'); END;".into(),
+            format!("CREATE TEMP TRIGGER publisher_failure BEFORE UPDATE ON main.session_catalog WHEN NEW.namespace=semon_namespace() AND NEW.session_key={} BEGIN SELECT RAISE(ABORT,'middle catalog'); END;", quoted(fail_key)),
+            format!("CREATE TEMP TRIGGER publisher_failure BEFORE INSERT ON main.session_catalog_sources WHEN NEW.namespace=semon_namespace() AND NEW.session_key={} BEGIN SELECT RAISE(ABORT,'source tail'); END;", quoted(fail_key)),
+            format!("CREATE TEMP TRIGGER publisher_failure BEFORE INSERT ON main.session_slots WHEN NEW.namespace=semon_namespace() AND NEW.session_key={} BEGIN SELECT RAISE(ABORT,'slot tail'); END;", quoted(fail_key)),
+            "CREATE TEMP TRIGGER publisher_failure BEFORE DELETE ON main.session_catalog_invalidations WHEN OLD.namespace=semon_namespace() BEGIN SELECT RAISE(ABORT,'ack tail'); END;".into(),
         ];
         for failure in failures {
             for (store, writer) in [
