@@ -111,9 +111,35 @@ fn finite_history_page(
     after: Option<&(i64, Vec<u8>)>,
     bytes_left: &mut usize,
 ) -> Result<Vec<(crate::model::summary::CatalogRow, i64, Vec<u8>)>, StorageError> {
+    let page = finite_history_page_rows(snapshot, cutoff, active, after, *bytes_left)?;
+    let mut output = Vec::new();
+    for record in page {
+        let key = record.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
+        let metadata = record.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        *bytes_left = bytes_left.checked_sub(64 + key.len() + metadata.len()).ok_or(StorageError::Busy)?;
+        let row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
+            .map_err(|_| cohort_scope_changed("finite_history_metadata_invalid"))?;
+        let key_digest = record.get::<_, Vec<u8>>(3);
+        if row.key.as_bytes() != key || digest(row.key.as_bytes()) != key_digest {
+            return Err(cohort_scope_changed("finite_history_identity_mismatch"));
+        }
+        output.push((row, record.get::<_, Option<i64>>(2).unwrap_or(0), key_digest));
+    }
+    snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?.check()?;
+    Ok(output)
+}
+
+fn finite_history_page_rows(
+    snapshot: &Snapshot<'_, '_>,
+    cutoff: i64,
+    active: bool,
+    after: Option<&(i64, Vec<u8>)>,
+    bytes_left: usize,
+) -> Result<Vec<tokio_postgres::Row>, StorageError> {
     snapshot.require_current().map_err(|_| cohort_scope_changed("snapshot_not_current"))?;
     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
     tx.check()?;
+    let request_budget = i64::try_from(bytes_left).map_err(|_| StorageError::Busy)?;
     let predicate = match (active, after.is_some()) {
         (true, false) => "query_active=true AND $5::bytea IS NULL AND $3::bigint IS NOT NULL AND $4::bigint IS NULL",
         (true, true) => "query_active=true AND key_digest>$5 AND $3::bigint IS NOT NULL AND $4::bigint IS NULL",
@@ -130,27 +156,21 @@ fn finite_history_page(
             FROM semon_pg_native_catalog_history_owners
             WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {predicate}
             ORDER BY {order} LIMIT 65
-        ) SELECT CASE WHEN octet_length(p.session_key)<=1048576 THEN p.session_key END,CASE WHEN sum(octet_length(h.metadata)) OVER ()<=1048576 THEN h.metadata END,p.query_activity,p.key_digest
-        FROM page p LEFT JOIN semon_pg_native_catalog_history_headers h
-          ON h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=p.owner_generation
-         AND h.key_digest=p.key_digest AND h.session_key=p.session_key
+        ), bounded AS MATERIALIZED (
+            SELECT p.session_key,h.metadata,p.query_activity,p.key_digest,
+                   count(*) OVER ()*64+sum(octet_length(p.session_key)+coalesce(octet_length(h.metadata),0)) OVER ()<=$6::bigint AS within_request_budget,
+                   sum(octet_length(h.metadata)) OVER ()<=1048576 AS within_metadata_budget
+            FROM page p LEFT JOIN semon_pg_native_catalog_history_headers h
+              ON h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=p.owner_generation
+             AND h.key_digest=p.key_digest AND h.session_key=p.session_key
+        ) SELECT CASE WHEN octet_length(session_key)<=1048576 AND within_request_budget THEN session_key END,
+                 CASE WHEN within_request_budget AND within_metadata_budget THEN metadata END,
+                 query_activity,key_digest
+        FROM bounded p
         ORDER BY {output_order}"
-    ), &[&tx.namespace.as_str().as_bytes(), &snapshot.generation.as_bytes(), &cutoff, &after_activity, &after_key]).map_err(sqlstate::error)?;
-    let mut output = Vec::new();
-    for record in page {
-        let key = record.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?;
-        let metadata = record.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
-        *bytes_left = bytes_left.checked_sub(64 + key.len() + metadata.len()).ok_or(StorageError::Busy)?;
-        let row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
-            .map_err(|_| cohort_scope_changed("finite_history_metadata_invalid"))?;
-        let key_digest = record.get::<_, Vec<u8>>(3);
-        if row.key.as_bytes() != key || digest(row.key.as_bytes()) != key_digest {
-            return Err(cohort_scope_changed("finite_history_identity_mismatch"));
-        }
-        output.push((row, record.get::<_, Option<i64>>(2).unwrap_or(0), key_digest));
-    }
+    ), &[&tx.namespace.as_str().as_bytes(), &snapshot.generation.as_bytes(), &cutoff, &after_activity, &after_key, &request_budget]).map_err(sqlstate::error)?;
     tx.check()?;
-    Ok(output)
+    Ok(page)
 }
 
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
@@ -799,7 +819,7 @@ impl QueryCatalogStore for QueryCatalog {
                         current_graph_owners.insert(owner.clone());
                         needed.insert(owner);
                         edges.insert(id);
-                        keep.insert(from);
+                        keep.insert(from.clone());
                         current_context.extend(to.iter().cloned());
                         current_context.insert(from.clone());
                         keep.extend(to);
@@ -1046,5 +1066,126 @@ impl Snapshot<'_, '_> {
             usize::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?,
             slot,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::postgres::{
+        PgCancellation,
+        tests::{fixture, ns},
+        txn::TxnKind,
+    };
+
+    #[test]
+    fn finite_history_page_bounds_aggregate_keys_and_metadata_before_materializing_cells() {
+        let (pool, _) = fixture(|_| {});
+        let namespace = ns("finite-history-page-budget");
+        let control = PgCancellation::default();
+        let generation = "a".repeat(64);
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            let operation_id = b"finite-history-query".to_vec();
+            let payload = b"fixture".to_vec();
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,1)",
+                &[&ns, &operation_id, &payload, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "WITH source AS (
+                    SELECT convert_to(repeat('x',8200)||lpad(i::text,2,'0'),'UTF8') AS session_key
+                    FROM generate_series(1,65) AS n(i)
+                ) INSERT INTO semon_pg_native_catalog_history_owners(
+                    namespace,generation,key_digest,session_key,owner_generation,original,
+                    last_ms,harness,repo,model,query_activity,query_active
+                ) SELECT $1,$2,sha256(session_key),session_key,$2,false,0,'claude','','',100,false
+                  FROM source",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "WITH source AS (
+                    SELECT convert_to(repeat('x',8200)||lpad(i::text,2,'0'),'UTF8') AS session_key
+                    FROM generate_series(1,65) AS n(i)
+                ), metadata AS (
+                    SELECT session_key,convert_to(jsonb_build_object(
+                        'key',convert_from(session_key,'UTF8'),'name','fixture','harness','claude',
+                        'kind','session','native_ids','[]'::jsonb,'parent',NULL,'parent_source',NULL,
+                        'repo',NULL,'branch',NULL,'model','','effort',NULL,'start',NULL,'last',0,
+                        'tokens','[0,0,0]'::jsonb,
+                        'cost',jsonb_build_object('usd',NULL,'unpriced_models','[]'::jsonb,
+                            'split_unknown_messages',0,'by_model','{}'::jsonb,'by_day','{}'::jsonb),
+                        'sources','[]'::jsonb
+                    )::text,'UTF8') AS metadata
+                    FROM source
+                ) INSERT INTO semon_pg_native_catalog_history_headers(
+                    namespace,generation,key_digest,session_key,recipe_generation,source_generation,
+                    version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,
+                    query_activity,query_active
+                ) SELECT $1,$2,sha256(session_key),session_key,$2,NULL,1,0,false,metadata,NULL,
+                         0,'claude','','',100,false
+                  FROM metadata",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            let sizes = tx.driver.query_one(
+                "SELECT sum(octet_length(o.session_key)),sum(octet_length(h.metadata))
+                 FROM semon_pg_native_catalog_history_owners o
+                 JOIN semon_pg_native_catalog_history_headers h
+                   ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
+                  AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
+                  AND h.session_key=o.session_key
+                 WHERE o.namespace=$1 AND o.generation=$2",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            let key_bytes: i64 = sizes.get(0);
+            let metadata_bytes: i64 = sizes.get(1);
+            assert!(key_bytes < 1024 * 1024);
+            assert!(metadata_bytes < 1024 * 1024);
+            assert!(key_bytes + metadata_bytes + 65 * 64 > 1024 * 1024);
+            Ok(())
+        }).unwrap();
+
+        let mut bytes_left = 1024 * 1024;
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
+            assert_eq!(rows.len(), 65);
+            assert!(rows
+                .iter()
+                .all(|row| row.get::<_, Option<Vec<u8>>>(0).unwrap().is_none()));
+            assert!(rows
+                .iter()
+                .all(|row| row.get::<_, Option<Vec<u8>>>(1).unwrap().is_none()));
+            assert_eq!(
+                finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
+                Some(StorageError::Busy)
+            );
+            Ok(())
+        }).unwrap();
+
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            tx.driver.execute(
+                "DELETE FROM semon_pg_native_catalog_history_headers WHERE namespace=$1 AND generation=$2",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "DELETE FROM semon_pg_native_catalog_history_owners WHERE namespace=$1 AND generation=$2 AND key_digest<>(SELECT key_digest FROM semon_pg_native_catalog_history_owners WHERE namespace=$1 AND generation=$2 ORDER BY key_digest LIMIT 1)",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        }).unwrap();
+
+        bytes_left = 1024 * 1024;
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(0).unwrap().is_some());
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(1).unwrap().is_none());
+            assert_eq!(
+                finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
+                Some(StorageError::Busy)
+            );
+            Ok(())
+        }).unwrap();
     }
 }
