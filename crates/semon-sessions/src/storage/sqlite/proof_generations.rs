@@ -1058,7 +1058,7 @@ fn observation_binding_for_owner(
     physical_owner: Option<CatalogObservationOwner>,
     local_only: bool,
 ) -> Result<crate::storage::QueryRuntimeBinding, ObservationPreparationError> {
-    observation_authority_for_owner(db, current, selected, local_owner, local_owner.is_some())
+    observation_authority_for_owner(db, current, selected, physical_owner, local_only)
         .map(|(binding, _)| binding)
 }
 
@@ -1068,7 +1068,7 @@ fn observation_authority_for_owner(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
-    local_owner: Option<CatalogObservationOwner>,
+    physical_owner: Option<CatalogObservationOwner>,
     local_only: bool,
 ) -> Result<
     (
