@@ -272,15 +272,15 @@ fn read(
         });
         // A missing Current row leaves a finite History candidate eligible;
         // an eligible Current row takes priority.
-        if cutoff.is_none() || !current_eligible {
-            if let Some(row) = load_catalog_row(db, &key, true, bytes_left)? {
-                let member = history_window(&row, cutoff).map_err(unavailable)?.member;
-                if select_history(cutoff, current_eligible, true, member) {
-                    history_selected.insert(key.clone());
-                    selected_rows.insert(key.clone(), (row, true));
-                    keep.insert(key.clone());
-                    continue;
-                }
+        if (cutoff.is_none() || !current_eligible)
+            && let Some(row) = load_catalog_row(db, &key, true, bytes_left)?
+        {
+            let member = history_window(&row, cutoff).map_err(unavailable)?.member;
+            if select_history(cutoff, current_eligible, true, member) {
+                history_selected.insert(key.clone());
+                selected_rows.insert(key.clone(), (row, true));
+                keep.insert(key.clone());
+                continue;
             }
         }
         if (current_eligible || cutoff.is_none())
@@ -407,7 +407,7 @@ fn read(
         if !selected_history {
             return Err(unavailable("Selected History owner changed cohorts"));
         }
-        let window = history_window(&row, cutoff).map_err(unavailable)?;
+        let window = history_window(row, cutoff).map_err(unavailable)?;
         if !window.member {
             return Err(unavailable("Selected History row is outside its cutoff"));
         }

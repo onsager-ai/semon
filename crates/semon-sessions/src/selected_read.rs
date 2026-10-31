@@ -246,6 +246,7 @@ pub(crate) fn charge(fixed: usize, dynamic: usize) -> io::Result<()> {
 /// leaving room to account its fixed row storage. SQL callers use this before
 /// the driver materializes dynamic cells; inactive test/maintenance reads keep
 /// the same default request bound.
+#[cfg(feature = "postgres")]
 pub(crate) fn max_dynamic_bytes(fixed_per_row: usize, max_rows: usize) -> io::Result<usize> {
     check()?;
     Ok(ACTIVE.with(|active| {
