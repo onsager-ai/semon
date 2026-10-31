@@ -2939,11 +2939,9 @@ impl SqliteStore {
         let owner = &self.owner;
         let expected_catalog_version = crate::model::summary::CATALOG_VERSION.to_string();
         {
-            let snapshot = Transaction::new_unchecked(
-                &self.connection,
-                TransactionBehavior::Deferred,
-            )
-            .map_err(failure)?;
+            let snapshot =
+                Transaction::new_unchecked(&self.connection, TransactionBehavior::Deferred)
+                    .map_err(failure)?;
             let stale = owner
                 .validate_catalog_publication_ready(&snapshot)
                 .map_err(StoreError::Configured)?;
@@ -2966,11 +2964,9 @@ impl SqliteStore {
                 return Ok(true);
             }
         }
-        let transaction = Transaction::new_unchecked(
-            &self.connection,
-            TransactionBehavior::Immediate,
-        )
-        .map_err(failure)?;
+        let transaction =
+            Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+                .map_err(failure)?;
         let stale = owner
             .validate_catalog_publication_ready(&transaction)
             .map_err(StoreError::Configured)?;
@@ -3014,11 +3010,9 @@ impl SqliteStore {
             )
             .map_err(failure)?;
         let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
-        let search = crate::storage::sqlite::search::SearchWriter::admitted(
-            &transaction,
-            &admitted,
-        )
-        .map_err(StoreError::Configured)?;
+        let search =
+            crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &admitted)
+                .map_err(StoreError::Configured)?;
         crate::storage::catalog::SearchPublicationStore::begin(&search, &[]).map_err(failure)?;
         transaction
             .execute_batch(
@@ -3682,8 +3676,7 @@ impl SqliteStore {
                     Ok(())
                 };
                 if claims.is_none()
-                    || previous_search_version.as_deref()
-                        != Some(crate::catalog_search::VERSION)
+                    || previous_search_version.as_deref() != Some(crate::catalog_search::VERSION)
                 {
                     transaction.execute_batch("DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();").map_err(failure)?;
                     let mut after = String::new();
@@ -11147,7 +11140,8 @@ mod tests {
                     limit: 10,
                     index_complete: true,
                 },
-            ).unwrap();
+            )
+            .unwrap();
             assert!(history_only.rows.is_empty());
             let catalog_field = crate::catalog_search::read_admitted(
                 &store.connection,
@@ -11161,7 +11155,8 @@ mod tests {
                     limit: 10,
                     index_complete: true,
                 },
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(catalog_field.rows.len(), 1);
             assert_eq!(catalog_field.rows[0].name, original.name);
             store.connection.execute(

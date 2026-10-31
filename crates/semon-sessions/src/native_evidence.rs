@@ -4321,9 +4321,7 @@ mod catalog_owner_tests {
         let binding = crate::storage::NativeReaderBinding::Admitted(config.clone());
         let connection = binding.connection().unwrap();
         connection.execute_batch("BEGIN DEFERRED").unwrap();
-        binding
-            .validate(&connection, &config.namespace)
-            .is_ok()
+        binding.validate(&connection, &config.namespace).is_ok()
     }
 
     #[test]
@@ -4382,8 +4380,8 @@ mod catalog_owner_tests {
         );
         assert!(strict_catalog_reader_available(&options));
 
-        let mut cache = crate::events::EventCache::open_scoped(&options.cache, &options.source)
-            .unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
         let database = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
         )

@@ -608,8 +608,10 @@ pub(crate) fn validate_catalog_publication_profile(
     if incoming {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    Ok(catalog_version.as_deref() == Some(expected_catalog_version.as_str())
-        && search_version.as_deref() != Some(crate::catalog_search::VERSION))
+    Ok(
+        catalog_version.as_deref() == Some(expected_catalog_version.as_str())
+            && search_version.as_deref() != Some(crate::catalog_search::VERSION),
+    )
 }
 
 /// Private primitive writer authority. Database flags cannot manufacture it;

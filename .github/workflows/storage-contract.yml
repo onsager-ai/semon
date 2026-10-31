@@ -63,6 +63,34 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Stale search recovery and scoped Catalog eligibility
+        id: catalog_search_recovery
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            native_evidence::tests::stale_catalog_search_is_reported_then_rebuilt_after_audit \
+            catalog_search::tests::scoped_changes_preserve_independent_history_and_counts \
+            catalog_search::tests::scoped_search_lookup_uses_catalog_metadata_and_rejects_history_orphans \
+            events::store::configured::tests::configured_semantic_scoped_search_effects_replace_and_rollback \
+            query::tests::published_catalog_search_matches_shared_five_tool_oracles; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/catalog-search-recovery-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/catalog-search-recovery-case.log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/catalog-search-recovery-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/catalog-search-recovery-case.log" >> "$RUNNER_TEMP/catalog-search-recovery-tests.log"
+            echo "CASE name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/catalog-search-recovery-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/catalog-search-recovery-tests.log"
+          exit "$result"
+      - name: Retain stale search recovery and scoped Catalog results
+        if: ${{ !cancelled() && steps.catalog_search_recovery.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: catalog-search-recovery-tests
+          path: ${{ runner.temp }}/catalog-search-recovery-tests.log
       - name: Selected Query recipe foundation and token loader
         id: query_recipe_loader
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}

@@ -263,9 +263,7 @@ pub(crate) fn assert_posting_multiset(rows: &[CatalogRow]) -> rusqlite::Result<(
             original
                 .iter()
                 .zip(&actual)
-                .all(|((left, a), right)| {
-                    *left == right.gram && std::ptr::eq(*a, right.row)
-                })
+                .all(|((left, a), right)| { *left == right.gram && std::ptr::eq(*a, right.row) })
         );
     }
     Ok(())
@@ -361,9 +359,7 @@ pub(crate) fn publish_scoped_rows_port<P: crate::storage::catalog::SearchPublica
         let rows = rows
             .iter()
             .copied()
-            .filter(|row| {
-                row.scopes.count() != 0 && key_set.contains(row.row.key.as_str())
-            })
+            .filter(|row| row.scopes.count() != 0 && key_set.contains(row.row.key.as_str()))
             .collect::<Vec<_>>();
         phase("start", keys.len());
         store.begin(keys)?;
@@ -1684,11 +1680,9 @@ mod sqlite_tests {
         {
             let transaction = connection.transaction().unwrap();
             let source = sqlite_tests::source(&transaction);
-            let writer = crate::storage::sqlite::search::SearchWriter::admitted(
-                &transaction,
-                &source,
-            )
-            .unwrap();
+            let writer =
+                crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source)
+                    .unwrap();
             let lookup = writer.lookup(&keys).unwrap();
             assert_eq!(lookup.consumed, 1);
             assert!(!lookup.oversized);
@@ -1753,11 +1747,9 @@ mod sqlite_tests {
                 1
             );
             let source = sqlite_tests::source(&transaction);
-            let writer = crate::storage::sqlite::search::SearchWriter::admitted(
-                &transaction,
-                &source,
-            )
-            .unwrap();
+            let writer =
+                crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source)
+                    .unwrap();
             let lookup = writer.lookup(&keys).unwrap();
             assert_eq!(lookup.consumed, 1);
             assert!(lookup.rows.is_empty());
@@ -1793,16 +1785,16 @@ mod sqlite_tests {
                 "UPDATE main.session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1",
                 [&current.key],
             ).unwrap();
-            transaction.execute(
-                "DELETE FROM main.session_history_catalog WHERE session_key=?1",
-                [&current.key],
-            ).unwrap();
+            transaction
+                .execute(
+                    "DELETE FROM main.session_history_catalog WHERE session_key=?1",
+                    [&current.key],
+                )
+                .unwrap();
             let source = sqlite_tests::source(&transaction);
-            let writer = crate::storage::sqlite::search::SearchWriter::admitted(
-                &transaction,
-                &source,
-            )
-            .unwrap();
+            let writer =
+                crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source)
+                    .unwrap();
             let lookup = writer.lookup(&keys).unwrap();
             assert_eq!(lookup.consumed, 1);
             assert!(lookup.rows.is_empty());

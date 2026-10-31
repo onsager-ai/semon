@@ -278,7 +278,8 @@ impl SemanticStaging {
     /// Explicit private admission into the authored composite native profile.
     #[allow(dead_code)]
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
-        let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(config)?;
+        let owner =
+            crate::events::store::configured::NativeOwnership::admit_catalog_publisher(config)?;
         let db = SourceJournal::owned(owner.clone()).connection()?;
         db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
         owner.validate_ready(&db)?;

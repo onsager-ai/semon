@@ -206,10 +206,7 @@ impl SearchPublicationStore for SearchWriter<'_> {
         }
         Ok(())
     }
-    fn postings(
-        &self,
-        rows: &[crate::catalog_search::SearchPosting<'_>],
-    ) -> rusqlite::Result<()> {
+    fn postings(&self, rows: &[crate::catalog_search::SearchPosting<'_>]) -> rusqlite::Result<()> {
         let sql = "INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key,gram) DO UPDATE SET current_last_ms=excluded.current_last_ms,history_last_ms=excluded.history_last_ms";
         let mut posting = self.db.prepare_cached(sql)?;
         for item in rows {

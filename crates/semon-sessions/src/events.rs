@@ -2819,10 +2819,7 @@ impl EventCache {
             .flatten()
     }
 
-    pub(crate) fn rebuild_catalog_search(
-        &mut self,
-        expected_generation: &str,
-    ) -> io::Result<bool> {
+    pub(crate) fn rebuild_catalog_search(&mut self, expected_generation: &str) -> io::Result<bool> {
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("producer store unavailable"))?
