@@ -3782,9 +3782,8 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
             assert_eq!(retained["entries"], page["entries"]);
             assert_eq!(retained["content_observation"]["state"], "cached");
             let generation = retained["projection"]["generation"].as_str().unwrap();
-            let continuation = format!(
-                "sid=selected&scope={scope}&after=1&limit=1&generation={generation}"
-            );
+            let continuation =
+                format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}");
             assert_eq!(
                 crate::session_transcript_range(
                     &fixture.options,

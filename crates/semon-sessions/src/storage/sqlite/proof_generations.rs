@@ -670,10 +670,13 @@ pub(crate) fn observation_binding_with_observations(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
-) -> Result<(
-    crate::storage::QueryRuntimeBinding,
-    crate::storage::selected::PresentationObservations,
-), StorageError> {
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::selected::PresentationObservations,
+    ),
+    StorageError,
+> {
     let (reference_kind, owner_kind) = match selected.lifecycle {
         crate::model::summary::CatalogLifecycle::Current => ("current", "catalog"),
         crate::model::summary::CatalogLifecycle::Retained => ("history", "history"),
@@ -683,7 +686,8 @@ pub(crate) fn observation_binding_with_observations(
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let prefix = crate::retention::source_generation(&selected.sources)
         .map_err(|_| StorageError::Unavailable)?;
-    let selected_metadata = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
+    let selected_metadata =
+        serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
     let selected_digest = proof_codec::digest(selected_metadata.as_bytes());
     let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
     let exact_owner_grant: bool = db
