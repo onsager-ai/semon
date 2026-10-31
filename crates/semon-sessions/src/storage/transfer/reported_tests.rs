@@ -573,7 +573,7 @@ pub(crate) fn finish_catalog(
             &batch,
             1_790_000_000_000,
         )
-            .unwrap();
+        .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             if model.prepared().rows.len() == 17 {
                 let prepared = model.prepared();
@@ -615,7 +615,9 @@ pub(crate) fn finish_catalog(
                 );
             }
         }
-        if cache.record_semantic_batch(&batch, model.prepared()).unwrap()
+        if cache
+            .record_semantic_batch(&batch, model.prepared())
+            .unwrap()
             != crate::events::Outcome::Written
         {
             panic!("semantic model stage changed");
