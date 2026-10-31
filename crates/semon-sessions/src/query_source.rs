@@ -1336,6 +1336,15 @@ mod tests {
         }
     }
 
+    fn admitted_writer_connection(options: &Options) -> Connection {
+        let config = options.source.config(&options.cache).unwrap();
+        crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection()
+    }
+
     #[test]
     fn index_l2_with_selected_l1_and_stable_raw_reports_header_ledger() {
         use std::io::Write;
@@ -1476,12 +1485,18 @@ mod tests {
         let before = fs::metadata(&fixture.path).unwrap().len();
         drop(cache);
 
-        let db = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
-        db.execute(
-            "UPDATE meta SET value='{' WHERE key GLOB 'native_source_chunks:*:header'",
-            [],
-        )
-        .unwrap();
+        let db = admitted_writer_connection(&options);
+        assert_eq!(
+            db.execute(
+                "UPDATE main.meta SET value='{' \
+                 WHERE namespace=semon_namespace() \
+                   AND key GLOB 'native_source_chunks:*:header'",
+                [],
+            )
+            .unwrap(),
+            1,
+            "corrupt exactly one header in the admitted source namespace"
+        );
         drop(db);
         crate::events::store::chunk_proofs::HEADER_DIAGNOSTICS
             .with(|lines| lines.borrow_mut().clear());
@@ -1893,25 +1908,38 @@ mod tests {
         let original = format!("{prefix}{record}\n");
         fs::write(&fixture.path, &original).unwrap();
         let cache_path = fixture.root.join("index.json");
-        let mut cache =
-            crate::events::EventCache::open_scoped(&cache_path, &crate::Options::default().source)
-                .unwrap();
+        let options = Options {
+            cache: cache_path.clone(),
+            ..Options::default()
+        };
+        let mut cache = crate::events::EventCache::open_scoped(
+            &cache_path,
+            &options.source,
+        )
+        .unwrap();
         let initial =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(initial.handoff_index.as_ref().unwrap().calls().len(), 1);
         let before = crate::events::PARSED.with(std::cell::Cell::get);
         drop(cache);
-        let connection =
-            rusqlite::Connection::open(crate::events::EventCache::path(&cache_path)).unwrap();
-        connection
-            .execute(
-                "DELETE FROM meta WHERE key GLOB 'native_launch_calls:*'",
-                [],
-            )
-            .unwrap();
-        let mut cache =
-            crate::events::EventCache::open_scoped(&cache_path, &crate::Options::default().source)
-                .unwrap();
+        let connection = admitted_writer_connection(&options);
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM main.meta \
+                     WHERE namespace=semon_namespace() \
+                       AND key GLOB 'native_launch_calls:*'",
+                    [],
+                )
+                .unwrap(),
+            2,
+            "delete the launch page and header in the admitted source namespace"
+        );
+        let mut cache = crate::events::EventCache::open_scoped(
+            &cache_path,
+            &options.source,
+        )
+        .unwrap();
         let repaired =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(repaired.handoff_index, initial.handoff_index);
