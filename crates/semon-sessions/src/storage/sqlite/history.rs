@@ -53,9 +53,13 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
     fn retained(&self, key: &str) -> rusqlite::Result<bool> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_retained");
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![self.namespace,key], |r|r.get(0))
     }
     fn replacement(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_replacement");
         let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
         let old: Option<CatalogRow> = text
             .as_deref()
@@ -74,9 +78,13 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         }))
     }
     fn header(&self, key: &str) -> rusqlite::Result<Option<OriginalHeader>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_header");
         self.db.query_row("SELECT generation,version,source_generation,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2", params![self.namespace,key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()
     }
     fn transfer(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_transfer");
         self.db
             .query_row(
                 "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
@@ -86,6 +94,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
             .optional()
     }
     fn reset_transfer(&self, key: &str) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_reset_transfer");
         let removed = self.db.execute("DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 AND slot IN (SELECT slot FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 64)",params![self.namespace,key])?;
         let parts = self.db.execute("DELETE FROM main.session_history_slot_parts WHERE namespace=?1 AND session_key=?2 AND (slot,part) IN (SELECT slot,part FROM main.session_history_slot_parts WHERE namespace=?1 AND session_key=?2 ORDER BY slot,part LIMIT 64)",params![self.namespace,key])?;
         if removed == 0 && parts == 0 {
@@ -97,6 +107,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         Ok(())
     }
     fn next_slot(&self, key: &str, last: Option<i64>) -> rusqlite::Result<Option<(i64, i64)>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_next_slot");
         let sql = if last.is_some() {
             "SELECT slot,octet_length(metadata) FROM main.session_slots WHERE namespace=?1 AND session_key=?2 AND slot>?3 ORDER BY slot LIMIT 1"
         } else {
@@ -119,6 +131,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         split: bool,
         inspect: bool,
     ) -> rusqlite::Result<Option<String>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_copy_slot");
         if split {
             self.db.execute("INSERT INTO main.session_history_slot_parts(namespace,session_key,slot,part,bytes) SELECT namespace,session_key,slot,?4,substr(CAST(metadata AS BLOB),?4+1,?5) FROM main.session_slots WHERE namespace=?1 AND session_key=?2 AND slot=?3",params![self.namespace,key,slot,offset,take])?;
             return Ok(None);
@@ -130,6 +144,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         self.db.query_row("SELECT metadata FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 AND slot=?3",params![self.namespace,key,slot], |r|r.get(0)).map(Some)
     }
     fn more_slots(&self, key: &str, last: Option<i64>) -> rusqlite::Result<bool> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_more_slots");
         let sql = if last.is_some() {
             "SELECT EXISTS(SELECT 1 FROM main.session_slots WHERE namespace=?1 AND session_key=?2 AND slot>?3)"
         } else {
@@ -142,6 +158,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         )
     }
     fn checkpoint(&self, key: &str, transfer: &str) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_checkpoint");
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_transfer:{key}"),transfer])?;
         Ok(())
     }
@@ -153,6 +171,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         header: Option<&OriginalHeader>,
         complete: bool,
     ) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=original_complete");
         let key = &row.key;
         let (activity, active) = crate::storage::query::history_activity(row);
         self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5)",params![self.namespace,key,metadata,activity,active])?;
@@ -175,9 +195,13 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
     fn original(&self, key: &str) -> rusqlite::Result<bool> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_original");
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.meta m ON m.namespace=h.namespace AND m.key=?3 WHERE h.namespace=?1 AND h.session_key=?2)",params![self.namespace,key,format!("history_original_header:{key}")],|r|r.get(0))
     }
     fn previous(&self, key: &str) -> rusqlite::Result<Option<String>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_previous");
         let history: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|r.get(0)).optional()?;
         let history = match history {
             Some(None) => return Err(rusqlite::Error::InvalidQuery),
@@ -196,6 +220,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         Ok(history.or(current))
     }
     fn history_exists(&self, key: &str) -> rusqlite::Result<bool> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_history_exists");
         <Self as OriginalHistoryStore>::retained(self, key)
     }
     fn retain_source(
@@ -203,6 +229,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         row: &CatalogRow,
         source: &crate::model::summary::CatalogSource,
     ) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_retain_source");
         self.db.execute("INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,?2,'retained',?3,?4,?5) ON CONFLICT(namespace,session_key,source_path) DO UPDATE SET lifecycle='retained'",params![self.namespace,row.key,row.harness,source.native_id,source.path.to_string_lossy()])?;
         Ok(())
     }
@@ -211,11 +239,15 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         old: &crate::model::summary::CatalogSource,
         current: &[crate::model::summary::CatalogSource],
     ) -> rusqlite::Result<bool> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_relocated");
         // The existing relocation witness reader already scopes metadata and
         // ledger reads through the admitted connection's native binding.
         crate::events::store::relocated_catalog_source(self.db, old, current)
     }
     fn clear(&self, key: &str) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_clear");
         self.db.execute(
             "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
             params![self.namespace, format!("history_transfer:{key}")],
@@ -234,6 +266,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         &self,
         key: &str,
     ) -> rusqlite::Result<(bool, Option<crate::storage::catalog::HistoryRecipeHeader>)> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_previous_recipe");
         let header=self.db.query_row("SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
         if header.is_some() {
             return Ok((true, header));
@@ -242,6 +276,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         Ok((false, header))
     }
     fn recipe_slots(&self, key: &str, history: bool) -> rusqlite::Result<Vec<String>> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_recipe_slots");
         let sql = if history {
             "SELECT metadata FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65"
         } else {
@@ -266,6 +302,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         texts: &[String],
         incomplete: bool,
     ) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("catalog_history_probe method=composite_composed");
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed=self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
         let row: CatalogRow = serde_json::from_str(metadata)
