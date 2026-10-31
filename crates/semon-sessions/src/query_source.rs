@@ -1912,11 +1912,8 @@ mod tests {
             cache: cache_path.clone(),
             ..Options::default()
         };
-        let mut cache = crate::events::EventCache::open_scoped(
-            &cache_path,
-            &options.source,
-        )
-        .unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&cache_path, &options.source).unwrap();
         let initial =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(initial.handoff_index.as_ref().unwrap().calls().len(), 1);
@@ -1935,11 +1932,8 @@ mod tests {
             2,
             "delete the launch page and header in the admitted source namespace"
         );
-        let mut cache = crate::events::EventCache::open_scoped(
-            &cache_path,
-            &options.source,
-        )
-        .unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&cache_path, &options.source).unwrap();
         let repaired =
             crate::events::scan_file(&fixture.path, "claude", &mut cache, &mut false).unwrap();
         assert_eq!(repaired.handoff_index, initial.handoff_index);

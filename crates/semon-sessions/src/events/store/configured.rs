@@ -1247,14 +1247,19 @@ impl Writer {
             .backend
             .sqlite_database()
             .map_err(StoreError::Configured)?;
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
+            .clone();
         let mut store = super::SqliteStore {
-            owner: self
-                .owner
-                .as_ref()
-                .ok_or(StoreError::Configured(
-                    StorageError::NamespaceUpgradePending,
-                ))?
-                .clone(),
+            #[cfg(test)]
+            observation_journal: crate::storage::sqlite::source_journal::SourceJournal::owned(
+                owner.clone(),
+            ),
+            owner,
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1298,14 +1303,19 @@ impl Writer {
             .backend
             .sqlite_database()
             .map_err(StoreError::Configured)?;
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
+            .clone();
         let mut store = super::SqliteStore {
-            owner: self
-                .owner
-                .as_ref()
-                .ok_or(StoreError::Configured(
-                    StorageError::NamespaceUpgradePending,
-                ))?
-                .clone(),
+            #[cfg(test)]
+            observation_journal: crate::storage::sqlite::source_journal::SourceJournal::owned(
+                owner.clone(),
+            ),
+            owner,
             connection,
             path: database.clone(),
             selected_runs: None,
@@ -1347,6 +1357,10 @@ impl Writer {
             .sqlite_database()
             .map_err(std::io::Error::other)?;
         let mut store = super::SqliteStore {
+            #[cfg(test)]
+            observation_journal: crate::storage::sqlite::source_journal::SourceJournal::owned(
+                owner.clone(),
+            ),
             owner: owner.clone(),
             connection,
             path: database.clone(),

@@ -5443,12 +5443,14 @@ fn local_only_codex_fixture() -> (Fixture, PathBuf) {
     drop(file);
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.clone()]));
+    let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
     crate::write_facts(
         fixture.options.facts.as_ref().unwrap(),
         &facts,
-        &crate::Options::default().source,
+        &fixture.options.source,
     )
     .unwrap();
+    facts_write.complete().unwrap();
     let mut cache =
         EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     let prepared = crate::model::prepare_sources(
