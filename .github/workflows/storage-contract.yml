@@ -63,6 +63,22 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Configured semantic rejection and withdrawal contracts
+        id: semantic_rejection
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          cargo test --locked -p semon-sessions --lib semantic_rejection_ -- --nocapture > "$RUNNER_TEMP/semantic-rejection-tests.log" 2>&1 || result=$?
+          if ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/semantic-rejection-tests.log"; then result=1; fi
+          cat "$RUNNER_TEMP/semantic-rejection-tests.log"
+          exit "$result"
+      - name: Retain configured semantic rejection results
+        if: ${{ !cancelled() && steps.semantic_rejection.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-rejection-tests
+          path: ${{ runner.temp }}/semantic-rejection-tests.log
       - name: Configured header ownership and copied-usage fixture contracts
         id: ownership_fixtures
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
