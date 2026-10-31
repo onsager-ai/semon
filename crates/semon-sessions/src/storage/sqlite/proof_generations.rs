@@ -665,14 +665,14 @@ fn immutable_observation_candidate(
     prefix: &str,
     stream: &str,
     metadata: &str,
-) -> Result<bool, StorageError> {
+) -> Result<bool, ObservationPreparationError> {
     // Only route into the immutable verifier; this predicate grants no authority.
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND (g.id IS NULL OR (g.stream=?4 AND (g.prefix=?5 OR g.metadata=?6))))",
         params![namespace, session_key, reference_kind, stream, prefix, metadata],
         |row| row.get(0),
     )
-    .map_err(failed)
+    .map_err(ObservationPreparationError::Sql)
 }
 
 fn exact_immutable_observation_owner(
@@ -739,6 +739,128 @@ fn same_runtime_inputs(
     left.source_runtime == right.source_runtime
         && left.runtime_for(row).is_some()
         && left.runtime_for(row) == right.runtime_for(row)
+}
+
+struct VerifiedObservation {
+    binding: crate::storage::QueryRuntimeBinding,
+    row: CatalogRow,
+    observations: Option<crate::storage::selected::PresentationObservations>,
+}
+
+/// A relevant immutable owner must authenticate before a mutable grant can
+/// authorize its row. Runtime observations remain optional for row authority.
+fn verify_immutable_observation(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    reference_kind: &str,
+    prefix: &str,
+    local_only: bool,
+) -> Result<VerifiedObservation, ObservationPreparationError> {
+    let mut statement = db
+        .prepare(
+            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
+        )
+        .map_err(ObservationPreparationError::Sql)?;
+    let rows = statement
+        .query_map(
+            params![
+                current.namespace.as_str(),
+                selected.key,
+                reference_kind,
+                prefix,
+                current.stream_epoch
+            ],
+            |row| {
+                Ok((
+                    proof_codec::GenerationRecord {
+                        namespace: current.namespace.as_str().to_owned(),
+                        id: ProofGenerationId(row.get(0)?),
+                        session_key: selected.key.clone(),
+                        publication: row.get(1)?,
+                        proof: row.get(2)?,
+                        admission: u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Integer,
+                                Box::new(error),
+                            )
+                        })?,
+                        stream: row.get(4)?,
+                        metadata: row.get(5)?,
+                        slots: row.get(6)?,
+                        prefix: row.get(7)?,
+                    },
+                    row.get::<_, String>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                ))
+            },
+        )
+        .map_err(ObservationPreparationError::Sql)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(ObservationPreparationError::Sql)?;
+    let [(record, base, manifest, presentation)] = rows.as_slice() else {
+        return Err(StorageError::ScopeChanged.into());
+    };
+    crate::selected_read::charge(
+        64,
+        record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
+    )
+    .map_err(|_| StorageError::Busy)?;
+    let observations = proof_codec::verify_presentation_observations(
+        &selected.key,
+        &record.metadata,
+        &record.slots,
+        presentation,
+        base,
+        manifest,
+        &record.proof,
+    )?;
+    let original: CatalogRow =
+        serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
+    let original_binding = proof_codec::observation_binding(record.clone(), current, &original)?;
+    if original.lifecycle != crate::model::summary::CatalogLifecycle::Current
+        || crate::retention::source_generation(&original.sources)
+            .map_err(|_| StorageError::Unavailable)?
+            != prefix
+    {
+        return Err(StorageError::ScopeChanged.into());
+    }
+    let grant = format!("{}:{}", current.admission, current.stream_epoch);
+    let transfer_grant = if local_only {
+        false
+    } else {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3)",
+            params![current.namespace.as_str(), record.publication, grant],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(ObservationPreparationError::Sql)?
+    };
+    let stage_grant = if record.admission == current.admission {
+        let digest = proof_codec::digest(record.metadata.as_bytes());
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
+            params![
+                current.namespace.as_str(),
+                format!("catalog_native_observation:{digest}"),
+                grant
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(ObservationPreparationError::Sql)?
+    } else {
+        false
+    };
+    if !stage_grant && !transfer_grant {
+        return Err(StorageError::ScopeChanged.into());
+    }
+    Ok(VerifiedObservation {
+        binding: original_binding,
+        row: original,
+        observations,
+    })
 }
 
 /// Query observations use original producer coordinates only after the same
@@ -818,7 +940,8 @@ pub(crate) fn observation_binding_with_observations(
             &prefix,
             &current.stream_epoch,
             &selected_metadata,
-        )?
+        )
+        .map_err(ObservationPreparationError::into_storage)?
     };
     if !proof_candidate {
         if let Some(observations) =
@@ -827,103 +950,12 @@ pub(crate) fn observation_binding_with_observations(
             return Ok((current.clone(), observations));
         }
     }
-    let mut statement = db
-        .prepare(
-            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
-        )
-        .map_err(failed)?;
-    let rows = statement
-        .query_map(
-            params![
-                current.namespace.as_str(),
-                selected.key,
-                reference_kind,
-                prefix,
-                current.stream_epoch
-            ],
-            |row| {
-                Ok((
-                    proof_codec::GenerationRecord {
-                        namespace: current.namespace.as_str().to_owned(),
-                        id: ProofGenerationId(row.get(0)?),
-                        session_key: selected.key.clone(),
-                        publication: row.get(1)?,
-                        proof: row.get(2)?,
-                        admission: u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                3,
-                                rusqlite::types::Type::Integer,
-                                Box::new(error),
-                            )
-                        })?,
-                        stream: row.get(4)?,
-                        metadata: row.get(5)?,
-                        slots: row.get(6)?,
-                        prefix: row.get(7)?,
-                    },
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                    row.get::<_, String>(10)?,
-                ))
-            },
-        )
-        .map_err(failed)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(failed)?;
-    let [(record, base, manifest, presentation)] = rows.as_slice() else {
-        return Err(StorageError::ScopeChanged);
-    };
-    crate::selected_read::charge(
-        64,
-        record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
-    )
-    .map_err(|_| StorageError::Busy)?;
-    let observations = proof_codec::verify_presentation_observations(
-        &selected.key,
-        &record.metadata,
-        &record.slots,
-        presentation,
-        base,
-        manifest,
-        &record.proof,
-    )?
-    .ok_or(StorageError::ScopeChanged)?;
-    let original: CatalogRow =
-        serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
-    let original_binding = proof_codec::observation_binding(record.clone(), current, &original)?;
-    if original.lifecycle != crate::model::summary::CatalogLifecycle::Current
-        || crate::retention::source_generation(&original.sources)
-            .map_err(|_| StorageError::Unavailable)?
-            != prefix
-    {
-        return Err(StorageError::ScopeChanged);
-    }
-    let grant = format!("{}:{}", current.admission, current.stream_epoch);
-    let transfer_grant: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3)",
-            params![current.namespace.as_str(), record.publication, grant],
-            |row| row.get(0),
-        )
-        .map_err(failed)?;
-    let stage_grant = if record.admission == current.admission {
-        let digest = proof_codec::digest(record.metadata.as_bytes());
-        db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
-            params![
-                current.namespace.as_str(),
-                format!("catalog_native_observation:{digest}"),
-                grant
-            ],
-            |row| row.get::<_, bool>(0),
-        )
-        .map_err(failed)?
-    } else {
-        false
-    };
-    if !stage_grant && !transfer_grant {
-        return Err(StorageError::ScopeChanged);
-    }
+    let verified =
+        verify_immutable_observation(db, current, selected, reference_kind, &prefix, false)
+            .map_err(ObservationPreparationError::into_storage)?;
+    let original = verified.row;
+    let original_binding = verified.binding;
+    let observations = verified.observations.ok_or(StorageError::ScopeChanged)?;
     let original_runtime = observations
         .runtime_for(&original)
         .ok_or(StorageError::ScopeChanged)?;
@@ -1001,6 +1033,30 @@ fn observation_binding_for_owner(
             )
             .map_err(ObservationPreparationError::Sql)?;
         if native {
+            let reference_kind = proof_kind.unwrap_or(match selected.lifecycle {
+                crate::model::summary::CatalogLifecycle::Current => "current",
+                crate::model::summary::CatalogLifecycle::Retained => "history",
+            });
+            let prefix = crate::retention::source_generation(&selected.sources)
+                .map_err(|_| StorageError::Unavailable)?;
+            if immutable_observation_candidate(
+                db,
+                ns,
+                &selected.key,
+                reference_kind,
+                &prefix,
+                &current.stream_epoch,
+                &current_metadata,
+            )? {
+                verify_immutable_observation(
+                    db,
+                    current,
+                    selected,
+                    reference_kind,
+                    &prefix,
+                    local_owner.is_some(),
+                )?;
+            }
             return Ok(current.clone());
         }
     }

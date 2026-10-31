@@ -1016,6 +1016,23 @@ fn read_inner(
                 eprintln!("semon sessions native: selected_row_authority_refused boundary=observation_binding");
             }
         })?;
+    // A current captured runtime must still qualify when the Index has moved
+    // beyond this row. Optional Query metadata grants no substitute authority.
+    if row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+        && let Some(saved_runtime) = row
+            .query
+            .as_ref()
+            .and_then(|query| query["runtime"].as_str())
+    {
+        let global_runtime = snapshot.runtime_generation(options)?;
+        if snapshot
+            .runtime_observation(options, &row, &global_runtime)?
+            .as_deref()
+            != Some(saved_runtime)
+        {
+            return Ok(unavailable());
+        }
+    }
     selected_read_stage(SelectedReadStage::RangeContext);
     let context = crate::storage::selected::range_context(
         &crate::storage::sqlite::selected::Context::owned(&transaction),
