@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           result=0
-          cargo test --locked -p semon-sessions --lib cold_origin_ -- --nocapture > "$RUNNER_TEMP/cold-origin.log" 2>&1 || result=$?
+          cargo test --locked -p semon-sessions --lib cold_origin -- --nocapture > "$RUNNER_TEMP/cold-origin.log" 2>&1 || result=$?
           cat "$RUNNER_TEMP/cold-origin.log"
           if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/cold-origin.log"; then result=1; fi
           exit "$result"
