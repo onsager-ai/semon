@@ -1742,8 +1742,8 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     assert_eq!(status, 200);
     let details = &selected["items"][0]["details"];
     assert_eq!(
-        details["live_observation"], false,
-        "retained reads cannot claim a live observation for the same Current key"
+        details["live_observation"], true,
+        "retained-history scope still selects a physical Catalog-owned Current row"
     );
     assert_eq!(details["turns"], 1);
     assert_eq!(details["copied_usage"], false);
@@ -4995,6 +4995,24 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
             history_row.lifecycle,
             crate::model::summary::CatalogLifecycle::Retained
         );
+        use crate::storage::catalog::{CatalogObservationOwner, CatalogSnapshot};
+        let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+        let mut db = fixture.db();
+        let tx = db.transaction().unwrap();
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+        let selected = snapshot
+            .rows(&Request::parse("sid=thinking-session&scope=retained_history").unwrap())
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].owner, Some(CatalogObservationOwner::Catalog));
+        let selected_history = snapshot
+            .history_catalog("thinking-session")
+            .unwrap()
+            .unwrap();
+        let selected_history: CatalogRow = serde_json::from_str(&selected_history).unwrap();
+        assert_eq!(selected_history.sources, history_row.sources);
+        assert!(snapshot.history_qualified(&selected_history).unwrap());
+        tx.rollback().unwrap();
         let history = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
         let historical_thinking = history["entries"]
             .as_array()
@@ -6663,7 +6681,11 @@ fn list_status_reuses_native_facts_and_rejects_runtime_or_source_changes() {
         body["items"][0]["status"],
         json!({"state":null,"observation":"unavailable"})
     );
-    assert_eq!(body["items"][0]["facts_observation"]["state"], "stale");
+    assert_eq!(
+        body["items"][0]["facts_observation"]["state"],
+        "cached",
+        "an invalid Query runtime cannot change independently qualified Facts freshness"
+    );
     for private in ["query", "details", "transcript"] {
         assert!(body["items"][0].get(private).is_none());
     }
