@@ -522,15 +522,11 @@ pub(crate) fn advance_catalog_with_retirement_observer(
         )
         .unwrap();
     after_retirement();
-    assert_eq!(
-        cache
-            .begin_semantic_stage_with_journal(
-                &[old_path.to_str().unwrap().to_owned()],
-                "transfer-real-model",
-                true,
-            )
-            .unwrap(),
-        crate::events::Outcome::Written
+    begin_active_catalog(
+        &mut cache,
+        &[old_path.to_str().unwrap().to_owned()],
+        "transfer-real-model",
+        true,
     );
     assert!(finish_catalog(&mut cache, options, std::slice::from_ref(&old)).is_empty());
     // Complete the ordinary withdrawal before the same native identity returns.
@@ -538,15 +534,11 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     std::fs::write(&path, body).unwrap();
     cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
-    assert_eq!(
-        cache
-            .begin_semantic_stage_with_journal(
-                &[path.to_str().unwrap().to_owned()],
-                "transfer-real-model",
-                true,
-            )
-            .unwrap(),
-        crate::events::Outcome::Written
+    begin_active_catalog(
+        &mut cache,
+        &[path.to_str().unwrap().to_owned()],
+        "transfer-real-model",
+        true,
     );
     finish_catalog(&mut cache, options, std::slice::from_ref(&input))
 }
