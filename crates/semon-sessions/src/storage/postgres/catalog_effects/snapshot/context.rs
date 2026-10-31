@@ -107,7 +107,8 @@ impl ContextLookup for Snapshot<'_, '_> {
     }
     fn relative(&self, key: &str) -> io::Result<Option<String>> {
         let current = self.catalog(key, false).map_err(io::Error::other)?;
-        let lifecycle = if current.is_some() {
+        let current_harness = current.as_ref().map(|row| row.harness.clone());
+        let lifecycle = if current_harness.is_some() {
             crate::model::summary::CatalogLifecycle::Current
         } else {
             crate::model::summary::CatalogLifecycle::Retained
@@ -120,9 +121,10 @@ impl ContextLookup for Snapshot<'_, '_> {
             return Ok(None);
         };
         row.lifecycle = lifecycle;
+        let harness = current_harness.as_deref().unwrap_or(&row.harness);
         let value = serde_json::to_value(&row).map_err(io::Error::other)?;
         Ok(Some(
-            json!({"key":row.key,"name":row.name,"harness":row.harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string(),
+            json!({"key":row.key,"name":row.name,"harness":harness,"kind":value["presentation_kind"],"parent":value["parent"],"last":row.last,"cost":value["cost"],"_status_catalog":value}).to_string(),
         ))
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
