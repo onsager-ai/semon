@@ -15,7 +15,7 @@ fn unavailable<T>() -> io::Result<T> {
 }
 
 impl Snapshot<'_, '_> {
-    fn row_runtime_binding_with_observations(
+    pub(super) fn row_runtime_binding_with_observations(
         &self,
         row: &CatalogRow,
         owner: Option<CatalogObservationOwner>,
