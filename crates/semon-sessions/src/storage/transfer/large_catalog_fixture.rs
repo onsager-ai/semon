@@ -238,7 +238,40 @@ fn finish_measured(
                 .max()
                 .unwrap_or(0);
             let coordinator_bytes = serde_json::to_vec(&cells).unwrap().len();
-            let witness_bytes = prepared.staged_model_witness().unwrap().len();
+            let witness = prepared.staged_model_witness().unwrap();
+            let witness_bytes = witness.len();
+            let witness: serde_json::Value = serde_json::from_str(&witness).unwrap();
+            let witness = witness.as_array().unwrap();
+            assert_eq!(witness.len(), 2);
+            for (label, value) in ["projection", "presentation"].into_iter().zip(witness) {
+                eprintln!(
+                    "selected_large_fixture phase={:?} model_component={label} bytes={}",
+                    batch.phase,
+                    serde_json::to_vec(value).unwrap().len()
+                );
+            }
+            let projection = witness[0].as_array().unwrap();
+            let labels = [
+                "slots",
+                "trace_rows",
+                "pids",
+                "lineage_dependencies",
+                "indexed_parents",
+                "withdrawals",
+                "endpoints",
+                "relations",
+                "message_dependencies",
+                "retired_owners",
+                "lifecycle_authority",
+            ];
+            assert_eq!(projection.len(), labels.len());
+            for (label, value) in labels.into_iter().zip(projection) {
+                eprintln!(
+                    "selected_large_fixture phase={:?} projection_component={label} bytes={}",
+                    batch.phase,
+                    serde_json::to_vec(value).unwrap().len()
+                );
+            }
             eprintln!(
                 "selected_large_fixture phase={:?} paths={} rows={} children=16 usage_reports_per_child=1000 cost_bytes={} cost_quote_count={} transcripts={} transcript_slots={} producer_metadata_bytes={} compact_metadata_bytes={} payload_bytes={} maximum_pair_bytes={} coordinator_bytes={} witness_bytes={} sqlite_context_bytes={}",
                 batch.phase,
