@@ -2139,6 +2139,14 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
             )
             .optional()
             .unwrap();
+        let history_source: Option<(i64, i64)> = db
+            .query_row(
+                "SELECT json_extract(item.value,'$.offset'),json_extract(item.value,'$.size') FROM main.session_history_catalog history JOIN json_each(CASE WHEN octet_length(history.metadata)<=1048576 THEN history.metadata ELSE '{}' END,'$.sources') item WHERE history.namespace=semon_namespace() AND history.session_key='large-original' AND json_extract(item.value,'$.path')=?1 LIMIT 1",
+                [&source_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
         let (pending_claims, pending_revision): (i64, Option<i64>) = db
             .query_row(
                 "SELECT COUNT(*),MAX(CASE WHEN source_path=?1 THEN revision END) FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path IN (?1,?2)",
@@ -2150,11 +2158,13 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
         // than the physical source records a bounded parser checkpoint.
         let bounded = ledger.is_some_and(|(offset, _)| offset < physical_size);
         eprintln!(
-            "archive_offset_diagnostic step={refresh_step} ready={ready} bounded={bounded} physical_size={physical_size} ledger_offset={:?} ledger_stat_size={:?} catalog_offset={:?} catalog_size={:?} pending_claims={pending_claims} pending_revision={pending_revision:?}",
+            "archive_offset_diagnostic step={refresh_step} ready={ready} bounded={bounded} physical_size={physical_size} ledger_offset={:?} ledger_stat_size={:?} catalog_offset={:?} catalog_size={:?} history_offset={:?} history_size={:?} pending_claims={pending_claims} pending_revision={pending_revision:?}",
             ledger.map(|(offset, _)| offset),
             ledger.map(|(_, size)| size),
             catalog_source.map(|(offset, _)| offset),
             catalog_source.map(|(_, size)| size),
+            history_source.map(|(offset, _)| offset),
+            history_source.map(|(_, size)| size),
         );
         drop(db);
         refresh_step += 1;
@@ -2203,6 +2213,11 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
         .unwrap()
         .unwrap();
     assert_eq!(refs.len(), 1);
+    eprintln!(
+        "archive_offset_selected_ref offset={} source_count={}",
+        refs[0].offset,
+        refs.len(),
+    );
     assert!(refs[0].offset > 64 * 1024 * 1024);
     assert!(
         crate::repair_session_overview(
