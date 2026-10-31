@@ -4406,6 +4406,15 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     )
     .unwrap();
     fixture.publish_existing();
+    let original_identity = session_catalog_identity(&fixture.options, "source", "live-history")
+        .unwrap()
+        .unwrap();
+    let original_provider = PinnedOriginal {
+        source: original_identity.source_refs[0].source.clone(),
+        bytes: fs::read(&source).unwrap(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        change_at: None,
+    };
     let (
         original_metadata,
         original_source,
@@ -4685,7 +4694,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         )
         .unwrap();
     assert!(!current, "the selected owner is physically Retained");
-    let fields = query
+    let missing_original = query
         .call_selected(
             "source",
             "live-history",
@@ -4694,7 +4703,21 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             None,
             crate::SessionSourceReadMode::LocalThenProvider,
         )
+        .expect_err("retained prompts require authorized original bytes");
+    assert_eq!(missing_original.code, "io");
+    assert_eq!(missing_original.message, "Turn prompt unavailable");
+    let fields = query
+        .call_selected(
+            "source",
+            "live-history",
+            "get_session",
+            &json!({"id":"live-history"}),
+            Some(&original_provider),
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
         .unwrap();
+    assert!(original_provider.calls.load(Ordering::Relaxed) > 0);
+    assert_eq!(fields["session"]["turns"][0]["text"], "synthetic prompt");
     assert_eq!(fields["session"]["alive"], Value::Null);
     assert_eq!(fields["session"]["run"], Value::Null);
     assert_eq!(fields["session"]["state"], "unknown");
