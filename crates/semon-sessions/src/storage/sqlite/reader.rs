@@ -62,27 +62,51 @@ impl NativeReaderBinding {
         self.validate_listing(db, requested)
     }
 
+    /// Readiness probes may report an unavailable derived search projection
+    /// without opening any payload reader. All other admission fences remain
+    /// active, and actual bindings still reject the stale projection.
+    pub(crate) fn search_projection_stale(
+        &self,
+        db: &Connection,
+        requested: &LogicalSourceNamespace,
+    ) -> Result<bool, StorageError> {
+        self.validate_listing_state(db, requested)
+            .map(|(stale, _)| stale)
+    }
+
     fn validate_listing(
         &self,
         db: &Connection,
         requested: &LogicalSourceNamespace,
     ) -> Result<bool, StorageError> {
+        let (stale, readers) = self.validate_listing_state(db, requested)?;
+        if stale {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        Ok(readers)
+    }
+
+    fn validate_listing_state(
+        &self,
+        db: &Connection,
+        requested: &LogicalSourceNamespace,
+    ) -> Result<(bool, bool), StorageError> {
         let config = self.config();
         if requested != &config.namespace {
             return Err(StorageError::NamespaceMismatch);
         }
-        match self {
-            Self::Semantic(owner) => owner.validate_ready(db)?,
+        let stale = match self {
+            Self::Semantic(owner) => owner.validate_catalog_publication_ready(db)?,
             Self::Admitted(_) => {
                 let admission = namespace::require_admitted(db, requested)?;
                 crate::events::store::configured::NativeOwnership::validate_physical(db)?;
-                crate::events::store::configured::validate_read_profile(
+                crate::events::store::configured::validate_catalog_publication_profile(
                     db,
                     requested,
                     i64::try_from(admission.generation).map_err(|_| StorageError::ScopeChanged)?,
-                )?;
+                )?
             }
-        }
+        };
         if !crate::events::store::current_contract(db).map_err(failed)? {
             return Err(StorageError::Unavailable);
         }
@@ -100,7 +124,8 @@ impl NativeReaderBinding {
         {
             return Err(StorageError::ScopeChanged);
         }
-        super::catalog_namespace::scope_readers(db)
+        let readers = super::catalog_namespace::scope_readers(db)?;
+        Ok((stale, readers))
     }
 
     /// Repair and lazy proof readers retain this admitted snapshot until their

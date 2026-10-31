@@ -672,8 +672,8 @@ pub(crate) fn catalog_work_pending(options: &crate::Options) -> io::Result<bool>
     let tx = db.unchecked_transaction().map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let pending: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND ((key='catalog_backfill_state' AND value IN ('discovering','draining')) OR (key='catalog_semantic_gc' AND value='1'))) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace())",
-        [], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND ((key='catalog_backfill_state' AND value IN ('discovering','draining')) OR (key='catalog_semantic_gc' AND value='1'))) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta c WHERE c.namespace=semon_namespace() AND c.key='catalog_version' AND c.value=?1 AND NOT EXISTS(SELECT 1 FROM main.meta s WHERE s.namespace=semon_namespace() AND s.key='search_version' AND s.value=?2))",
+        rusqlite::params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION], |row| row.get(0),
     ).map_err(io::Error::other)?;
     Ok(pending)
 }
@@ -2935,6 +2935,172 @@ fn catalog_batch_bytes(
 }
 
 impl SqliteStore {
+    fn rebuild_catalog_search(&self, expected_generation: &str) -> Result<bool, StoreError> {
+        let owner = &self.owner;
+        let expected_catalog_version = crate::model::summary::CATALOG_VERSION.to_string();
+        {
+            let snapshot = Transaction::new_unchecked(
+                &self.connection,
+                TransactionBehavior::Deferred,
+            )
+            .map_err(failure)?;
+            let stale = owner
+                .validate_catalog_publication_ready(&snapshot)
+                .map_err(StoreError::Configured)?;
+            let (catalog_version, generation): (Option<String>, Option<String>) = snapshot
+                .query_row(
+                    "SELECT (SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'),(SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(failure)?;
+            if catalog_version.as_deref() != Some(expected_catalog_version.as_str()) {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::NamespaceUpgradePending,
+                ));
+            }
+            if generation.as_deref() != Some(expected_generation) {
+                return Ok(false);
+            }
+            if !stale {
+                return Ok(true);
+            }
+        }
+        let transaction = Transaction::new_unchecked(
+            &self.connection,
+            TransactionBehavior::Immediate,
+        )
+        .map_err(failure)?;
+        let stale = owner
+            .validate_catalog_publication_ready(&transaction)
+            .map_err(StoreError::Configured)?;
+        let (catalog_version, generation): (Option<String>, Option<String>) = transaction
+            .query_row(
+                "SELECT (SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'),(SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(failure)?;
+        if catalog_version.as_deref() != Some(expected_catalog_version.as_str()) {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::NamespaceUpgradePending,
+            ));
+        }
+        if generation.as_deref() != Some(expected_generation) {
+            return Ok(false);
+        }
+        if !stale {
+            return Ok(true);
+        }
+        let pending: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()) OR EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_backfill_state' AND value IN ('discovering','draining'))",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(failure)?;
+        if pending {
+            return Ok(false);
+        }
+        crate::storage::sqlite::catalog_namespace::scope_readers(&transaction)
+            .map_err(StoreError::Configured)?;
+        transaction
+            .create_scalar_function(
+                "semon_semantic_publisher",
+                0,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .map_err(failure)?;
+        let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
+        let search = crate::storage::sqlite::search::SearchWriter::admitted(
+            &transaction,
+            &admitted,
+        )
+        .map_err(StoreError::Configured)?;
+        crate::storage::catalog::SearchPublicationStore::begin(&search, &[]).map_err(failure)?;
+        transaction
+            .execute_batch(
+                "DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();",
+            )
+            .map_err(failure)?;
+        let mut after = String::new();
+        loop {
+            let keys = search.key_page(&after).map_err(failure)?;
+            if keys.is_empty() {
+                break;
+            }
+            after = keys.last().expect("nonempty search page").clone();
+            let mut offset = 0;
+            while offset < keys.len() {
+                let selected = search.lookup(&keys[offset..]).map_err(failure)?;
+                if selected.oversized {
+                    return Err(StoreError::Data(
+                        "catalog search metadata exceeds 1 MiB for an eligible row".into(),
+                    ));
+                }
+                if selected.consumed == 0 {
+                    return Err(failure(rusqlite::Error::InvalidQuery));
+                }
+                let roster = &keys[offset..offset + selected.consumed];
+                let rows = selected
+                    .rows
+                    .iter()
+                    .map(|selected| crate::catalog_search::ScopedCatalogRow {
+                        row: &selected.row,
+                        scopes: selected.scopes,
+                    })
+                    .collect::<Vec<_>>();
+                crate::catalog_search::publish_scoped_rows_with_store(
+                    &transaction,
+                    roster,
+                    &rows,
+                    &search,
+                )
+                .map_err(failure)?;
+                offset += selected.consumed;
+            }
+        }
+        transaction
+            .execute(
+                "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+                [],
+            )
+            .map_err(failure)?;
+        for scope in ["current", "retained_history"] {
+            let incomplete: i64 = transaction
+                .query_row(
+                    "SELECT incomplete FROM main.session_search_coverage WHERE namespace=semon_namespace() AND read_scope=?1",
+                    [scope],
+                    |row| row.get(0),
+                )
+                .map_err(failure)?;
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+                    params![format!("search_generation_{scope}"), expected_generation],
+                )
+                .map_err(failure)?;
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+                    params![format!("search_incomplete_{scope}"), incomplete.to_string()],
+                )
+                .map_err(failure)?;
+        }
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_version'),'search_version',?1)",
+                [crate::catalog_search::VERSION],
+            )
+            .map_err(failure)?;
+        transaction
+            .commit()
+            .map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
+        Ok(true)
+    }
+
     fn publish_catalog_with_generation(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
@@ -3022,10 +3188,9 @@ impl SqliteStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(failure)?;
             owner
-                .validate_ready(&transaction)
+                .validate_catalog_publication_ready(&transaction)
                 .map_err(StoreError::Configured)?;
-            crate::storage::NativeReaderBinding::Semantic(owner.clone())
-                .validate(&transaction, &owner.config().namespace)
+            crate::storage::sqlite::catalog_namespace::scope_readers(&transaction)
                 .map_err(StoreError::Configured)?;
             transaction
                 .create_scalar_function(
@@ -3533,8 +3698,7 @@ impl SqliteStore {
                 } else {
                     let mut keys = affected.clone();
                     keys.extend(rows.iter().map(|row| row.key.clone()));
-                    keys.sort_unstable();
-                    keys.dedup();
+                    let keys = keys.into_iter().collect::<Vec<_>>();
                     refresh(&keys)?;
                 }
                 transaction.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", []).map_err(failure)?;

@@ -557,21 +557,59 @@ pub(crate) fn validate_read_profile(
     namespace: &crate::storage::LogicalSourceNamespace,
     admission: i64,
 ) -> Result<(), StorageError> {
-    // Readers and native writers share the producer's current scoped
-    // profile. A retained capability cannot authorize a replaced recipe.
+    if validate_read_profile_state(db, namespace, admission)? {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    Ok(())
+}
+
+/// Validate every part of the admitted read profile except whether the
+/// derived search projection is current. Only producer readiness and
+/// readiness probes use this result; payload readers still use
+/// `validate_read_profile` and remain closed while an old projection exists.
+pub(crate) fn validate_read_profile_state(
+    db: &Connection,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    admission: i64,
+) -> Result<bool, StorageError> {
+    validate_catalog_publication_profile(db, namespace, admission)
+}
+
+/// Validate producer custody and the primary Catalog format while allowing a
+/// stale derived search projection to be rebuilt from the admitted Catalog.
+/// The postings themselves are never read or translated here.
+pub(crate) fn validate_catalog_publication_profile(
+    db: &Connection,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    admission: i64,
+) -> Result<bool, StorageError> {
     let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![namespace.as_str(),admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
     if !profile {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let publications: bool = db.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_version','search_version') AND value<>CASE key WHEN 'catalog_version' THEN ?2 ELSE ?3 END)",params![namespace.as_str(),crate::model::summary::CATALOG_VERSION.to_string(),crate::catalog_search::VERSION],|r|r.get(0)).map_err(failed)?;
-    if !publications {
+    let (catalog_version, search_version): (Option<String>, Option<String>) = db
+        .query_row(
+            "SELECT (SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_version'),(SELECT value FROM main.meta WHERE namespace=?1 AND key='search_version')",
+            [namespace.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(failed)?;
+    let expected_catalog_version = crate::model::summary::CATALOG_VERSION.to_string();
+    if catalog_version
+        .as_deref()
+        .is_some_and(|value| value != expected_catalog_version)
+    {
+        return Err(StorageError::NamespaceUpgradePending);
+    }
+    if catalog_version.is_none() && search_version.is_some() {
         return Err(StorageError::NamespaceUpgradePending);
     }
     let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [namespace.as_str()], |r| r.get(0)).map_err(failed)?;
     if incoming {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    Ok(())
+    Ok(catalog_version.as_deref() == Some(expected_catalog_version.as_str())
+        && search_version.as_deref() != Some(crate::catalog_search::VERSION))
 }
 
 /// Private primitive writer authority. Database flags cannot manufacture it;
@@ -580,11 +618,13 @@ pub(crate) fn validate_read_profile(
 pub(crate) struct NativeOwnership {
     config: StoreConfig,
     admission: i64,
+    catalog_publisher: bool,
 }
 
 impl NativeOwnership {
-    /// Restore the exact admitted capability for a reader without enrollment,
-    /// schema mutation or a retry through another namespace.
+    /// Restore the exact admitted owner for status and journal operations
+    /// without enrollment, schema mutation or a retry through another
+    /// namespace. A payload reader must still validate its strict binding.
     pub(crate) fn restore(config: &StoreConfig) -> Result<Self, StorageError> {
         Self::restore_inner(config, false)
     }
@@ -617,8 +657,9 @@ impl NativeOwnership {
             config: config.clone(),
             admission: i64::try_from(admission.generation)
                 .map_err(|_| StorageError::ScopeChanged)?,
+            catalog_publisher: false,
         };
-        owner.validate_ready(&db)?;
+        owner.validate_catalog_publication_ready(&db)?;
         Ok(owner)
     }
     pub(crate) fn config(&self) -> &StoreConfig {
@@ -695,10 +736,42 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_ready(&self, db: &Connection) -> Result<(), StorageError> {
+        if self.catalog_publisher {
+            self.validate_catalog_publication_ready(db).map(|_| ())
+        } else {
+            self.validate_read_ready(db)
+        }
+    }
+
+    /// A publisher owner is still not a reader capability. Reader bindings
+    /// call `validate_read_ready` explicitly, even when built from this owner.
+    pub(crate) fn validate_read_ready(&self, db: &Connection) -> Result<(), StorageError> {
+        self.validate_ready_with(db, false).map(|_| ())
+    }
+
+    pub(crate) fn validate_catalog_publication_ready(
+        &self,
+        db: &Connection,
+    ) -> Result<bool, StorageError> {
+        self.validate_ready_with(db, true)
+    }
+
+    fn validate_ready_with(
+        &self,
+        db: &Connection,
+        catalog_publication: bool,
+    ) -> Result<bool, StorageError> {
         #[cfg(test)]
         NATIVE_READY_VALIDATIONS.with(|count| count.set(count.get() + 1));
         self.validate(db)?;
-        validate_read_profile(db, &self.config.namespace, self.admission)?;
+        let search_stale = if catalog_publication {
+            validate_catalog_publication_profile(db, &self.config.namespace, self.admission)?
+        } else {
+            validate_read_profile_state(db, &self.config.namespace, self.admission)?
+        };
+        if !catalog_publication && search_stale {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
         let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);
@@ -720,7 +793,7 @@ impl NativeOwnership {
         if !all_owned {
             return Err(StorageError::ScopeChanged);
         }
-        Ok(())
+        Ok(search_stale)
     }
 
     pub(crate) fn validate(&self, db: &Connection) -> Result<(), StorageError> {
@@ -754,6 +827,17 @@ impl NativeOwnership {
     /// Admit only the already-authored, fully composite native profile. No row
     /// conversion, singleton adoption, or public qualification is performed.
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
+        Self::admit_inner(config, false)
+    }
+
+    /// Admit the existing native producer only for Catalog publication. This
+    /// authority can rebuild derived search rows, while reader bindings made
+    /// from it still validate the strict read profile.
+    pub(crate) fn admit_catalog_publisher(config: &StoreConfig) -> Result<Self, StorageError> {
+        Self::admit_inner(config, true)
+    }
+
+    fn admit_inner(config: &StoreConfig, catalog_publisher: bool) -> Result<Self, StorageError> {
         let mut db = connection(config)?;
         // Reopening an enrolled namespace is a read, not another enrollment.
         // Keep the capability and all readiness checks in one snapshot; a
@@ -777,6 +861,7 @@ impl NativeOwnership {
                     let owner = Self {
                         config: config.clone(),
                         admission,
+                        catalog_publisher,
                     };
                     owner.validate_ready(&tx)?;
                     return Ok(owner);
@@ -826,6 +911,7 @@ impl NativeOwnership {
                 let owner = Self {
                     config: config.clone(),
                     admission,
+                    catalog_publisher,
                 };
                 owner.validate_ready(&tx)?;
                 return Ok(owner);
@@ -937,6 +1023,7 @@ impl NativeOwnership {
         let owner = Self {
             config: config.clone(),
             admission,
+            catalog_publisher,
         };
         owner.validate(&tx)?;
         prepare_owned(&tx, &owner)?;
@@ -1223,6 +1310,37 @@ impl Writer {
         )
         .optional()
         .map_err(failure)
+    }
+
+    pub(crate) fn rebuild_catalog_search(
+        &self,
+        expected_generation: &str,
+    ) -> Result<bool, StoreError> {
+        let connection = connection(&self.config).map_err(StoreError::Configured)?;
+        let database = self
+            .config
+            .backend
+            .sqlite_database()
+            .map_err(StoreError::Configured)?;
+        let owner = self
+            .owner
+            .as_ref()
+            .ok_or(StoreError::Configured(
+                StorageError::NamespaceUpgradePending,
+            ))?
+            .clone();
+        let store = super::SqliteStore {
+            #[cfg(test)]
+            observation_journal: super::source_journal::SourceJournal::owned(owner.clone()),
+            owner,
+            connection,
+            path: database.clone(),
+            selected_runs: None,
+            semantic_rejection: None,
+            #[cfg(test)]
+            traversal_observation: None,
+        };
+        store.rebuild_catalog_search(expected_generation)
     }
 
     pub(crate) fn publish_catalog(

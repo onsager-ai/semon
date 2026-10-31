@@ -228,6 +228,9 @@ impl IndexStore for ConfiguredIndex {
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.native.catalog_generation()
     }
+    fn rebuild_catalog_search(&mut self, expected_generation: &str) -> Result<bool, StoreError> {
+        self.native.rebuild_catalog_search(expected_generation)
+    }
     fn note_catalog_audit(&mut self, expected: Option<&str>, now: i64) -> Result<bool, StoreError> {
         self.native.note_catalog_audit(expected, now)
     }

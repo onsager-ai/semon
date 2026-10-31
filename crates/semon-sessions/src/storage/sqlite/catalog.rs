@@ -202,6 +202,12 @@ pub(crate) fn page_ready(binding: &crate::storage::NativeReaderBinding) -> io::R
         .busy_timeout(std::time::Duration::from_millis(100))
         .map_err(io::Error::other)?;
     let transaction = connection.transaction().map_err(io::Error::other)?;
+    if binding
+        .search_projection_stale(&transaction, &binding.config().namespace)
+        .map_err(io::Error::other)?
+    {
+        return Ok(false);
+    }
     let snapshot = admitted_snapshot(binding, &transaction).map_err(io::Error::other)?;
     snapshot.require_current()?;
     if snapshot.publication_value("catalog_generation")?.is_none() {
