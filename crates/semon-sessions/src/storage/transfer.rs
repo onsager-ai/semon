@@ -443,7 +443,17 @@ impl TransferCheckpoint {
             return Err(StorageError::Conflict);
         }
         for record in &page.records {
-            next.digests[index] = hash(&(next.digests[index], record))?;
+            // Category digests describe content across captures. The page
+            // digest and receiver still bind each fragment to its snapshot.
+            next.digests[index] = match record {
+                TransferRecord::CatalogRow {
+                    generation, kind, key, part, parts, total_bytes, row_digest, bytes, ..
+                } => hash(&(
+                    next.digests[index], "catalog_row", generation, kind, key,
+                    part, parts, total_bytes, row_digest, bytes,
+                ))?,
+                _ => hash(&(next.digests[index], record))?,
+            };
         }
         next.sequence = page.sequence;
         next.digest = page.digest;
