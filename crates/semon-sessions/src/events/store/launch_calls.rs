@@ -188,11 +188,10 @@ mod tests {
             &root.join(name),
             &crate::events::store::fixture_namespace(),
         );
-        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
-            store.owner.clone(),
-        )
-        .connection()
-        .unwrap();
+        store.connection =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                .connection()
+                .unwrap();
         store
     }
 
@@ -660,7 +659,11 @@ mod tests {
         );
         assert_eq!(
             connection
-                .query_row::<i64, _, _>("SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()", [], |row| row.get(0))
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()",
+                    [],
+                    |row| row.get(0)
+                )
                 .unwrap(),
             4
         );
@@ -679,7 +682,10 @@ mod tests {
             match mutation {
                 0 => {
                     connection
-                        .execute("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1", [&page])
+                        .execute(
+                            "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+                            [&page],
+                        )
                         .unwrap();
                 }
                 1 => {
@@ -726,7 +732,11 @@ mod tests {
         );
         assert_eq!(
             connection
-                .query_row::<i64, _, _>("SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()", [], |row| row.get(0))
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM main.meta WHERE namespace=semon_namespace()",
+                    [],
+                    |row| row.get(0)
+                )
                 .unwrap(),
             1
         );
