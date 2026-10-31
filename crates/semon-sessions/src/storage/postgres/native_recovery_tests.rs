@@ -109,7 +109,8 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         let ns = namespace.as_str().as_bytes();
         for row in &prepared_rows {
             let metadata = serde_json::to_vec(row).map_err(|_| StorageError::Unavailable)?;
-            tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8)", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &metadata, &row.last.unwrap_or(0), &row.harness.as_bytes(), &row.repo.as_deref().unwrap_or("").as_bytes(), &row.model.as_bytes()]).map_err(sqlstate::error)?;
+            let parent_key = row.parent.as_deref().map(|parent| parent.as_bytes());
+            tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9)", &[&ns, &generation.as_bytes(), &row.key.as_bytes(), &parent_key, &metadata, &row.last.unwrap_or(0), &row.harness.as_bytes(), &row.repo.as_deref().unwrap_or("").as_bytes(), &row.model.as_bytes()]).map_err(sqlstate::error)?;
             for source in &row.sources {
                 let path = source.path.to_str().ok_or(StorageError::InvalidArguments)?.as_bytes();
                 let metadata = serde_json::to_vec(source).map_err(|_| StorageError::Unavailable)?;
@@ -236,7 +237,7 @@ fn pg_native126_recovery136_sqlite_first_exact_pages_restart_and_faults() {
         for (table, columns) in [
             (
                 "catalog_rows",
-                "key_digest,session_key,metadata,last_ms,harness,repo,model",
+                "key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model",
             ),
             (
                 "catalog_sources",
