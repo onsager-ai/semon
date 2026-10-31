@@ -278,6 +278,82 @@ fn validate_cohort_members(
     Ok(())
 }
 
+/// The durable identity phase records every physical source for each owner.
+/// Refuse new origin receipts until that index is complete and the whole owner
+/// union fits the existing 64-path cohort bound.
+fn validate_complete_owner_cohorts(
+    db: &Connection,
+    owner: &NativeOwnership,
+    token: &OriginPublication,
+    publication: &crate::slot_projection::Publication<'_>,
+    claims: &[(String, Option<i64>)],
+) -> Result<(), StorageError> {
+    let ns = owner.config().namespace.as_str();
+    let identity_ready: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_stage stage WHERE stage.namespace=?1 AND stage.epoch=?2 AND stage.key_epoch=?3 AND stage.origin_phase='sealed' AND stage.origin_runtime_bound=1 AND stage.resetting=0 AND stage.phase IN('relations','publication') AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources source WHERE source.namespace=stage.namespace AND source.origin_member=1 AND (source.index_done<>1 OR source.identity_done<>1)))",
+            params![ns, token.held_epoch, token.key_epoch],
+            |row| row.get(0),
+        )
+        .map_err(super::failed)?;
+    if !identity_ready {
+        return Err(StorageError::Conflict);
+    }
+
+    let mut expected_paths = BTreeSet::new();
+    for row in publication.rows {
+        let mut statement = db
+            .prepare(
+                "SELECT source_path FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND session_key=?2 ORDER BY source_path LIMIT 65",
+            )
+            .map_err(super::failed)?;
+        let owner_paths = statement
+            .query_map(params![ns, row.key], |record| record.get::<_, String>(0))
+            .map_err(super::failed)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(super::failed)?;
+        if owner_paths.is_empty() || owner_paths.len() > 64 {
+            return Err(StorageError::Conflict);
+        }
+
+        let indexed_paths = owner_paths.iter().cloned().collect::<BTreeSet<_>>();
+        let row_paths = row
+            .sources
+            .iter()
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>();
+        if indexed_paths != row_paths || row_paths.len() != row.sources.len() {
+            return Err(StorageError::Conflict);
+        }
+
+        for path in owner_paths {
+            let enrolled: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND origin_member=1 AND index_done=1 AND identity_done=1)",
+                    params![ns, path],
+                    |record| record.get(0),
+                )
+                .map_err(super::failed)?;
+            if !enrolled {
+                return Err(StorageError::Conflict);
+            }
+            expected_paths.insert(path);
+        }
+        if expected_paths.len() > 64 {
+            return Err(StorageError::Conflict);
+        }
+    }
+
+    let claimed_paths = claims
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    if expected_paths != claimed_paths {
+        return Err(StorageError::Conflict);
+    }
+    Ok(())
+}
+
 /// Preserve matching source evidence and withdraw owner comparisons touched by
 /// the selected claim before its journal row is removed. A later validated
 /// publication may write successor comparisons in this same transaction.
@@ -370,6 +446,7 @@ pub(crate) fn validate_publication(
         return Err(StorageError::Conflict);
     }
     let _ = cohort_digests(token, expected_generation, model_witness, publication, claims)?;
+    validate_complete_owner_cohorts(db, owner, token, publication, claims)?;
     for (path, _) in claims {
         let enrolled: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND origin_member=1)", params![ns,path], |row| row.get(0)).map_err(super::failed)?;
         if !enrolled {

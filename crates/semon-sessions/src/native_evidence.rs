@@ -845,9 +845,13 @@ impl NativeEvidence {
                 cache.resolve_catalog_input(&self.options, path)?;
                 return Ok(CatalogPreparation::Pending);
             }
-            std::mem::take(&mut discovery.newest)
-                .into_iter()
-                .map(|(_, input)| input)
+            // Retain the selection until its first publication commits. If the
+            // identity gate refuses it, bounded stage progress can complete
+            // owner indexing before the one-shot handoff retries this group.
+            discovery
+                .newest
+                .iter()
+                .map(|(_, input)| input.clone())
                 .collect::<Vec<_>>()
         } else {
             let (ticket, ordinary_due, excluded) = {
@@ -1015,6 +1019,9 @@ impl NativeEvidence {
                     "backfill publication changed",
                 ));
             }
+            if use_newest {
+                discovery.newest.clear();
+            }
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "cold_cleanup");
             crate::events::store::requeue_concurrent_sources(&self.options, &prepared)?;
             self.acknowledge_catalog_search(cache, &prepared);
@@ -1114,6 +1121,23 @@ impl NativeEvidence {
         let Some(batch) = cache.semantic_batch(64)? else {
             return Ok(false);
         };
+        // Identity batches have now filled catalog_semantic_owner_sources.
+        // Give the retained cold selection one ordinary facade attempt before
+        // this stage proceeds to relationship/publication work. A reset gets
+        // a new handoff because its key epoch changes.
+        if matches!(batch.phase, Phase::Relations | Phase::Publication)
+            && cache.semantic_origin_pending()?
+            && let Some(origin) = cache.semantic_origin_publication()?
+            && origin.held_epoch == batch.epoch
+            && let Some(discovery) = &mut work.cold_catalog
+        {
+            let binding = (origin.origin.0, origin.held_epoch, origin.key_epoch);
+            if discovery.origin_identity_handoff != Some(binding) {
+                discovery.origin_identity_handoff = Some(binding);
+                work.pending_sources = true;
+                return Ok(false);
+            }
+        }
         #[cfg(test)]
         eprintln!(
             "native_stage phase={:?} epoch={} revision={} sources={}",
@@ -2069,6 +2093,7 @@ struct ColdCatalog {
     snapshot: Option<Snapshot>,
     started: bool,
     timing: crate::native_timing::ColdDiscoveryProgress,
+    origin_identity_handoff: Option<(i64, i64, i64)>,
     newest: BTreeSet<(
         std::cmp::Reverse<Option<std::time::SystemTime>>,
         crate::inputs::Input,

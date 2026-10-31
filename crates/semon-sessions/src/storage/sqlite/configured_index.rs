@@ -307,6 +307,15 @@ impl IndexStore for ConfiguredIndex {
             .map(|stage| stage.origin_pending())
             .unwrap_or(Ok(false))
     }
+    fn semantic_origin_publication(
+        &self,
+    ) -> Result<Option<crate::model::relation_stage::OriginPublication>, StoreError> {
+        self.semantic
+            .as_ref()
+            .map(|stage| stage.origin_publication())
+            .transpose()
+            .map(Option::flatten)
+    }
     fn publish_closed_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
