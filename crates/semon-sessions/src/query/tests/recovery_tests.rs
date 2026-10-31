@@ -705,7 +705,9 @@ fn recovery_native_long_session_pages_and_tool_expansion_measurement() {
         );
         assert_eq!(generations(), before);
         let grant_after = observation_grant();
-        assert_ne!(grant_after.0, grant_before.0, "repaired Query row digest");
+        // Upgrading recipes with unchanged sources and runtime reproduces the
+        // same admitted Query observation and preserves its exact row identity.
+        assert_eq!(grant_after.0, grant_before.0, "unchanged admitted Query row digest");
         assert_eq!(grant_after.1, grant_before.1, "repair preserves admission");
         assert_eq!(grant_after.2, grant_before.2, "repair preserves stream");
         assert_eq!(std::fs::read(&source_path).unwrap(), raw);
