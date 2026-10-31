@@ -19,11 +19,49 @@ fn record_steps(statement: &rusqlite::Statement<'_>) {
     let _ = statement;
 }
 
-pub(crate) const VERSION: &str = "2";
+pub(crate) const VERSION: &str = "3";
 pub(crate) const MAX_CANDIDATES: usize = 512;
 pub(crate) const MAX_SCAN_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: usize = 8192;
 const MAX_GRAMS: usize = 1024;
+pub(crate) const MAX_PUBLICATION_KEYS: usize = 64;
+pub(crate) const MAX_PUBLICATION_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SearchScopeEligibility {
+    pub(crate) current: bool,
+    pub(crate) retained_history: bool,
+}
+
+impl SearchScopeEligibility {
+    pub(crate) const CURRENT_AND_HISTORY: Self = Self {
+        current: true,
+        retained_history: true,
+    };
+
+    fn includes(self, scope: crate::CatalogReadScope) -> bool {
+        match scope {
+            crate::CatalogReadScope::Current => self.current,
+            crate::CatalogReadScope::RetainedHistory => self.retained_history,
+        }
+    }
+
+    fn count(self) -> usize {
+        usize::from(self.current) + usize::from(self.retained_history)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ScopedCatalogRow<'a> {
+    pub(crate) row: &'a CatalogRow,
+    pub(crate) scopes: SearchScopeEligibility,
+}
+
+pub(crate) struct SearchPosting<'a> {
+    pub(crate) gram: &'a String,
+    pub(crate) row: &'a CatalogRow,
+    pub(crate) scopes: SearchScopeEligibility,
+}
 
 pub(crate) fn scope_key(scope: crate::CatalogReadScope) -> &'static str {
     match scope {
@@ -139,38 +177,47 @@ pub(crate) fn publish_current_rows(
 }
 
 fn posting_order<'a>(
-    rows: &[&'a CatalogRow],
+    rows: &[ScopedCatalogRow<'a>],
     prepared: &'a [(String, BTreeSet<String>, bool)],
     owners: usize,
-) -> Vec<(&'a String, &'a CatalogRow)> {
+) -> Vec<SearchPosting<'a>> {
     let mut postings = rows
         .iter()
         .zip(prepared)
         .flat_map(|(row, (_, grams, complete))| {
             grams
                 .iter()
-                .filter(move |_| *complete)
-                .map(move |gram| (gram, *row))
+                .filter(move |_| *complete && row.scopes.count() != 0)
+                .map(move |gram| SearchPosting {
+                    gram,
+                    row: row.row,
+                    scopes: row.scopes,
+                })
         })
         .collect::<Vec<_>>();
     if owners == 64 {
         // The release path retains the original gram/key comparator exactly.
-        postings.sort_unstable_by(|(left, a), (right, b)| {
-            left.cmp(right).then_with(|| a.key.cmp(&b.key))
+        postings.sort_unstable_by(|left, right| {
+            left.gram
+                .cmp(right.gram)
+                .then_with(|| left.row.key.cmp(&right.row.key))
         });
     } else {
-        let mut keys = rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>();
+        let mut keys = rows
+            .iter()
+            .map(|row| row.row.key.as_str())
+            .collect::<Vec<_>>();
         keys.sort_unstable();
         let groups = keys
             .into_iter()
             .enumerate()
             .map(|(position, key)| (key, position / owners))
             .collect::<std::collections::BTreeMap<_, _>>();
-        postings.sort_unstable_by(|(left, a), (right, b)| {
-            groups[a.key.as_str()]
-                .cmp(&groups[b.key.as_str()])
-                .then_with(|| left.cmp(right))
-                .then_with(|| a.key.cmp(&b.key))
+        postings.sort_unstable_by(|left, right| {
+            groups[left.row.key.as_str()]
+                .cmp(&groups[right.row.key.as_str()])
+                .then_with(|| left.gram.cmp(right.gram))
+                .then_with(|| left.row.key.cmp(&right.row.key))
         });
     }
     postings
@@ -180,11 +227,17 @@ fn posting_order<'a>(
 /// These validation sorts must never enter preparation or full-search timing.
 #[cfg(test)]
 pub(crate) fn assert_posting_multiset(rows: &[CatalogRow]) -> rusqlite::Result<()> {
-    assert!(rows.len() <= 64);
-    let rows = rows.iter().collect::<Vec<_>>();
+    assert!(rows.len() <= MAX_PUBLICATION_KEYS);
+    let rows = rows
+        .iter()
+        .map(|row| ScopedCatalogRow {
+            row,
+            scopes: SearchScopeEligibility::CURRENT_AND_HISTORY,
+        })
+        .collect::<Vec<_>>();
     let prepared = rows
         .iter()
-        .map(|row| prepared_fields(row))
+        .map(|row| prepared_fields(row.row))
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut original = rows
         .iter()
@@ -193,22 +246,26 @@ pub(crate) fn assert_posting_multiset(rows: &[CatalogRow]) -> rusqlite::Result<(
             grams
                 .iter()
                 .filter(move |_| *complete)
-                .map(move |gram| (gram, *row))
+                .map(move |gram| (gram, row.row))
         })
         .collect::<Vec<_>>();
     original
         .sort_unstable_by(|(left, a), (right, b)| left.cmp(right).then_with(|| a.key.cmp(&b.key)));
     for owners in [64, 16, 8] {
         let mut actual = posting_order(&rows, &prepared, owners);
-        actual.sort_unstable_by(|(left, a), (right, b)| {
-            left.cmp(right).then_with(|| a.key.cmp(&b.key))
+        actual.sort_unstable_by(|left, right| {
+            left.gram
+                .cmp(right.gram)
+                .then_with(|| left.row.key.cmp(&right.row.key))
         });
         assert_eq!(original.len(), actual.len());
         assert!(
             original
                 .iter()
                 .zip(&actual)
-                .all(|((left, a), (right, b))| left == right && std::ptr::eq(*a, *b))
+                .all(|((left, a), right)| {
+                    left == right.gram && std::ptr::eq(*a, right.row)
+                })
         );
     }
     Ok(())
@@ -252,6 +309,25 @@ pub(crate) fn publish_current_rows_with_store<
     )
 }
 
+pub(crate) fn publish_scoped_rows_with_store<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
+    transaction: &Transaction<'_>,
+    keys: &[String],
+    rows: &[ScopedCatalogRow<'_>],
+    store: &P,
+) -> rusqlite::Result<()> {
+    publish_scoped_rows_effects(
+        transaction,
+        store,
+        keys,
+        rows,
+        64,
+        #[cfg(test)]
+        None,
+    )
+}
+
 /// One metadata-search producer; adapters own only physical effects. The phase
 /// callback keeps SQLite's existing performance probes outside the algorithm.
 pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
@@ -260,12 +336,40 @@ pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublic
     owners: usize,
     mut phase: impl FnMut(&'static str, usize),
 ) -> Result<(), P::Error> {
-    for rows in rows.chunks(64) {
-        phase("start", rows.len());
-        store.begin(rows)?;
-        phase("members", rows.len());
-        for row in rows {
-            store.validate(&row.key)?;
+    let keys = rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    let scoped = rows
+        .iter()
+        .map(|row| ScopedCatalogRow {
+            row,
+            scopes: SearchScopeEligibility::CURRENT_AND_HISTORY,
+        })
+        .collect::<Vec<_>>();
+    publish_scoped_rows_port(store, &keys, &scoped, owners, |name, units| {
+        phase(name, units)
+    })
+}
+
+pub(crate) fn publish_scoped_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
+    store: &P,
+    keys: &[String],
+    rows: &[ScopedCatalogRow<'_>],
+    owners: usize,
+    mut phase: impl FnMut(&'static str, usize),
+) -> Result<(), P::Error> {
+    for keys in keys.chunks(MAX_PUBLICATION_KEYS) {
+        let key_set = keys.iter().map(String::as_str).collect::<BTreeSet<_>>();
+        let rows = rows
+            .iter()
+            .copied()
+            .filter(|row| {
+                row.scopes.count() != 0 && key_set.contains(row.row.key.as_str())
+            })
+            .collect::<Vec<_>>();
+        phase("start", keys.len());
+        store.begin(keys)?;
+        phase("members", keys.len());
+        for key in keys {
+            store.validate(key)?;
         }
         for scope in [
             crate::CatalogReadScope::Current,
@@ -276,20 +380,29 @@ pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublic
         phase("removal", 2);
         let prepared = rows
             .iter()
-            .map(|row| prepared_fields_port(row).map_err(P::data))
+            .map(|row| prepared_fields_port(row.row).map_err(P::data))
             .collect::<Result<Vec<_>, _>>()?;
         phase("normalization", rows.len());
+        let mut document_count = 0;
         for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
             for scope in [
                 crate::CatalogReadScope::Current,
                 crate::CatalogReadScope::RetainedHistory,
             ] {
-                store.document(scope, row, encoded, *complete)?;
+                if row.scopes.includes(scope) {
+                    store.document(scope, row.row, encoded, *complete)?;
+                    document_count += 1;
+                }
             }
         }
-        phase("documents", rows.len() * 2);
-        let postings = posting_order(rows, &prepared, owners);
+        phase("documents", document_count);
+        let postings = posting_order(&rows, &prepared, owners);
         phase("posting_preparation", postings.len());
+        let positions = postings
+            .iter()
+            .map(|posting| posting.scopes.count())
+            .sum::<usize>();
+        phase("posting_positions", positions);
         store.postings(&postings)?;
         phase("postings", postings.len());
         for scope in [
@@ -312,6 +425,35 @@ pub(crate) fn publish_current_rows_effects<
     owners: usize,
     #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
 ) -> rusqlite::Result<()> {
+    let keys = rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+    let scoped = rows
+        .iter()
+        .map(|row| ScopedCatalogRow {
+            row,
+            scopes: SearchScopeEligibility::CURRENT_AND_HISTORY,
+        })
+        .collect::<Vec<_>>();
+    publish_scoped_rows_effects(
+        transaction,
+        store,
+        &keys,
+        &scoped,
+        owners,
+        #[cfg(test)]
+        probe,
+    )
+}
+
+pub(crate) fn publish_scoped_rows_effects<
+    P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
+>(
+    transaction: &Transaction<'_>,
+    store: &P,
+    keys: &[String],
+    rows: &[ScopedCatalogRow<'_>],
+    owners: usize,
+    #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+) -> rusqlite::Result<()> {
     let producer = crate::native_timing::enabled()
         .then(|| {
             transaction
@@ -327,7 +469,13 @@ pub(crate) fn publish_current_rows_effects<
     #[cfg(test)]
     let (mut preparation_started, mut preparation_us, mut physical_rows, mut cohort) =
         (None, 0, 0, 0);
-    publish_current_rows_port(store, rows, owners, |name, units| {
+    #[cfg(test)]
+    let mut logical_positions = 0;
+    let mut posting_positions = 0;
+    publish_scoped_rows_port(store, keys, rows, owners, |name, units| {
+        if name == "posting_positions" {
+            posting_positions = units;
+        }
         #[cfg(test)]
         if probe.is_some() {
             match name {
@@ -346,6 +494,7 @@ pub(crate) fn publish_current_rows_effects<
                 "postings" => {
                     postings_after = Some(crate::native_timing::ProbeSample::read(transaction))
                 }
+                "posting_positions" => logical_positions = units,
                 "counts" => {
                     let counts_after = crate::native_timing::ProbeSample::read(transaction);
                     if let Some(probe) = probe.as_deref_mut() {
@@ -363,18 +512,22 @@ pub(crate) fn publish_current_rows_effects<
                                 + counts_after.sampling_us(),
                             owners: cohort,
                             physical_rows,
-                            logical_positions: physical_rows * 2,
+                            logical_positions,
                         });
                     }
                 }
                 _ => {}
             }
         }
-        if name != "start" {
+        if name != "start" && name != "posting_positions" {
             measurements.record(
                 name,
                 started,
-                if name == "postings" { units * 2 } else { units },
+                if name == "postings" {
+                    posting_positions
+                } else {
+                    units
+                },
             );
             if name == "postings" {
                 measurements.count("posting_rows", units);
@@ -1516,6 +1669,124 @@ mod sqlite_tests {
     }
 
     #[test]
+    fn scoped_search_lookup_uses_catalog_metadata_and_rejects_history_orphans() {
+        let mut connection = database();
+        let current = row("scope-key", "catalog authority phrase");
+        let transaction = connection.transaction().unwrap();
+        put(&transaction, &current);
+        transaction.execute(
+            "UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','retained','$.name','history only phrase') WHERE session_key=?1",
+            [&current.key],
+        ).unwrap();
+        transaction.commit().unwrap();
+
+        let keys = vec![current.key.clone()];
+        {
+            let transaction = connection.transaction().unwrap();
+            let source = sqlite_tests::source(&transaction);
+            let writer = crate::storage::sqlite::search::SearchWriter::admitted(
+                &transaction,
+                &source,
+            )
+            .unwrap();
+            let lookup = writer.lookup(&keys).unwrap();
+            assert_eq!(lookup.consumed, 1);
+            assert!(!lookup.oversized);
+            assert_eq!(lookup.rows.len(), 1);
+            assert!(lookup.rows[0].scopes.current);
+            assert!(lookup.rows[0].scopes.retained_history);
+            assert_eq!(lookup.rows[0].row.name, "catalog authority phrase");
+            let rows = lookup
+                .rows
+                .iter()
+                .map(|selected| ScopedCatalogRow {
+                    row: &selected.row,
+                    scopes: selected.scopes,
+                })
+                .collect::<Vec<_>>();
+            publish_scoped_rows_with_store(&transaction, &keys, &rows, &writer).unwrap();
+            transaction.commit().unwrap();
+        }
+
+        fn retained_query(query: &str) -> Query<'_> {
+            Query {
+                scope: CatalogReadScope::RetainedHistory,
+                query,
+                harness: None,
+                repo: None,
+                model: None,
+                after: None,
+                limit: 60,
+                index_complete: true,
+            }
+        }
+        assert_eq!(
+            read_admitted(&connection, retained_query("catalog authority"))
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
+        assert!(
+            read_admitted(&connection, retained_query("history only"))
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+
+        {
+            let transaction = connection.transaction().unwrap();
+            transaction
+                .execute(
+                    "DELETE FROM main.session_catalog WHERE session_key=?1",
+                    [&current.key],
+                )
+                .unwrap();
+            assert_eq!(
+                transaction
+                    .query_row(
+                        "SELECT COUNT(*) FROM main.session_history_catalog WHERE session_key=?1",
+                        [&current.key],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap(),
+                1
+            );
+            let source = sqlite_tests::source(&transaction);
+            let writer = crate::storage::sqlite::search::SearchWriter::admitted(
+                &transaction,
+                &source,
+            )
+            .unwrap();
+            let lookup = writer.lookup(&keys).unwrap();
+            assert_eq!(lookup.consumed, 1);
+            assert!(lookup.rows.is_empty());
+            publish_scoped_rows_with_store(&transaction, &keys, &[], &writer).unwrap();
+            transaction.commit().unwrap();
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM main.session_search_documents WHERE session_key=?1",
+                    [&current.key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM main.session_search_memberships WHERE session_key=?1",
+                    [&current.key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn search_order_work_and_exact_metadata_are_independent_of_unrelated_history() {
         let mut connection = database();
         let transaction = connection.transaction().unwrap();
@@ -1639,9 +1910,7 @@ mod sqlite_tests {
             let writer =
                 crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &source)
                     .unwrap();
-            writer
-                .begin(&[&row("candidate-00900", "replacement")])
-                .unwrap();
+            writer.begin(&["candidate-00900".to_owned()]).unwrap();
             writer.validate("candidate-00900").unwrap();
             writer.remove(CatalogReadScope::Current).unwrap();
         }

@@ -2087,23 +2087,19 @@ impl Stage {
             use crate::storage::catalog::SearchPublicationStore;
             let search = super::search::SearchWriter::admitted(&tx, &self.source)
                 .map_err(StoreError::Configured)?;
-            let mut rows = Vec::new();
-            for (key, _) in &retired {
-                let text: String = tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",params![ns,key],|r|r.get(0)).map_err(error)?;
-                rows.push(
-                    serde_json::from_str::<crate::model::summary::CatalogRow>(&text)
-                        .map_err(|e| StoreError::Data(e.to_string()))?,
-                );
+            let keys = retired
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for keys in keys.chunks(crate::catalog_search::MAX_PUBLICATION_KEYS) {
+                search.begin(keys).map_err(error)?;
+                for key in keys {
+                    search.validate(key).map_err(error)?;
+                }
+                search
+                    .remove(crate::CatalogReadScope::Current)
+                    .map_err(error)?;
             }
-            search
-                .begin(&rows.iter().collect::<Vec<_>>())
-                .map_err(error)?;
-            for row in &rows {
-                search.validate(&row.key).map_err(error)?;
-            }
-            search
-                .remove(crate::CatalogReadScope::Current)
-                .map_err(error)?;
         }
         // Negative effects change the publication even without replacement rows.
         let repeat = unchanged

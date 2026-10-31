@@ -7,8 +7,8 @@ impl SearchPublicationStore for Effects<'_, '_> {
     fn data(_: serde_json::Error) -> StorageError {
         StorageError::Unavailable
     }
-    fn begin(&self, rows: &[&CatalogRow]) -> Result<(), StorageError> {
-        if rows.len() > 64 {
+    fn begin(&self, keys: &[String]) -> Result<(), StorageError> {
+        if keys.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
             return Err(StorageError::Busy);
         }
         self.tx.borrow().check()
@@ -51,21 +51,26 @@ impl SearchPublicationStore for Effects<'_, '_> {
             ],
         )
     }
-    fn postings(&self, rows: &[(&String, &CatalogRow)]) -> Result<(), StorageError> {
+    fn postings(
+        &self,
+        rows: &[crate::catalog_search::SearchPosting<'_>],
+    ) -> Result<(), StorageError> {
         // Bounded arrays avoid one round trip per gram. The full identity is
         // compared on every conflict, including a theoretical digest collision.
+        // PG memberships have no scope column; scoped documents select which
+        // owners participate in each scope's count and read.
         for rows in rows.chunks(64) {
             let keys = rows
                 .iter()
-                .map(|(_, row)| row.key.as_bytes().to_vec())
+                .map(|posting| posting.row.key.as_bytes().to_vec())
                 .collect::<Vec<_>>();
             let grams = rows
                 .iter()
-                .map(|(gram, _)| gram.as_bytes().to_vec())
+                .map(|posting| posting.gram.as_bytes().to_vec())
                 .collect::<Vec<_>>();
             let times = rows
                 .iter()
-                .map(|(_, row)| row.last.unwrap_or(0))
+                .map(|posting| posting.row.last.unwrap_or(0))
                 .collect::<Vec<_>>();
             if grams.iter().any(|gram| gram.len() > 12) {
                 return Err(StorageError::Busy);
@@ -88,7 +93,7 @@ impl SearchPublicationStore for Effects<'_, '_> {
         // Carried owners make the generation unbounded; the aggregate stays in
         // SQL and each owner was admitted with <=1024 grams. No unrelated
         // retained generation participates in this aggregate.
-        let row = tx.driver.query_one("WITH physical AS MATERIALIZED (SELECT gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2), valid AS (SELECT coalesce(bool_and(octet_length(gram)<=12),true) AS ok FROM physical), counts AS MATERIALIZED (SELECT gram,count(*) AS members FROM physical WHERE (SELECT ok FROM valid) GROUP BY gram), written AS (INSERT INTO semon_pg_native_catalog_search_counts(namespace,generation,scope,gram,members) SELECT $1,$2,$3,gram,members FROM counts ON CONFLICT(namespace_digest,generation,scope,gram) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_search_counts.namespace=excluded.namespace AND semon_pg_native_catalog_search_counts.members=excluded.members RETURNING 1) SELECT (SELECT ok FROM valid) AND (SELECT count(*) FROM counts)=(SELECT count(*) FROM written)", &[&ns, &self.generation.as_bytes(), &crate::catalog_search::scope_key(scope).as_bytes()]).map_err(sqlstate::error)?;
+        let row = tx.driver.query_one("WITH physical AS MATERIALIZED (SELECT m.gram FROM semon_pg_native_catalog_search_memberships m JOIN semon_pg_native_catalog_search_documents d ON d.namespace_digest=m.namespace_digest AND d.namespace=m.namespace AND d.generation=m.generation AND d.key_digest=m.key_digest AND d.session_key=m.session_key WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND d.scope=$3), valid AS (SELECT coalesce(bool_and(octet_length(gram)<=12),true) AS ok FROM physical), counts AS MATERIALIZED (SELECT gram,count(*) AS members FROM physical WHERE (SELECT ok FROM valid) GROUP BY gram), written AS (INSERT INTO semon_pg_native_catalog_search_counts(namespace,generation,scope,gram,members) SELECT $1,$2,$3,gram,members FROM counts ON CONFLICT(namespace_digest,generation,scope,gram) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_search_counts.namespace=excluded.namespace AND semon_pg_native_catalog_search_counts.members=excluded.members RETURNING 1) SELECT (SELECT ok FROM valid) AND (SELECT count(*) FROM counts)=(SELECT count(*) FROM written)", &[&ns, &self.generation.as_bytes(), &crate::catalog_search::scope_key(scope).as_bytes()]).map_err(sqlstate::error)?;
         if !row.get::<_, bool>(0) {
             return Err(StorageError::ScopeChanged);
         }
