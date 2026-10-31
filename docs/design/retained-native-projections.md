@@ -93,6 +93,10 @@ bounded physical owner groups. Their virtual transcripts do not enter that
 group's publication recipes. Every real owner retains its transcript projection;
 genuine unmatched call or receipt stubs retain their explicit relationship and
 projection witnesses without gaining Catalog ownership or Raw membership.
+Publication materializes its complete relationship witness from bounded durable
+replay pages, preserving nonlocal source locations and native ordering. A selected
+physical sender may enrich its recorded parent-turn witness only through the
+existing strict merge; local rendering omissions cannot replace staged evidence.
 
 SQLite semantic catch-up accepts a removed path only with its durable ordinary
 producer removal invalidation and no remaining live ledger. An exact index

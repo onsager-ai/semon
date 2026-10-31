@@ -9930,6 +9930,26 @@ mod tests {
                             continue;
                         }
                         assert!(f.db().query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE namespace='source-a' AND session_key=?1)", [external], |r| r.get::<_, bool>(0)).unwrap(), "external relation endpoint retains its durable identity");
+                        let text: String = f.db().query_row("SELECT metadata FROM catalog_semantic_relations WHERE namespace='source-a' AND relation_id=?1", [&relation.id], |r| r.get(0)).unwrap();
+                        let mut recorded: crate::model::relation_stage::Relation =
+                            serde_json::from_str(&text).unwrap();
+                        assert_eq!(
+                            recorded.source_turn.merge(&relation.source_turn),
+                            Some(relation.source_turn.clone()),
+                            "publication preserves or strictly enriches the recorded sender turn"
+                        );
+                        if !child {
+                            assert_eq!(
+                                relation.source_turn, recorded.source_turn,
+                                "an external sender cannot supply a new parent-turn observation"
+                            );
+                        }
+                        recorded.source_turn = relation.source_turn.clone();
+                        assert_eq!(
+                            serde_json::to_value(relation).unwrap(),
+                            serde_json::to_value(&recorded).unwrap(),
+                            "external relation preserves every durable field and native location"
+                        );
                         assert!(
                             prepared
                                 .transcripts
@@ -12279,6 +12299,62 @@ mod tests {
                 1_790_000_000_000,
             )
             .unwrap();
+            assert_eq!(
+                altered.staged_model_witness().unwrap(),
+                model.prepared().staged_model_witness().unwrap(),
+                "the unaltered replay exactly matches its recorded publication witness"
+            );
+            let original_relation = altered
+                .relationships
+                .relations
+                .values()
+                .find(|relation| {
+                    !relation.previews.is_empty()
+                        && !relation.placements.is_empty()
+                        && !matches!(
+                            relation.source_turn,
+                            crate::model::relation_stage::OriginTurn::Unknown
+                        )
+                })
+                .expect("native call records previews, locations and a resolved sender turn")
+                .clone();
+            for field in ["order", "preview", "location", "source_turn"] {
+                let mut changed = original_relation.clone();
+                match field {
+                    "order" => changed.order.0 ^= 1,
+                    "preview" => changed.previews.values_mut().next().unwrap().skip ^= 1,
+                    "location" => changed.placements[0].at.offset ^= 1,
+                    "source_turn" => {
+                        changed.source_turn = crate::model::relation_stage::OriginTurn::Known(
+                            "unrecorded-parent-turn".into(),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    changed.merge_prior(&original_relation).is_err(),
+                    "the durable relation merge remains strict for {field}"
+                );
+                altered
+                    .relationships
+                    .relations
+                    .insert(changed.id.clone(), changed);
+                let before = shared_state(&f);
+                assert_eq!(
+                    own.publish_semantic_catalog(&batch, &altered).unwrap().0,
+                    Outcome::Conflict,
+                    "unrecorded {field} cannot publish"
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "unrecorded {field} has zero effects"
+                );
+            }
+            altered
+                .relationships
+                .relations
+                .insert(original_relation.id.clone(), original_relation);
             let stub = altered
                 .transcripts
                 .iter()
