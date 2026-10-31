@@ -336,9 +336,11 @@ jobs:
       - name: Native Catalog and Query fixture contracts through adapter
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
-          cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
-          cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
-          cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
+          result=0
+          for group in catalog::tests:: query::tests::published_catalog query::tests::catalog_query; do
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture || result=1
+          done
+          exit "$result"
       - name: Reported facts persistence after typed error propagation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
