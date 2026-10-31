@@ -296,9 +296,23 @@ fn read(
     let mut current_graph_owners = BTreeSet::new();
     let edge_select = "SELECT session_key,edge_id,json_extract(metadata,'$.from'),json_extract(metadata,'$.to') FROM main.session_trace_edges WHERE namespace=semon_namespace()";
     let edge_sql = if cutoff.is_some() {
-        format!(
-            "{edge_select} AND (json_extract(metadata,'$.at')>=?1 OR json_extract(metadata,'$.done')>=?1 OR json_extract(metadata,'$.status') IN ('work','wait','new'))"
+        "WITH eligible_edges AS (
+            SELECT session_key,edge_id FROM main.session_trace_edges INDEXED BY session_trace_query_at
+            WHERE namespace=semon_namespace() AND json_extract(metadata,'$.at')>=?1
+            UNION
+            SELECT session_key,edge_id FROM main.session_trace_edges INDEXED BY session_trace_query_done
+            WHERE namespace=semon_namespace() AND json_extract(metadata,'$.done')>=?1
+            UNION
+            SELECT session_key,edge_id FROM main.session_trace_edges INDEXED BY session_trace_query_status
+            WHERE namespace=semon_namespace() AND json_extract(metadata,'$.status') IN ('work','wait','new')
         )
+        SELECT edge.session_key,edge.edge_id,json_extract(edge.metadata,'$.from'),json_extract(edge.metadata,'$.to')
+        FROM eligible_edges AS candidate
+        CROSS JOIN main.session_trace_edges AS edge
+        WHERE edge.namespace=semon_namespace()
+          AND edge.session_key=candidate.session_key
+          AND edge.edge_id=candidate.edge_id"
+            .to_owned()
     } else {
         edge_select.to_owned()
     };
