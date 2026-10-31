@@ -3200,12 +3200,16 @@ impl SqliteStore {
                 publication.transcripts,
             )
             .map_err(failure)?;
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=history_composition_complete");
             stage("history", &transaction);
             let mut metadata_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
             let mut overview_measurements =
                 crate::native_timing::Measurements::new(producer.is_some());
             let setup_started = metadata_measurements.start();
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=current_metadata_setup_begin");
             let previous_version: Option<String> = transaction
                 .query_row(
                     "SELECT value FROM meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
@@ -3215,6 +3219,8 @@ impl SqliteStore {
                 .optional()
                 .map_err(failure)?;
             metadata_measurements.record("setup", setup_started, 1);
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=current_metadata_setup_complete");
 
             let mut metadata_sample = None;
             let mut cohort_changed = None;
@@ -3223,12 +3229,16 @@ impl SqliteStore {
                 // A temporary membership table bounds deletion SQL parameters and
                 // never escapes the transaction or becomes part of the read model.
                 {
+                    #[cfg(test)]
+                    eprintln!("catalog_publication_probe stage=current_writer_admission_begin");
                     let current_effects =
                         crate::storage::sqlite::publication::CurrentWriter::admitted(
                             &transaction,
                             &admitted,
                         )
                         .map_err(StoreError::Configured)?;
+                    #[cfg(test)]
+                    eprintln!("catalog_publication_probe stage=current_writer_admission_complete");
                     metadata_measurements.record("statements", statements_started, 1);
                     if batch_bytes.is_some() && producer.is_some() {
                         metadata_sample = Some(crate::native_timing::WriteActivity::new(
@@ -3242,6 +3252,8 @@ impl SqliteStore {
                         let store =
                             crate::storage::sqlite::trace::TraceWriter::owned(&transaction, owner)
                                 .map_err(|error| {
+                                    #[cfg(test)]
+                                    eprintln!("catalog_publication_probe stage=trace_writer_failed");
                                     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                                 })
                                 .map_err(failure)?;
@@ -3253,7 +3265,7 @@ impl SqliteStore {
                         // UNIQUE keys were certified before reordering. These
                         // helpers read their own History/Overview, never another
                         // row's newly written Current/source membership.
-                        for row in rows {
+                        for (_position, row) in rows.iter().enumerate() {
                             let started = metadata_measurements.start();
                             crate::overview::publish_current_owned(
                                 &transaction,
@@ -3261,11 +3273,17 @@ impl SqliteStore {
                                 &mut overview_measurements,
                                 trace_store.as_ref(),
                             )
-                            .map_err(failure)?;
+                            .map_err(|error| {
+                                #[cfg(test)]
+                                eprintln!("catalog_publication_probe stage=overview_publish_failed row_index={_position}");
+                                failure(error)
+                            })?;
                             metadata_measurements.record("overview", started, 1);
                             let started = metadata_measurements.start();
                             metadata_measurements.record("catalog_members", started, 1);
                         }
+                        #[cfg(test)]
+                        eprintln!("catalog_publication_probe stage=overview_publication_complete");
                         if let Some(sample) = metadata_sample.as_mut() {
                             sample.stage("overview_and_members", &transaction);
                         }
