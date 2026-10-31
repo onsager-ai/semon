@@ -96,10 +96,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if let Some(payload) = &payload {
-            crate::query_projection::SelectedRecipe::decode(row, payload)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        }
+        crate::query_projection::SelectedRecipe::validate_custody(row, payload.as_deref())
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(payload)
     }
     fn transfer(&self, key: &str) -> rusqlite::Result<Option<String>> {

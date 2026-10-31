@@ -229,10 +229,8 @@ impl OriginalHistoryStore for History<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         let payload = record.get::<_, Option<Vec<u8>>>(2).map(text).transpose()?;
-        if let Some(payload) = &payload {
-            crate::query_projection::SelectedRecipe::decode(row, payload)
-                .map_err(|_| StorageError::ScopeChanged)?;
-        }
+        crate::query_projection::SelectedRecipe::validate_custody(row, payload.as_deref())
+            .map_err(|_| StorageError::ScopeChanged)?;
         Ok(payload)
     }
     fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {

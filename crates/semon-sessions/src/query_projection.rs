@@ -33,6 +33,28 @@ pub(crate) struct SelectedRecipePublication {
 }
 
 impl SelectedRecipe {
+    /// Custody never turns a detached reference with missing bytes into History.
+    /// This does not read inactive inline producer metadata as a payload.
+    pub(crate) fn validate_custody(
+        row: &CatalogRow,
+        payload: Option<&str>,
+    ) -> std::io::Result<()> {
+        if let Some(payload) = payload {
+            return Self::decode(row, payload).map(|_| ());
+        }
+        if row
+            .query
+            .as_ref()
+            .and_then(|query| query.get("selected"))
+            .is_some_and(|selected| {
+                <SelectedRecipeRef as serde::Deserialize>::deserialize(selected).is_ok()
+            })
+        {
+            return Err(std::io::Error::other("Selected Query recipe payload unavailable"));
+        }
+        Ok(())
+    }
+
     /// Prepare both stored cells without changing the producer's active row.
     pub(crate) fn prepare(row: &CatalogRow) -> std::io::Result<SelectedRecipePublication> {
         if row.query_recipe.is_none()
@@ -148,7 +170,11 @@ mod selected_recipe_tests {
         let mut recipe = recipe();
         recipe.session["busy"] = json!(vec![[100, 200]; 2048]);
         row.query_recipe = Some(recipe.clone());
+        row.query.as_mut().unwrap()["selected"] = serde_json::to_value(&recipe).unwrap();
+        assert!(SelectedRecipe::validate_custody(&row, None).is_ok());
         let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        assert!(SelectedRecipe::validate_custody(&row, None).is_err());
+        assert!(SelectedRecipe::validate_custody(&row, Some(&encoded)).is_ok());
         let metadata = serde_json::to_string(&row).unwrap();
         assert!(metadata.len() < 8192);
         assert!(

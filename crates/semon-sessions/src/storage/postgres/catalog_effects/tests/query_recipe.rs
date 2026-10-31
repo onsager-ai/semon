@@ -145,6 +145,23 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             Ok(token)
         })
         .unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let before = super::snapshot(tx)?;
+        let boundaries = super::super::BOUNDARIES.with(|count| count.get());
+        {
+            let store = super::super::history::History {
+                effects: Effects {
+                    tx: std::cell::RefCell::new(&mut *tx),
+                    generation: L2,
+                },
+                previous: &generation,
+            };
+            assert_eq!(catalog::preserve_original(&store, row), Err(StorageError::ScopeChanged));
+        }
+        assert_eq!(super::super::BOUNDARIES.with(|count| count.get()), boundaries);
+        assert_eq!(super::snapshot(tx)?, before, "missing payload refuses before custody effects");
+        Ok(())
+    }).unwrap();
     let payload = format!("{}\n", compact.query_recipe.unwrap());
     // The only physical seam supplies the nullable payload, after normal
     // publication authenticated the exact compact metadata and native receipt.

@@ -8353,6 +8353,24 @@ mod tests {
             port.selected_recipe(&original),
             Err(QueryRecipeLoadError::MissingPayload)
         ));
+        {
+            let mut db = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
+                    .unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
+            let tx = db.transaction().unwrap();
+            let source = crate::storage::sqlite::semantic::AdmittedSource::native(store.owner.clone());
+            let custody = crate::storage::sqlite::history::OriginalHistory::admitted(&tx, &source)
+                .unwrap();
+            let changes = tx.total_changes();
+            assert!(crate::storage::catalog::preserve_original(&custody, &rows[0]).is_err());
+            assert_eq!(tx.total_changes(), changes, "missing payload refuses before custody effects");
+            let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
+            assert!(!retained);
+            tx.commit().unwrap();
+        }
         let payload = format!("{}\n", prepared.query_recipe.unwrap());
         supply_payload(
             &store,
