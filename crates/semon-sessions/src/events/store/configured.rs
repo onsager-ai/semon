@@ -3774,6 +3774,28 @@ mod tests {
         panic!("real model did not reach publication")
     }
 
+    fn expected_source_runtime_witness(
+        namespace: &str,
+        admission: u64,
+        stream_epoch: &str,
+        scoped_runtime: &str,
+    ) -> String {
+        use sha2::{Digest, Sha256};
+        format!(
+            "source-runtime-v1:{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(
+                    "semon-source-runtime-v1",
+                    namespace,
+                    admission,
+                    stream_epoch,
+                    scoped_runtime,
+                ))
+                .unwrap()
+            )
+        )
+    }
+
     #[test]
     fn current_source_recovery_replays_terminal_done_and_keeps_other_sources() {
         use crate::storage::source_observations::{
@@ -4454,7 +4476,6 @@ mod tests {
             )
             .unwrap();
             let config = if i == 0 { &a.config } else { &b };
-            let runtime = crate::native_evidence::query_runtime_generation(&options[i]).unwrap();
             let admission: i64 = a
                 .db()
                 .query_row(
@@ -4464,30 +4485,33 @@ mod tests {
                 )
                 .unwrap();
             let admission = u64::try_from(admission).unwrap();
-            use sha2::{Digest, Sha256};
-            let expected = format!(
-                "source-runtime-v1:{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&(
-                        "semon-source-runtime-v1",
-                        config.namespace.as_str(),
-                        admission,
-                        config.expected_stream_epoch.as_deref().unwrap(),
-                        &runtime,
-                    ))
-                    .unwrap()
-                )
-            );
-            assert_eq!(
-                model.prepared().rows[0].query.as_ref().unwrap()["runtime"],
-                expected
-            );
+            let observations = crate::native_evidence::RuntimeObservations::new(&options[i]);
+            for row in &mut original.rows {
+                let cwds = caches[i].runtime_source_cwds(&row.sources).unwrap();
+                let scoped_runtime = observations.scope(row, &cwds).unwrap();
+                let expected = expected_source_runtime_witness(
+                    config.namespace.as_str(),
+                    admission,
+                    config.expected_stream_epoch.as_deref().unwrap(),
+                    &scoped_runtime,
+                );
+                let actual = model
+                    .prepared()
+                    .rows
+                    .iter()
+                    .find(|actual| actual.key == row.key)
+                    .unwrap();
+                assert_eq!(
+                    actual.query.as_ref().unwrap()["runtime"],
+                    expected,
+                    "source-scoped runtime for {}",
+                    row.key
+                );
+                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(expected);
+            }
             // The only intentional difference from the unbound oracle is its
             // runtime observation contract. All semantic rows and recipes below
             // still compare byte-for-byte, including source-generation fences.
-            for row in &mut original.rows {
-                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(expected);
-            }
             assert_eq!(
                 serde_json::to_value(&model.prepared().rows).unwrap(),
                 serde_json::to_value(&original.rows).unwrap()
@@ -4573,6 +4597,7 @@ mod tests {
             crate::native_evidence::query_runtime_generation(&options[1]).unwrap()
         );
         let mut witnesses = Vec::new();
+        let mut scoped_runtimes = Vec::new();
         for (i, config) in [&a.config, &b].into_iter().enumerate() {
             let mut cache = EventCache::open_semantic(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
@@ -4585,9 +4610,47 @@ mod tests {
             let before = namespace_state(&a, foreign);
             let (batch, model) =
                 model_ready(&a, &mut cache, &options[i], &inputs[i], "same-native-id");
+            let mut reference =
+                EventCache::open_scoped(&options[i].cache, &options[i].source).unwrap();
+            let original = crate::model::prepare_sources(
+                &options[i],
+                &mut reference,
+                std::slice::from_ref(&inputs[i]),
+                1_790_000_000_000,
+            )
+            .unwrap();
+            let expected_row = original
+                .rows
+                .iter()
+                .find(|row| row.key == "model-0")
+                .unwrap();
+            let observations = crate::native_evidence::RuntimeObservations::new(&options[i]);
+            let cwds = cache.runtime_source_cwds(&expected_row.sources).unwrap();
+            let scoped_runtime = observations.scope(expected_row, &cwds).unwrap();
+            let admission: i64 = a
+                .db()
+                .query_row(
+                    "SELECT admission_generation FROM storage_namespaces WHERE namespace=?1",
+                    [config.namespace.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let expected_runtime = expected_source_runtime_witness(
+                config.namespace.as_str(),
+                u64::try_from(admission).unwrap(),
+                config.expected_stream_epoch.as_deref().unwrap(),
+                &scoped_runtime,
+            );
             let row = &model.prepared().rows[0];
             assert_eq!(row.key, "model-0");
-            witnesses.push(row.query.as_ref().unwrap()["runtime"].clone());
+            assert_eq!(
+                row.query.as_ref().unwrap()["runtime"],
+                expected_runtime,
+                "source-scoped runtime for {}",
+                row.key
+            );
+            witnesses.push(expected_runtime);
+            scoped_runtimes.push(scoped_runtime);
             cache
                 .publish_semantic_catalog(&batch, model.prepared())
                 .unwrap();
@@ -4600,12 +4663,12 @@ mod tests {
             )
             .unwrap();
             let binding = reopened.query_runtime_binding().unwrap().unwrap();
-            assert_eq!(binding.witness(&runtime).unwrap(), witnesses[i]);
+            assert_eq!(binding.witness(&scoped_runtimes[i]).unwrap(), witnesses[i]);
             let next = crate::storage::QueryRuntimeBinding {
                 admission: binding.admission + 1,
                 ..binding.clone()
             };
-            assert_ne!(next.witness(&runtime).unwrap(), witnesses[i]);
+            assert_ne!(next.witness(&scoped_runtimes[i]).unwrap(), witnesses[i]);
             assert_ne!(binding.witness("changed-runtime").unwrap(), witnesses[i]);
         }
         assert_ne!(
@@ -6890,22 +6953,16 @@ mod tests {
                 crate::model::prepare_sources(options, &mut unbound, inputs, 1_790_000_000_000)
                     .unwrap();
             let binding = cache.query_runtime_binding().unwrap().unwrap();
-            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            use sha2::{Digest, Sha256};
-            let witness = format!(
-                "source-runtime-v1:{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&(
-                        "semon-source-runtime-v1",
-                        binding.namespace.as_str(),
-                        binding.admission,
-                        binding.stream_epoch.as_str(),
-                        runtime
-                    ))
-                    .unwrap()
-                )
-            );
+            let observations = crate::native_evidence::RuntimeObservations::new(options);
             for row in &mut expected.rows {
+                let cwds = cache.runtime_source_cwds(&row.sources).unwrap();
+                let scoped_runtime = observations.scope(row, &cwds).unwrap();
+                let witness = expected_source_runtime_witness(
+                    binding.namespace.as_str(),
+                    binding.admission,
+                    binding.stream_epoch.as_str(),
+                    &scoped_runtime,
+                );
                 assert_eq!(
                     prepared
                         .rows
@@ -8175,22 +8232,16 @@ mod tests {
                 crate::model::prepare_sources(options, &mut reference, inputs, 1_790_000_000_000)
                     .unwrap();
             let binding = cache.query_runtime_binding().unwrap().unwrap();
-            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-            use sha2::{Digest, Sha256};
-            let runtime = format!(
-                "source-runtime-v1:{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&(
-                        "semon-source-runtime-v1",
-                        binding.namespace.as_str(),
-                        binding.admission,
-                        binding.stream_epoch.as_str(),
-                        runtime
-                    ))
-                    .unwrap()
-                )
-            );
+            let observations = crate::native_evidence::RuntimeObservations::new(options);
             for row in &mut expected.rows {
+                let cwds = cache.runtime_source_cwds(&row.sources).unwrap();
+                let scoped_runtime = observations.scope(row, &cwds).unwrap();
+                let runtime = expected_source_runtime_witness(
+                    binding.namespace.as_str(),
+                    binding.admission,
+                    binding.stream_epoch.as_str(),
+                    &scoped_runtime,
+                );
                 row.query.as_mut().unwrap()["runtime"] = serde_json::json!(runtime);
             }
             assert_eq!(
