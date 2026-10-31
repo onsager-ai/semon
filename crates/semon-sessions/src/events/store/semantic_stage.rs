@@ -3199,10 +3199,9 @@ mod tests {
     ) {
         let (root, store, path) = header_repair_catalog(name);
         let config = store.owner.config().clone();
-        let capability =
-            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
-        let mut stage = crate::storage::sqlite::configured_index::open_semantic(capability)
-            .unwrap();
+        let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+        let mut stage =
+            crate::storage::sqlite::configured_index::open_semantic(capability).unwrap();
         assert_eq!(
             stage
                 .begin_semantic_stage(std::slice::from_ref(&path), "runtime", false)
@@ -3674,7 +3673,10 @@ mod tests {
         )
         .unwrap();
         assert!(owns_header_repair(&store.connection, &path).unwrap());
-        assert_eq!(stage.finish_semantic_stage(epoch).unwrap(), Outcome::Written);
+        assert_eq!(
+            stage.finish_semantic_stage(epoch).unwrap(),
+            Outcome::Written
+        );
         assert!(!owns_header_repair(&store.connection, &path).unwrap());
         drop(stage);
         drop(store);
@@ -3683,8 +3685,7 @@ mod tests {
 
     #[test]
     fn current_header_repair_preserves_pending_and_live_ack_observations() {
-        let (root, mut store, mut stage, path, old_epoch) =
-            current_header_repair_store("ack");
+        let (root, mut store, mut stage, path, old_epoch) = current_header_repair_store("ack");
         let observed = revision(&store.connection).unwrap();
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
@@ -3710,7 +3711,10 @@ mod tests {
             assert_eq!(header_repair_claim(&store, &path), None);
             assert!(owns_header_repair(&store.connection, &path).unwrap());
         }
-        assert_eq!(stage.finish_semantic_stage(old_epoch).unwrap(), Outcome::Written);
+        assert_eq!(
+            stage.finish_semantic_stage(old_epoch).unwrap(),
+            Outcome::Written
+        );
         // Ordinary source observations remain independent of projection repair.
         header_repair_invalidate(&store, &path, "changed");
         assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
