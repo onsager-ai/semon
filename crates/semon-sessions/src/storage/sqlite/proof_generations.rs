@@ -1006,7 +1006,13 @@ fn observation_authority_for_owner(
     selected: &CatalogRow,
     local_owner: Option<CatalogObservationOwner>,
     local_only: bool,
-) -> Result<(crate::storage::QueryRuntimeBinding, crate::storage::query::QueryRecipeResidence), ObservationPreparationError> {
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::query::QueryRecipeResidence,
+    ),
+    ObservationPreparationError,
+> {
     let ns = current.namespace.as_str();
     let owner_kind = local_owner.map(CatalogObservationOwner::kind);
     let proof_kind = local_owner.map(|owner| match owner {
@@ -1072,8 +1078,12 @@ fn observation_authority_for_owner(
             }
             let metadata_digest = proof_codec::digest(original.as_bytes());
             let residence = match native.as_str() {
-                "catalog" => crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest },
-                "history" => crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest },
+                "catalog" => {
+                    crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest }
+                }
+                "history" => {
+                    crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest }
+                }
                 _ => return Err(StorageError::ScopeChanged.into()),
             };
             return Ok((current.clone(), residence));
@@ -1303,17 +1313,21 @@ pub(crate) fn query_recipe_observation(
         params![current.namespace.as_str(), selected.key],
         |row| row.get(0),
     ).map_err(failed)?;
-    let stored: CatalogRow = serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
+    let stored: CatalogRow =
+        serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
     if serde_json::to_value(&stored).map_err(|_| StorageError::Unavailable)?
         != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
     {
         return Err(StorageError::ScopeChanged);
     }
-    let (original, residence) = observation_authority_for_owner(
-        db, current, &stored, Some(owner), false,
-    ).map_err(ObservationPreparationError::into_storage)?;
+    let (original, residence) =
+        observation_authority_for_owner(db, current, &stored, Some(owner), false)
+            .map_err(ObservationPreparationError::into_storage)?;
     crate::storage::query::QueryRecipeObservation::qualified(
-        residence, metadata, original, current.clone(),
+        residence,
+        metadata,
+        original,
+        current.clone(),
     )
 }
 
