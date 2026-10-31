@@ -3179,9 +3179,13 @@ impl SqliteStore {
                     }
                 }
             }
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=history_preflight");
             let history =
                 crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, &admitted)
                     .map_err(StoreError::Configured)?;
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=history_composition");
             let preserved =
                 crate::storage::catalog::preserve_rows(&history, publication.rows, &withdrawn);
             if !preserved.map_err(failure)? {
@@ -3264,6 +3268,8 @@ impl SqliteStore {
                             sample.stage("overview_and_members", &transaction);
                         }
                         let started = metadata_measurements.start();
+                        #[cfg(test)]
+                        eprintln!("catalog_publication_probe stage=catalog_batch_insert");
                         let changed = crate::storage::sqlite::publication::put_catalog_batch(
                             &transaction,
                             rows,
@@ -3281,6 +3287,8 @@ impl SqliteStore {
                         None
                     };
                     for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
+                        #[cfg(test)]
+                        eprintln!("catalog_publication_probe stage=catalog_row_sources row_index={position}");
                         // The first selected row may be unchanged. These
                         // intervals are nested in catalog_metadata, not
                         // additive publication totals.
@@ -3401,6 +3409,8 @@ impl SqliteStore {
                 #[allow(unused_mut)]
                 let mut refresh =
                     |refreshed: &[crate::model::summary::CatalogRow]| -> Result<(), StoreError> {
+                        #[cfg(test)]
+                        eprintln!("catalog_publication_probe stage=search_refresh");
                         let refs = refreshed.iter().collect::<Vec<_>>();
                         #[cfg(test)]
                         if let CatalogWriter::Traversal { owners, measured } = writer {
@@ -3561,6 +3571,8 @@ impl SqliteStore {
                 crate::storage::sqlite::publication::SlotWriter::admitted(&transaction, &admitted)
                     .map_err(StoreError::Configured)?;
             if let Some(projections) = publication.transcripts {
+                #[cfg(test)]
+                eprintln!("catalog_publication_probe stage=slot_publication");
                 crate::storage::catalog::publish_slot_rows(&slot_effects, rows, projections)?;
                 if claims.is_none() {
                     transaction.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace() AND session_key NOT IN (SELECT session_key FROM session_catalog)", []).map_err(failure)?;
@@ -3651,6 +3663,8 @@ impl SqliteStore {
             grant_owners.extend(rows.iter().map(|row| row.key.clone()));
             grant_owners.extend(affected.iter().cloned());
             grant_owners.extend(withdrawn.iter().map(|row| row.key.clone()));
+            #[cfg(test)]
+            eprintln!("catalog_publication_probe stage=grant_reconciliation");
             for key in grant_owners {
                 crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
                     &transaction,
@@ -3661,7 +3675,9 @@ impl SqliteStore {
                 )
                 .map_err(StoreError::Configured)?;
             }
-            for (row, output) in rows.iter().zip(&metadata) {
+            for (_row_index, (row, output)) in rows.iter().zip(&metadata).enumerate() {
+                #[cfg(test)]
+                eprintln!("catalog_publication_probe stage=observation_grant row_index={_row_index}");
                 crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
                     &transaction,
                     owner.config().namespace.as_str(),
@@ -8798,6 +8814,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_some());
+        eprintln!("catalog_publication_probe round=initial");
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         assert_eq!(
             batch
@@ -8866,6 +8883,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        eprintln!("catalog_publication_probe round=repair");
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         let feed = batch.connection.prepare("SELECT session_key,read_scope FROM session_catalog_changes WHERE revision>?1 ORDER BY revision").unwrap().query_map([feed_before], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         let expected = [0, 2, 4, 5, 6, 7]
@@ -8905,6 +8923,7 @@ mod tests {
                 )
                 .unwrap();
         }
+        eprintln!("catalog_publication_probe round=version");
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
         assert_eq!(batch.connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current'", [&rows[8].key], |row| row.get::<_, i64>(0)).unwrap(), rows[8].sources.len() as i64, "unchanged metadata still repairs old-version sources");
         // A two-row scoped no-op keeps unrelated rows and exact source claims.
@@ -8914,6 +8933,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert!(catalog_batch_bytes(&rows[10..12], &metadata, CatalogWriter::Auto).is_some());
+        eprintln!("catalog_publication_probe round=scoped");
         catalog_write_pair(&mut batch, &mut row_wise, &rows[10..12], &projections, true);
         drop(batch);
         drop(row_wise);
