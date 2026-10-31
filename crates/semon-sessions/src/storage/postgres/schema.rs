@@ -158,7 +158,6 @@ impl PgPool {
                     .batch_execute(
                         "
                 CREATE TABLE semon_pg_schema(version integer NOT NULL PRIMARY KEY,epoch bigint NOT NULL CHECK(epoch>0));
-                INSERT INTO semon_pg_schema VALUES (11,1);
                 CREATE TABLE semon_pg_operations(
                     namespace bytea NOT NULL CHECK (octet_length(namespace) BETWEEN 1 AND 4096),
                     namespace_digest bytea GENERATED ALWAYS AS (sha256(namespace)) STORED,
@@ -186,6 +185,9 @@ impl PgPool {
                     WITH CHECK (namespace = decode(current_setting('semon.namespace', true), 'hex'));
             ",
                     )
+                    .map_err(sqlstate::error)?;
+                tx.driver
+                    .execute("INSERT INTO semon_pg_schema VALUES ($1,1)", &[&VERSION])
                     .map_err(sqlstate::error)?;
                 tx.driver.batch_execute("
                 CREATE TABLE semon_pg_source_state(

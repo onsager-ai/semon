@@ -78,7 +78,7 @@ pub(crate) fn validate_query_recipe_cell(
     metadata: &str,
     query_recipe: Option<&str>,
 ) -> Result<(), StorageError> {
-    if metadata.len() > 8192 || metadata.len() + query_recipe.map_or(0, str::len) > METADATA_MAX {
+    if metadata.len() + query_recipe.map_or(0, str::len) > METADATA_MAX {
         return Err(StorageError::HistoryRetentionBounds);
     }
     let row: CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
@@ -143,7 +143,7 @@ pub(crate) fn decode_generation(
         || record.proof != expected.proof
         || record.publication != expected.publication
         || record.prefix != expected.prefix
-        || record.metadata.len() > 8192
+        || record.metadata.len() > METADATA_MAX
         || record.slots.len() > METADATA_MAX
     {
         return Err(StorageError::ScopeChanged);
@@ -390,7 +390,7 @@ mod tests {
         let mut record = fixture();
         record
             .metadata
-            .push_str(&" ".repeat(8192 - record.metadata.len()));
+            .push_str(&" ".repeat(METADATA_MAX - record.metadata.len()));
         record
             .slots
             .push_str(&" ".repeat(METADATA_MAX - record.slots.len()));

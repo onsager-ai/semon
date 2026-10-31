@@ -49,8 +49,9 @@ The PG native physical contract is now v12. It includes nullable `bytea`
 `query_recipe` cells on current Catalog rows, retained History headers and
 immutable selected proof generations form one paired current format. Publishers
 prepare compact typed metadata and its complete selected payload without changing
-the raw producer's inline model. Persisted Catalog metadata is at most 8192 bytes;
-metadata plus payload is at most 1 MiB. A selected reference without its matching
+the raw producer's inline model. Metadata plus payload is at most 1 MiB;
+the focused growing-busy fixture keeps compact Catalog metadata within 8192 bytes.
+A selected reference without its matching
 payload is refused. There is no inline reader fallback or format migration.
 
 Original custody copies the exact Current payload bytes into the original History

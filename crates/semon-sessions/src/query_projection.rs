@@ -80,11 +80,10 @@ impl SelectedRecipe {
         let mut compact = row.clone();
         let query_recipe = Self::detach(&mut compact)?;
         let metadata = serde_json::to_string(&compact).map_err(std::io::Error::other)?;
-        if metadata.len() > 8192
-            || metadata
-                .len()
-                .saturating_add(query_recipe.as_ref().map_or(0, String::len))
-                > crate::storage::proof_codec::METADATA_MAX
+        if metadata
+            .len()
+            .saturating_add(query_recipe.as_ref().map_or(0, String::len))
+            > crate::storage::proof_codec::METADATA_MAX
         {
             return Err(std::io::Error::other(
                 "Selected Query metadata budget exceeded",
@@ -142,9 +141,7 @@ impl SelectedRecipe {
     /// A digest is integrity evidence, never namespace or source authority.
     pub(crate) fn decode(row: &CatalogRow, text: &str) -> std::io::Result<Self> {
         let metadata = serde_json::to_vec(row).map_err(std::io::Error::other)?;
-        if metadata.len() > 8192
-            || metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX
-        {
+        if metadata.len().saturating_add(text.len()) > crate::storage::proof_codec::METADATA_MAX {
             return Err(std::io::Error::other(
                 "Selected Query metadata budget exceeded",
             ));
@@ -196,7 +193,13 @@ mod selected_recipe_tests {
         row.query_recipe = Some(recipe.clone());
         row.query.as_mut().unwrap()["selected"] = serde_json::to_value(&recipe).unwrap();
         assert!(SelectedRecipe::validate_custody(&row, None).is_err());
-        let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
+        assert!(
+            SelectedRecipe::validate_custody(&row, Some(&serde_json::to_string(&recipe).unwrap()))
+                .is_err()
+        );
+        let prepared = SelectedRecipe::prepare(&row).unwrap();
+        let encoded = prepared.query_recipe.unwrap();
+        row = prepared.row;
         assert!(SelectedRecipe::validate_custody(&row, None).is_err());
         assert!(SelectedRecipe::validate_custody(&row, Some(&encoded)).is_ok());
         let metadata = serde_json::to_string(&row).unwrap();

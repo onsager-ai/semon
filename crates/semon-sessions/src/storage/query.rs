@@ -55,7 +55,7 @@ impl QueryRecipeObservation {
             || original.stream_epoch != destination.stream_epoch
             || original.admission == 0
             || destination.admission == 0
-            || metadata.len() > 8192
+            || metadata.len() > super::proof_codec::METADATA_MAX
         {
             return Err(super::StorageError::ScopeChanged);
         }
@@ -731,9 +731,14 @@ mod tests {
         };
         let mut row = retained_row(json!({"version":1,"selected":recipe}));
         row.query_recipe = Some(recipe.clone());
+        row.name = "x".repeat(9000);
         let active = serde_json::to_string(&row).unwrap();
         let prepared = crate::query_projection::SelectedRecipe::prepare(&row).unwrap();
         let payload = prepared.query_recipe.unwrap();
+        assert!(
+            prepared.metadata.len() > 8192,
+            "compact metadata has no universal 8192-byte ceiling"
+        );
         assert!(active.len() + payload.len() > super::super::proof_codec::METADATA_MAX);
         assert!(prepared.metadata.len() + payload.len() < super::super::proof_codec::METADATA_MAX);
         assert_eq!(serde_json::to_string(&row).unwrap(), active);
