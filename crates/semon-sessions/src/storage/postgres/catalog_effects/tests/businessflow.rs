@@ -5216,6 +5216,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .cloned()
             .collect::<Vec<_>>()
     );
+    // The parent was appended after its retained owner was captured. Retained
+    // list and search pages must use the latest Catalog index fields on both
+    // engines, while exact History selection keeps the older stored row.
+    let sqlite_parent = sqlite_retained
+        .iter()
+        .find(|item| item["key"] == "one")
+        .expect("appended Claude parent in retained list");
+    let exact_history = crate::catalog::session_catalog_page(
+        &withdraw_options,
+        recent_machine,
+        "sid=one&scope=retained_history&limit=50",
+    );
+    assert_eq!(exact_history.status, 200);
+    let exact_history: serde_json::Value = serde_json::from_slice(&exact_history.body).unwrap();
+    assert_ne!(
+        sqlite_parent["last"], exact_history["items"][0]["last"],
+        "parent append must move the retained list position"
+    );
+    let pg_parent = scoped_items(&caught, "scope=retained_history&")
+        .into_iter()
+        .find(|item| item["key"] == "one")
+        .expect("appended Claude parent in PostgreSQL retained list");
+    assert_eq!(stable(&pg_parent), stable(sqlite_parent));
+    assert_eq!(
+        scoped_items(&caught, "scope=retained_history&q=one&")
+            .iter()
+            .map(stable)
+            .collect::<Vec<_>>(),
+        sqlite_scoped("scope=retained_history&q=one&", 50)
+            .iter()
+            .map(stable)
+            .collect::<Vec<_>>(),
+        "retained search uses the latest Catalog index fields"
+    );
     // P3 search: metadata search over the published PG projection. A key
     // query finds its Current session; a removed key is absent from the
     // successor's Current search but found in the qualified generation.
