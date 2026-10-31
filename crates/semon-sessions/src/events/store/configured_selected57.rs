@@ -84,6 +84,96 @@ fn configured_semantic_selected57_real_two_source_native_range_and_field_oracle(
 }
 
 #[test]
+fn configured_semantic_selected57_claude_original_provenance_survives_current_reference_move() {
+    use std::io::Write;
+    let (f, config, options, inputs) = model_sources();
+    let options = &options[1];
+    let input = &inputs[1];
+    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+    let binding = capability.reader_binding().unwrap();
+    let mut cache = EventCache::open_semantic(capability).unwrap();
+    let path = input.full_path(options);
+    cache.ingest(&"a".repeat(64), &path, "claude").unwrap();
+    let (batch, model) = model_ready(&f, &mut cache, options, input, "selected57-provenance");
+    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+    let runtime = binding.reader_runtime().unwrap();
+    let key = &model.prepared().rows[0].key;
+    let id = runtime.current_generation(key).unwrap();
+    let lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
+    let host = HostSourceBinding {
+        source_key: config.namespace.as_str().into(),
+        snapshot: lease.snapshot().clone(),
+    };
+    let query = format!("sid={key}&after=0&limit=1");
+    let history_query = format!("{query}&scope=retained_history");
+    let original = read(&lease, options, &host, &query);
+    let original_history = read(&lease, options, &host, &history_query);
+    assert_eq!(original["session"]["details"]["live_observation"], true);
+    assert_eq!(original_history["session"], original["session"]);
+    assert_eq!(original_history["identity"]["read_scope"], "retained_history");
+
+    // Independently qualify the fresh selected presentation against the normal
+    // producer, retaining every product field in the existing publication oracle.
+    let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    let prepared = crate::model::prepare_sources(options, &mut ordinary, std::slice::from_ref(input), 1_790_000_000_000).unwrap();
+    ordinary.publish_catalog_projection(&crate::slot_projection::Publication {
+        rows: &prepared.rows,
+        transcripts: Some(&prepared.transcripts),
+        observations: None,
+    }, prepared.base_generation.as_deref()).unwrap();
+    let mut expected = body(crate::session_transcript_range_with_mode(options, &host.source_key, &query, None, SessionSourceReadMode::LocalOrPinnedProvider));
+    let mut db = SourceJournal::owned(NativeOwnership::admit(&config).unwrap()).connection().unwrap();
+    publication_oracle(&mut expected, &db, config.namespace.as_str());
+    assert_eq!(original, expected);
+    cache.finish_semantic_stage(batch.epoch).unwrap();
+
+    fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(concat!(
+        "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"later\",\"parentUuid\":\"answer\",",
+        "\"timestamp\":\"2026-10-01T00:03:00Z\",\"message\":{\"role\":\"user\",\"content\":\"later Claude publication\"}}\n"
+    ).as_bytes()).unwrap();
+    cache.ingest(&"b".repeat(64), &path, "claude").unwrap();
+    let (next, next_model) = model_ready(&f, &mut cache, options, input, "selected57-provenance");
+    assert_eq!(cache.publish_semantic_catalog(&next, next_model.prepared()).unwrap().0, Outcome::Written);
+    let next_id = runtime.current_generation(key).unwrap();
+    assert_ne!(next_id, id);
+    let next_lease = runtime.selected_generation(key, &next_id, &"8".repeat(64), 60_000).unwrap();
+    let next_host = HostSourceBinding {
+        source_key: host.source_key.clone(),
+        snapshot: next_lease.snapshot().clone(),
+    };
+    let fresh = read(&next_lease, options, &next_host, &query);
+    assert_ne!(fresh["projection"]["generation"], original["projection"]["generation"]);
+    assert_ne!(fresh["session"], original["session"]);
+    let references: (bool, bool) = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND id=?3 AND kind='current'),EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND id=?3 AND kind='history')",
+        params![config.namespace.as_str(), key, id.0],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(references, (false, true), "the real successor moves A out of Current");
+
+    // Retire only the test's History reference, leaving the active lease as A's
+    // sole retention authority. Catalog History metadata and Raw stay intact.
+    assert_eq!(db.execute(
+        "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND id=?3 AND kind='history'",
+        params![config.namespace.as_str(), key, id.0],
+    ).unwrap(), 1);
+    let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    crate::storage::sqlite::proof_generations::collect(&tx, config.namespace.as_str(), 64).unwrap();
+    tx.commit().unwrap();
+    for (query, expected) in [(&query, &original), (&history_query, &original_history)] {
+        let (snapshot, reply) = read_bound(&lease, options, &host, query, None, SessionSourceReadMode::LocalOrPinnedProvider, &crate::SelectedReadControl::default()).unwrap();
+        assert_eq!(body(reply), *expected, "both scopes retain the original presentation");
+        assert_eq!(snapshot.namespace, host.snapshot.namespace);
+        assert_eq!(snapshot.admission, host.snapshot.admission);
+        assert_eq!(snapshot.stream_epoch, host.snapshot.stream_epoch);
+        assert_eq!(snapshot.publication_generation, host.snapshot.publication_generation);
+        assert_eq!(snapshot.proof_generation, host.snapshot.proof_generation);
+        assert_eq!(snapshot.consumed_prefix, host.snapshot.consumed_prefix);
+    }
+    assert!(path.exists());
+}
+
+#[test]
 fn configured_semantic_selected57_l1_append_gc_reopen_and_unknown_ack() {
     use std::io::Write;
     let (f,_,options,inputs)=model_sources();
