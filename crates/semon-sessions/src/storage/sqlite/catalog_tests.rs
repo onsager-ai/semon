@@ -3605,6 +3605,7 @@ fn selected_observation_does_not_report_ready_after_a_lost_publication_cas() {
         .status,
         200
     );
+    assert_selected_runtime_observation(&fixture, "selected");
     assert_eq!(
         crate::session_transcript_range(
             &fixture.options,
@@ -3615,6 +3616,76 @@ fn selected_observation_does_not_report_ready_after_a_lost_publication_cas() {
         .status,
         200
     );
+}
+
+fn assert_selected_runtime_observation(fixture: &Fixture, key: &str) {
+    use crate::storage::catalog::CatalogSnapshot;
+
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "source").unwrap();
+    let mut db = binding.connection().unwrap();
+    let tx = db.transaction().unwrap();
+    let metadata: String = tx
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    let saved = row.query.as_ref().unwrap()["runtime"].as_str().unwrap();
+    assert!(saved.starts_with("source-runtime-v1:"));
+    let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+    let runtime = snapshot.runtime_generation(&fixture.options).unwrap();
+    assert_eq!(
+        snapshot
+            .runtime_observation(&fixture.options, &row, &runtime)
+            .unwrap()
+            .as_deref(),
+        Some(saved)
+    );
+}
+
+#[test]
+fn selected_projection_upgrade_preserves_admitted_query_runtime() {
+    let fixture = Fixture::new();
+    fixture.source("selected");
+    fixture.publish_existing();
+    let db = fixture.db();
+    assert_eq!(
+        db.execute(
+            "UPDATE main.session_slot_projections SET version=?1 WHERE namespace=semon_namespace() AND session_key='selected'",
+            [crate::slot_projection::VERSION + 1],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::session_transcript_range(&fixture.options, "source", "sid=selected&limit=1", None)
+            .status,
+        503
+    );
+    assert!(
+        crate::repair_session_overview(
+            &fixture.options,
+            "source",
+            "selected",
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+        )
+        .unwrap()
+    );
+    assert_selected_runtime_observation(&fixture, "selected");
+    for scope in ["current", "retained_history"] {
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            &format!("sid=selected&scope={scope}&limit=1"),
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert!(!body["entries"].as_array().unwrap().is_empty());
+    }
 }
 
 #[test]
