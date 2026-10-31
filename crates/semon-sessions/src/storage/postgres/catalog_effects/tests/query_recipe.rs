@@ -87,6 +87,11 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         Ok(())
     })
     .unwrap();
+    let port = snapshot::query::QueryCatalog {
+        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
+        generation: generation.clone(), options: options.clone(), captured: false,
+    };
+    assert_eq!(crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap(), Some(expected.clone()));
     for fault in [
         "corrupt",
         "digest",
@@ -334,6 +339,13 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         Ok(token)
     })
     .unwrap();
+    let mut pg_options = options.clone();
+    pg_options.source = crate::storage::HostSource::new(namespace.clone(), config.expected_stream_epoch.clone().unwrap()).unwrap().with_store(config.clone()).unwrap();
+    let port = snapshot::query::QueryCatalog {
+        pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
+        generation: generation.clone(), options: pg_options.clone(), captured: false,
+    };
+    assert_eq!(crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap().as_ref(), Some(expected));
     for sql in [
         "UPDATE semon_pg_native_selected_generations SET query_recipe=NULL WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
         "UPDATE semon_pg_native_selected_generations SET query_recipe='{'::bytea WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
@@ -365,5 +377,27 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         assert_eq!(result, Err(StorageError::Conflict));
         assert!(checked);
     }
+    // A genuine native successor hands the imported original to immutable
+    // History, preserving its existing producer proof and detached payload.
+    snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
+        let selected = held.catalog(&row.key, false)?.unwrap();
+        let next = super::native_history::advance(&pg_options, &selected, "query-recipe-import-next");
+        assert_eq!(held.load_query_recipe(&token).unwrap().as_ref(), Some(expected));
+        snapshot::with_admitted_snapshot(&pool, namespace, &control, &next, |view| {
+            let history = view.catalog(&row.key, true)?.unwrap();
+            let history_token = view.query_recipe_observation(Owner::History, &history).unwrap();
+            match (&token.residence, &history_token.residence) {
+                (QueryRecipeResidence::Immutable { generation: original, publication: original_publication, .. }, QueryRecipeResidence::Immutable { owner: crate::storage::query::QueryRecipeOwner::History, generation: retained, publication: retained_publication }) => {
+                    assert_eq!(original, retained);
+                    assert_eq!(original_publication, retained_publication);
+                }
+                _ => panic!("imported original lost its immutable History residence"),
+            }
+            assert_eq!(history_token.original, binding);
+            assert_eq!(view.load_query_recipe(&history_token).unwrap().as_ref(), Some(expected));
+            Ok(())
+        })?;
+        Ok(())
+    }).unwrap();
     fs::remove_dir_all(root).unwrap();
 }
