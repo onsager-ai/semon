@@ -157,7 +157,10 @@ impl Query {
                                 if part == *index {
                                     data.clone()
                                 } else {
-                                    Arc::new(crate::model::QueryData::identity(&source.options, now))
+                                    Arc::new(crate::model::QueryData::identity(
+                                        &source.options,
+                                        now,
+                                    ))
                                 },
                             )
                         })

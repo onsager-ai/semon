@@ -1501,9 +1501,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let related_key = oracle
         .rows
         .iter()
-        .find(|row| {
-            row.key == "related154" || row.native_ids.iter().any(|id| id == "related154")
-        })
+        .find(|row| row.key == "related154" || row.native_ids.iter().any(|id| id == "related154"))
         .expect("fixture publishes the related Claude subagent")
         .key
         .clone();
@@ -3639,12 +3637,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let row = snapshot
                     .catalog(&related_key, false)?
                     .ok_or(StorageError::ScopeChanged)?;
-                let edges = row
-                    .query
-                    .as_ref()
-                    .ok_or(StorageError::ScopeChanged)?["selected"]["edges"]
-                    .as_array()
-                    .ok_or(StorageError::ScopeChanged)?;
+                let edges =
+                    row.query.as_ref().ok_or(StorageError::ScopeChanged)?["selected"]["edges"]
+                        .as_array()
+                        .ok_or(StorageError::ScopeChanged)?;
                 let sources = edges
                     .iter()
                     .flat_map(|edge| {
