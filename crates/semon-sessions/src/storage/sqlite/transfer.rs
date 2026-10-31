@@ -73,6 +73,14 @@ fn transaction<T>(
     Ok(result)
 }
 
+#[cfg(test)]
+pub(crate) fn fixture_transaction<T>(
+    config: &StoreConfig,
+    operation: impl FnOnce(&Connection) -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    transaction(config, |inbox| operation(inbox.0))
+}
+
 pub(crate) fn begin(
     config: &StoreConfig,
     manifest: &SnapshotManifest,
