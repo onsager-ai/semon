@@ -7686,6 +7686,11 @@ impl SemanticModelBatch {
     pub(crate) fn prepared(&self) -> &PreparedSources {
         &self.prepared
     }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_mut_for_test(&mut self) -> &mut PreparedSources {
+        &mut self.prepared
+    }
 }
 
 pub(crate) fn prepare_semantic_batch(
