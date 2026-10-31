@@ -93,19 +93,17 @@ impl Snapshot<'_, '_> {
 
 impl ContextLookup for Snapshot<'_, '_> {
     fn details(&self, key: &str, source: &str) -> io::Result<Option<(Option<String>, bool)>> {
-        let Some(row) = self.catalog(key, false).map_err(io::Error::other)? else {
-            return Ok(None);
-        };
+        let current = self
+            .catalog(key, false)
+            .map_err(io::Error::other)?
+            .is_some_and(|row| row.lifecycle == crate::model::summary::CatalogLifecycle::Current);
         let Some(value) = self.trace_value_for_source(key, source)? else {
             return Ok(None);
         };
         let mut details = value["details"].clone();
         details["busy"] = value["busy"].clone();
         details["content_generation"] = value["content_generation"].clone();
-        Ok(Some((
-            Some(details.to_string()),
-            row.lifecycle == crate::model::summary::CatalogLifecycle::Current,
-        )))
+        Ok(Some((Some(details.to_string()), current)))
     }
     fn relative(&self, key: &str) -> io::Result<Option<String>> {
         self.catalog(key, false).map_err(io::Error::other)?.map(|row| {
