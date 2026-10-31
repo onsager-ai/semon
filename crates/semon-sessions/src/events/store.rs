@@ -3275,7 +3275,9 @@ impl SqliteStore {
                             )
                             .map_err(|error| {
                                 #[cfg(test)]
-                                eprintln!("catalog_publication_probe stage=overview_publish_failed row_index={_position}");
+                                eprintln!(
+                                    "catalog_publication_probe stage=overview_publish_failed row_index={_position}"
+                                );
                                 failure(error)
                             })?;
                             metadata_measurements.record("overview", started, 1);
