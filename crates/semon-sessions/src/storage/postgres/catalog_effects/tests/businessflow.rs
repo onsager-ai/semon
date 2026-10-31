@@ -1156,16 +1156,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let mut withdraw_options = history_options.clone();
     withdraw_options.cache = oracle.root.join("oracle-withdraw201");
-    // Replay the actual parent continuation and recorded PID/Facts context
-    // consumed before PG withdrawal. Retained fields use that live context;
-    // comparing them with the earlier local-machine oracle is not parity.
+    // Keep the isolated append oracle at 00:00:02; its capture is at 00:00:03.
     let source_append = format!(
         "{}\n",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
     );
-    let facts_append = format!(
+    // The original parent prefix already has records through 00:00:04. These
+    // later source and Facts writes make retained-list last differ from the
+    // exact History row while preserving the same ordinary producer path.
+    let parent_source_append = format!(
         "{}\n",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:04Z","message":{"role":"user","content":"positive Facts source continuation"}})
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:05Z","message":{"role":"user","content":"sanitized continuation"}})
+    );
+    let parent_facts_append = format!(
+        "{}\n",
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":"positive Facts source continuation"}})
     );
     let pid_bytes = serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
     let parent_before_withdrawal = fs::read(&claude_parent).unwrap();
@@ -1280,8 +1285,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .append(true)
         .open(&claude_parent)
         .unwrap();
-    parent.write_all(source_append.as_bytes()).unwrap();
-    parent.write_all(facts_append.as_bytes()).unwrap();
+    parent.write_all(parent_source_append.as_bytes()).unwrap();
+    parent.write_all(parent_facts_append.as_bytes()).unwrap();
     drop(parent);
     let oracle_pid = options.claude_home.join("sessions/4242.json");
     fs::create_dir_all(oracle_pid.parent().unwrap()).unwrap();
@@ -1307,7 +1312,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let continued_parent_source = parent_source(&continued_parent_current);
     assert_eq!(
         continued_parent_source.offset,
-        original_parent_source.offset + (source_append.len() + facts_append.len()) as u64,
+        original_parent_source.offset
+            + (parent_source_append.len() + parent_facts_append.len()) as u64,
         "SQLite Current consumes both parent continuations"
     );
     let continued_parent_history =
@@ -3793,7 +3799,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     use std::io::Write;
     let path = inputs[0].full_path(&options);
-    let append = source_append;
+    let append = parent_source_append;
     let raw_store = || {
         crate::storage::postgres::index_store::open(
             pool.clone(),
@@ -3943,7 +3949,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .ingest(&format!("{:064x}", 128), &path, "claude")
         .unwrap();
     let continued =
-        crate::model::prepare_sources(&options, &mut resumed, &inputs, 1790812803000).unwrap();
+        crate::model::prepare_sources(&options, &mut resumed, &inputs, 1790812807000).unwrap();
     assert_eq!(continued.rows.len(), prepared.rows.len());
     assert_eq!(continued.rows[0].key, prepared.rows[0].key);
     assert_eq!(
@@ -4004,7 +4010,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &options,
                 &stage_inputs(&options, &batch),
                 &batch,
-                1790812803000,
+                1790812807000,
             )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
@@ -4465,7 +4471,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 false,
                 total,
                 100,
-                1790812803000,
+                1790812807000,
                 &page,
             )
             .map_err(|_| StorageError::ScopeChanged)?;
@@ -5225,7 +5231,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .unwrap();
     let facts_intent = writer.intent();
-    let extra = facts_append;
+    let extra = parent_facts_append;
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     file.write_all(extra.as_bytes()).unwrap();
     file.sync_all().unwrap();
