@@ -12960,10 +12960,16 @@ mod tests {
                 } else {
                     Connection::open(options.cache.with_extension("sqlite3")).unwrap()
                 };
-                let predicate = if configured { "WHERE namespace='source-a'" } else { "" };
+                let predicate = if configured {
+                    "WHERE namespace='source-a'"
+                } else {
+                    ""
+                };
                 let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
                 let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
-                cache.begin_semantic_stage_with_journal(&[seed], &runtime, true).unwrap();
+                cache
+                    .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+                    .unwrap();
                 let mut paged = false;
                 let mut refused = false;
                 for _ in 0..256 {
@@ -12971,7 +12977,11 @@ mod tests {
                     match cache.semantic_batch(64) {
                         Err(error) => {
                             assert_eq!(error.to_string(), "semantic_physical_owner_source_budget");
-                            assert_eq!(database_state(&db), before, "failed owner transaction is byte-identical; configured={configured}");
+                            assert_eq!(
+                                database_state(&db),
+                                before,
+                                "failed owner transaction is byte-identical; configured={configured}"
+                            );
                             refused = true;
                             break;
                         }
@@ -12981,24 +12991,66 @@ mod tests {
                             if batch.paths.is_empty() {
                                 continue;
                             }
-                            let selected = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+                            let selected = inputs
+                                .iter()
+                                .filter(|input| {
+                                    batch.paths.contains(
+                                        &input.full_path(options).to_string_lossy().into_owned(),
+                                    )
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
                             assert_eq!(selected.len(), batch.paths.len());
-                            cache.prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000).unwrap();
+                            cache
+                                .prepare_semantic_model_batch(
+                                    options,
+                                    &selected,
+                                    &batch,
+                                    1_790_000_000_000,
+                                )
+                                .unwrap();
                         }
                         Ok(None) => panic!("filename owner stage disappeared"),
                     }
                 }
-                assert!(paged && refused, "filename cursor precedes actual owner capacity refusal; configured={configured}");
+                assert!(
+                    paged && refused,
+                    "filename cursor precedes actual owner capacity refusal; configured={configured}"
+                );
                 let histogram = db.prepare(&format!("SELECT native_id,count(*) FROM catalog_semantic_inputs {predicate} GROUP BY native_id ORDER BY native_id")).unwrap().query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                assert_eq!(histogram, vec![("claude72-0".to_owned(), 1), ("peer81-target".to_owned(), 65)]);
-                let links = db.prepare(&format!("SELECT links FROM files {predicate} ORDER BY path")).unwrap().query_map([], |r| r.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert_eq!(
+                    histogram,
+                    vec![
+                        ("claude72-0".to_owned(), 1),
+                        ("peer81-target".to_owned(), 65)
+                    ]
+                );
+                let links = db
+                    .prepare(&format!(
+                        "SELECT links FROM files {predicate} ORDER BY path"
+                    ))
+                    .unwrap()
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap();
                 assert_eq!(links.len(), 66);
                 for links in links {
-                    assert_eq!(serde_json::from_str::<crate::events::Links>(&links).unwrap(), crate::events::Links::default());
+                    assert_eq!(
+                        serde_json::from_str::<crate::events::Links>(&links).unwrap(),
+                        crate::events::Links::default()
+                    );
                 }
                 assert_eq!(db.query_row(&format!("SELECT count(*) FROM session_catalog {predicate} {} lifecycle='current'", if configured { "AND" } else { "WHERE" }), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
                 assert_eq!(db.query_row(&format!("SELECT count(*) FROM catalog_semantic_sources {predicate} {} ack_done=1", if configured { "AND" } else { "WHERE" }), [], |r| r.get::<_, i64>(0)).unwrap(), 0);
-                assert!(database_state(&db).into_iter().filter(|(table, _)| table.starts_with("storage_proof_") || table == "storage_semantic_publications").all(|(_, rows)| rows.is_empty()), "capacity refusal creates no proof or publication");
+                assert!(
+                    database_state(&db)
+                        .into_iter()
+                        .filter(|(table, _)| table.starts_with("storage_proof_")
+                            || table == "storage_semantic_publications")
+                        .all(|(_, rows)| rows.is_empty()),
+                    "capacity refusal creates no proof or publication"
+                );
             }
         }
 
@@ -13010,19 +13062,47 @@ mod tests {
             // one and 64 sources, not 65 distinct owners named by sessionId.
             let inputs = filename_peer_inputs(options, 65);
             let mut ordinary = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            let mut expected = crate::model::prepare_sources(options, &mut ordinary, &inputs, 1_790_000_000_000).unwrap();
-            assert_eq!(expected.rows.len(), 2);
-            let mut source_counts = expected.rows.iter().map(|row| row.sources.len()).collect::<Vec<_>>();
+            let mut expected_rows = Vec::new();
+            let mut expected_relations = BTreeMap::new();
+            let mut expected_slots = BTreeMap::new();
+            for cohort in [&inputs[..1], &inputs[1..]] {
+                let prepared = crate::model::prepare_sources(
+                    options,
+                    &mut ordinary,
+                    cohort,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                expected_rows.extend(prepared.rows);
+                expected_relations.extend(prepared.relationships.relations);
+                expected_slots.extend(
+                    prepared
+                        .transcripts
+                        .into_iter()
+                        .map(|projection| (projection.key, projection.slots)),
+                );
+            }
+            assert_eq!(expected_rows.len(), 2);
+            let mut source_counts = expected_rows
+                .iter()
+                .map(|row| row.sources.len())
+                .collect::<Vec<_>>();
             source_counts.sort();
             assert_eq!(source_counts, [1, 64]);
             let mut admitted = open(&f.config);
             claude_ingest(&mut admitted, options, &inputs);
             let binding = admitted.query_runtime_binding().unwrap().unwrap();
             let observations = crate::native_evidence::RuntimeObservations::new(options);
-            for row in &mut expected.rows {
+            for row in &mut expected_rows {
                 let cwds = admitted.runtime_source_cwds(&row.sources).unwrap();
                 let scoped = observations.scope(row, &cwds).unwrap();
-                row.query.as_mut().unwrap()["runtime"] = serde_json::json!(expected_source_runtime_witness(binding.namespace.as_str(), binding.admission, binding.stream_epoch.as_str(), &scoped));
+                row.query.as_mut().unwrap()["runtime"] =
+                    serde_json::json!(expected_source_runtime_witness(
+                        binding.namespace.as_str(),
+                        binding.admission,
+                        binding.stream_epoch.as_str(),
+                        &scoped
+                    ));
             }
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
@@ -13034,20 +13114,42 @@ mod tests {
             let mut actual_slots = BTreeMap::new();
             let mut acknowledged = BTreeSet::new();
             let progress = physical_groups::finish_observing(
-                &mut admitted, &f, options, &inputs, Some("claudeid"),
+                &mut admitted,
+                &f,
+                options,
+                &inputs,
+                Some("claudeid"),
                 |_, batch, prepared| {
                     for row in &prepared.rows {
-                        let reference = expected.rows.iter().find(|expected| expected.key == row.key).unwrap();
-                        assert_eq!(serde_json::to_value(row).unwrap(), serde_json::to_value(reference).unwrap());
-                        let sources = row.sources.iter().map(|source| source.path.to_string_lossy().into_owned()).collect::<BTreeSet<_>>();
-                        assert_eq!(sources, batch.paths.iter().cloned().collect(), "complete physical owner is published atomically");
+                        let reference = expected_rows
+                            .iter()
+                            .find(|expected| expected.key == row.key)
+                            .unwrap();
+                        assert_eq!(
+                            serde_json::to_value(row).unwrap(),
+                            serde_json::to_value(reference).unwrap()
+                        );
+                        let sources = row
+                            .sources
+                            .iter()
+                            .map(|source| source.path.to_string_lossy().into_owned())
+                            .collect::<BTreeSet<_>>();
+                        assert_eq!(
+                            sources,
+                            batch.paths.iter().cloned().collect(),
+                            "complete physical owner is published atomically"
+                        );
                         actual_rows.insert(row.key.clone(), serde_json::to_value(row).unwrap());
                     }
                     for (id, relation) in &prepared.relationships.relations {
-                        actual_relations.insert(id.clone(), serde_json::to_value(relation).unwrap());
+                        actual_relations
+                            .insert(id.clone(), serde_json::to_value(relation).unwrap());
                     }
                     for projection in &prepared.transcripts {
-                        actual_slots.insert(projection.key.clone(), serde_json::to_value(&projection.slots).unwrap());
+                        actual_slots.insert(
+                            projection.key.clone(),
+                            serde_json::to_value(&projection.slots).unwrap(),
+                        );
                     }
                     acknowledged.extend(batch.paths.iter().cloned());
                     assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND ack_done=1", [], |r| r.get::<_, i64>(0)).unwrap(), acknowledged.len() as i64);
@@ -13055,10 +13157,34 @@ mod tests {
             );
             assert!(progress.frontier_paged && progress.restarted_frontier);
             assert!(progress.publications >= 2 && progress.restarted_between_groups);
-            assert_eq!(acknowledged, inputs.iter().map(|input| input.full_path(options).to_string_lossy().into_owned()).collect());
-            assert_eq!(actual_rows, expected.rows.iter().map(|row| (row.key.clone(), serde_json::to_value(row).unwrap())).collect());
-            assert_eq!(actual_relations, expected.relationships.relations.iter().map(|(id, relation)| (id.clone(), serde_json::to_value(relation).unwrap())).collect());
-            assert_eq!(actual_slots, expected.transcripts.iter().map(|projection| (projection.key.clone(), serde_json::to_value(&projection.slots).unwrap())).collect());
+            assert_eq!(
+                acknowledged,
+                inputs
+                    .iter()
+                    .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                    .collect()
+            );
+            assert_eq!(
+                actual_rows,
+                expected_rows
+                    .iter()
+                    .map(|row| (row.key.clone(), serde_json::to_value(row).unwrap()))
+                    .collect()
+            );
+            assert_eq!(
+                actual_relations,
+                expected_relations
+                    .iter()
+                    .map(|(id, relation)| (id.clone(), serde_json::to_value(relation).unwrap()))
+                    .collect()
+            );
+            assert_eq!(
+                actual_slots,
+                expected_slots
+                    .iter()
+                    .map(|(key, slots)| (key.clone(), serde_json::to_value(slots).unwrap()))
+                    .collect()
+            );
             assert_eq!(f.db().query_row("SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
             claude_ingest(&mut ordinary, options, &inputs);
             ordinary
