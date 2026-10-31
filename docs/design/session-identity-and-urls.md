@@ -24,9 +24,9 @@ tuple `("native-start", canonical session key, UUID)`, so opaque values and
 delimiters cannot alias. The current hash is the existing 64-bit FNV-1a stable
 ID encoding (`t` followed by 16 lowercase hexadecimal digits); as with any
 fixed-width hash, collisions remain possible. If the first grouped event has no
-UUID, the existing `<session key>:<native file ID>:<byte offset>` ID remains.
-The turn's `file` and `offset` fields continue to identify its native start
-location.
+nonempty UUID, the existing `<session key>:<native file ID>:<byte offset>` ID
+remains. The turn's `file` and `offset` fields continue to identify its native
+start location.
 
 Distinct handoff-free turn starts within one canonical session need distinct
 native UUIDs for distinct IDs. Repeated start UUIDs are not merged or
