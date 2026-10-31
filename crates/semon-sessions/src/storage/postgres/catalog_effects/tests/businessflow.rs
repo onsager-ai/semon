@@ -1514,12 +1514,38 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::copy(input.full_path(&options), destination).unwrap();
     }
+    // Query completion only derives live Query data. Publish the real model
+    // first so the append replaces an admitted Catalog/recipe generation.
+    let mut append_oracle_cache =
+        EventCache::open_scoped(&append_oracle_options.cache, &append_oracle_options.source)
+            .unwrap();
+    let append_prefix_prepared = crate::model::prepare_sources(
+        &append_oracle_options,
+        &mut append_oracle_cache,
+        &inputs,
+        1790812802000,
+    )
+    .unwrap();
+    let append_prefix_generation = append_oracle_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &append_prefix_prepared.rows,
+                transcripts: Some(&append_prefix_prepared.transcripts),
+                observations: append_prefix_prepared.presentation_observations(),
+            },
+            append_prefix_prepared.base_generation.as_deref(),
+        )
+        .expect("SQLite same-append original Catalog publication")
+        .expect("SQLite original Catalog generation");
     let mut append_oracle_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(recent_machine.into(), append_oracle_options)]),
+        crate::SessionSources::with_machines(vec![(
+            recent_machine.into(),
+            append_oracle_options.clone(),
+        )]),
     ));
     let prefix_list = append_oracle_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
-        .expect("SQLite same-append prefix publication");
+        .expect("SQLite same-append prefix Query");
     let prefix_ids = prefix_list["sessions"].as_array().unwrap();
     let append_oracle_key = prefix_ids
         .iter()
@@ -1594,6 +1620,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         append_history_identity.read_scope,
         crate::CatalogReadScope::RetainedHistory
     );
+    assert_eq!(append_history_identity.generation, append_prefix_generation);
     let saved_prefixes = append_history_identity
         .source_refs
         .iter()
@@ -1651,6 +1678,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         append_history_prefix["content_observation"]["state"],
         "cached"
     );
+    assert_eq!(
+        append_history_prefix["projection"]["total"].as_u64(),
+        Some(append_history_prefix["entries"].as_array().unwrap().len() as u64),
+        "SQLite original prefix range includes every recipe"
+    );
+    let append_writer = crate::SessionSourceWrite::begin(
+        &append_oracle_options,
+        &inputs[0],
+        None,
+        raw[0].len() as u64,
+    )
+    .unwrap();
     let mut append_oracle_file = fs::OpenOptions::new()
         .append(true)
         .open(&append_oracle_path)
@@ -1660,9 +1699,56 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap();
     append_oracle_file.sync_all().unwrap();
     drop(append_oracle_file);
-    append_oracle_query
-        .call_at("list_sessions", &serde_json::json!({}), 1790812803000)
-        .expect("SQLite same-append successor publication");
+    append_writer
+        .complete(raw[0].len() as u64 + source_append.len() as u64)
+        .unwrap();
+    let append_successor_prepared = crate::model::prepare_sources(
+        &append_oracle_options,
+        &mut append_oracle_cache,
+        &inputs,
+        1790812803000,
+    )
+    .unwrap();
+    assert_eq!(
+        append_successor_prepared.base_generation.as_deref(),
+        Some(append_prefix_generation.as_str())
+    );
+    let append_successor_generation = append_oracle_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &append_successor_prepared.rows,
+                transcripts: Some(&append_successor_prepared.transcripts),
+                observations: append_successor_prepared.presentation_observations(),
+            },
+            append_successor_prepared.base_generation.as_deref(),
+        )
+        .expect("SQLite same-append successor Catalog publication")
+        .expect("SQLite successor Catalog generation");
+    assert_ne!(append_successor_generation, append_prefix_generation);
+    let append_current_identity = crate::session_catalog_identity(
+        &append_oracle_options,
+        recent_machine,
+        &appended_key,
+    )
+    .unwrap()
+    .expect("SQLite append successor has a Current identity");
+    assert_eq!(append_current_identity.generation, append_successor_generation);
+    let appended_offset = |identity: &crate::CatalogSessionIdentity| {
+        identity
+            .source_refs
+            .iter()
+            .find(|reference| {
+                reference.source.root == "claude" && reference.source.path == append_relative_path
+            })
+            .unwrap()
+            .source
+            .offset
+    };
+    assert_eq!(
+        appended_offset(&append_current_identity),
+        appended_offset(&append_history_identity) + source_append.len() as u64,
+        "SQLite Current consumes the actual appended native record"
+    );
     let append_history_after = crate::session_transcript_range_with_mode(
         &append_oracle_options,
         recent_machine,
@@ -1681,6 +1767,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(
         append_history_after["identity"]["read_scope"],
         "retained_history"
+    );
+    assert_eq!(
+        append_history_after["identity"]["generation"],
+        append_successor_generation
     );
     assert_eq!(
         append_history_after["identity"]["source_refs"]
@@ -1706,6 +1796,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "SQLite History keeps the original exact source prefix after append"
     );
     drop(append_oracle_query);
+    drop(append_oracle_cache);
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
