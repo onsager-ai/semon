@@ -287,6 +287,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
 
 #[test]
 fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt() {
+    use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
     let root = root();
     let source = sqlite(&root, "query-recipe-import");
@@ -355,9 +356,12 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         }
         let mut complete = false;
         for _ in 0..256 {
-            let result = cache
-                .publish_semantic_catalog(&batch, model.prepared())
-                .unwrap();
+            // Author the payload at its immutable INSERT from this exact
+            // prepared model; all ordinary publication checks still run.
+            let result = with_prepared_query_recipe_for_test(|| {
+                cache.publish_semantic_catalog(&batch, model.prepared())
+            })
+            .unwrap();
             if result.0 == crate::events::Outcome::Written {
                 assert!(result.1.is_some());
                 complete = true;
@@ -391,8 +395,25 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         row,
     )
     .unwrap();
-    assert_eq!(tx.execute("UPDATE main.session_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap(), 1);
-    assert!(tx.execute("UPDATE main.storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap() > 0);
+    let current_payload: Option<String> = tx
+        .query_row(
+            "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3",
+            rusqlite::params![source.namespace.as_str(), row.key, compact.metadata],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        current_payload.is_none(),
+        "the production Current writer stays inactive"
+    );
+    let immutable_payload: Option<String> = tx
+        .query_row(
+            "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND metadata=?3",
+            rusqlite::params![source.namespace.as_str(), row.key, compact.metadata],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(immutable_payload.as_ref(), Some(payload));
     tx.commit().unwrap();
     drop(db);
     drop(cache);
