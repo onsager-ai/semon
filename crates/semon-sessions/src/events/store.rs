@@ -6528,9 +6528,10 @@ mod tests {
         for (_, counts) in records {
             assert_eq!(counts.skipped, 1);
             assert_eq!(
-                counts.statements, 7,
-                "only the transaction and committed witness probes may execute"
+                counts.statements, 6,
+                "three current-contract probes and three witness-stamp probes execute"
             );
+            assert_eq!(counts.schema_probes, 1);
             assert_eq!(counts.rows, 0);
             assert_eq!(counts.factory_opens, 0);
             assert_eq!(counts.committed_changes, 0);
@@ -6722,6 +6723,117 @@ mod tests {
     }
 
     #[test]
+    fn recovery_witness_checks_marker_created_by_ack_trigger() {
+        let root = scratch("recovery-witness-ack-marker");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        store
+            .connection
+            .execute_batch(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after','');",
+            )
+            .unwrap();
+        let cursor = store.observation_journal.recovery_cursor().unwrap();
+        let operation = SourceOperation::capture(
+            fixture_namespace().as_str(),
+            "recover",
+            &serde_json::to_vec(&cursor).unwrap(),
+        );
+        store
+            .observation_journal
+            .persist_intent(&SourceIntent::Recover {
+                operation: operation.clone(),
+                cursor: cursor.clone(),
+            })
+            .unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;")
+            .unwrap();
+
+        let (_, done) = store
+            .observation_journal
+            .recover(&operation, cursor.as_deref())
+            .unwrap();
+        assert!(done);
+        assert!(
+            !store
+                .observation_journal
+                .recovery_is_current()
+                .unwrap(),
+            "an ACK trigger's marker must prevent a completed recovery witness"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_witness_requalifies_mutable_source_journal_rows() {
+        for mutation in [
+            "DELETE FROM storage_source_journal WHERE namespace='fixture-source';",
+            "UPDATE storage_source_journal SET revision=0 WHERE namespace='fixture-source';",
+        ] {
+            let root = scratch("recovery-witness-journal-row");
+            let path = root.join("index.sqlite3");
+            let (mut store, _) = opened(&path);
+            assert!(store.discover_recovery_sources().unwrap());
+            store
+                .discover_catalog_sources(&["/claimed.jsonl".into()], false)
+                .unwrap();
+            store.connection.execute_batch(mutation).unwrap();
+            let changes = store.connection.total_changes();
+            assert!(
+                store.discover_recovery_sources().is_err(),
+                "invalid mutable journal row must refuse witness promotion: {mutation}"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        let root = scratch("discovery-witness-owned-journal-row");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let _recording = crate::native_timing::catalog_commit_tests::recording(true);
+        assert!(store.discover_recovery_sources().unwrap());
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch("CREATE TEMP TRIGGER corrupt_discovery_journal_revision AFTER INSERT ON source_observation_receipts WHEN NEW.namespace=semon_namespace() BEGIN UPDATE main.storage_source_journal SET revision=0 WHERE namespace=semon_namespace(); END;")
+            .unwrap();
+        crate::native_timing::take_discovery_records();
+        assert!(
+            store
+                .discover_catalog_sources(&["/owned-corruption.jsonl".into()], false)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/owned-corruption.jsonl'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .committed_changes,
+            0
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn event_cache_uses_owner_committed_discovery_witness() {
         let root = scratch("producer-owner-witness");
         let path = root.join("index.sqlite3");
@@ -6756,7 +6868,11 @@ mod tests {
         assert_eq!(records.len(), 2);
         for (_, counts) in records {
             assert_eq!(counts.skipped, 1);
-            assert_eq!(counts.statements, 7);
+            assert_eq!(
+                counts.statements, 6,
+                "three current-contract probes and three witness-stamp probes execute"
+            );
+            assert_eq!(counts.schema_probes, 1);
             assert_eq!(counts.rows, 0);
             assert_eq!(counts.factory_opens, 0);
             assert_eq!(counts.committed_changes, 0);
