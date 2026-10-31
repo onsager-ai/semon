@@ -9,7 +9,7 @@ const PAGE: i64 = 64;
 const OWNED: &[(&str, &str)] = &[
     (
         "catalog_rows",
-        "key_digest,session_key,metadata,last_ms,harness,repo,model",
+        "key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model",
     ),
     (
         "catalog_sources",

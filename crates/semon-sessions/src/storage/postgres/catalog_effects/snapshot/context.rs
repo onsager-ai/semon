@@ -112,29 +112,82 @@ impl ContextLookup for Snapshot<'_, '_> {
         }).transpose()
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
-        use crate::storage::catalog::CatalogSnapshot;
-        let rows = self.rows(
-            &crate::catalog::Request::parse("limit=64")
-                .map_err(|_| io::Error::other(StorageError::InvalidArguments))?,
-        )?;
-        if rows.len() > 64 {
-            return Err(io::Error::other(StorageError::Busy));
-        }
+        // Match SQLite's 101-node recursive bound while reading only indexed
+        // children of the selected family. Truncated membership follows the
+        // stable key-digest index order; returned keys remain lexically sorted.
+        const FAMILY_NODES: usize = 101;
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| io::Error::other(StorageError::Unavailable))?;
+        tx.check().map_err(io::Error::other)?;
+        let namespace = tx.namespace.as_str().as_bytes();
+        let generation = self.generation.as_bytes();
         let mut known = std::collections::BTreeSet::from([key.to_owned()]);
-        loop {
-            let before = known.len();
-            for row in &rows {
-                let value = serde_json::to_value(row).map_err(io::Error::other)?;
-                if value["parent"]
-                    .as_str()
-                    .is_some_and(|parent| known.contains(parent))
-                {
-                    known.insert(row.key.clone());
+        let mut frontier = std::collections::BTreeSet::from([key.to_owned()]);
+        while !frontier.is_empty() && known.len() < FAMILY_NODES {
+            let mut next = std::collections::BTreeSet::new();
+            for parent in &frontier {
+                let remaining = FAMILY_NODES - known.len() - next.len();
+                if remaining == 0 {
+                    break;
+                }
+                let parent_digest = digest(parent.as_bytes());
+                let limit = i64::try_from(remaining)
+                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                let visited = known
+                    .iter()
+                    .chain(next.iter())
+                    .map(|known| known.as_bytes().to_vec())
+                    .collect::<Vec<_>>();
+                let rows = tx
+                    .driver
+                    .query(
+                        "SELECT CASE WHEN octet_length(parent_key)<=1048576 THEN parent_key END,parent_digest,key_digest,CASE WHEN octet_length(session_key)<=1048576 THEN session_key END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND parent_digest=$3 AND NOT (session_key=ANY($5::bytea[])) ORDER BY key_digest LIMIT $4",
+                        &[
+                            &namespace,
+                            &generation,
+                            &parent_digest,
+                            &limit,
+                            &visited,
+                        ],
+                    )
+                    .map_err(sqlstate::error)
+                    .map_err(io::Error::other)?;
+                tx.check().map_err(io::Error::other)?;
+                for row in rows {
+                    let parent_key = row
+                        .get::<_, Option<Vec<u8>>>(0)
+                        .ok_or(StorageError::Busy)
+                        .map_err(io::Error::other)?;
+                    let parent_digest = row
+                        .get::<_, Option<Vec<u8>>>(1)
+                        .ok_or(StorageError::ScopeChanged)
+                        .map_err(io::Error::other)?;
+                    let key_digest = row.get::<_, Vec<u8>>(2);
+                    let session_key = row
+                        .get::<_, Option<Vec<u8>>>(3)
+                        .ok_or(StorageError::Busy)
+                        .map_err(io::Error::other)?;
+                    if parent_key.as_slice() != parent.as_bytes()
+                        || parent_digest != digest(&parent_key)
+                        || key_digest != digest(&session_key)
+                    {
+                        return Err(io::Error::other(StorageError::ScopeChanged));
+                    }
+                    crate::selected_read::charge(
+                        64,
+                        parent_key.len()
+                            + parent_digest.len()
+                            + key_digest.len()
+                            + session_key.len(),
+                    )
+                    .map_err(|_| io::Error::other(StorageError::Busy))?;
+                    next.insert(text(Some(session_key)).map_err(io::Error::other)?);
                 }
             }
-            if known.len() == before {
-                break;
-            }
+            known.extend(next.iter().cloned());
+            frontier = next;
         }
         known.remove(key);
         Ok(known.into_iter().collect())
@@ -198,3 +251,6 @@ impl ContextLookup for Snapshot<'_, '_> {
             .transpose()
     }
 }
+
+#[cfg(test)]
+mod tests;
