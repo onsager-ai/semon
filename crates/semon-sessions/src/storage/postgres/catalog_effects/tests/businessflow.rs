@@ -1550,9 +1550,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut retained_options = withdraw_options.clone();
     retained_options.all = options.all;
     retained_options.since = options.since;
-    let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(recent_machine.into(), retained_options.clone())]),
-    ));
+    let mut retained_query =
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(recent_machine.into(), retained_options.clone())],
+        )));
     let oracle_retained_reads = oracle_withdrawn
         .iter()
         .map(|row| {
