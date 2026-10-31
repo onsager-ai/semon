@@ -11784,6 +11784,11 @@ mod tests {
             let mut raw = fs::read_to_string(&path).unwrap();
             raw.push('\n');
             fs::write(&path, raw).unwrap();
+            // Reobserve changed Raw under a new native-ingest request. Reusing
+            // the prior operation ID would replay its completed receipt.
+            cache
+                .ingest(&"b".repeat(64), &path, "claude")
+                .unwrap();
             let before = shared_state(&f);
             assert!(
                 cache
@@ -11878,11 +11883,15 @@ mod tests {
             );
             drop(cache);
             let mut cache = open(&f.config);
-            for input in &inputs[1..] {
+            // Renaming restored peers changes their Stat witness. Give each
+            // reobservation a fresh request ID so the native reader refreshes it.
+            for (i, input) in inputs[1..].iter().enumerate() {
                 let path = input.full_path(options);
                 fs::rename(path.with_extension("held"), path).unwrap();
+                cache
+                    .ingest(&format!("{:064x}", 10_000 + i), &path, "claude")
+                    .unwrap();
             }
-            claude_ingest(&mut cache, options, &inputs);
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
             let seed = inputs[0].full_path(options).to_string_lossy().into_owned();
             cache
