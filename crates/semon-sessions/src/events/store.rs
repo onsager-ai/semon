@@ -6027,31 +6027,11 @@ mod tests {
         ) -> Result<(), StoreError>;
     }
 
-    fn source_journal(path: &Path) -> Result<Box<dyn SourceObservationStore>, StoreError> {
-        let epoch: String = Connection::open(path)
-            .and_then(|db| {
-                db.query_row(
-                    "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .map_err(|error| StoreError::Failed(error.to_string()))?;
-        let config = crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite {
-                database: path.to_owned(),
-            },
-            namespace: fixture_namespace(),
-            expected_stream_epoch: Some(epoch),
-        };
-        config.admit_namespace().map_err(StoreError::Configured)?;
-        crate::storage::sqlite::source_journal::open(&config).map_err(StoreError::Configured)
-    }
-
     impl TestSourceObservations for SqliteStore {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
-            let mut journal = source_journal(&self.path)?;
+            let mut journal =
+                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
             if journal
                 .recovery_is_current()
                 .map_err(StoreError::Configured)?
@@ -6082,7 +6062,8 @@ mod tests {
             complete: bool,
         ) -> Result<(), StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
-            let mut journal = source_journal(&self.path)?;
+            let mut journal =
+                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
             if journal
                 .discovery_is_current(paths, complete)
                 .map_err(StoreError::Configured)?
