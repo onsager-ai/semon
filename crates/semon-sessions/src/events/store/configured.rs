@@ -4888,6 +4888,84 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority() {
+        use crate::storage::query::QueryRecipeLoadError;
+        use crate::storage::sqlite::proof_generations::{
+            CatalogObservationOwner, load_query_recipe, query_recipe_observation,
+        };
+        let (fixture, _, options, inputs) = model_sources();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap(),
+        )
+        .unwrap();
+        let path = inputs[0].full_path(&options[0]);
+        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        let (batch, model) = model_ready(
+            &fixture,
+            &mut cache,
+            &options[0],
+            &inputs[0],
+            "recipe-immutable",
+        );
+        assert_eq!(
+            cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        let reader = crate::storage::NativeReaderBinding::Semantic(
+            NativeOwnership::restore(&fixture.config).unwrap(),
+        );
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let binding = reader.runtime_binding_at(&db).unwrap();
+        let row = &model.prepared().rows[0];
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
+                [fixture.config.namespace.as_str()],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        let token =
+            query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
+        assert!(
+            matches!(
+                load_query_recipe(&db, &reader, &token),
+                Err(QueryRecipeLoadError::MissingPayload)
+            ),
+            "the real immutable producer authenticates; its payload hook remains unconnected"
+        );
+        let namespace = fixture.config.namespace.as_str();
+        for sql in [
+            "DELETE FROM main.meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
+            "DELETE FROM storage_proof_refs WHERE namespace=?1 AND kind='current'",
+            "DELETE FROM storage_proof_presentations WHERE namespace=?1",
+            "UPDATE storage_namespaces SET admission_generation=admission_generation+2 WHERE namespace=?1",
+        ] {
+            db.execute_batch("SAVEPOINT recipe_authority").unwrap();
+            db.execute(sql, [namespace]).unwrap();
+            assert!(
+                load_query_recipe(&db, &reader, &token).is_err(),
+                "a prior token cannot bypass changed immutable authority: {sql}"
+            );
+            db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
+                .unwrap();
+        }
+        assert!(matches!(
+            load_query_recipe(&db, &reader, &token),
+            Err(QueryRecipeLoadError::MissingPayload)
+        ));
+    }
+
+    #[test]
     fn configured_semantic_reprice_preserves_stage_only_authority() {
         use crate::storage::catalog::CatalogObservationOwner;
         use crate::storage::native_events::NativeEventStore;
@@ -6422,6 +6500,7 @@ mod tests {
             overview: None,
             trace: None,
             query: None,
+            query_recipe: None,
             lifecycle: Default::default(),
             key: key.clone(),
             name: key.clone(),

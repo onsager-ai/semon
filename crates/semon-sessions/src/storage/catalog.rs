@@ -559,6 +559,14 @@ pub(crate) trait CatalogSnapshot {
     fn has_history(&self, key: &str) -> io::Result<bool>;
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>>;
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool>;
+    /// Read only the payload belonging to the store-issued exact observation.
+    /// This never selects a cohort from a display lifecycle or latest header.
+    fn selected_query_recipe(
+        &self,
+        _observation: &super::query::QueryRecipeObservation,
+    ) -> io::Result<crate::query_projection::SelectedRecipe> {
+        Err(io::Error::other(super::StorageError::Unavailable))
+    }
     fn selected_details(
         &self,
         key: &str,

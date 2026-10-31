@@ -3065,6 +3065,7 @@ mod tests {
             overview: None,
             trace: None,
             query: None,
+            query_recipe: None,
             lifecycle: crate::model::summary::CatalogLifecycle::Current,
             key: "old".into(),
             name: "old".into(),

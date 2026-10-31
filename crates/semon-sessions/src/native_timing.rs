@@ -1463,6 +1463,7 @@ mod tests {
                     overview: None,
                     trace: None,
                     query: Some(serde_json::json!({"version":1,"state":"off","last":version})),
+                    query_recipe: None,
                     lifecycle: crate::model::summary::CatalogLifecycle::Current,
                     key: key.clone(),
                     name: format!("Probe {position}"),

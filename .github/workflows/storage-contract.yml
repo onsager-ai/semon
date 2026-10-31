@@ -63,6 +63,28 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Selected Query recipe foundation and token loader
+        id: query_recipe_loader
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for group in query_projection::selected_recipe_tests:: storage::query::tests::prepared_recipe_charges_compact_metadata_and_payload_without_changing_active_row storage::query::tests::observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget storage::sqlite::tests::query_recipe_cells_keep_combined_bound_rollback_and_immutable_original events::store::tests::direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant events::store::configured::tests::configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority; do
+            group_result=0
+            cargo test --locked -p semon-sessions --lib "$group" -- --nocapture > "$RUNNER_TEMP/query-recipe-loader-case.log" 2>&1 || group_result=$?
+            if ! grep -Eq 'running [1-9][0-9]* tests?' "$RUNNER_TEMP/query-recipe-loader-case.log"; then group_result=1; fi
+            cat "$RUNNER_TEMP/query-recipe-loader-case.log" >> "$RUNNER_TEMP/query-recipe-loader-tests.log"
+            echo "GROUP name=$group status=$group_result" >> "$RUNNER_TEMP/query-recipe-loader-tests.log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/query-recipe-loader-tests.log"
+          exit "$result"
+      - name: Retain selected Query recipe loader results
+        if: ${{ !cancelled() && steps.query_recipe_loader.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: query-recipe-loader-tests
+          path: ${{ runner.temp }}/query-recipe-loader-tests.log
       - name: Configured semantic rejection and withdrawal contracts
         id: semantic_rejection
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}

@@ -1024,6 +1024,7 @@ mod tests {
             overview: None,
             trace: None,
             query: None,
+            query_recipe: None,
             lifecycle: CatalogLifecycle::Current,
             key: "owner".into(),
             name: "owner".into(),
