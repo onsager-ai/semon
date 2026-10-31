@@ -134,6 +134,7 @@ jobs:
         run: |
           result=0
           for test in \
+            events::store::configured::tests::configured_semantic_reset_and_reduction_rollback_zero_partial_writes \
             events::store::semantic_stage::tests::reserved_native_key_cursor_bounds_probes_and_selectors_reuse_qualified_result \
             events::store::chunk_proofs::tests::shrinking_or_removing_a_proof_cleans_only_its_exact_namespace \
             events::store::relocation::tests::relocation_candidates_preserve_identity_and_bound_work_by_native_matches \
