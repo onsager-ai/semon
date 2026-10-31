@@ -8949,8 +8949,12 @@ fn cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin() {
 fn cold_origin_head_loss_with_current_is_not_an_empty_baseline() {
     use crate::storage::source_observations::{SourceObservationStore, SourceOperation};
     let fixture = Fixture::new();
-    fixture.source("origin-prior");
-    fixture.publish_existing();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    crate::storage::transfer::reported::tests::seed_catalog(&config, &fixture.root);
     let db = fixture.db();
     let before: String = db.query_row("SELECT group_concat(metadata) FROM (SELECT metadata FROM session_catalog ORDER BY session_key)", [], |row| row.get(0)).unwrap();
     let grants: i64 = db
