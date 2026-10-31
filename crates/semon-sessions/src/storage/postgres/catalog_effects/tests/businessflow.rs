@@ -5531,12 +5531,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         retained_options.all = all;
         retained_options.scan_window = false;
         retained_options.since = since;
-        let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
-            crate::SessionSources::with_machines(vec![(
-                namespace.as_str().into(),
-                retained_options.clone(),
-            )]),
-        ));
+        let mut retained_query =
+            crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+                vec![(namespace.as_str().into(), retained_options.clone())],
+            )));
         let retained_runtime_store = super::super::snapshot::query::QueryCatalog {
             captured: false,
             pool: pool.clone(),
@@ -5601,12 +5599,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     expired_options.all = false;
     expired_options.scan_window = false;
     expired_options.since = Duration::from_secs(1);
-    let mut expired_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(
-            namespace.as_str().into(),
-            expired_options.clone(),
-        )]),
-    ));
+    let mut expired_query =
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(namespace.as_str().into(), expired_options.clone())],
+        )));
     let expired_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),
