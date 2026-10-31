@@ -1604,8 +1604,7 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     let (status, current) = fixture.body("sid=session-00000");
     assert_eq!(status, 200);
     assert_eq!(
-        current["items"][0]["details"]["live_observation"],
-        true,
+        current["items"][0]["details"]["live_observation"], true,
         "same-source Current control must observe its native status"
     );
     let original = session_catalog_identity(&fixture.options, "source", "session-00000")
@@ -1624,8 +1623,7 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     assert_eq!(status, 200);
     let details = &selected["items"][0]["details"];
     assert_eq!(
-        details["live_observation"],
-        false,
+        details["live_observation"], false,
         "retained reads cannot claim a live observation for the same Current key"
     );
     assert_eq!(details["turns"], 1);
@@ -2288,13 +2286,9 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
     };
     fixture.publish(3);
 
-    let original_identity = session_catalog_identity(
-        &fixture.options,
-        "source",
-        "session-00000",
-    )
-    .unwrap()
-    .unwrap();
+    let original_identity = session_catalog_identity(&fixture.options, "source", "session-00000")
+        .unwrap()
+        .unwrap();
     let original_selected = fixture.body("sid=session-00000").1;
     let original_transcript = crate::session_transcript_range(
         &fixture.options,
@@ -2303,8 +2297,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         None,
     );
     assert_eq!(original_transcript.status, 200);
-    let original_transcript: Value =
-        serde_json::from_slice(&original_transcript.body).unwrap();
+    let original_transcript: Value = serde_json::from_slice(&original_transcript.body).unwrap();
     let (original_row, original_slots, original_header) = {
         let db = fixture.db();
         let header: (String, u32, Option<String>, i64) = db
@@ -2314,14 +2307,14 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
-        (catalog_row(&db, "session_catalog"), slots(&db, "session_slots"), header)
+        (
+            catalog_row(&db, "session_catalog"),
+            slots(&db, "session_slots"),
+            header,
+        )
     };
 
-    append_model(
-        "session-00000",
-        "2026-10-01T00:00:30Z",
-        "original-model",
-    );
+    append_model("session-00000", "2026-10-01T00:00:30Z", "original-model");
     fixture.publish_existing();
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
     facts
@@ -2333,11 +2326,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         &fixture.options.source,
     )
     .unwrap();
-    append_model(
-        "session-00000",
-        "2026-10-01T00:02:00Z",
-        "current-model",
-    );
+    append_model("session-00000", "2026-10-01T00:02:00Z", "current-model");
     append_model(
         "session-00001",
         "2026-10-01T00:01:30Z",
@@ -2362,14 +2351,22 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
                 |row| row.get(0),
             )
             .unwrap();
-        (current, history, slots(&db, "session_history_slots"), marker)
+        (
+            current,
+            history,
+            slots(&db, "session_history_slots"),
+            marker,
+        )
     };
     assert_eq!(history.key, original_row.key);
     assert_eq!(history.sources, original_row.sources);
     assert_eq!(history.last, original_row.last);
     assert_eq!(history.repo, original_row.repo);
     assert_eq!(history.model, original_row.model);
-    assert_eq!(history.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
     assert_eq!(history_slots, original_slots);
     assert_eq!(
         original_header_marker,
@@ -2380,13 +2377,10 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
     assert_ne!(current.model, history.model);
     assert_eq!(current.repo.as_deref(), Some("current-repo"));
 
-    let history_identity = session_catalog_history_identity(
-        &fixture.options,
-        "source",
-        "session-00000",
-    )
-    .unwrap()
-    .unwrap();
+    let history_identity =
+        session_catalog_history_identity(&fixture.options, "source", "session-00000")
+            .unwrap()
+            .unwrap();
     assert_eq!(
         history_identity
             .source_refs
@@ -2399,13 +2393,9 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
             .map(|reference| reference.source.clone())
             .collect::<Vec<_>>()
     );
-    let current_identity = session_catalog_identity(
-        &fixture.options,
-        "source",
-        "session-00000",
-    )
-    .unwrap()
-    .unwrap();
+    let current_identity = session_catalog_identity(&fixture.options, "source", "session-00000")
+        .unwrap()
+        .unwrap();
     assert_eq!(current_identity.read_scope, CatalogReadScope::Current);
     assert_ne!(current_identity.source_refs, history_identity.source_refs);
 
@@ -2474,8 +2464,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         None,
     );
     assert_eq!(retained_transcript.status, 200);
-    let retained_transcript: Value =
-        serde_json::from_slice(&retained_transcript.body).unwrap();
+    let retained_transcript: Value = serde_json::from_slice(&retained_transcript.body).unwrap();
     assert_eq!(
         retained_transcript["projection"],
         original_transcript["projection"]

@@ -8391,15 +8391,10 @@ mod tests {
                 namespace: &str,
                 key: &str,
             ) {
-                let has_history = |state: &BTreeMap<
-                    String,
-                    Vec<Vec<rusqlite::types::Value>>,
-                >| {
+                let has_history = |state: &BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>| {
                     state["session_history_catalog"].iter().any(|row| {
-                        row.first()
-                            == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
-                            && row.get(1)
-                                == Some(&rusqlite::types::Value::Text(key.to_owned()))
+                        row.first() == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
+                            && row.get(1) == Some(&rusqlite::types::Value::Text(key.to_owned()))
                     })
                 };
                 let history_existed = has_history(before);

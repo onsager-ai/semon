@@ -2106,13 +2106,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &generation,
             |snapshot| {
-                crate::catalog::read_page_snapshot(
-                    &options,
-                    recent_machine,
-                    &request,
-                    snapshot,
-                )
-                .map_err(|_| StorageError::ScopeChanged)
+                crate::catalog::read_page_snapshot(&options, recent_machine, &request, snapshot)
+                    .map_err(|_| StorageError::ScopeChanged)
             },
         )
         .unwrap();
@@ -2122,14 +2117,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let current_parent_item = exact_catalog_item("sid=one&limit=50");
     assert_eq!(
-        current_parent_item["details"]["live_observation"],
-        true,
+        current_parent_item["details"]["live_observation"], true,
         "same-source Current details preserve the PG live observation"
     );
     let history_parent_item = exact_catalog_item("sid=one&scope=retained_history&limit=50");
     assert_eq!(
-        history_parent_item["details"]["live_observation"],
-        false,
+        history_parent_item["details"]["live_observation"], false,
         "retained reads cannot claim a live observation for a Current PG row"
     );
     // P3: retained history over the admitted PG generation equals the SQLite
