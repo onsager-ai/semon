@@ -9001,17 +9001,17 @@ mod tests {
                 Outcome::Written
             );
             let before = shared_state(f);
-            FAIL_EFFECT.with(|p| p.set(Some("semantic_lifecycle_enroll")));
+            FAIL_EFFECT.with(|p| p.set(Some("semantic_reduction")));
             assert!(cache.semantic_batch(64).is_err());
             assert_eq!(
                 FAIL_EFFECT.with(|p| p.get()),
                 None,
-                "enrollment effect must be hit"
+                "SQLite semantic batch effect must be hit"
             );
             assert_eq!(
                 shared_state(f),
                 before,
-                "closure enrollment rolls back every family"
+                "SQLite semantic batch changes roll back every family"
             );
             for _ in 0..128 {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
