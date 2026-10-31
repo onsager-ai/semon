@@ -4714,6 +4714,99 @@ mod tests {
     }
 
     #[test]
+    fn configured_semantic_reprice_preserves_stage_only_authority() {
+        use crate::storage::native_events::NativeEventStore;
+        use std::io::Write;
+        use crate::storage::sqlite::proof_generations::{
+            CatalogObservationOwner, observation_binding, prepare_repriced_observation,
+        };
+        let (a, b, options, inputs) = model_sources();
+        let path = inputs[1].full_path(&options[1]);
+        let raw = fs::read_to_string(&path).unwrap().replace(
+            "\"model\":\"sanitized-model\"",
+            "\"model\":\"claude-sonnet-4-5\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5}",
+        );
+        fs::write(&path, raw).unwrap();
+        let mut cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&b).unwrap(),
+        ).unwrap();
+        cache.ingest(&"a".repeat(64), &path, "claude").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[1], &inputs[1], "stage-reprice");
+        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        let mut retained = model.prepared().rows[0].clone();
+        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"model-1","uuid":"reprice-successor","parentUuid":"answer","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"retained price cohort"}})).unwrap();
+        drop(raw);
+        cache.ingest(&"b".repeat(64), &path, "claude").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[1], &inputs[1], "stage-reprice-successor");
+        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+        cache.finish_semantic_stage(batch.epoch).unwrap();
+        let original = model.prepared().rows[0].clone();
+        assert_ne!(retained.sources, original.sources, "actual append publishes a divergent source cohort");
+        let binding = cache.query_runtime_binding().unwrap().unwrap();
+        let owner = NativeOwnership::restore(&b).unwrap();
+        let mut db = crate::storage::sqlite::semantic::pricing_connection(&owner).unwrap();
+        assert_eq!(db.query_row(
+            "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
+            [b.namespace.as_str()], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0, "semantic publication starts with immutable Stage authority only");
+        assert!(observation_binding(&db, &binding, &original).is_ok());
+        assert!(observation_binding(&db, &binding, &retained).is_ok());
+        let history_before: String = db.query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![b.namespace.as_str(), retained.key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(history_before, serde_json::to_string(&retained).unwrap());
+        let proofs = shared_state(&a).into_iter().filter(|(table, _)| {
+            table.starts_with("storage_proof_") || table == "storage_semantic_publications"
+        }).collect::<BTreeMap<_, _>>();
+
+        // Even a valid Stage proof must not bypass a mismatched mutable slot.
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'catalog',?3,?4,?5)",
+            params![b.namespace.as_str(), original.key, "0".repeat(64), i64::try_from(binding.admission).unwrap(), binding.stream_epoch],
+        ).unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            assert!(prepare_repriced_observation(&tx, &binding, CatalogObservationOwner::Catalog, &original, &original.cost, original.query.as_ref()).is_err());
+        }
+        db.execute("DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1", [b.namespace.as_str()]).unwrap();
+        let mut fixture: Value = serde_json::from_slice(include_bytes!("../../pricing/fixtures/models-dev.json")).unwrap();
+        fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = Value::from(300.0);
+        let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+        crate::storage::sqlite::proof_generations::FAIL_OBSERVATION_READ.with(|fault| {
+            fault.set(Some(("catalog", "storage_proof_generations")));
+        });
+        let error = crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap_err();
+        assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+        let failed = shared_state(&a);
+        let error = crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap_err();
+        assert_eq!(error.sqlite_error().map(|error| error.extended_code & 0xff), Some(rusqlite::ffi::SQLITE_AUTH));
+        assert_eq!(shared_state(&a), failed, "Stage SQL read failure retains the exact row/grant/progress/pending snapshot");
+        crate::storage::sqlite::proof_generations::FAIL_OBSERVATION_READ.with(|fault| fault.set(None));
+        crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap();
+        let encoded: String = db.query_row(
+            "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+            params![b.namespace.as_str(), original.key], |r| r.get(0),
+        ).unwrap();
+        let repriced: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).unwrap();
+        assert_ne!(repriced.cost.usd, original.cost.usd);
+        assert_eq!(repriced.cost.pricing_fingerprint, table.fingerprint);
+        assert!(observation_binding(&db, &binding, &repriced).is_ok());
+        let history_after: String = db.query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![b.namespace.as_str(), retained.key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(history_after, history_before, "divergent original History remains byte-for-byte unchanged");
+        assert!(observation_binding(&db, &binding, &retained).is_ok());
+        assert_eq!(shared_state(&a).into_iter().filter(|(table, _)| {
+            table.starts_with("storage_proof_") || table == "storage_semantic_publications"
+        }).collect::<BTreeMap<_, _>>(), proofs, "original Stage receipts, proof rows and references are immutable");
+    }
+
+    #[test]
     fn configured_semantic_real_model_claude_replacement_rollback_stale_and_history() {
         use crate::storage::native_events::NativeEventStore;
         use std::io::Write;

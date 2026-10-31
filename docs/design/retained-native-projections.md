@@ -36,6 +36,16 @@ work and claim acknowledgements leave no invalidations. Local publishers mint
 separate exact-row observation authority only for their actual outputs; transport
 and carry never mint it. Later local heads therefore cannot replace the original
 import grants for carried observations, even when admission counters coincide.
+Cost-only SQLite repricing authenticates the exact stored preimage against its
+own Current or History local grant, or its qualified immutable local Stage proof,
+before replacing metadata and the matching owner grant in one transaction.
+Same-source History qualifies independently; divergent cohorts retain their
+original metadata. Missing or mismatched authority leaves an observation unchanged.
+Imported receipts alone cannot authorize repricing or mint local grants, even
+when producer and destination admission counters coincide. Original Stage proofs
+remain immutable; a SQLite preparation-read or grant-write failure rolls back
+metadata and pricing progress together. SQL failures remain distinct from
+unavailable evidence and leave the failed owner retryable.
 Forward and reverse reads with authorized
 originals and absent local Raw remain subject to exact-revision CI qualification.
 

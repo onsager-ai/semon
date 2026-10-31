@@ -590,6 +590,63 @@ fn log_observation_row_comparison(
     }
 }
 
+/// SQL failures must abort producer transactions; unavailable evidence can
+/// leave one owner unchanged. Reader APIs retain their StorageError contract.
+#[derive(Debug)]
+pub(crate) enum ObservationPreparationError {
+    Evidence(StorageError),
+    Sql(rusqlite::Error),
+}
+
+impl From<StorageError> for ObservationPreparationError {
+    fn from(error: StorageError) -> Self {
+        Self::Evidence(error)
+    }
+}
+
+impl ObservationPreparationError {
+    fn into_storage(self) -> StorageError {
+        match self {
+            Self::Evidence(error) => error,
+            Self::Sql(error) => failed(error),
+        }
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    pub(crate) static FAIL_OBSERVATION_READ: std::cell::Cell<Option<(&'static str, &'static str)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct ObservationReadFault<'a>(&'a Connection);
+
+#[cfg(test)]
+impl<'a> ObservationReadFault<'a> {
+    fn install(db: &'a Connection, owner: CatalogObservationOwner) -> Option<Self> {
+        let table = FAIL_OBSERVATION_READ.with(|fault| {
+            fault.get().filter(|(kind, _)| *kind == owner.kind()).map(|(_, table)| table)
+        })?;
+        // Deny the real preparation statement without damaging the fixture DB.
+        db.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+            match context.action {
+                rusqlite::hooks::AuthAction::Read { table_name, .. } if table_name == table => {
+                    rusqlite::hooks::Authorization::Deny
+                }
+                _ => rusqlite::hooks::Authorization::Allow,
+            }
+        })).unwrap();
+        Some(Self(db))
+    }
+}
+
+#[cfg(test)]
+impl Drop for ObservationReadFault<'_> {
+    fn drop(&mut self) {
+        self.0.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+    }
+}
+
 /// Query observations use original producer coordinates only after the same
 /// destination admission grant that qualifies a retained selected lease.
 pub(crate) fn observation_binding(
@@ -597,7 +654,22 @@ pub(crate) fn observation_binding(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
 ) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
+    observation_binding_for_owner(db, current, selected, None)
+        .map_err(ObservationPreparationError::into_storage)
+}
+
+fn observation_binding_for_owner(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    local_owner: Option<CatalogObservationOwner>,
+) -> Result<crate::storage::QueryRuntimeBinding, ObservationPreparationError> {
     let ns = current.namespace.as_str();
+    let owner_kind = local_owner.map(CatalogObservationOwner::kind);
+    let proof_kind = local_owner.map(|owner| match owner {
+        CatalogObservationOwner::Catalog => "current",
+        CatalogObservationOwner::History => "history",
+    });
     let grant = format!("{}:{}", current.admission, current.stream_epoch);
     let mut metadata = selected.clone();
     metadata.lifecycle = crate::model::summary::CatalogLifecycle::Current;
@@ -617,17 +689,18 @@ pub(crate) fn observation_binding(
         }
         let native: bool = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
+                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6))",
                 params![
                     ns,
                     selected.key,
                     proof_codec::digest(original.as_bytes()),
                     admission,
-                    current.stream_epoch
+                    current.stream_epoch,
+                    owner_kind
                 ],
                 |row| row.get(0),
             )
-            .map_err(failed)?;
+            .map_err(ObservationPreparationError::Sql)?;
         if native {
             return Ok(current.clone());
         }
@@ -704,13 +777,13 @@ pub(crate) fn observation_binding(
                 g.prefix,r.base,
                 CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
                 CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
-                (EXISTS(
+                ((?10 IS NULL AND EXISTS(
                     SELECT 1 FROM main.meta m JOIN main.meta a
                       ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
                     WHERE m.namespace=f.namespace
                       AND m.key='native_transfer_v1:publication:'||g.publication
                       AND a.value=?3
-                ) OR (
+                )) OR (
                     g.admission=?8 AND g.stream=?9 AND EXISTS(
                         SELECT 1 FROM main.meta m
                         WHERE m.namespace=f.namespace
@@ -729,9 +802,10 @@ pub(crate) fn observation_binding(
              JOIN storage_proof_presentations v
                ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key
              WHERE f.namespace=?1 AND f.session_key=?2 AND g.metadata IN (?4,?5)
+               AND (?10 IS NULL OR f.kind=?10)
              ORDER BY g.id LIMIT 1",
         )
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let values = statement
         .query_map(
             params![
@@ -743,7 +817,8 @@ pub(crate) fn observation_binding(
                 current_digest,
                 retained_digest,
                 admission,
-                current.stream_epoch
+                current.stream_epoch,
+                proof_kind
             ],
             |r| {
                 let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
@@ -773,9 +848,9 @@ pub(crate) fn observation_binding(
                 ))
             },
         )
-        .map_err(failed)?
+        .map_err(ObservationPreparationError::Sql)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let (record, base, manifest, presentation, granted) = values
         .into_iter()
         .next()
@@ -791,7 +866,7 @@ pub(crate) fn observation_binding(
         if crate::native_timing::enabled() {
             eprintln!("semon sessions native: observation_stage_refused boundary=grant_mismatch");
         }
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
     crate::selected_read::charge(
         64,
@@ -823,7 +898,7 @@ pub(crate) fn observation_binding(
         if crate::native_timing::enabled() {
             eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
         }
-    })
+    }).map_err(ObservationPreparationError::Evidence)
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable
@@ -880,9 +955,67 @@ pub(crate) enum CatalogObservationOwner {
     History,
 }
 
-/// Publish one producer-repaired Query observation without changing its
-/// source admission or rewriting any immutable Stage proof. The old row must
-/// still be authorized by its exact current owner grant or retained proof.
+impl CatalogObservationOwner {
+    fn table(self) -> &'static str {
+        match self {
+            Self::Catalog => "session_catalog",
+            Self::History => "session_history_catalog",
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Catalog => "catalog",
+            Self::History => "history",
+        }
+    }
+}
+
+/// Prepared against an exact stored preimage and its existing producer authority.
+/// Apply in the same transaction; SQL faults must remain SQL faults so the cost
+/// producer cannot mistake a failed grant write for unavailable source evidence.
+pub(crate) struct PreparedObservationUpdate {
+    namespace: String,
+    key: String,
+    owner: CatalogObservationOwner,
+    stored: String,
+    metadata: String,
+    before_digest: String,
+    after_digest: String,
+    admission: i64,
+    stream: String,
+    existing_slot: bool,
+}
+
+impl PreparedObservationUpdate {
+    pub(crate) fn publish(self, db: &Transaction<'_>) -> rusqlite::Result<()> {
+        let changed = db.execute(
+            &format!("UPDATE main.{} SET metadata=?3 WHERE namespace=?1 AND session_key=?2 AND metadata=?4", self.owner.table()),
+            params![self.namespace, self.key, self.metadata, self.stored],
+        )?;
+        if changed != 1 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if self.existing_slot {
+            let changed = db.execute(
+                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
+                params![self.namespace, self.key, self.owner.kind(), self.before_digest, self.admission, self.after_digest, self.stream],
+            )?;
+            if changed != 1 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+        } else {
+            db.execute(
+                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,?3,?4,?5,?6)",
+                params![self.namespace, self.key, self.owner.kind(), self.after_digest, self.admission, self.stream],
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Query repair constructs only a Query postimage; its caller still qualifies
+/// the source-backed Query recipe before entering this publication transaction.
 pub(crate) fn publish_repaired_query_observation(
     db: &Transaction<'_>,
     current: &crate::storage::QueryRuntimeBinding,
@@ -899,10 +1032,44 @@ pub(crate) fn publish_repaired_query_observation(
     {
         return Err(StorageError::ScopeChanged);
     }
-    let (table, owner_kind) = match owner {
-        CatalogObservationOwner::Catalog => ("session_catalog", "catalog"),
-        CatalogObservationOwner::History => ("session_history_catalog", "history"),
-    };
+    let mut repaired = selected.clone();
+    repaired.query = Some(query.clone());
+    let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
+        .map_err(ObservationPreparationError::into_storage)?;
+    if selected.query.as_ref() == Some(query) {
+        return Ok(());
+    }
+    prepared.publish(db).map_err(failed)
+}
+
+/// Cost publication cannot use an imported receipt to mint local authority.
+/// Its only mutable fields are the recomputed cost and embedded cost summaries.
+pub(crate) fn prepare_repriced_observation(
+    db: &Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    owner: CatalogObservationOwner,
+    selected: &CatalogRow,
+    cost: &crate::pricing::Cost,
+    query: Option<&serde_json::Value>,
+) -> Result<PreparedObservationUpdate, ObservationPreparationError> {
+    let mut repriced = selected.clone();
+    repriced.cost = cost.clone();
+    repriced.query = query.cloned();
+    prepare_observation_update(db, current, owner, selected, &repriced, true)
+}
+
+fn prepare_observation_update(
+    db: &Transaction<'_>,
+    current: &crate::storage::QueryRuntimeBinding,
+    owner: CatalogObservationOwner,
+    selected: &CatalogRow,
+    repaired: &CatalogRow,
+    local_only: bool,
+) -> Result<PreparedObservationUpdate, ObservationPreparationError> {
+    #[cfg(test)]
+    let _fault = ObservationReadFault::install(db, owner);
+    let table = owner.table();
+    let owner_kind = owner.kind();
     let namespace = current.namespace.as_str();
     let stored: Option<Option<String>> = db
         .query_row(
@@ -911,28 +1078,27 @@ pub(crate) fn publish_repaired_query_observation(
             |row| row.get(0),
         )
         .optional()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     let stored = match stored {
         Some(Some(stored)) => stored,
-        Some(None) => return Err(StorageError::HistoryRetentionBounds),
-        None => return Err(StorageError::ScopeChanged),
+        Some(None) => return Err(StorageError::HistoryRetentionBounds.into()),
+        None => return Err(StorageError::ScopeChanged.into()),
     };
     let stored_row: CatalogRow =
         serde_json::from_str(&stored).map_err(|_| StorageError::Unavailable)?;
     if serde_json::to_value(&stored_row).map_err(|_| StorageError::Unavailable)?
         != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
-    // Validate the exact preimage through the ordinary reader authority path.
-    // This also permits immutable Stage-only rows without trusting saved Query
-    // runtime data as authority.
-    let proven = observation_binding(db, current, selected)?;
+    // Repricing requires this owner's local grant or immutable local Stage
+    // proof. Query repair retains its ordinary imported observation contract.
+    let proven = observation_binding_for_owner(db, current, selected, local_only.then_some(owner))?;
     if proven.namespace.as_str() != current.namespace.as_str()
         || proven.stream_epoch != current.stream_epoch
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
     let mut before = selected.clone();
@@ -947,7 +1113,7 @@ pub(crate) fn publish_repaired_query_observation(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
-        .map_err(failed)?;
+        .map_err(ObservationPreparationError::Sql)?;
     if owner_slot
         .as_ref()
         .is_some_and(|(digest, slot_admission, stream)| {
@@ -956,63 +1122,28 @@ pub(crate) fn publish_repaired_query_observation(
                 || stream != &current.stream_epoch
         })
     {
-        return Err(StorageError::ScopeChanged);
+        return Err(StorageError::ScopeChanged.into());
     }
 
-    if selected.query.as_ref() == Some(query) {
-        return Ok(());
+    let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
+    let mut normalized = repaired.clone();
+    normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let normalized = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
+    if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
+        return Err(StorageError::HistoryRetentionBounds.into());
     }
-    let mut repaired = before;
-    repaired.query = Some(query.clone());
-    let repaired_metadata =
-        serde_json::to_string(&repaired).map_err(|_| StorageError::Unavailable)?;
-    if repaired_metadata.len() > 1_048_576 {
-        return Err(StorageError::HistoryRetentionBounds);
-    }
-    let repaired_digest = proof_codec::digest(repaired_metadata.as_bytes());
-
-    let changed = db
-        .execute(
-            &format!("UPDATE main.{table} SET metadata=json_set(metadata,'$.query',json(?3)) WHERE namespace=?1 AND session_key=?2 AND metadata=?4"),
-            params![namespace, selected.key, query.to_string(), stored],
-        )
-        .map_err(failed)?;
-    if changed != 1 {
-        return Err(StorageError::ScopeChanged);
-    }
-    if owner_slot.is_some() {
-        let changed = db
-            .execute(
-                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
-                params![
-                    namespace,
-                    selected.key,
-                    owner_kind,
-                    before_digest,
-                    admission,
-                    repaired_digest,
-                    current.stream_epoch
-                ],
-            )
-            .map_err(failed)?;
-        if changed != 1 {
-            return Err(StorageError::ScopeChanged);
-        }
-    } else {
-        db.execute(
-            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![
-                namespace,
-                selected.key,
-                owner_kind,
-                repaired_digest,
-                admission,
-                current.stream_epoch
-            ],
-        )
-        .map_err(failed)?;
-    }
-    Ok(())
+    Ok(PreparedObservationUpdate {
+        namespace: namespace.to_owned(),
+        key: selected.key.clone(),
+        owner,
+        stored,
+        metadata,
+        before_digest,
+        after_digest: proof_codec::digest(normalized.as_bytes()),
+        admission,
+        stream: current.stream_epoch.clone(),
+        existing_slot: owner_slot.is_some(),
+    })
 }
 
 /// Reconcile both owner slots from the post-publication Catalog rows, keeping
