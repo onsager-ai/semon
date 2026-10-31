@@ -124,6 +124,47 @@ pub(super) fn diagnose(error: &rusqlite::Error) {
     });
 }
 
+#[cfg(test)]
+fn diagnose_finish(
+    db: &Connection,
+    ns: &str,
+    epoch: i64,
+    phase: &'static str,
+    failure: &rusqlite::Error,
+) {
+    let guard = match failure {
+        rusqlite::Error::SqliteFailure(_, Some(message)) => match message.as_str() {
+            "semantic Source refused" => "semantic_source",
+            "private native ownership refused" => "native_ownership",
+            "private native family unported" => "private_unported",
+            "source operation namespace refused" => "source_namespace",
+            "event operation namespace refused" => "event_namespace",
+            "configured event writer refused" => "event_writer",
+            "namespace writer refused" => "catalog_namespace",
+            _ => "unclassified",
+        },
+        _ => "unclassified",
+    };
+    eprintln!(
+        "semantic_finish_failure phase={phase} guard={guard} sqlite_extended_code={:?}",
+        failure.sqlite_error().map(|error| error.extended_code)
+    );
+    let flags: rusqlite::Result<(bool, bool, Option<bool>, Option<bool>)> = db.query_row(
+        "SELECT semon_namespace() IS ?1,semon_semantic_writer() IS 1,(SELECT namespace IS semon_namespace() FROM main.catalog_semantic_stage WHERE namespace=?1 AND singleton=1 AND epoch=?2),(SELECT namespace IS semon_namespace() FROM main.storage_semantic_model_batches WHERE namespace=?1)",
+        params![ns, epoch],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    );
+    match flags {
+        Ok((namespace_matches, writer_enabled, stage_row_matches, model_row_matches)) => eprintln!(
+            "semantic_finish_binding phase={phase} namespace_matches={namespace_matches} writer_enabled={writer_enabled} stage_row_matches={stage_row_matches:?} model_row_matches={model_row_matches:?}"
+        ),
+        Err(error) => eprintln!(
+            "semantic_finish_binding phase={phase} probe_failed=true sqlite_extended_code={:?}",
+            error.sqlite_error().map(|error| error.extended_code)
+        ),
+    }
+}
+
 /// This capability binds the real admission and physical incarnation. Its fields
 /// cannot be supplied by a caller or inferred from an Options path.
 pub(crate) struct AdmittedSource {
@@ -2321,25 +2362,43 @@ impl Stage {
         if !ready {
             return Ok(Outcome::Conflict);
         }
-        tx.execute(
+        let deletion = tx.execute(
             "DELETE FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2",
             params![ns, epoch],
-        )
-        .map_err(error)?;
-        tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_semantic_gc','1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'", [ns]).map_err(error)?;
-        tx.execute(
+        );
+        #[cfg(test)]
+        if let Err(failure) = &deletion {
+            diagnose_finish(&tx, ns, epoch, "delete_stage", failure);
+        }
+        deletion.map_err(error)?;
+        let gc = tx.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_semantic_gc','1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'", [ns]);
+        #[cfg(test)]
+        if let Err(failure) = &gc {
+            diagnose_finish(&tx, ns, epoch, "mark_gc", failure);
+        }
+        gc.map_err(error)?;
+        let model_deletion = tx.execute(
             "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",
             [ns],
-        )
-        .map_err(error)?;
+        );
+        #[cfg(test)]
+        if let Err(failure) = &model_deletion {
+            diagnose_finish(&tx, ns, epoch, "delete_model_batch", failure);
+        }
+        model_deletion.map_err(error)?;
         // A repair stage temporarily publishes a partial head. Once its exact
         // claims are acknowledged, preserve an already completed discovery;
         // otherwise the observer starts recovery and rediscovers unchanged
         // sources solely because this representation was repaired.
-        tx.execute(
+        let completeness = tx.execute(
             "UPDATE main.meta SET value='complete' WHERE namespace=?1 AND key='catalog_completeness' AND NOT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=?1) AND EXISTS(SELECT 1 FROM main.storage_source_journal WHERE namespace=?1 AND backfill_state='complete')",
             [ns],
-        ).map_err(error)?;
+        );
+        #[cfg(test)]
+        if let Err(failure) = &completeness {
+            diagnose_finish(&tx, ns, epoch, "mark_complete", failure);
+        }
+        completeness.map_err(error)?;
         tx.commit().map_err(error)?;
         self.epoch = None;
         Ok(Outcome::Written)
