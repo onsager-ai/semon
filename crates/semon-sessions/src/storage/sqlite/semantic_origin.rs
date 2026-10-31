@@ -97,12 +97,16 @@ pub(crate) fn pending(db: &Connection, ns: &str) -> rusqlite::Result<bool> {
 
 pub(crate) fn publication(
     db: &Connection,
-    ns: &str,
+    owner: &NativeOwnership,
     held: Option<i64>,
 ) -> rusqlite::Result<Option<OriginPublication>> {
+    // A committed first group retains its original held epoch. Reopening a
+    // producer must recover that receipt token, rather than treating the next
+    // group as an uncommitted publication under the live stage epoch.
     db.query_row(
-        "SELECT origin_epoch,epoch FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND origin_phase='sealed' AND origin_runtime_bound=1 AND resetting=0",
-        params![ns, held], |row| Ok(OriginPublication { origin: OriginId(row.get(0)?), held_epoch: row.get(1)? }),
+        "SELECT origin_epoch,epoch FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND origin_phase='sealed' AND origin_runtime_bound=1 AND origin_admission=?3 AND origin_stream=?4 AND resetting=0 UNION ALL SELECT receipt.origin_epoch,receipt.held_epoch FROM main.catalog_semantic_origin_publications receipt JOIN main.catalog_semantic_stage stage ON stage.namespace=receipt.namespace AND stage.origin_epoch=receipt.origin_epoch WHERE receipt.namespace=?1 AND receipt.admission=?3 AND receipt.stream=?4 AND stage.origin_phase='draining' AND stage.origin_runtime_bound=1 AND stage.origin_admission=receipt.admission AND stage.origin_stream=receipt.stream AND stage.origin_first_generation=receipt.generation AND stage.resetting=0",
+        params![owner.config().namespace.as_str(), held, owner.admission(), owner.config().expected_stream_epoch],
+        |row| Ok(OriginPublication { origin: OriginId(row.get(0)?), held_epoch: row.get(1)? }),
     ).optional()
 }
 
@@ -142,12 +146,13 @@ pub(crate) fn replay(
     claims: &[(String, Option<i64>)],
 ) -> Result<Option<String>, StorageError> {
     writer(db, owner)?;
-    let receipt: Option<(String, String)> = db.query_row(
-        "SELECT request_digest,generation FROM main.catalog_semantic_origin_publications WHERE namespace=?1 AND origin_epoch=?2 AND held_epoch=?3",
-        params![owner.config().namespace.as_str(), token.origin.0, token.held_epoch], |row| Ok((row.get(0)?, row.get(1)?)),
+    let receipt: Option<(String, String, bool)> = db.query_row(
+        "SELECT request_digest,generation,admission=?4 AND stream=?5 FROM main.catalog_semantic_origin_publications WHERE namespace=?1 AND origin_epoch=?2 AND held_epoch=?3",
+        params![owner.config().namespace.as_str(), token.origin.0, token.held_epoch, owner.admission(), owner.config().expected_stream_epoch],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).optional().map_err(super::failed)?;
     match receipt {
-        Some((digest, generation)) if digest == request(token, publication, claims)? => Ok(Some(generation)),
+        Some((digest, generation, true)) if digest == request(token, publication, claims)? => Ok(Some(generation)),
         Some(_) => Err(StorageError::Conflict),
         None => Ok(None),
     }
@@ -212,8 +217,8 @@ pub(crate) fn record(
         db.execute("UPDATE main.catalog_semantic_sources SET claim=NULL WHERE namespace=?1 AND source_path=?2 AND origin_member=1", params![ns,path]).map_err(super::failed)?;
     }
     db.execute(
-        "INSERT INTO main.catalog_semantic_origin_publications(namespace,origin_epoch,held_epoch,request_digest,generation) VALUES(?1,?2,?3,?4,?5)",
-        params![ns, token.origin.0, token.held_epoch, request(token, publication, claims)?, generation],
+        "INSERT INTO main.catalog_semantic_origin_publications(namespace,origin_epoch,held_epoch,request_digest,generation,admission,stream) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![ns, token.origin.0, token.held_epoch, request(token, publication, claims)?, generation, owner.admission(), owner.config().expected_stream_epoch],
     ).map_err(super::failed)?;
     if db.execute(
         "UPDATE main.catalog_semantic_stage SET generation=?6,origin_phase='draining',origin_first_generation=?6 WHERE namespace=?1 AND epoch=?2 AND origin_epoch=?3 AND origin_admission=?4 AND origin_stream=?5 AND origin_phase='sealed' AND origin_runtime_bound=1 AND generation IS NULL AND origin_first_generation IS NULL AND resetting=0",

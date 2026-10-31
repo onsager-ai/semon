@@ -2313,7 +2313,9 @@ impl Stage {
 
     pub(crate) fn origin_publication(&self) -> Result<Option<crate::model::relation_stage::OriginPublication>, StoreError> {
         self.source.validate(&self.db).map_err(StoreError::Configured)?;
-        origin::publication(&self.db, self.source.namespace(), self.epoch).map_err(error)
+        self.source.owner.as_ref()
+            .map(|owner| origin::publication(&self.db, owner, self.epoch).map_err(error))
+            .unwrap_or(Ok(None))
     }
 
     pub(crate) fn runtime_binding(

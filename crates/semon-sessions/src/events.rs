@@ -2636,6 +2636,9 @@ impl EventCache {
 
     /// Return this transaction's generation, rather than reading a generation
     /// another producer may already have replaced after the commit.
+    /// An exact retry retains the same PreparedSources, including its original
+    /// base head, claims, rows, slot projections and presentation observations.
+    /// Rebuilding the model is a new request and cannot consume an old receipt.
     pub(crate) fn publish_partial_catalog_fenced(
         &mut self,
         prepared: &crate::model::PreparedSources,

@@ -233,6 +233,10 @@ catalog_semantic_origin_sources(
   acknowledged, dev, ino, size, mtime_ns, ctime_ns, resume_at,
   head_sha256, tail_sha256,
   PRIMARY KEY(namespace, origin_epoch, source_path));
+catalog_semantic_origin_publications(
+  namespace, origin_epoch, held_epoch, request_digest, generation,
+  admission, stream,
+  PRIMARY KEY(namespace, origin_epoch, held_epoch));
 ```
 
 Allocation also proves the Current baseline is empty in that same owned
@@ -317,12 +321,28 @@ existing proof/presentation authority and selected-group receipts.
    grants, write the group receipt, ACK only its exact claims, and move the same
    stage to `Draining` with its resulting live generation. All effects commit
    atomically. Any receipt/capture failure rolls back publication and ACK.
+   The SQLite WIP retains the first group's original held epoch, admission and
+   stream in its immutable receipt. A reopened native producer in `Draining`
+   reacquires that committed token even after normal held-epoch takeover. Its
+   exact receipt lookup runs after current native capability validation and
+   before live head/held-epoch checks, returning the recorded generation without
+   any second ACK or progress write. A changed first-group request is refused;
+   this committed token cannot authorize the next cohort.
 5. Later groups require the current held epoch and live head, complete selected
    owner closures and the ordinary current claims. They publish/ACK only their
    selected paths/owners, advance only those progress flags and witnesses, and
    update the stage's live head in that same transaction. Unselected pending
    work is untouched. Empty publication requests finish only after all durable
    queues and final witnesses qualify.
+
+An exact retry requires the caller to retain the original `PreparedSources`:
+its absent base head, selected claims, rows, slot projections and presentation
+observations. The regression tears down/reopens the actual EventCache producer
+while retaining that same request at the caller boundary. The receipt stores
+its digest and result, not a reconstructable request payload. Full process loss
+of that caller payload therefore does not imply that fresh model preparation
+will reproduce an exact retry; new preparation is a new request. Durable model
+payload recovery and later cohort publication remain outside this SQLite WIP.
 
 The SQLite first-publication header CAS is conceptually the following guarded
 update, inside the transaction that already validates/updates the Catalog head:
