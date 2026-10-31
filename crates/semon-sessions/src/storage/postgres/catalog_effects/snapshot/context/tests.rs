@@ -68,6 +68,63 @@ fn insert(
         .map_err(|_| StorageError::Unavailable)
 }
 
+fn insert_raw_key(
+    tx: &mut PgTxn<'_>,
+    namespace: &[u8],
+    generation: &str,
+    key: &[u8],
+    parent: Option<&[u8]>,
+) -> Result<(), StorageError> {
+    tx.driver
+        .execute(
+            "INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+            &[
+                &namespace,
+                &generation.as_bytes(),
+                &super::digest(key),
+                &key,
+                &parent,
+                &b"{}"[..],
+                &0i64,
+                &b"claude"[..],
+                &b""[..],
+                &b""[..],
+            ],
+        )
+        .map(|_| ())
+        .map_err(|_| StorageError::Unavailable)
+}
+
+fn descendants_with_budget(
+    pool: &crate::storage::postgres::PgPool,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    generation: &str,
+    key: &str,
+    bytes: usize,
+) -> Result<Vec<String>, StorageError> {
+    let cancellation = PgCancellation::default();
+    let selected = crate::selected_read::SelectedReadControl::new(
+        std::time::Instant::now() + std::time::Duration::from_secs(20),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+    .with_limits(131_072, bytes);
+    selected
+        .scope(|| {
+            super::super::with_generation(
+                pool,
+                namespace,
+                &cancellation,
+                generation,
+                |snapshot| {
+                    crate::storage::selected::ContextLookup::descendants(snapshot, key)
+                        .map_err(|_| StorageError::Busy)
+                },
+            )
+            .map_err(std::io::Error::other)
+        })
+        .map_err(|_| StorageError::Busy)
+}
+
 #[test]
 fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
     let (pool, _) = fixture(|_| {});
@@ -205,4 +262,80 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
         },
     );
     assert_eq!(collision, Err(StorageError::ScopeChanged));
+}
+
+#[test]
+fn pg_selected_family_bounds_candidate_bytes_and_charges_visited_binds() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("selected-family-byte-budget");
+    let foreign_namespace = ns("selected-family-byte-budget-foreign");
+    let control = PgCancellation::default();
+    let generation = "a".repeat(64);
+    let scoped_parent = "s".repeat(70_000);
+    let budget_parent = "budget-root";
+    let visited_parent = "v".repeat(140_000);
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        insert_raw_key(tx, ns, &generation, scoped_parent.as_bytes(), None)?;
+        insert_raw_key(
+            tx,
+            ns,
+            &generation,
+            b"scope-child",
+            Some(scoped_parent.as_bytes()),
+        )?;
+        insert_raw_key(tx, ns, &generation, budget_parent.as_bytes(), None)?;
+        insert_raw_key(tx, ns, &generation, visited_parent.as_bytes(), None)?;
+        for index in 0..4 {
+            let child = format!("{index}{}", "c".repeat(70_000));
+            insert_raw_key(
+                tx,
+                ns,
+                &generation,
+                child.as_bytes(),
+                Some(budget_parent.as_bytes()),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+    pool.transaction(&foreign_namespace, TxnKind::Write, &control, |tx| {
+        let ns = foreign_namespace.as_str().as_bytes();
+        for index in 0..3 {
+            let child = format!("foreign-scope-child-{index}");
+            insert_raw_key(
+                tx,
+                ns,
+                &generation,
+                child.as_bytes(),
+                Some(scoped_parent.as_bytes()),
+            )?;
+        }
+        Ok(())
+    })
+    .unwrap();
+
+    let scoped = descendants_with_budget(
+        &pool,
+        &namespace,
+        &generation,
+        &scoped_parent,
+        2 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(scoped, vec!["scope-child".to_owned()]);
+    assert_eq!(
+        descendants_with_budget(
+            &pool,
+            &namespace,
+            &generation,
+            &budget_parent,
+            2 * 1024 * 1024,
+        ),
+        Err(StorageError::Busy)
+    );
+    assert_eq!(
+        descendants_with_budget(&pool, &namespace, &generation, &visited_parent, 1024 * 1024),
+        Err(StorageError::Busy)
+    );
 }
