@@ -63,6 +63,25 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Archived overview large source offset diagnostic
+        id: archive_offset_diagnostic
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          test=catalog::tests::archived_overview_repair_reuses_exact_indexes_for_large_native_sources
+          cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/archive-offset-diagnostic-case.log" 2>&1 || result=$?
+          if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/archive-offset-diagnostic-case.log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/archive-offset-diagnostic-case.log"; then result=1; fi
+          cat "$RUNNER_TEMP/archive-offset-diagnostic-case.log"
+          echo "CASE name=$test expected=1 status=$result" >> "$RUNNER_TEMP/archive-offset-diagnostic.log"
+          exit "$result"
+      - name: Retain archived overview large source offset diagnostic
+        if: ${{ !cancelled() && steps.archive_offset_diagnostic.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: archive-offset-diagnostic
+          path: ${{ runner.temp }}/archive-offset-diagnostic*.log
       - name: Native turn identity and filename-owner publication qualification
         id: filename_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}

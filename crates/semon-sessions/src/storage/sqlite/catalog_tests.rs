@@ -2111,7 +2111,60 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
         writeln!(file, "{}", json!({"type":"system","padding":padding})).unwrap();
     }
     drop(file);
-    fixture.publish(1);
+    let companion_path = fixture.source("session-00000");
+    let source_path = path.to_string_lossy().into_owned();
+    let companion_path = companion_path.to_string_lossy().into_owned();
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let mut refresh_step = 0usize;
+    loop {
+        let ready = evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        let db = fixture.db();
+        let physical_size = i64::try_from(fs::metadata(&path).unwrap().len()).unwrap();
+        let ledger: Option<(i64, i64)> = db
+            .query_row(
+                "SELECT resume_at,size FROM main.files WHERE namespace=semon_namespace() AND path=?1",
+                [&source_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        let catalog_source: Option<(i64, i64)> = db
+            .query_row(
+                "SELECT json_extract(item.value,'$.offset'),json_extract(item.value,'$.size') FROM main.session_catalog_sources owner JOIN main.session_catalog catalog USING(namespace,session_key) JOIN json_each(CASE WHEN octet_length(catalog.metadata)<=1048576 THEN catalog.metadata ELSE '{}' END,'$.sources') item WHERE owner.namespace=semon_namespace() AND owner.source_path=?1 AND owner.lifecycle='current' AND json_extract(item.value,'$.path')=?1 LIMIT 1",
+                [&source_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        let (pending_claims, pending_revision): (i64, Option<i64>) = db
+            .query_row(
+                "SELECT COUNT(*),MAX(CASE WHEN source_path=?1 THEN revision END) FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path IN (?1,?2)",
+                rusqlite::params![&source_path, &companion_path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        // Every fixture record ends in a newline, so an indexed prefix shorter
+        // than the physical source records a bounded parser checkpoint.
+        let bounded = ledger.is_some_and(|(offset, _)| offset < physical_size);
+        eprintln!(
+            "archive_offset_diagnostic step={refresh_step} ready={ready} pending_sources={} bounded={bounded} physical_size={physical_size} ledger_offset={:?} ledger_stat_size={:?} catalog_offset={:?} catalog_size={:?} pending_claims={pending_claims} pending_revision={pending_revision:?}",
+            work.pending_sources,
+            ledger.map(|(offset, _)| offset),
+            ledger.map(|(_, size)| size),
+            catalog_source.map(|(offset, _)| offset),
+            catalog_source.map(|(_, size)| size),
+        );
+        drop(db);
+        refresh_step += 1;
+        if ready {
+            break;
+        }
+    }
+    drop(work);
+    evidence.retire();
     let original = fs::read(&path).unwrap();
     assert!(original.len() > 64 * 1024 * 1024);
     struct Reader {
