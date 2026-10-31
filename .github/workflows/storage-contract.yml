@@ -130,26 +130,66 @@ jobs:
           name: retained-contract-tests
           path: ${{ runner.temp }}/retained-contract-tests.log
       - name: Retained row authority diagnostic (not qualification)
+        id: retained_authority_diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         env:
           SEMON_BUILD_TIMING: "1"
         run: |
-          cargo test --locked -p semon-sessions --lib configured_semantic_real_model_claude_replacement_rollback_stale_and_history -- --nocapture > "$RUNNER_TEMP/retained-authority.log" 2>&1 || true
           python3 - <<'PYSAFE'
-          import os
+          import os, subprocess
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
+          cases = (
+              'events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history',
+              'catalog::tests::family_status_does_not_treat_a_retired_native_selection_as_current',
+              'catalog::tests::family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification',
+          )
           prefixes = (
               'semon sessions native: observation_direct_grant_',
               'semon sessions native: observation_stage_refused ',
-              'test result:',
+              'catalog_retained_observation_refused ',
+              'catalog_runtime_refused ',
+              'catalog_relative_status_refused ',
           )
-          with (root / 'retained-authority.log').open() as source:
-              lines = [line.rstrip()[:1024] for line in source if line.startswith(prefixes)]
-          (root / 'retained-authority-diagnostic.txt').write_text('\n'.join(lines[:30]))
+          report = []
+          valid_execution = True
+          for index, case in enumerate(cases):
+              raw = root / f'retained-authority-case-{index}.log'
+              with raw.open('w') as output:
+                  result = subprocess.run(
+                      ['cargo', 'test', '--locked', '-p', 'semon-sessions', '--lib', case,
+                       '--', '--exact', '--nocapture'], stdout=output, stderr=subprocess.STDOUT,
+                  )
+              stages, results = [], []
+              running_one = 0
+              stage_count = 0
+              with raw.open() as source:
+                  for line in source:
+                      line = line.rstrip()
+                      running_one += line == 'running 1 test'
+                      if line.startswith(prefixes):
+                          stage_count += 1
+                          if len(stages) < 64:
+                              stages.append(line[:1024])
+                      if line.startswith('test result:'):
+                          results.append(line[:1024])
+              execution_ok = running_one == 1 and len(results) == 1
+              valid_execution &= execution_ok
+              report.append(
+                  f'CASE name={case} process_status={result.returncode} '
+                  f'running_one_count={running_one} result_count={len(results)} '
+                  f'stage_count={stage_count} retained_stage_count={len(stages)}'
+              )
+              report.extend(stages)
+              report.extend(results[:1])
+          text = '\n'.join(report) + '\n'
+          (root / 'retained-authority-diagnostic.txt').write_text(text)
+          print(text, end='')
+          if not valid_execution:
+              raise SystemExit('Exact diagnostic case did not produce one running test and result')
           PYSAFE
       - name: Retain bounded row authority diagnostic
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.retained_authority_diagnostic.outcome != 'skipped' && steps.production.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: retained-authority-diagnostic
