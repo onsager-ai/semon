@@ -408,6 +408,12 @@ mod tests {
         id: &str,
         path: &str,
     ) {
+        connection
+            .execute(
+                "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,metadata) VALUES(semon_namespace(),?1,?2,0,?3,'{}')",
+                params![key, lifecycle, harness],
+            )
+            .unwrap();
         connection.execute(
             "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(semon_namespace(),?1,?2,?3,?4,?5)",
             params![key, lifecycle, harness, id, path],
