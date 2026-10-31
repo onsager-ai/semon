@@ -367,9 +367,11 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
             ],
         )
     } else if *kind == CatalogRowKind::History {
-        let row: crate::model::summary::CatalogRow =
+        let mut row: crate::model::summary::CatalogRow =
             serde_json::from_str(values[1].as_str().ok_or(StorageError::ScopeChanged)?)
                 .map_err(|_| StorageError::ScopeChanged)?;
+        crate::query_projection::SelectedRecipe::hydrate(&mut row, values[2].as_str())
+            .map_err(|_| StorageError::ScopeChanged)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
         (
             "session_key,metadata,query_recipe,query_activity,query_active",
@@ -403,7 +405,7 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
                 .map_err(|_| StorageError::ScopeChanged)?;
         // Retained-only sessions still need the normal SQLite listing owner;
         // an existing Current row for a composite keeps its own observation.
-        tx.0.execute("INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'retained',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO NOTHING", params![tx.1,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,values[1].as_str()]).map_err(failed)?;
+        tx.0.execute("INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES(?1,?2,'retained',?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,session_key) DO NOTHING", params![tx.1,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,values[1].as_str(),values[2].as_str()]).map_err(failed)?;
     }
     if *kind == CatalogRowKind::Current {
         let row: crate::model::summary::CatalogRow =

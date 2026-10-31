@@ -242,7 +242,9 @@ pub(crate) fn put_catalog_batch(
         statement.raw_bind_parameter(first + 4, &row.parent)?;
         let publication = crate::query_projection::SelectedRecipe::prepare(row)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        if publication.metadata != *metadata { return Err(rusqlite::Error::InvalidQuery); }
+        if publication.metadata != *metadata {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         statement.raw_bind_parameter(first + 5, metadata)?;
         statement.raw_bind_parameter(first + 6, publication.query_recipe)?;
     }

@@ -127,7 +127,8 @@ impl History<'_, '_> {
         // against the metadata.
         let mut row: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
-        crate::query_projection::SelectedRecipe::hydrate(&mut row, query_recipe).map_err(|_| StorageError::ScopeChanged)?;
+        crate::query_projection::SelectedRecipe::hydrate(&mut row, query_recipe)
+            .map_err(|_| StorageError::ScopeChanged)?;
         if row.key != key {
             return Err(StorageError::ScopeChanged);
         }

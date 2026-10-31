@@ -1885,7 +1885,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
             path: "projects/-work-proj/first.jsonl".into(),
         },
     );
-    let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let mut selected = recovery_catalog_row(&db, "session_catalog", "first");
     let proof_snapshot = recovery_proof_snapshot(&db, "first");
     let proof_provenance = recovery_stage_provenance(&db, "first");
     let direct_capture_before_reprice: Option<String> = db
@@ -1916,6 +1916,13 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     );
     let mut cost = selected.cost.clone();
     cost.usd = Some(cost.usd.unwrap_or_default() + 1.0);
+    crate::storage::sqlite::proof_generations::hydrate_query_recipe(
+        &tx,
+        &current_binding,
+        CatalogObservationOwner::Catalog,
+        &mut selected,
+    )
+    .unwrap();
     prepare_repriced_observation(
         &tx,
         &current_binding,
@@ -1923,6 +1930,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         &selected,
         &cost,
         selected.query.as_ref(),
+        selected.query_recipe.as_ref(),
     )
     .unwrap()
     .publish(&tx)
@@ -2244,6 +2252,7 @@ fn recovery_immutable_corruption_blocks_selected_bytes_and_preimage_publication(
                 &row,
                 &cost,
                 row.query.as_ref(),
+                row.query_recipe.as_ref(),
             ),
             Err(ObservationPreparationError::Evidence(
                 crate::storage::StorageError::ScopeChanged

@@ -80,10 +80,11 @@ impl SelectedRecipe {
         let mut compact = row.clone();
         let query_recipe = Self::detach(&mut compact)?;
         let metadata = serde_json::to_string(&compact).map_err(std::io::Error::other)?;
-        if metadata.len() > 8192 || metadata
-            .len()
-            .saturating_add(query_recipe.as_ref().map_or(0, String::len))
-            > crate::storage::proof_codec::METADATA_MAX
+        if metadata.len() > 8192
+            || metadata
+                .len()
+                .saturating_add(query_recipe.as_ref().map_or(0, String::len))
+                > crate::storage::proof_codec::METADATA_MAX
         {
             return Err(std::io::Error::other(
                 "Selected Query metadata budget exceeded",
@@ -100,7 +101,9 @@ impl SelectedRecipe {
     /// remains unchanged for grants, hashes and presentation qualification.
     pub(crate) fn hydrate(row: &mut CatalogRow, payload: Option<&str>) -> std::io::Result<()> {
         Self::validate_custody(row, payload)?;
-        row.query_recipe = payload.map(|payload| Self::decode(row, payload)).transpose()?;
+        row.query_recipe = payload
+            .map(|payload| Self::decode(row, payload))
+            .transpose()?;
         Ok(())
     }
 
@@ -190,7 +193,7 @@ mod selected_recipe_tests {
         recipe.session["busy"] = json!(vec![[100, 200]; 2048]);
         row.query_recipe = Some(recipe.clone());
         row.query.as_mut().unwrap()["selected"] = serde_json::to_value(&recipe).unwrap();
-        assert!(SelectedRecipe::validate_custody(&row, None).is_ok());
+        assert!(SelectedRecipe::validate_custody(&row, None).is_err());
         let encoded = SelectedRecipe::detach(&mut row).unwrap().unwrap();
         assert!(SelectedRecipe::validate_custody(&row, None).is_err());
         assert!(SelectedRecipe::validate_custody(&row, Some(&encoded)).is_ok());
@@ -453,7 +456,10 @@ impl Projection {
         let identity = identity(row);
         let query_generation = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&SelectedRecipe::prepare(row).map_err(data)?.row.query).map_err(data)?)
+            Sha256::digest(
+                serde_json::to_vec(&SelectedRecipe::prepare(row).map_err(data)?.row.query)
+                    .map_err(data)?
+            )
         );
         let mut hash = Sha256::new();
         hash.update(serde_json::to_vec(&(1, &source, trace)).map_err(data)?);

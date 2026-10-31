@@ -251,8 +251,11 @@ impl CurrentPublicationStore for Effects<'_, '_> {
         if metadata.len() > MAX || row.sources.len() > 64 {
             return Err(StorageError::Busy);
         }
-        let publication = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?;
-        if publication.metadata != metadata { return Err(StorageError::ScopeChanged); }
+        let publication = crate::query_projection::SelectedRecipe::prepare(row)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if publication.metadata != metadata {
+            return Err(StorageError::ScopeChanged);
+        }
         let query_recipe = publication.query_recipe.as_deref().map(str::as_bytes);
         let parent_key = row
             .parent
@@ -454,7 +457,9 @@ pub(super) fn stage(
         generation,
     };
     for row in publication.rows {
-        let metadata = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?.metadata;
+        let metadata = crate::query_projection::SelectedRecipe::prepare(row)
+            .map_err(|_| StorageError::ScopeChanged)?
+            .metadata;
         effects.current(row, &metadata)?;
         catalog::publish_current_sources(&effects, row)?;
         if let Some(trace) = &row.trace {

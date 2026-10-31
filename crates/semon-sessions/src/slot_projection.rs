@@ -621,6 +621,7 @@ impl SavedSlot {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct Projection {
     pub(crate) key: String,
     pub(crate) slots: Vec<SavedSlot>,

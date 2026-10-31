@@ -51,8 +51,18 @@ pub(crate) fn selected_query_context(
             };
             let text = text.ok_or(StorageError::Busy)?;
             crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
-            let mut candidate = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
-            super::proof_generations::hydrate_query_recipe(tx, &current, if history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &mut candidate)?;
+            let mut candidate =
+                serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+            super::proof_generations::hydrate_query_recipe(
+                tx,
+                &current,
+                if history {
+                    crate::storage::catalog::CatalogObservationOwner::History
+                } else {
+                    crate::storage::catalog::CatalogObservationOwner::Catalog
+                },
+                &mut candidate,
+            )?;
             Ok(Some(candidate))
         },
         |candidate, history| qualify_context_candidate(tx, &current, options, candidate, history),
@@ -269,7 +279,17 @@ fn load_catalog_row(
     spend(bytes_left, text.len())?;
     let mut row: crate::model::summary::CatalogRow =
         serde_json::from_str(&text).map_err(unavailable)?;
-    super::proof_generations::hydrate_query_recipe(db, binding, if history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &mut row).map_err(unavailable)?;
+    super::proof_generations::hydrate_query_recipe(
+        db,
+        binding,
+        if history {
+            crate::storage::catalog::CatalogObservationOwner::History
+        } else {
+            crate::storage::catalog::CatalogObservationOwner::Catalog
+        },
+        &mut row,
+    )
+    .map_err(unavailable)?;
     if row.key != key {
         return Err(unavailable("Catalog metadata identity changed"));
     }

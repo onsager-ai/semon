@@ -1628,8 +1628,14 @@ impl Stage {
         if batch.phase != Phase::Publication || batch.base_generation != prepared.base_generation {
             return Ok((Outcome::Conflict, None));
         }
+        let publications = prepared
+            .selected_publications()
+            .map_err(|error| StoreError::Data(error.to_string()))?;
         let mut publication_model = prepared.clone();
-        publication_model.rows = prepared.selected_publications().map_err(|error| StoreError::Data(error.to_string()))?.into_iter().map(|publication| publication.row).collect();
+        publication_model.rows = publications
+            .iter()
+            .map(|publication| publication.row.clone())
+            .collect();
         let prepared = &publication_model;
         if prepared.rows.len() > 64
             || prepared.claims.len() > 64
@@ -1722,9 +1728,6 @@ impl Stage {
         let producer_witness = prepared
             .staged_model_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
-        let publications = prepared
-            .selected_publications()
-            .map_err(|e| StoreError::Data(e.to_string()))?;
         let coordinator_metadata =
             crate::query_projection::SelectedRecipePublication::coordinator_metadata(&publications)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
@@ -1735,7 +1738,10 @@ impl Stage {
         {
             return Err(refuse("semantic_context_budget"));
         }
-        let metadata = publications.iter().map(|publication| publication.metadata.clone()).collect::<Vec<_>>();
+        let metadata = publications
+            .iter()
+            .map(|publication| publication.metadata.clone())
+            .collect::<Vec<_>>();
         if metadata.iter().map(String::len).sum::<usize>() > 1048576 {
             return Err(refuse("semantic_publication_metadata_budget"));
         }

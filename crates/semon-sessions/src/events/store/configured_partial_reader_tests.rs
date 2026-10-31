@@ -334,11 +334,18 @@ mod partial_readers {
 
         assert_eq!(selected(options, &row.key, &provider).status, 200);
 
-        let current: crate::model::summary::CatalogRow =
+        let mut current: crate::model::summary::CatalogRow =
             serde_json::from_str(&metadata).unwrap();
         let binding = crate::storage::local_navigation_binding(options, "").unwrap();
         let tx = db.transaction().unwrap();
         let current_binding = binding.runtime_binding_at(&tx).unwrap();
+        crate::storage::sqlite::proof_generations::hydrate_query_recipe(
+            &tx,
+            &current_binding,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
+            &mut current,
+        )
+        .unwrap();
         let mut repriced_cost = current.cost.clone();
         repriced_cost.usd = Some(repriced_cost.usd.unwrap_or_default() + 1.0);
         crate::storage::sqlite::proof_generations::prepare_repriced_observation(
@@ -348,6 +355,7 @@ mod partial_readers {
             &current,
             &repriced_cost,
             current.query.as_ref(),
+            current.query_recipe.as_ref(),
         )
         .unwrap()
         .publish(&tx)

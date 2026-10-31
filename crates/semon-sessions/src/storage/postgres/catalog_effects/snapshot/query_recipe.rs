@@ -24,10 +24,27 @@ fn authority(error: std::io::Error) -> Error {
 }
 
 impl Snapshot<'_, '_> {
-    pub(in crate::storage::postgres) fn hydrate_query_recipe(&self, row: &mut CatalogRow, history: bool) -> Result<(), StorageError> {
-        if row.query.is_none() { return Ok(()); }
-        let observation = self.query_recipe_observation(if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }, row).map_err(Error::into_storage)?;
-        row.query_recipe = self.load_query_recipe(&observation).map_err(Error::into_storage)?;
+    pub(in crate::storage::postgres) fn hydrate_query_recipe(
+        &self,
+        row: &mut CatalogRow,
+        history: bool,
+    ) -> Result<(), StorageError> {
+        if row.query.is_none() {
+            return Ok(());
+        }
+        let observation = self
+            .query_recipe_observation(
+                if history {
+                    CatalogObservationOwner::History
+                } else {
+                    CatalogObservationOwner::Catalog
+                },
+                row,
+            )
+            .map_err(Error::into_storage)?;
+        row.query_recipe = self
+            .load_query_recipe(&observation)
+            .map_err(Error::into_storage)?;
         Ok(())
     }
 

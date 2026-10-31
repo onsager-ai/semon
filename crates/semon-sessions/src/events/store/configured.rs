@@ -5122,7 +5122,8 @@ mod tests {
         .unwrap()
         .into_test_connection();
         let binding = reader.runtime_binding_at(&db).unwrap();
-        let compact = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0]).unwrap();
+        let compact =
+            crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0]).unwrap();
         let row = &compact.row;
         assert_eq!(
             db.query_row(
@@ -5135,7 +5136,10 @@ mod tests {
         );
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
-        assert_eq!(load_query_recipe(&db, &reader, &token).unwrap(), model.prepared().rows[0].query_recipe);
+        assert_eq!(
+            load_query_recipe(&db, &reader, &token).unwrap(),
+            model.prepared().rows[0].query_recipe
+        );
         let namespace = fixture.config.namespace.as_str();
         for sql in [
             "DELETE FROM main.meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
@@ -5152,7 +5156,10 @@ mod tests {
             db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
                 .unwrap();
         }
-        assert_eq!(load_query_recipe(&db, &reader, &token).unwrap(), model.prepared().rows[0].query_recipe);
+        assert_eq!(
+            load_query_recipe(&db, &reader, &token).unwrap(),
+            model.prepared().rows[0].query_recipe
+        );
     }
 
     #[test]
@@ -5184,7 +5191,9 @@ mod tests {
             Outcome::Written
         );
         cache.finish_semantic_stage(batch.epoch).unwrap();
-        let mut retained = model.prepared().rows[0].clone();
+        let mut retained = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0])
+            .unwrap()
+            .row;
         retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"model-1","uuid":"reprice-successor","parentUuid":"answer","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"retained price cohort"}})).unwrap();
@@ -5205,7 +5214,9 @@ mod tests {
             Outcome::Written
         );
         cache.finish_semantic_stage(batch.epoch).unwrap();
-        let original = model.prepared().rows[0].clone();
+        let original = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0])
+            .unwrap()
+            .row;
         assert!(original.cost.usd.is_some_and(|cost| cost > 0.0));
         assert_ne!(
             retained.sources, original.sources,

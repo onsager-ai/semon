@@ -353,7 +353,8 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         let metadata = text(1)?;
         let mut row: crate::model::summary::CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
-        crate::query_projection::SelectedRecipe::hydrate(&mut row, values[2].as_str()).map_err(|_| StorageError::ScopeChanged)?;
+        crate::query_projection::SelectedRecipe::hydrate(&mut row, values[2].as_str())
+            .map_err(|_| StorageError::ScopeChanged)?;
         let key = row.key.as_bytes();
         let parent_key = row
             .parent

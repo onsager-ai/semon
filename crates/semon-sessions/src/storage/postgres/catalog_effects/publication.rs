@@ -216,7 +216,15 @@ pub(super) fn request(
         .collect::<Vec<_>>();
     let payload = encoded(&(
         "catalog-publication-v2",
-        crate::query_projection::SelectedRecipePublication::coordinator_metadata(&publication.rows.iter().map(crate::query_projection::SelectedRecipe::prepare).collect::<Result<Vec<_>, _>>().map_err(|_| StorageError::ScopeChanged)?).map_err(|_| StorageError::ScopeChanged)?,
+        crate::query_projection::SelectedRecipePublication::coordinator_metadata(
+            &publication
+                .rows
+                .iter()
+                .map(crate::query_projection::SelectedRecipe::prepare)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| StorageError::ScopeChanged)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?,
         derivations,
         recipes,
         publication.observations,
@@ -236,8 +244,20 @@ pub(in crate::storage::postgres) fn publish(
     closed: bool,
     semantic: Option<Semantic<'_>>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
-    let stored_rows = publication.rows.iter().map(crate::query_projection::SelectedRecipe::prepare).collect::<Result<Vec<_>, _>>().map_err(|_| StorageError::ScopeChanged)?.into_iter().map(|publication| publication.row).collect::<Vec<_>>();
-    let publication = &crate::slot_projection::Publication { rows: &stored_rows, transcripts: publication.transcripts, observations: publication.observations };
+    let stored_rows = publication
+        .rows
+        .iter()
+        .map(crate::query_projection::SelectedRecipe::prepare)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| StorageError::ScopeChanged)?
+        .into_iter()
+        .map(|publication| publication.row)
+        .collect::<Vec<_>>();
+    let publication = &crate::slot_projection::Publication {
+        rows: &stored_rows,
+        transcripts: publication.transcripts,
+        observations: publication.observations,
+    };
     let (operation, payload) = request(publication, expected, claims, closed, semantic.as_ref())?;
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
@@ -530,7 +550,12 @@ pub(in crate::storage::postgres) fn publish(
     for row in publication.rows {
         let key = format!(
             "catalog-native-observation:{:x}",
-            Sha256::digest(crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?.metadata.as_bytes())
+            Sha256::digest(
+                crate::query_projection::SelectedRecipe::prepare(row)
+                    .map_err(|_| StorageError::ScopeChanged)?
+                    .metadata
+                    .as_bytes()
+            )
         );
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE native_observation");

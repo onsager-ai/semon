@@ -67,7 +67,13 @@ fn edge(
     records: &crate::query_source::Records<'_>,
     bytes_left: &std::cell::RefCell<usize>,
 ) -> Result<Value, QueryError> {
-    let recipes = context.iter().filter_map(|owner| owner.query_recipe.as_ref()).flat_map(|recipe| &recipe.edges).filter(|recipe| recipe["id"].as_str() == Some(id)).cloned().collect::<Vec<_>>();
+    let recipes = context
+        .iter()
+        .filter_map(|owner| owner.query_recipe.as_ref())
+        .flat_map(|recipe| &recipe.edges)
+        .filter(|recipe| recipe["id"].as_str() == Some(id))
+        .cloned()
+        .collect::<Vec<_>>();
     render_edge(id, context, records, &recipes, bytes_left)
 }
 
@@ -781,7 +787,17 @@ fn read_inner(
     }
     let mut row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
     let admitted = binding.runtime_binding_at(&tx).map_err(unavailable)?;
-    crate::storage::sqlite::proof_generations::hydrate_query_recipe(&tx, &admitted, if history.is_some() { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }, &mut row).map_err(unavailable)?;
+    crate::storage::sqlite::proof_generations::hydrate_query_recipe(
+        &tx,
+        &admitted,
+        if history.is_some() {
+            crate::storage::catalog::CatalogObservationOwner::History
+        } else {
+            crate::storage::catalog::CatalogObservationOwner::Catalog
+        },
+        &mut row,
+    )
+    .map_err(unavailable)?;
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
     }) {
@@ -810,7 +826,9 @@ fn read_inner(
     let cutoff = (!options.all && !options.scan_window)
         .then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
     if let Some(cutoff) = cutoff
-        && !crate::storage::query::history_window(&row, Some(cutoff)).map_err(unavailable)?.member
+        && !crate::storage::query::history_window(&row, Some(cutoff))
+            .map_err(unavailable)?
+            .member
     {
         return Err(QueryError::unknown_session(key));
     }
@@ -1026,23 +1044,34 @@ fn read_inner(
             },
             &|turn| {
                 cutoff
-                    .map(|cutoff| crate::storage::query::history_window(&row, Some(cutoff)).map(|window| window.turns.contains(turn["id"].as_str().unwrap_or_default())).map_err(unavailable))
+                    .map(|cutoff| {
+                        crate::storage::query::history_window(&row, Some(cutoff))
+                            .map(|window| {
+                                window
+                                    .turns
+                                    .contains(turn["id"].as_str().unwrap_or_default())
+                            })
+                            .map_err(unavailable)
+                    })
                     .unwrap_or(Ok(true))
             },
             &|id| {
                 cutoff
-                    .map(|cutoff| crate::storage::query::history_window(&row, Some(cutoff)).map(|window| window.edges.contains(id)).map_err(unavailable))
+                    .map(|cutoff| {
+                        crate::storage::query::history_window(&row, Some(cutoff))
+                            .map(|window| window.edges.contains(id))
+                            .map_err(unavailable)
+                    })
                     .unwrap_or(Ok(true))
             },
             &|id| {
                 if let Some(cutoff) = cutoff {
-                    let Some(child) = context
-                        .iter()
-                        .find(|owner| owner.key == id)
-                    else {
+                    let Some(child) = context.iter().find(|owner| owner.key == id) else {
                         return Ok(false);
                     };
-                    crate::storage::query::history_window(child, Some(cutoff)).map(|window| window.member).map_err(unavailable)
+                    crate::storage::query::history_window(child, Some(cutoff))
+                        .map(|window| window.member)
+                        .map_err(unavailable)
                 } else {
                     Ok(true)
                 }
@@ -1154,11 +1183,22 @@ fn read_inner(
                 }
                 let handoffs = if let crate::model::SlotKind::H(id) = &slot.kind {
                     if let Some(cutoff) = cutoff
-                        && !crate::storage::query::history_window(&row, Some(cutoff)).map_err(unavailable)?.edges.contains(id)
+                        && !crate::storage::query::history_window(&row, Some(cutoff))
+                            .map_err(unavailable)?
+                            .edges
+                            .contains(id)
                     {
                         vec![]
                     } else {
-                        let recipe = row.query_recipe.as_ref().and_then(|recipe| recipe.edges.iter().find(|edge| edge["id"].as_str() == Some(id.as_str())))
+                        let recipe = row
+                            .query_recipe
+                            .as_ref()
+                            .and_then(|recipe| {
+                                recipe
+                                    .edges
+                                    .iter()
+                                    .find(|edge| edge["id"].as_str() == Some(id.as_str()))
+                            })
                             .ok_or_else(|| unavailable("Native handoff recipe unavailable"))?;
                         vec![render_edge(
                             id,
@@ -1292,7 +1332,10 @@ pub(crate) fn render_session(
         .query
         .as_ref()
         .ok_or_else(|| unavailable("Selected Query unavailable"))?;
-    let selected = row.query_recipe.as_ref().ok_or_else(|| unavailable("Selected Query recipe unavailable"))?;
+    let selected = row
+        .query_recipe
+        .as_ref()
+        .ok_or_else(|| unavailable("Selected Query recipe unavailable"))?;
     let mut summary = saved["rows"][key]["summary"].clone();
     if !summary.is_object() || !selected.session["busy"].is_array() {
         return Err(unavailable("Selected Query recipe unavailable"));
@@ -1322,8 +1365,7 @@ pub(crate) fn render_session(
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     let mut metadata = 0usize;
     let mut turns = Vec::new();
-    for recipe in &selected.turns
-    {
+    for recipe in &selected.turns {
         metadata += recipe.to_string().len();
         if metadata > 8 * 1024 * 1024 {
             return Err(unavailable(
@@ -1363,8 +1405,7 @@ pub(crate) fn render_session(
     }
     summary["turns"] = json!(turns);
     let mut handoffs = Vec::new();
-    for recipe in &selected.edges
-    {
+    for recipe in &selected.edges {
         let id = recipe["id"]
             .as_str()
             .ok_or_else(|| unavailable("Handoff identity unavailable"))?;

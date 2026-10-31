@@ -105,7 +105,9 @@ fn selected_edge_context(
         history,
         |owner, history| {
             let mut row = snapshot.catalog(owner, history)?;
-            if let Some(row) = &mut row { snapshot.hydrate_query_recipe(row, history)?; }
+            if let Some(row) = &mut row {
+                snapshot.hydrate_query_recipe(row, history)?;
+            }
             Ok(row)
         },
         |candidate, history| qualify_context_candidate(snapshot, options, candidate, history),
@@ -188,7 +190,9 @@ fn cohort_page(
     }
     tx.check()?;
     drop(tx);
-    for (row, catalog_member) in &mut output { snapshot.hydrate_query_recipe(row, !*catalog_member)?; }
+    for (row, catalog_member) in &mut output {
+        snapshot.hydrate_query_recipe(row, !*catalog_member)?;
+    }
     Ok(output)
 }
 

@@ -2969,8 +2969,21 @@ impl SqliteStore {
             return Ok((Outcome::Conflict, None));
         }
         self.semantic_rejection = None;
-        let stored_rows = publication.rows.iter().map(crate::query_projection::SelectedRecipe::prepare).collect::<Result<Vec<_>, _>>().map_err(|error| StoreError::Data(error.to_string()))?.into_iter().map(|publication| publication.row).collect::<Vec<_>>();
-        let publication = &crate::slot_projection::Publication { rows: &stored_rows, transcripts: publication.transcripts, observations: publication.observations };
+        let selected_publications = publication
+            .rows
+            .iter()
+            .map(crate::query_projection::SelectedRecipe::prepare)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let stored_rows = selected_publications
+            .iter()
+            .map(|publication| publication.row.clone())
+            .collect::<Vec<_>>();
+        let publication = &crate::slot_projection::Publication {
+            rows: &stored_rows,
+            transcripts: publication.transcripts,
+            observations: publication.observations,
+        };
         let rows = publication.rows;
         #[cfg(test)]
         {
@@ -3008,11 +3021,10 @@ impl SqliteStore {
         }
         use sha2::{Digest, Sha256};
         let version = crate::model::summary::CATALOG_VERSION.to_string();
-        let metadata: Vec<_> = rows
+        let metadata: Vec<_> = selected_publications
             .iter()
-            .map(|row| crate::query_projection::SelectedRecipe::prepare(row).map(|publication| publication.metadata).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error))))
-            .collect::<Result<_, _>>()
-            .map_err(failure)?;
+            .map(|publication| publication.metadata.clone())
+            .collect();
         let batch_bytes = catalog_batch_bytes(rows, &metadata, writer);
         self.connection
             .busy_timeout(Duration::ZERO)
@@ -8351,7 +8363,10 @@ mod tests {
             options: options.clone(),
             binding: reader.clone(),
         };
-        assert_eq!(port.selected_recipe(&original).unwrap(), Some(expected.clone()));
+        assert_eq!(
+            port.selected_recipe(&original).unwrap(),
+            Some(expected.clone())
+        );
         {
             let mut db = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
@@ -8375,7 +8390,8 @@ mod tests {
             );
             let retained: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![config.namespace.as_str(), rows[0].key], |row| row.get(0)).unwrap();
             assert!(!retained);
-            tx.execute_batch("ROLLBACK TO missing_recipe; RELEASE missing_recipe").unwrap();
+            tx.execute_batch("ROLLBACK TO missing_recipe; RELEASE missing_recipe")
+                .unwrap();
             tx.commit().unwrap();
         }
         let payload = format!("{}\n", prepared.query_recipe.unwrap());

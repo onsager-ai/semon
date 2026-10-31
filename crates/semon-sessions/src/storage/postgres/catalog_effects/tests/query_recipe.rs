@@ -137,7 +137,10 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 token.residence,
                 QueryRecipeResidence::NativeCatalog { .. }
             ));
-            assert_eq!(view.load_query_recipe(&token).unwrap(), Some(expected.clone()));
+            assert_eq!(
+                view.load_query_recipe(&token).unwrap(),
+                Some(expected.clone())
+            );
             assert!(view.query_recipe_observation(Owner::History, row).is_err());
             Ok(token)
         })
@@ -388,7 +391,9 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         for _ in 0..256 {
             // Author the exact pair at Current and immutable INSERTs from
             // this prepared model; ordinary publication checks still run.
-            let result = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+            let result = cache
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
             if result.0 == crate::events::Outcome::Written {
                 assert!(result.1.is_some());
                 complete = true;

@@ -732,7 +732,8 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
                 CatalogObservationOwner::Catalog,
                 original,
                 &changed,
-                original.query.as_ref()
+                original.query.as_ref(),
+                original.query_recipe.as_ref()
             )
             .is_err()
         );

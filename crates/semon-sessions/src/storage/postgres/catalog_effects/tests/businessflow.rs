@@ -2655,7 +2655,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 at_limit,
                 "whole Stage cap counts encoded payloads"
             );
-            eprintln!("pg_selected_recipe_coordinator paired_tamper=refused rollback=preserved stage_exact_1048576=written stage_plus_one=refused");
+            eprintln!(
+                "pg_selected_recipe_coordinator paired_tamper=refused rollback=preserved stage_exact_1048576=written stage_plus_one=refused"
+            );
             assert_eq!(
                 pg.record_semantic_batch(&batch, saved).unwrap(),
                 Outcome::Written

@@ -55,7 +55,7 @@ impl QueryRecipeObservation {
             || original.stream_epoch != destination.stream_epoch
             || original.admission == 0
             || destination.admission == 0
-            || metadata.len() > super::proof_codec::METADATA_MAX
+            || metadata.len() > 8192
         {
             return Err(super::StorageError::ScopeChanged);
         }
@@ -98,7 +98,10 @@ pub(crate) enum QueryRecipeLoadError {
 
 impl QueryRecipeLoadError {
     pub(crate) fn into_storage(self) -> super::StorageError {
-        match self { Self::Storage(error) => error, _ => super::StorageError::ScopeChanged }
+        match self {
+            Self::Storage(error) => error,
+            _ => super::StorageError::ScopeChanged,
+        }
     }
 }
 
@@ -170,7 +173,11 @@ struct EdgeSourceNeed {
 fn edge_source_needs(
     row: &CatalogRow,
 ) -> Result<(Vec<EdgeSourceNeed>, BTreeSet<String>), StorageError> {
-    let edges = &row.query_recipe.as_ref().ok_or(StorageError::ScopeChanged)?.edges;
+    let edges = &row
+        .query_recipe
+        .as_ref()
+        .ok_or(StorageError::ScopeChanged)?
+        .edges;
     let mut needs = Vec::<EdgeSourceNeed>::new();
     let mut endpoint_owners = BTreeSet::new();
     for edge in edges {
@@ -403,7 +410,12 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     };
     let mut last = query["last"].as_i64();
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
-    for edge in row.query_recipe.as_ref().into_iter().flat_map(|recipe| &recipe.edges) {
+    for edge in row
+        .query_recipe
+        .as_ref()
+        .into_iter()
+        .flat_map(|recipe| &recipe.edges)
+    {
         let edge = &edge["query"];
         for at in [edge["at"].as_i64(), edge["done"].as_i64()]
             .into_iter()
@@ -443,7 +455,10 @@ pub(crate) fn history_window(
     cutoff: Option<i64>,
 ) -> Result<HistoryWindow, &'static str> {
     let saved = row.query.as_ref().ok_or("retained_query_missing")?;
-    let selected = row.query_recipe.as_ref().ok_or("retained_query_recipe_missing")?;
+    let selected = row
+        .query_recipe
+        .as_ref()
+        .ok_or("retained_query_recipe_missing")?;
     let edges = &selected.edges;
     let turns = &selected.turns;
     let mut edge_ids = BTreeMap::new();
@@ -679,7 +694,9 @@ mod tests {
     }
 
     fn retained_row(query: Value) -> crate::model::summary::CatalogRow {
-        let recipe = query.get("selected").and_then(|selected| serde_json::from_value(selected.clone()).ok());
+        let recipe = query
+            .get("selected")
+            .and_then(|selected| serde_json::from_value(selected.clone()).ok());
         let mut row: crate::model::summary::CatalogRow = serde_json::from_value(json!({
             "lifecycle":"retained",
             "key":"owner",
@@ -786,7 +803,10 @@ mod tests {
         let persisted = observation
             .metadata
             .expect("admitted persisted Catalog metadata");
-        assert!(serde_json::to_string(&producer_row).unwrap().len() > 8192, "raw producer keeps complete inline observations");
+        assert!(
+            serde_json::to_string(&producer_row).unwrap().len() > 8192,
+            "raw producer keeps complete inline observations"
+        );
         assert!(persisted.len() <= 8192);
 
         let prepared = crate::query_projection::SelectedRecipe::prepare(&producer_row).unwrap();

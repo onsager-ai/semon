@@ -624,14 +624,24 @@ fn catalog_step(
     let Some(cost) = retained_cost(tx, &row, table)? else {
         return Ok(false);
     };
-    crate::storage::sqlite::proof_generations::hydrate_query_recipe(tx, binding, CatalogObservationOwner::Catalog, &mut row).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    crate::storage::sqlite::proof_generations::hydrate_query_recipe(
+        tx,
+        binding,
+        CatalogObservationOwner::Catalog,
+        &mut row,
+    )
+    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     let original = row.clone();
     let old = row.cost.clone();
     row.cost = cost.clone();
-    if let Some(query) = &mut row.query { replace_costs(query, &old, &cost)?; }
+    if let Some(query) = &mut row.query {
+        replace_costs(query, &old, &cost)?;
+    }
     if let Some(recipe) = &mut row.query_recipe {
         replace_costs(&mut recipe.session, &old, &cost)?;
-        for item in recipe.turns.iter_mut().chain(&mut recipe.edges) { replace_costs(item, &old, &cost)?; }
+        for item in recipe.turns.iter_mut().chain(&mut recipe.edges) {
+            replace_costs(item, &old, &cost)?;
+        }
     }
     prepare_repriced_observation(
         tx,
@@ -649,7 +659,13 @@ fn catalog_step(
     if let Some(encoded) = crate::history_projection::catalog(tx, &key)? {
         let mut history: crate::model::summary::CatalogRow = decode_json(0, &encoded)?;
         if history.sources == row.sources {
-            crate::storage::sqlite::proof_generations::hydrate_query_recipe(tx, binding, CatalogObservationOwner::History, &mut history).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            crate::storage::sqlite::proof_generations::hydrate_query_recipe(
+                tx,
+                binding,
+                CatalogObservationOwner::History,
+                &mut history,
+            )
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let original_history = history.clone();
             history.cost = cost.clone();
             if let Some(query) = &mut history.query {
@@ -657,7 +673,9 @@ fn catalog_step(
             }
             if let Some(recipe) = &mut history.query_recipe {
                 replace_costs(&mut recipe.session, &old, &cost)?;
-                for item in recipe.turns.iter_mut().chain(&mut recipe.edges) { replace_costs(item, &old, &cost)?; }
+                for item in recipe.turns.iter_mut().chain(&mut recipe.edges) {
+                    replace_costs(item, &old, &cost)?;
+                }
             }
             match prepare_repriced_observation(
                 tx,
