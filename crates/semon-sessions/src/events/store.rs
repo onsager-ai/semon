@@ -7839,8 +7839,10 @@ mod tests {
         for (owner_kind, denied_table) in [
             ("catalog", "session_catalog"),
             ("catalog", "storage_catalog_native_observation_grants"),
+            ("catalog", "storage_proof_generations"),
             ("history", "session_history_catalog"),
             ("history", "storage_catalog_native_observation_grants"),
+            ("history", "storage_proof_generations"),
         ] {
             let root = scratch("direct-catalog-reprice-preparation-failure");
             let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
