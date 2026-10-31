@@ -3393,6 +3393,10 @@ mod tests {
 
     fn shared_state(f: &Fixture) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
         let db = f.db();
+        database_state(&db)
+    }
+
+    fn database_state(db: &Connection) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
         let tables=db.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 129").unwrap().query_map([],|r|r.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
         assert!(tables.len() <= 128);
         tables
