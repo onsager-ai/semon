@@ -2161,7 +2161,7 @@ impl EventCache {
         complete: bool,
     ) -> io::Result<()> {
         let observation_path = self.observation_path.clone();
-        let _probe = observation_path
+        let mut probe = observation_path
             .as_deref()
             .map(|path| crate::native_timing::DiscoveryProbe::new(path, "publication"));
         let timing = crate::native_timing::enabled();
@@ -2181,6 +2181,7 @@ impl EventCache {
         }
         let operation = self.capture_discover_operation(&paths, complete)?;
         let started = measurements.start();
+        let thread_cpu_started_ns = crate::native_timing::thread_cpu_time_ns(timing);
         let result = self
             .observation_store_mut()
             .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
@@ -2194,12 +2195,25 @@ impl EventCache {
                 return Err(io::Error::other(error.to_string()));
             }
         };
+        let thread_cpu_ended_ns = crate::native_timing::thread_cpu_time_ns(timing);
+        measurements.record_cpu(
+            "source_journal_inclusive",
+            thread_cpu_started_ns,
+            thread_cpu_ended_ns,
+            paths.len(),
+        );
         measurements.record("source_journal_inclusive", started, paths.len());
         if timing && let Some(observation_path) = observation_path.as_deref() {
+            // This measures the actual breakdown emit call; source-journal, probe,
+            // and phase log writes remain in their enclosing wall/CPU scopes.
+            let diagnostic_emit_started = std::time::Instant::now();
             measurements.emit(
                 &crate::native_timing::id(observation_path),
                 "discovery_publication_work",
             );
+            if let Some(probe) = &mut probe {
+                probe.record_diagnostic_emit(diagnostic_emit_started);
+            }
         }
         match receipt {
             crate::storage::source_observations::SourceMutationReceipt::Applied

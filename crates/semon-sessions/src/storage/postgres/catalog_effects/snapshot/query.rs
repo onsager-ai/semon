@@ -5,7 +5,7 @@ use crate::{
     Options, QueryError,
     storage::{
         catalog::CatalogSnapshot,
-        query::{Part, QueryCatalogStore},
+        query::{Part, QueryCatalogStore, edge_timed, history_window, select_history, turn_kept},
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -34,6 +34,8 @@ fn cohort_scope_changed(reason: &'static str) -> StorageError {
 fn cohort_page(
     snapshot: &Snapshot<'_, '_>,
     after: Option<&(i64, Vec<u8>)>,
+    cutoff: Option<i64>,
+    bytes_left: &mut usize,
 ) -> Result<Vec<(crate::model::summary::CatalogRow, bool)>, StorageError> {
     snapshot
         .require_current()
@@ -58,6 +60,7 @@ fn cohort_page(
              AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
              AND h.session_key=o.session_key
             WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+              AND $5::bigint IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM semon_pg_native_catalog_rows r
                 WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
@@ -75,16 +78,21 @@ fn cohort_page(
                 &snapshot.generation.as_bytes(),
                 &after_last,
                 &after_key,
+                &cutoff,
             ],
         )
         .map_err(sqlstate::error)?;
     let mut output = Vec::new();
     for row in page {
         let bytes = row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?;
+        let key = row.get::<_, Vec<u8>>(0);
+        *bytes_left = bytes_left
+            .checked_sub(64 + key.len() + bytes.len())
+            .ok_or(StorageError::Busy)?;
         crate::selected_read::charge(64, bytes.len()).map_err(|_| StorageError::Busy)?;
         let metadata: crate::model::summary::CatalogRow = serde_json::from_slice(&bytes)
             .map_err(|_| cohort_scope_changed("page_metadata_invalid"))?;
-        if metadata.key.as_bytes() != row.get::<_, Vec<u8>>(0)
+        if metadata.key.as_bytes() != key
             || metadata.last.unwrap_or(0) != row.get::<_, i64>(2)
             || metadata.sources.len() > 64
         {
@@ -96,25 +104,122 @@ fn cohort_page(
     Ok(output)
 }
 
+/// Page each finite History predicate on its own owner index before joining
+/// immutable headers. Expired History never enters this request's scan.
+fn finite_history_page(
+    snapshot: &Snapshot<'_, '_>,
+    cutoff: i64,
+    active: bool,
+    after: Option<&(i64, Vec<u8>)>,
+    bytes_left: &mut usize,
+) -> Result<Vec<(crate::model::summary::CatalogRow, i64, Vec<u8>)>, StorageError> {
+    let page = finite_history_page_rows(snapshot, cutoff, active, after, *bytes_left)?;
+    let mut output = Vec::new();
+    for record in page {
+        let key = record
+            .get::<_, Option<Vec<u8>>>(0)
+            .ok_or(StorageError::Busy)?;
+        let metadata = record
+            .get::<_, Option<Vec<u8>>>(1)
+            .ok_or(StorageError::Busy)?;
+        *bytes_left = bytes_left
+            .checked_sub(64 + key.len() + metadata.len())
+            .ok_or(StorageError::Busy)?;
+        let row: crate::model::summary::CatalogRow = serde_json::from_slice(&metadata)
+            .map_err(|_| cohort_scope_changed("finite_history_metadata_invalid"))?;
+        let key_digest = record.get::<_, Vec<u8>>(3);
+        if row.key.as_bytes() != key || digest(row.key.as_bytes()) != key_digest {
+            return Err(cohort_scope_changed("finite_history_identity_mismatch"));
+        }
+        output.push((
+            row,
+            record.get::<_, Option<i64>>(2).unwrap_or(0),
+            key_digest,
+        ));
+    }
+    snapshot
+        .tx
+        .lock()
+        .map_err(|_| StorageError::Unavailable)?
+        .check()?;
+    Ok(output)
+}
+
+fn finite_history_page_rows(
+    snapshot: &Snapshot<'_, '_>,
+    cutoff: i64,
+    active: bool,
+    after: Option<&(i64, Vec<u8>)>,
+    bytes_left: usize,
+) -> Result<Vec<tokio_postgres::Row>, StorageError> {
+    snapshot
+        .require_current()
+        .map_err(|_| cohort_scope_changed("snapshot_not_current"))?;
+    let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+    tx.check()?;
+    let request_budget = i64::try_from(bytes_left).map_err(|_| StorageError::Busy)?;
+    let predicate = match (active, after.is_some()) {
+        (true, false) => {
+            "query_active=true AND $5::bytea IS NULL AND $3::bigint IS NOT NULL AND $4::bigint IS NULL"
+        }
+        (true, true) => {
+            "query_active=true AND key_digest>$5 AND $3::bigint IS NOT NULL AND $4::bigint IS NULL"
+        }
+        (false, false) => "query_activity>=$3 AND $4::bigint IS NULL AND $5::bytea IS NULL",
+        (false, true) => "query_activity>=$3 AND (query_activity,key_digest)>($4,$5)",
+    };
+    let order = if active {
+        "key_digest"
+    } else {
+        "query_activity,key_digest"
+    };
+    let after_activity = if active {
+        None
+    } else {
+        after.map(|cursor| cursor.0)
+    };
+    let output_order = if active {
+        "p.key_digest"
+    } else {
+        "p.query_activity,p.key_digest"
+    };
+    let after_key = after.map(|cursor| cursor.1.as_slice());
+    let page = tx.driver.query(&format!(
+        "WITH page AS MATERIALIZED (
+            SELECT session_key,key_digest,owner_generation,query_activity
+            FROM semon_pg_native_catalog_history_owners
+            WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {predicate}
+            ORDER BY {order} LIMIT 65
+        ), bounded AS MATERIALIZED (
+            SELECT p.session_key,h.metadata,p.query_activity,p.key_digest,
+                   count(*) OVER ()*64+sum(octet_length(p.session_key)+coalesce(octet_length(h.metadata),0)) OVER ()<=$6::bigint AS within_request_budget,
+                   sum(octet_length(h.metadata)) OVER ()<=1048576 AS within_metadata_budget
+            FROM page p LEFT JOIN semon_pg_native_catalog_history_headers h
+              ON h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=p.owner_generation
+             AND h.key_digest=p.key_digest AND h.session_key=p.session_key
+        ) SELECT CASE WHEN octet_length(session_key)<=1048576 AND within_request_budget THEN session_key END,
+                 CASE WHEN within_request_budget AND within_metadata_budget THEN metadata END,
+                 query_activity,key_digest
+        FROM bounded p
+        ORDER BY {output_order}"
+    ), &[&tx.namespace.as_str().as_bytes(), &snapshot.generation.as_bytes(), &cutoff, &after_activity, &after_key, &request_budget]).map_err(sqlstate::error)?;
+    tx.check()?;
+    Ok(page)
+}
+
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
 }
 
-fn edge_timed(edge: &serde_json::Value, cutoff: i64) -> bool {
-    edge["at"].as_i64().is_some_and(|at| at >= cutoff)
-        || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
-        || edge["status"]
-            .as_str()
-            .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
-}
-
-fn turn_kept(turn: &serde_json::Value, cutoff: i64, timed_edges: &BTreeSet<String>) -> bool {
-    turn["last"] == serde_json::json!(true)
-        || turn["last"] == serde_json::json!(1)
-        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
-        || turn["start"]
-            .as_str()
-            .is_some_and(|id| timed_edges.contains(id))
+fn charge_catalog_row(
+    row: &crate::model::summary::CatalogRow,
+    bytes_left: &mut usize,
+) -> Result<(), StorageError> {
+    let metadata = serde_json::to_vec(row).map_err(|_| StorageError::ScopeChanged)?;
+    *bytes_left = bytes_left
+        .checked_sub(64 + row.key.len() + metadata.len())
+        .ok_or(StorageError::Busy)?;
+    Ok(())
 }
 
 fn retained_window(
@@ -122,90 +227,24 @@ fn retained_window(
     generation: &str,
     cutoff: i64,
 ) -> Result<(Part, bool), StorageError> {
-    let saved = row
-        .query
-        .as_ref()
-        .ok_or_else(|| cohort_scope_changed("retained_query_missing"))?;
-    let selected = &saved["selected"];
-    let edges = selected["edges"]
-        .as_array()
-        .ok_or_else(|| cohort_scope_changed("retained_query_edges_missing"))?;
-    let turns = selected["turns"]
-        .as_array()
-        .ok_or_else(|| cohort_scope_changed("retained_query_turns_missing"))?;
-    let mut timed_edges = BTreeSet::new();
-    for recipe in edges {
-        let id = recipe["id"]
-            .as_str()
-            .ok_or_else(|| cohort_scope_changed("retained_query_edge_id_missing"))?;
-        if edge_timed(&recipe["query"], cutoff) {
-            timed_edges.insert(id.to_owned());
-        }
-    }
-    // An old last turn keeps its links only after the owner qualifies for the
-    // window; the turn alone cannot revive an expired retained owner.
-    let member = saved["last"].as_i64().is_some_and(|last| last >= cutoff)
-        || matches!(saved["state"].as_str(), Some("work" | "wait"))
-        || !timed_edges.is_empty();
-    let mut kept_turns = BTreeSet::new();
-    let mut kept_edges = timed_edges.clone();
-    for recipe in turns.iter().filter(|_| member) {
-        let turn = &recipe["query"];
-        if !turn_kept(turn, cutoff, &timed_edges) {
-            continue;
-        }
-        let id = recipe["id"]
-            .as_str()
-            .ok_or_else(|| cohort_scope_changed("retained_query_turn_id_missing"))?;
-        kept_turns.insert(id.to_owned());
-        if let Some(id) = turn["start"].as_str() {
-            kept_edges.insert(id.to_owned());
-        }
-        if let Some(sent) = turn["sent"].as_array() {
-            kept_edges.extend(sent.iter().filter_map(|id| id.as_str().map(str::to_owned)));
-        }
-    }
-    let mut rows = BTreeMap::new();
-    if member {
-        let summaries = saved["rows"]
-            .as_object()
-            .ok_or_else(|| cohort_scope_changed("retained_query_rows_missing"))?;
-        rows.insert(
-            row.key.clone(),
-            summaries
-                .get(&row.key)
-                .cloned()
-                .ok_or_else(|| cohort_scope_changed("retained_query_owner_missing"))?,
-        );
-        for recipe in edges {
-            let Some(id) = recipe["id"].as_str() else {
-                return Err(cohort_scope_changed("retained_query_edge_id_missing"));
-            };
-            if !kept_edges.contains(id) {
-                continue;
-            }
-            for endpoint in ["from", "to"]
-                .into_iter()
-                .filter_map(|field| recipe["query"][field].as_str())
-                .filter(|endpoint| *endpoint != "you")
-            {
-                rows.entry(endpoint.to_owned())
-                    .or_insert_with(|| summaries.get(endpoint).cloned().unwrap_or_default());
-            }
-        }
-    }
+    let selected = history_window(row, Some(cutoff)).map_err(cohort_scope_changed)?;
     Ok((
         Part {
             generation: generation.to_owned(),
-            runtime: saved["runtime"].as_str().unwrap_or_default().to_owned(),
-            rows,
+            runtime: row
+                .query
+                .as_ref()
+                .and_then(|saved| saved["runtime"].as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            rows: selected.rows,
             owners: BTreeMap::new(),
             content: BTreeMap::new(),
             witnesses: Vec::new(),
-            edges: kept_edges,
-            turns: kept_turns,
+            edges: selected.edges,
+            turns: selected.turns,
         },
-        member,
+        selected.member,
     ))
 }
 
@@ -571,9 +610,11 @@ impl QueryCatalogStore for QueryCatalog {
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let mut rows = BTreeMap::new();
             let mut owners = BTreeMap::new();
+            let mut saved_rows = BTreeMap::new();
+            let mut current_rows = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
-            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
+            let mut emit = |row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
                 if row.sources.is_empty() || row.sources.len() > 64 || row.sources.iter().any(|source| crate::catalog::source_relative(&self.options, &row.harness, source).is_none()) { return Err(cohort_scope_changed("query_source_outside_authority")); }
                 let expected = if current {
                     snapshot.runtime_observation(&self.options, &row, &runtime)
@@ -592,21 +633,46 @@ impl QueryCatalogStore for QueryCatalog {
                 let summaries = saved["rows"].as_object().ok_or_else(|| cohort_scope_changed("query_summaries_missing"))?;
                 if !summaries.contains_key(&row.key) { return Err(cohort_scope_changed("query_owner_summary_missing")); }
                 for (id, value) in summaries.iter().filter(|(id, _)| keep.is_none_or(|keep| keep.contains(*id))) {
-                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
-                    rows.insert(id.clone(), value.clone());
-                    owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                    if value["summary"]["id"] != *id { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
+                    let observed = value.clone();
+                    if saved_rows.get(id).is_some_and(|prior| prior != &observed) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
+                    let mut value = value.clone();
+                    if !current {
+                        value["summary"]["alive"] = serde_json::Value::Null;
+                        value["summary"]["run"] = serde_json::Value::Null;
+                        value["summary"]["open_question"] = serde_json::Value::Null;
+                        if matches!(value["summary"]["state"].as_str(), Some("working" | "waiting-question")) {
+                            value["summary"]["state"] = serde_json::json!("unknown");
+                        }
+                    }
+                    if saved_rows.contains_key(id) {
+                        if current && !current_rows.get(id).copied().unwrap_or(false) {
+                            current_rows.insert(id.clone(), true);
+                            rows.insert(id.clone(), value);
+                            owners.insert(id.clone(), row.key.clone());
+                        }
+                    } else {
+                        saved_rows.insert(id.clone(), observed);
+                        current_rows.insert(id.clone(), current);
+                        rows.insert(id.clone(), value);
+                        owners.insert(id.clone(), row.key.clone());
+                    }
                 }
-                witnesses.push((row.key.clone(), witness));
-                // Content generation belongs to the same immutable selected trace.
-                use crate::storage::selected::ContextLookup;
-                let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
-                if let Some((_, Some(version))) = version { content.insert(row.key, version); }
+                witnesses.push((row.key.clone(), witness, selected_history));
+                // The preview header is a Current trace witness. History has
+                // no retained overview summary from which to derive this hint.
+                if !selected_history {
+                    use crate::storage::selected::ContextLookup;
+                    let version = snapshot.preview_header(&row.key).map_err(|_| StorageError::Unavailable)?;
+                    if let Some((_, Some(version))) = version { content.insert(row.key, version); }
+                }
                 Ok(())
             };
             // As the SQLite reader, retained history wins for the same owner.
-            let chosen = |row: crate::model::summary::CatalogRow| -> Result<(crate::model::summary::CatalogRow, bool), StorageError> {
+            let chosen = |row: crate::model::summary::CatalogRow, bytes_left: &mut usize| -> Result<(crate::model::summary::CatalogRow, bool), StorageError> {
                 Ok(match snapshot.history_catalog(&row.key).map_err(|_| StorageError::Unavailable)? {
                     Some(text) => {
+                        *bytes_left = bytes_left.checked_sub(64 + row.key.len() + text.len()).ok_or(StorageError::Busy)?;
                         let history: crate::model::summary::CatalogRow = serde_json::from_str(&text).map_err(|_| cohort_scope_changed("history_metadata_invalid"))?;
                         if history.key != row.key { return Err(cohort_scope_changed("history_identity_mismatch")); }
                         (history, true)
@@ -618,39 +684,94 @@ impl QueryCatalogStore for QueryCatalog {
             let mut loaded = BTreeMap::new();
             let mut after = None;
             loop {
-                let mut catalog = cohort_page(snapshot, after.as_ref())?;
+                let mut catalog = cohort_page(snapshot, after.as_ref(), cutoff, bytes_left)?;
                 let more = catalog.len() > 64;
                 catalog.truncate(64);
                 let next = catalog.last().map(|(row,_)| (row.last.unwrap_or(0),row.key.as_bytes().to_vec()));
                 for (row,catalog_member) in catalog {
-                    let current = catalog_member && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                    let current_member = catalog_member && row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
                     let Some(c) = cutoff else {
-                        let selected = if catalog_member { chosen(row)?.0 } else { row };
-                        loaded.insert(selected.key.clone(), (selected,current));
+                            let (selected, selected_history) = if catalog_member { chosen(row, bytes_left)? } else { (row,true) };
+                            let current = !selected_history && selected.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                            loaded.insert(selected.key.clone(), (selected,current,selected_history));
                         continue;
                     };
                     // The chosen history may have older timestamps than its
                     // Current header. Only physical Catalog members qualify
                     // by header time or live state; retained-only owners use
                     // their saved Query time below.
-                    let state = current && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
-                    let current_recent = catalog_member && (row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state);
-                    let (row, history) = if catalog_member { chosen(row)? } else { (row,true) };
-                    if current_recent || (history && query_last(&row).is_some_and(|last| last >= c)) {
-                        loaded.insert(row.key.clone(), (row,current));
+                    let state = current_member && row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait"));
+                    let current_recent = current_member && (row.last.is_some_and(|last| last >= c) || query_last(&row).is_some_and(|last| last >= c) || state);
+                    if current_recent {
+                        loaded.insert(row.key.clone(), (row,true,false));
                     }
                 }
                 if !more { break; }
                 after = Some(next.ok_or_else(|| cohort_scope_changed("catalog_page_cursor_missing"))?);
+            }
+            if let Some(c) = cutoff {
+                for active in [false, true] {
+                    let mut after = None;
+                    loop {
+                        let mut page = finite_history_page(snapshot, c, active, after.as_ref(), bytes_left)?;
+                        let more = page.len() > 64;
+                        page.truncate(64);
+                        let next = page.last().map(|(_, activity, key_digest)| (*activity, key_digest.clone()));
+                        for (row, _, _) in page {
+                            if loaded.get(&row.key).is_some_and(|(_, current, _)| *current) {
+                                continue;
+                            }
+                            if !history_window(&row, Some(c)).map_err(cohort_scope_changed)?.member {
+                                return Err(cohort_scope_changed("history_activity_projection_mismatch"));
+                            }
+                            loaded.insert(row.key.clone(), (row, false, true));
+                        }
+                        if !more { break; }
+                        after = Some(next.ok_or_else(|| cohort_scope_changed("history_page_cursor_missing"))?);
+                    }
+                }
+            }
+            let mut history_edges = BTreeSet::new();
+            let mut history_turns = BTreeSet::new();
+            let mut history_context = BTreeSet::new();
+            let mut history_required_owners = BTreeSet::new();
+            for (row, _, selected_history) in loaded.values() {
+                if !selected_history { continue; }
+                let window = history_window(row, cutoff).map_err(cohort_scope_changed)?;
+                if !window.member { return Err(cohort_scope_changed("selected_history_outside_window")); }
+                history_edges.extend(window.edges);
+                history_turns.extend(window.turns);
+                history_context.extend(window.rows.keys().cloned());
+                history_context.extend(window.context.iter().cloned());
+                history_required_owners.extend(window.context);
+            }
+            for key in &history_required_owners {
+                if let Some(text) = snapshot.history_catalog(key).map_err(|_| StorageError::Unavailable)? {
+                    *bytes_left = bytes_left.checked_sub(64 + key.len() + text.len()).ok_or(StorageError::Busy)?;
+                    let row: crate::model::summary::CatalogRow = serde_json::from_str(&text)
+                        .map_err(|_| cohort_scope_changed("history_context_metadata_invalid"))?;
+                    if row.key != *key { return Err(cohort_scope_changed("history_context_identity_mismatch")); }
+                    if !loaded.get(key).is_some_and(|(_, current, _)| *current) {
+                        loaded.insert(key.clone(), (row, false, true));
+                    }
+                } else if !loaded.contains_key(key) {
+                    if let Some(row) = snapshot.catalog(key, false).map_err(|_| StorageError::Unavailable)? {
+                        charge_catalog_row(&row, bytes_left)?;
+                        let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                        loaded.insert(key.clone(), (row, current, false));
+                    }
+                }
             }
             let Some(c) = cutoff else {
                 // An immutable owner's relationship summaries may still name
                 // a withdrawn peer. Membership comes from this cohort, as in
                 // the SQLite reader, rather than from embedded old summaries.
                 let mut keep = loaded.keys().cloned().collect::<BTreeSet<_>>();
+                keep.extend(history_context.iter().cloned());
                 // Each saved owner contains its complete relationship summaries.
                 // Exact edge/turn sets are loaded below from the immutable effects.
-                let (edges, turns) = {
+                let mut current_context = BTreeSet::new();
+                let (mut current_edges, mut current_turns) = {
                     let tx = snapshot.tx.lock().map_err(|_|StorageError::Unavailable)?;
                     let mut sets = Vec::new();
                     for (table, column) in [("semon_pg_native_catalog_trace_edges", "edge_id"), ("semon_pg_native_catalog_trace_turns", "turn_id")] {
@@ -661,17 +782,23 @@ impl QueryCatalogStore for QueryCatalog {
                             tx.check()?;
                             let after_key = after.as_ref().map(|v| v.0.as_slice());
                             let after_id = after.as_ref().map(|v| v.1.as_slice());
-                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length({column})<=65536 THEN {column} END,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
+                            let page = tx.driver.query(&format!("SELECT key_digest,{digest_column},CASE WHEN octet_length(session_key)<=65536 THEN session_key END,CASE WHEN octet_length({column})<=65536 THEN {column} END,CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,{digest_column})>($3,$4)) ORDER BY key_digest,{digest_column} LIMIT 64"), &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
                             for row in &page {
-                                let value = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                                let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                                if !loaded.get(&owner).is_some_and(|(_, _, history)| !*history) { continue; }
+                                let value = text(row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?)?;
                                 *bytes_left = bytes_left.checked_sub(value.len()).ok_or(StorageError::Busy)?;
                                 if column == "edge_id" {
-                                    let bytes = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?;
+                                    let bytes = row.get::<_, Option<Vec<u8>>>(4).ok_or(StorageError::Busy)?;
                                     *bytes_left = bytes_left.checked_sub(bytes.len()).ok_or(StorageError::Busy)?;
                                     let metadata: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| cohort_scope_changed("all_time_edge_metadata_invalid"))?;
                                     let from = metadata["from"].as_str().ok_or_else(|| cohort_scope_changed("all_time_edge_source_missing"))?;
                                     keep.insert(from.to_owned());
-                                    if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") { keep.insert(to.to_owned()); }
+                                    current_context.insert(from.to_owned());
+                                    if let Some(to) = metadata["to"].as_str().filter(|to| *to != "you") {
+                                        keep.insert(to.to_owned());
+                                        current_context.insert(to.to_owned());
+                                    }
                                 }
                                 values.insert(value);
                             }
@@ -682,15 +809,25 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                     (sets.remove(0), sets.remove(0))
                 };
-                for (row,current) in loaded.into_values() { emit(row, current, Some(&keep), bytes_left)?; }
-                return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges, turns });
+                current_edges.extend(history_edges);
+                current_turns.extend(history_turns);
+                for (row,current,selected_history) in loaded.into_values() { emit(row, current, selected_history, Some(&keep), bytes_left)?; }
+                if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
+                    return Err(cohort_scope_changed("all_time_relationship_owner_missing"));
+                }
+                return Ok(Part { generation: self.generation.clone(), runtime: runtime.clone(), rows, owners, content, witnesses, edges: current_edges, turns: current_turns });
             };
             // Recent window: edges active or touched since the cutoff, then the
             // last/recent turns of each kept owner and their linked endpoints.
             let mut keep: BTreeSet<String> = loaded.keys().cloned().collect();
+            keep.extend(history_context.iter().cloned());
             let mut needed = keep.clone();
+            needed.retain(|key| loaded.contains_key(key));
+            needed.extend(history_context.iter().cloned());
             let mut edges = BTreeSet::new();
             let mut turns = BTreeSet::new();
+            let mut current_graph_owners = BTreeSet::new();
+            let mut current_context = BTreeSet::new();
             let json = |bytes: Option<Vec<u8>>| -> Result<serde_json::Value, StorageError> {
                 serde_json::from_slice(&bytes.ok_or(StorageError::Busy)?)
                     .map_err(|_| cohort_scope_changed("recent_relationship_metadata_invalid"))
@@ -709,14 +846,18 @@ impl QueryCatalogStore for QueryCatalog {
                     let page = tx.driver.query("SELECT key_digest,edge_digest,CASE WHEN octet_length(session_key)<=65536 AND octet_length(edge_id)<=65536 AND octet_length(metadata)<=65536 THEN session_key END,edge_id,metadata FROM semon_pg_native_catalog_trace_edges WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR (key_digest,edge_digest)>($3,$4)) ORDER BY key_digest,edge_digest LIMIT 64", &[&namespace.as_str().as_bytes(), &self.generation.as_bytes(), &after_key, &after_id]).map_err(sqlstate::error)?;
                     for row in &page {
                         let owner = text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
+                        if loaded.get(&owner).is_some_and(|(_, _, history)| *history) { continue; }
                         let id = text(row.get(3))?;
                         let metadata = json(row.get(4))?;
                         if !edge_timed(&metadata, c) { continue; }
                         let (from, to) = endpoint(&metadata)?;
                         *bytes_left = bytes_left.checked_sub(owner.len() + id.len() + from.len() + to.as_ref().map_or(0, String::len)).ok_or(StorageError::Busy)?;
+                        current_graph_owners.insert(owner.clone());
                         needed.insert(owner);
                         edges.insert(id);
-                        keep.insert(from);
+                        keep.insert(from.clone());
+                        current_context.extend(to.iter().cloned());
+                        current_context.insert(from.clone());
                         keep.extend(to);
                     }
                     if page.len() < 64 { break; }
@@ -725,6 +866,7 @@ impl QueryCatalogStore for QueryCatalog {
             }
             let timed_edges = edges.clone();
             for owner in keep.clone() {
+                if loaded.get(&owner).is_some_and(|(_, _, history)| *history) { continue; }
                 let mut links = Vec::new();
                 {
                     let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
@@ -754,33 +896,57 @@ impl QueryCatalogStore for QueryCatalog {
                         let metadata = serde_json::from_str(&metadata)
                             .map_err(|_| cohort_scope_changed("recent_turn_edge_metadata_invalid"))?;
                         let (from, to) = endpoint(&metadata)?;
+                        current_context.insert(from.clone());
                         keep.insert(from);
+                        current_context.extend(to.iter().cloned());
                         keep.extend(to);
                     }
                 }
             }
-            needed.extend(keep.iter().cloned());
+            if cutoff.is_some() {
+                for key in &current_context {
+                    if loaded.get(key).is_some_and(|(_, _, history)| *history) {
+                        match snapshot.catalog(key, false).map_err(|error| match error {
+                            StorageError::ScopeChanged => cohort_scope_changed("recent_current_context_refused"),
+                            other => other,
+                        })? {
+                            Some(row) => {
+                                charge_catalog_row(&row, bytes_left)?;
+                                let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                                let eligible = current
+                                    && (row.last.is_some_and(|last| last >= c)
+                                        || query_last(&row).is_some_and(|last| last >= c)
+                                        || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
+                                if eligible {
+                                    loaded.insert(key.clone(), (row, true, false));
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            }
+            needed.extend(current_context.iter().cloned());
+            edges.extend(history_edges);
+            turns.extend(history_turns);
             for key in &needed {
-                let (row,current) = match loaded.remove(key) {
+                let (row,current,selected_history) = match loaded.remove(key) {
                     Some(row) => row,
+                    None if history_required_owners.contains(key) => continue,
                     None => match snapshot.catalog(key, false).map_err(|error| match error {
                         StorageError::ScopeChanged => cohort_scope_changed("recent_current_catalog_refused"),
                         other => other,
                     })? {
                         Some(row) => {
+                            charge_catalog_row(&row, bytes_left)?;
                             let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                            (chosen(row)?.0,current)
+                            (row,current,false)
                         },
-                        None => match snapshot.catalog(key, true).map_err(|error| match error {
-                            StorageError::ScopeChanged => cohort_scope_changed("recent_history_catalog_refused"),
-                            other => other,
-                        })? {
-                            Some(row) => (row,false),
-                            None => continue,
-                        },
+                        None if current_graph_owners.contains(key) => continue,
+                        None => continue,
                     },
                 };
-                emit(row, current, Some(&keep), bytes_left)?;
+                emit(row, current, selected_history, Some(&keep), bytes_left)?;
             }
             if keep.iter().any(|id| id != "you" && !rows.contains_key(id)) {
                 return Err(cohort_scope_changed("recent_relationship_owner_missing"));
@@ -936,5 +1102,130 @@ impl Snapshot<'_, '_> {
             usize::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?,
             slot,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::postgres::{
+        PgCancellation,
+        tests::{fixture, ns},
+        txn::TxnKind,
+    };
+
+    #[test]
+    fn finite_history_page_bounds_aggregate_keys_and_metadata_before_materializing_cells() {
+        let (pool, _) = fixture(|_| {});
+        let namespace = ns("finite-history-page-budget");
+        let control = PgCancellation::default();
+        let generation = "a".repeat(64);
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            let operation_id = b"finite-history-query".to_vec();
+            let payload = b"fixture".to_vec();
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,1)",
+                &[&ns, &operation_id, &payload, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "WITH source AS (
+                    SELECT convert_to(repeat('x',8200)||lpad(i::text,2,'0'),'UTF8') AS session_key
+                    FROM generate_series(1,65) AS n(i)
+                ) INSERT INTO semon_pg_native_catalog_history_owners(
+                    namespace,generation,key_digest,session_key,owner_generation,original,
+                    last_ms,harness,repo,model,query_activity,query_active
+                ) SELECT $1,$2,sha256(session_key),session_key,$2,false,0,'claude','','',100,false
+                  FROM source",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "WITH source AS (
+                    SELECT convert_to(repeat('x',8200)||lpad(i::text,2,'0'),'UTF8') AS session_key
+                    FROM generate_series(1,65) AS n(i)
+                ), metadata AS (
+                    SELECT session_key,convert_to(jsonb_build_object(
+                        'key',convert_from(session_key,'UTF8'),'name','fixture','harness','claude',
+                        'kind','session','native_ids','[]'::jsonb,'parent',NULL,'parent_source',NULL,
+                        'repo',NULL,'branch',NULL,'model','','effort',NULL,'start',NULL,'last',0,
+                        'tokens','[0,0,0]'::jsonb,
+                        'cost',jsonb_build_object('usd',NULL,'unpriced_models','[]'::jsonb,
+                            'split_unknown_messages',0,'by_model','{}'::jsonb,'by_day','{}'::jsonb),
+                        'sources','[]'::jsonb
+                    )::text,'UTF8') AS metadata
+                    FROM source
+                ) INSERT INTO semon_pg_native_catalog_history_headers(
+                    namespace,generation,key_digest,session_key,recipe_generation,source_generation,
+                    version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,
+                    query_activity,query_active
+                ) SELECT $1,$2,sha256(session_key),session_key,$2,NULL,1,0,false,metadata,NULL,
+                         0,'claude','','',100,false
+                  FROM metadata",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            let sizes = tx.driver.query_one(
+                "SELECT sum(octet_length(o.session_key)),sum(octet_length(h.metadata))
+                 FROM semon_pg_native_catalog_history_owners o
+                 JOIN semon_pg_native_catalog_history_headers h
+                   ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
+                  AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
+                  AND h.session_key=o.session_key
+                 WHERE o.namespace=$1 AND o.generation=$2",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            let key_bytes: i64 = sizes.get(0);
+            let metadata_bytes: i64 = sizes.get(1);
+            assert!(key_bytes < 1024 * 1024);
+            assert!(metadata_bytes < 1024 * 1024);
+            assert!(key_bytes + metadata_bytes + 65 * 64 > 1024 * 1024);
+            Ok(())
+        }).unwrap();
+
+        let mut bytes_left = 1024 * 1024;
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
+            assert_eq!(rows.len(), 65);
+            assert!(
+                rows.iter()
+                    .all(|row| row.get::<_, Option<Vec<u8>>>(0).is_none())
+            );
+            assert!(
+                rows.iter()
+                    .all(|row| row.get::<_, Option<Vec<u8>>>(1).is_none())
+            );
+            assert_eq!(
+                finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
+                Some(StorageError::Busy)
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let ns = namespace.as_str().as_bytes();
+            tx.driver.execute(
+                "DELETE FROM semon_pg_native_catalog_history_headers WHERE namespace=$1 AND generation=$2",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            tx.driver.execute(
+                "DELETE FROM semon_pg_native_catalog_history_owners WHERE namespace=$1 AND generation=$2 AND key_digest<>(SELECT key_digest FROM semon_pg_native_catalog_history_owners WHERE namespace=$1 AND generation=$2 ORDER BY key_digest LIMIT 1)",
+                &[&ns, &generation.as_bytes()],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        }).unwrap();
+
+        bytes_left = 1024 * 1024;
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(0).is_some());
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(1).is_none());
+            assert_eq!(
+                finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
+                Some(StorageError::Busy)
+            );
+            Ok(())
+        })
+        .unwrap();
     }
 }

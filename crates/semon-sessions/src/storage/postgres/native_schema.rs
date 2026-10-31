@@ -95,12 +95,12 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_history_owners",
-        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean,last_ms bigint,harness bytea,repo bytea,model bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,owner_generation bytea,original boolean,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean",
         key: "generation,key_digest",
     },
     Table {
         name: "catalog_history_headers",
-        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,recipe_generation bytea,source_generation bytea?,version bigint,total bigint,incomplete boolean,metadata bytea,original_header bytea?,last_ms bigint,harness bytea,repo bytea,model bytea,query_activity bigint?,query_active boolean",
         key: "generation,key_digest",
     },
     Table {
@@ -160,7 +160,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         name: "catalog_rows",
-        columns: "generation bytea,key_digest bytea,session_key bytea,metadata bytea,last_ms bigint,harness bytea,repo bytea,model bytea",
+        columns: "generation bytea,key_digest bytea,session_key bytea,parent_key bytea?,metadata bytea,last_ms bigint,harness bytea,repo bytea,model bytea",
         key: "generation,key_digest",
     },
     Table {
@@ -386,6 +386,18 @@ const FOUNDATION: &[Table] = &[
 // Indexes are part of the same authoritative manifest, including key order.
 const INDEXES: &[(&str, &str, &str, bool)] = &[
     (
+        "catalog_history_query_activity",
+        "catalog_history_owners",
+        "generation,query_activity,key_digest",
+        false,
+    ),
+    (
+        "catalog_history_query_active",
+        "catalog_history_owners",
+        "generation,query_active,key_digest",
+        false,
+    ),
+    (
         "catalog_operation_generation",
         "catalog_operations",
         "generation",
@@ -401,6 +413,12 @@ const INDEXES: &[(&str, &str, &str, bool)] = &[
         "catalog_order",
         "catalog_rows",
         "generation,last_ms,key_digest",
+        false,
+    ),
+    (
+        "catalog_parent",
+        "catalog_rows",
+        "generation,parent_digest,key_digest",
         false,
     ),
     (
@@ -898,6 +916,18 @@ mod tests {
     #[test]
     fn pg_native_shape_drift_refuses_warm_admission_before_effects() {
         for (change, controlled) in [
+            (
+                "ALTER TABLE semon_pg_native_catalog_history_headers DROP COLUMN query_active",
+                true,
+            ),
+            (
+                "DROP INDEX semon_pg_native_catalog_history_query_activity",
+                true,
+            ),
+            (
+                "DROP INDEX semon_pg_native_catalog_history_query_active",
+                true,
+            ),
             ("ALTER TABLE semon_pg_native_files DROP COLUMN title", true),
             ("DROP INDEX semon_pg_native_files_cwd", true),
             (

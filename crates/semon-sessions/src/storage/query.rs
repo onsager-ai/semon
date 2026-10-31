@@ -32,9 +32,184 @@ pub(crate) struct Part {
     pub(crate) rows: BTreeMap<String, Value>,
     pub(crate) owners: BTreeMap<String, String>,
     pub(crate) content: BTreeMap<String, String>,
-    pub(crate) witnesses: Vec<(String, String)>,
+    /// Owner, exact Query facts and whether they came from History.
+    pub(crate) witnesses: Vec<(String, String, bool)>,
     pub(crate) edges: BTreeSet<String>,
     pub(crate) turns: BTreeSet<String>,
+}
+
+/// Exact retained Query context selected from a row's immutable publication.
+/// Current trace tables can change on append, so History must use this saved
+/// graph whenever its metadata row is selected.
+pub(crate) struct HistoryWindow {
+    pub(crate) member: bool,
+    pub(crate) rows: BTreeMap<String, Value>,
+    pub(crate) context: BTreeSet<String>,
+    pub(crate) edges: BTreeSet<String>,
+    pub(crate) turns: BTreeSet<String>,
+}
+
+pub(crate) fn edge_timed(edge: &Value, cutoff: i64) -> bool {
+    edge["at"].as_i64().is_some_and(|at| at >= cutoff)
+        || edge["done"].as_i64().is_some_and(|done| done >= cutoff)
+        || edge["status"]
+            .as_str()
+            .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
+}
+
+/// Indexed finite-window eligibility, authored with the immutable History row.
+/// Last-turn links do not admit an expired owner; `history_window` remains the
+/// authority for the exact graph after this projection selects candidates.
+pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Option<i64>, bool) {
+    let Some(query) = &row.query else {
+        return (None, false);
+    };
+    let mut last = query["last"].as_i64();
+    let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
+    for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
+        let edge = &edge["query"];
+        for at in [edge["at"].as_i64(), edge["done"].as_i64()]
+            .into_iter()
+            .flatten()
+        {
+            last = Some(last.map_or(at, |last| last.max(at)));
+        }
+        active |= matches!(edge["status"].as_str(), Some("work" | "wait" | "new"));
+    }
+    (last, active)
+}
+
+pub(crate) fn turn_kept(turn: &Value, cutoff: i64, timed_edges: &BTreeSet<String>) -> bool {
+    turn["last"] == serde_json::json!(true)
+        || turn["last"] == serde_json::json!(1)
+        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
+        || turn["start"]
+            .as_str()
+            .is_some_and(|id| timed_edges.contains(id))
+}
+
+/// All-time Queries retain History preference; finite windows use History only
+/// when it qualifies and no eligible Current row is available.
+pub(crate) fn select_history(
+    cutoff: Option<i64>,
+    current_eligible: bool,
+    history_available: bool,
+    history_member: bool,
+) -> bool {
+    history_available && (cutoff.is_none() || (!current_eligible && history_member))
+}
+
+/// Derive retained membership and required peer context from the exact saved
+/// Query graph. `None` preserves the all time retained cohort.
+pub(crate) fn history_window(
+    row: &crate::model::summary::CatalogRow,
+    cutoff: Option<i64>,
+) -> Result<HistoryWindow, &'static str> {
+    let saved = row.query.as_ref().ok_or("retained_query_missing")?;
+    let selected = &saved["selected"];
+    let edges = selected["edges"]
+        .as_array()
+        .ok_or("retained_query_edges_missing")?;
+    let turns = selected["turns"]
+        .as_array()
+        .ok_or("retained_query_turns_missing")?;
+    let mut edge_ids = BTreeMap::new();
+    let mut timed_edges = BTreeSet::new();
+    for recipe in edges {
+        let id = recipe["id"]
+            .as_str()
+            .ok_or("retained_query_edge_id_missing")?;
+        let query = recipe
+            .get("query")
+            .and_then(Value::as_object)
+            .ok_or("retained_query_edge_missing")?;
+        if edge_ids.insert(id, recipe).is_some() {
+            return Err("retained_query_edge_duplicate");
+        }
+        if cutoff.is_none_or(|cutoff| edge_timed(&Value::Object(query.clone()), cutoff)) {
+            timed_edges.insert(id.to_owned());
+        }
+    }
+
+    let member = cutoff.is_none_or(|cutoff| {
+        saved["last"].as_i64().is_some_and(|last| last >= cutoff)
+            || matches!(saved["state"].as_str(), Some("work" | "wait"))
+            || !timed_edges.is_empty()
+    });
+    if !member {
+        return Ok(HistoryWindow {
+            member,
+            rows: BTreeMap::new(),
+            context: BTreeSet::new(),
+            edges: BTreeSet::new(),
+            turns: BTreeSet::new(),
+        });
+    }
+
+    let summaries = saved["rows"]
+        .as_object()
+        .ok_or("retained_query_rows_missing")?;
+    let owner = summaries
+        .get(&row.key)
+        .cloned()
+        .ok_or("retained_query_owner_missing")?;
+
+    let mut kept_edges = timed_edges.clone();
+    let mut kept_turns = BTreeSet::new();
+    for recipe in turns {
+        let id = recipe["id"]
+            .as_str()
+            .ok_or("retained_query_turn_id_missing")?;
+        let turn = recipe
+            .get("query")
+            .and_then(Value::as_object)
+            .ok_or("retained_query_turn_missing")?;
+        let turn = Value::Object(turn.clone());
+        if cutoff.is_some_and(|cutoff| !turn_kept(&turn, cutoff, &timed_edges)) {
+            continue;
+        }
+        if !kept_turns.insert(id.to_owned()) {
+            return Err("retained_query_turn_duplicate");
+        }
+        if let Some(id) = turn["start"].as_str() {
+            kept_edges.insert(id.to_owned());
+        }
+        if let Some(sent) = turn["sent"].as_array() {
+            kept_edges.extend(sent.iter().filter_map(|id| id.as_str().map(str::to_owned)));
+        }
+    }
+
+    let mut rows = BTreeMap::from([(row.key.clone(), owner)]);
+    let mut context = BTreeSet::new();
+    for id in &kept_edges {
+        let recipe = edge_ids
+            .get(id.as_str())
+            .ok_or("retained_query_link_missing")?;
+        let query = recipe
+            .get("query")
+            .and_then(Value::as_object)
+            .ok_or("retained_query_edge_missing")?;
+        for endpoint in ["from", "to"]
+            .into_iter()
+            .filter_map(|field| query.get(field).and_then(Value::as_str))
+            .filter(|endpoint| *endpoint != "you")
+        {
+            if let Some(summary) = summaries.get(endpoint) {
+                rows.entry(endpoint.to_owned())
+                    .or_insert_with(|| summary.clone());
+            } else {
+                context.insert(endpoint.to_owned());
+            }
+        }
+    }
+
+    Ok(HistoryWindow {
+        member,
+        rows,
+        context,
+        edges: kept_edges,
+        turns: kept_turns,
+    })
 }
 
 pub(crate) trait QueryCatalogStore {
@@ -65,4 +240,114 @@ pub(crate) trait QueryCatalogStore {
         since: Option<i64>,
     ) -> Result<bool, QueryError>;
     fn validate(&self, namespace: &LogicalSourceNamespace, part: &Part) -> Result<(), QueryError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn summary(id: &str) -> Value {
+        json!({"summary":{"id":id}})
+    }
+
+    fn retained_row(query: Value) -> crate::model::summary::CatalogRow {
+        serde_json::from_value(json!({
+            "lifecycle":"retained",
+            "key":"owner",
+            "name":"owner",
+            "harness":"claude",
+            "kind":"session",
+            "native_ids":[],
+            "parent":null,
+            "parent_source":null,
+            "repo":null,
+            "branch":null,
+            "model":"",
+            "effort":null,
+            "start":100,
+            "last":100,
+            "tokens":[0,0,0],
+            "cost":{"usd":null,"unpriced_models":[],"split_unknown_messages":0,"by_model":{},"by_day":{}},
+            "sources":[],
+            "query":query
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn history_activity_matches_window_eligibility() {
+        let mut row = retained_row(json!({
+            "last":null,"state":"idle",
+            "selected":{"edges":[
+                {"query":{"at":100,"done":950,"status":"done"}},
+                {"query":{"at":null,"status":"new"}}
+            ],"turns":[{"query":{"at":2000,"last":true}}]}
+        }));
+        assert_eq!(history_activity(&row), (Some(950), true));
+        row.query.as_mut().unwrap()["selected"]["edges"][1]["query"]["status"] = json!("done");
+        assert_eq!(
+            history_activity(&row),
+            (Some(950), false),
+            "a recent or last turn does not admit the owner"
+        );
+        row.query.as_mut().unwrap()["state"] = json!("wait");
+        assert_eq!(history_activity(&row), (Some(950), true));
+        row.query.as_mut().unwrap()["last"] = json!(1000);
+        assert_eq!(history_activity(&row), (Some(1000), true));
+        row.query = None;
+        assert_eq!(history_activity(&row), (None, false));
+    }
+
+    #[test]
+    fn finite_history_window_uses_only_saved_edge_and_turn_ids() {
+        let row = retained_row(json!({
+            "last":100,
+            "state":"idle",
+            "rows":{
+                "owner":summary("owner"),
+                "recent-peer":summary("recent-peer"),
+                "start-peer":summary("start-peer"),
+                "sent-peer":summary("sent-peer"),
+                "expired-peer":summary("expired-peer")
+            },
+            "selected":{
+                "edges":[
+                    {"id":"expired-edge","query":{"at":100,"status":"done","from":"owner","to":"expired-peer"}},
+                    {"id":"recent-edge","query":{"at":950,"status":"done","from":"owner","to":"recent-peer"}},
+                    {"id":"turn-start","query":{"at":100,"status":"done","from":"owner","to":"start-peer"}},
+                    {"id":"turn-sent","query":{"at":110,"status":"done","from":"owner","to":"sent-peer"}}
+                ],
+                "turns":[
+                    {"id":"expired-turn","query":{"at":100,"last":false,"start":"expired-edge","sent":[]}},
+                    {"id":"last-turn","query":{"at":100,"last":true,"start":"turn-start","sent":["turn-sent"]}},
+                    {"id":"recent-turn","query":{"at":950,"last":false,"start":"recent-edge","sent":[]}}
+                ]
+            }
+        }));
+
+        let window = history_window(&row, Some(900)).unwrap();
+        assert!(
+            window.member,
+            "a recent saved edge admits an old History owner"
+        );
+        assert_eq!(
+            window.edges,
+            BTreeSet::from([
+                "recent-edge".to_owned(),
+                "turn-sent".to_owned(),
+                "turn-start".to_owned(),
+            ])
+        );
+        assert_eq!(
+            window.turns,
+            BTreeSet::from(["last-turn".to_owned(), "recent-turn".to_owned()])
+        );
+        assert!(!window.rows.contains_key("expired-peer"));
+        assert!(window.context.is_empty());
+        assert!(select_history(Some(900), false, true, window.member));
+        assert!(!select_history(Some(900), true, true, window.member));
+        assert!(!select_history(Some(900), false, false, window.member));
+        assert!(select_history(None, false, true, window.member));
+    }
 }

@@ -166,7 +166,8 @@ mod tests {
                         }],
                     };
                     let metadata = serde_json::to_vec(&row).unwrap();
-                    tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude',$7,$6)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes(),&repo.as_bytes()]).map_err(sqlstate::error)?;
+                    let parent_key = row.parent.as_deref().map(|parent| parent.as_bytes());
+                    tx.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,metadata,last_ms,harness,repo,model,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,'claude',$7,$6,$8)", &[&ns,&generation.as_bytes(),&key.as_bytes(),&metadata,&last,&model.as_bytes(),&repo.as_bytes(),&parent_key]).map_err(sqlstate::error)?;
                 }
                 tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,'workspace-probe','yes')", &[&ns]).map_err(sqlstate::error)?;
                 tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256('raw-fixture'::bytea),'raw-fixture','page',1,false)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
