@@ -20,6 +20,7 @@ use tokio_postgres::types::ToSql;
 
 pub(super) mod admission;
 pub(super) mod carry;
+mod observations;
 pub(super) mod publication;
 pub(super) mod selected_reader;
 pub(super) mod snapshot;

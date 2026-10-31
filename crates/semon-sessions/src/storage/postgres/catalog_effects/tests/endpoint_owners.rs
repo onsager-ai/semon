@@ -1,4 +1,5 @@
 use super::*;
+use super::super::{observations, snapshot};
 use crate::storage::{
     catalog::CatalogSnapshot,
     transfer::reported::tests::{advance_catalog, apply, root, seed_catalog, sqlite, stage},
@@ -39,14 +40,14 @@ fn pg_selected_endpoint_requires_its_physical_owner_authority() {
     .unwrap();
 
     for (key, history) in [(&original[0].key, true), (&continued[0].key, false)] {
-        let candidate = super::super::snapshot::with_generation(
+        let candidate = snapshot::with_generation(
             &pool,
             namespace,
             &control,
             &generation,
             |snapshot| {
                 let row = snapshot.catalog(key, history)?.unwrap();
-                super::super::snapshot::query::qualify_context_candidate(
+                snapshot::query::qualify_context_candidate(
                     snapshot, &options, &row, history,
                 )?;
                 Ok(row)
@@ -71,7 +72,7 @@ fn pg_selected_endpoint_requires_its_physical_owner_authority() {
                 Ok(ids)
             })
             .unwrap();
-        super::super::snapshot::with_generation(
+        snapshot::with_generation(
             &pool,
             namespace,
             &control,
@@ -80,7 +81,7 @@ fn pg_selected_endpoint_requires_its_physical_owner_authority() {
                 // Opposite-owner authority still proves this exact publication.
                 assert!(snapshot.row_runtime_binding(&candidate).unwrap().is_some());
                 assert!(matches!(
-                    super::super::snapshot::query::qualify_context_candidate(
+                    snapshot::query::qualify_context_candidate(
                         snapshot, &options, &candidate, history,
                     ),
                     Err(StorageError::ScopeChanged)
@@ -97,18 +98,58 @@ fn pg_selected_endpoint_requires_its_physical_owner_authority() {
             Ok(())
         })
         .unwrap();
-        super::super::snapshot::with_generation(
+        snapshot::with_generation(
             &pool,
             namespace,
             &control,
             &generation,
             |snapshot| {
-                super::super::snapshot::query::qualify_context_candidate(
+                snapshot::query::qualify_context_candidate(
                     snapshot, &options, &candidate, history,
                 )
             },
         )
         .unwrap();
     }
+    let current = &continued[0];
+    let original_id = snapshot::with_generation(
+        &pool, namespace, &control, &generation, |snapshot| {
+            let (_, _, origin) = snapshot.row_observation(current, Some(crate::storage::catalog::CatalogObservationOwner::Catalog))
+                .map_err(|_| StorageError::ScopeChanged)?.unwrap();
+            let observations::Origin::Imported(id) = origin else { panic!("genuine transferred Current proof") };
+            Ok(id)
+        },
+    ).unwrap();
+    let host = super::businessflow::body_host(&options, std::slice::from_ref(current));
+    let successor = super::native_history::advance(&options, current, "imported-current-native-history");
+    snapshot::with_generation(
+        &pool, namespace, &control, &successor, |snapshot| {
+            let history = snapshot.catalog(&current.key, true)?.unwrap();
+            assert_eq!(history.sources, current.sources);
+            snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)?;
+            let (_, _, origin) = snapshot.row_observation(&history, Some(crate::storage::catalog::CatalogObservationOwner::History))
+                .map_err(|_| StorageError::ScopeChanged)?.unwrap();
+            let observations::Origin::Imported(id) = origin else { panic!("History preserves original imported proof") };
+            assert_eq!(id.0, original_id.0);
+            Ok(())
+        },
+    ).unwrap();
+    // The new association must leave old Current snapshots and recipes readable.
+    snapshot::with_generation(
+        &pool, namespace, &control, &generation, |snapshot| {
+            snapshot::query::qualify_context_candidate(snapshot, &options, current, false)?;
+            assert!(snapshot.selected(&current.key, false, 0, 1)?.is_some());
+            Ok(())
+        },
+    ).unwrap();
+    let old_store = snapshot::query::QueryCatalog {
+        captured: true, pool: pool.clone(), namespace: namespace.clone(), control: control.clone(),
+        generation: generation.clone(), options: options.clone(),
+    };
+    let body = crate::Query::new(options.clone()).call_bound_selected_at(
+        "read_transcript", &serde_json::json!({"id":current.key,"limit":1}),
+        1790812860000, &old_store, &host, None,
+    ).unwrap();
+    assert!(body.to_string().contains("sanitized"));
     fs::remove_dir_all(root).unwrap();
 }

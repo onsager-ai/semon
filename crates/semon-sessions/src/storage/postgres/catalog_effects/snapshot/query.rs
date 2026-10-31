@@ -54,10 +54,10 @@ pub(in crate::storage::postgres::catalog_effects) fn qualify_context_candidate(
     }
     let source_generation = crate::retention::source_generation(&row.sources)
         .map_err(|_| StorageError::ScopeChanged)?;
-    if let Some(query) = &row.query
-        && (query["source_generation"] != source_generation
-            || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
-                .map_err(|_| StorageError::ScopeChanged)?)
+    let query = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+    if query["source_generation"] != source_generation
+        || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
+            .map_err(|_| StorageError::ScopeChanged)?
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -366,7 +366,14 @@ impl QueryCatalogStore for QueryCatalog {
                         .selected(key, history, 0, 1)?
                         .map(|(row, _, _)| {
                             snapshot
-                                .row_runtime_binding(&row)
+                                .row_runtime_binding_with_observations(
+                                    &row,
+                                    Some(if history {
+                                        crate::storage::catalog::CatalogObservationOwner::History
+                                    } else {
+                                        crate::storage::catalog::CatalogObservationOwner::Catalog
+                                    }),
+                                )
                                 .map_err(|_| StorageError::ScopeChanged)?
                                 .ok_or(StorageError::ScopeChanged)?;
                             let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
@@ -477,7 +484,14 @@ impl QueryCatalogStore for QueryCatalog {
                 // receipt. A still-Current owner supplies the separate live
                 // runtime observation for that same harness identity.
                 snapshot
-                    .row_runtime_binding(&row)
+                    .row_runtime_binding_with_observations(
+                        &row,
+                        Some(if history {
+                            crate::storage::catalog::CatalogObservationOwner::History
+                        } else {
+                            crate::storage::catalog::CatalogObservationOwner::Catalog
+                        }),
+                    )
                     .map_err(|_| StorageError::ScopeChanged)?
                     .ok_or(StorageError::ScopeChanged)?;
                 let selected_saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
@@ -714,7 +728,7 @@ impl QueryCatalogStore for QueryCatalog {
                     snapshot.runtime_observation(&self.options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
                         .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?
                 } else {
-                    snapshot.row_runtime_binding(&row)
+                    snapshot.row_runtime_binding_with_observations(&row, Some(if selected_history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }))
                         .map_err(|_| cohort_scope_changed("query_runtime_binding_refused"))?
                         .ok_or_else(|| cohort_scope_changed("query_runtime_binding_missing"))?;
                     None

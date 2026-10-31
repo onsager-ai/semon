@@ -1,4 +1,5 @@
 //! Ordinary Catalog renderer adapter over one acknowledged immutable generation.
+use super::super::observations::{self, Origin};
 use super::*;
 use crate::storage::source_observations::CatalogSearchLookup;
 use crate::{
@@ -25,6 +26,21 @@ impl Snapshot<'_, '_> {
             Option<crate::storage::selected::PresentationObservations>,
         )>,
     > {
+        self.row_observation(row, owner)
+            .map(|value| value.map(|(binding, observations, _)| (binding, observations)))
+    }
+
+    pub(in crate::storage::postgres::catalog_effects) fn row_observation(
+        &self,
+        row: &CatalogRow,
+        owner: Option<CatalogObservationOwner>,
+    ) -> io::Result<
+        Option<(
+            crate::storage::QueryRuntimeBinding,
+            Option<crate::storage::selected::PresentationObservations>,
+            Origin,
+        )>,
+    > {
         self.require_current()?;
         // Runtime callers supply the physical owner. Identity-only callers
         // retain their separate original-publication lookup contract.
@@ -41,14 +57,65 @@ impl Snapshot<'_, '_> {
                 {
                     return Err(failed(StorageError::ScopeChanged));
                 }
-                serde_json::to_vec(&stored).map_err(io::Error::other)
+                Ok(stored)
             })
             .transpose()?;
+        let physical_metadata = physical
+            .as_ref()
+            .map(encoded)
+            .transpose()
+            .map_err(failed)?;
+        let history_owner = if owner == Some(CatalogObservationOwner::History) {
+            if !self.history_qualified(row)? {
+                return Err(failed(StorageError::ScopeChanged));
+            }
+            Some(
+                self.owner(&row.key)
+                    .map_err(failed)?
+                    .ok_or_else(|| failed(StorageError::ScopeChanged))?,
+            )
+        } else {
+            None
+        };
         let mut tx = self
             .tx
             .lock()
             .map_err(|_| failed(StorageError::Unavailable))?;
         let current = super::super::super::model_cache::binding(&mut tx).map_err(failed)?;
+        if let Some(history_owner) = history_owner {
+            let metadata = physical_metadata
+                .as_ref()
+                .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+            let key = observations::history_key(&history_owner, metadata);
+            if let Some(reference) =
+                super::super::super::native_keys::read_meta(&mut tx, key.as_bytes(), 512)
+                    .map_err(failed)?
+            {
+                let reference: observations::HistoryReference =
+                    serde_json::from_slice(&reference).map_err(io::Error::other)?;
+                let acknowledged: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(),&history_owner.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
+                if reference.version != 1 || !acknowledged {
+                    return Err(failed(StorageError::ScopeChanged));
+                }
+                let mut original = physical
+                    .as_ref()
+                    .ok_or_else(|| failed(StorageError::ScopeChanged))?
+                    .clone();
+                original.lifecycle = reference.lifecycle;
+                let observations = observations::publication(
+                    &mut tx,
+                    &current,
+                    &encoded(&original).map_err(failed)?,
+                    &reference.receipt,
+                )
+                .map_err(failed)?;
+                return Ok(Some((
+                    current,
+                    observations,
+                    Origin::Native(reference.receipt),
+                )));
+            }
+        }
         let ns = current.namespace.as_str().as_bytes();
         let grant = format!("{}:{}", current.admission, current.stream_epoch);
         let mut metadata = row.clone();
@@ -59,7 +126,9 @@ impl Snapshot<'_, '_> {
         // Native publication grants belong to Catalog. History requires its
         // own immutable reference and cannot borrow a matching Catalog grant.
         let originals: Vec<&Vec<u8>> = match owner {
-            Some(CatalogObservationOwner::Catalog) => physical.as_ref().into_iter().collect(),
+            Some(CatalogObservationOwner::Catalog) => {
+                physical_metadata.as_ref().into_iter().collect()
+            }
             Some(CatalogObservationOwner::History) => Vec::new(),
             None => vec![&current_metadata, &retained_metadata],
         };
@@ -77,56 +146,20 @@ impl Snapshot<'_, '_> {
             else {
                 continue;
             };
-            let (admission, stream, generation): (u64, String, String) =
+            let receipt: observations::NativeReceipt =
                 serde_json::from_slice(&native).map_err(io::Error::other)?;
-            if admission != current.admission || stream != current.stream_epoch {
-                return Err(failed(StorageError::ScopeChanged));
-            }
-            let operations = tx.driver.query("SELECT operation_id,CASE WHEN octet_length(payload)<=1048576 THEN payload END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
-            if operations.len() != 1 {
-                return Err(failed(StorageError::ScopeChanged));
-            }
-            let operation_id: Vec<u8> = operations[0].get(0);
-            let payload = operations[0]
-                .get::<_, Option<Vec<u8>>>(1)
-                .ok_or_else(|| failed(StorageError::Busy))?;
-            let expected_operation = Sha256::digest(&payload);
-            let expected_generation = format!("{:x}", Sha256::digest(&operation_id));
-            if expected_operation.as_slice() != operation_id.as_slice()
-                || expected_generation != generation
-            {
-                return Err(failed(StorageError::ScopeChanged));
-            }
-            crate::selected_read::charge(64, payload.len())?;
-            let payload: serde_json::Value =
-                serde_json::from_slice(&payload).map_err(io::Error::other)?;
-            let original: serde_json::Value =
-                serde_json::from_slice(original).map_err(io::Error::other)?;
-            if payload[0] != "catalog-publication-v1"
-                || !payload[1]
-                    .as_array()
-                    .is_some_and(|rows| rows.contains(&original))
-            {
-                return Err(failed(StorageError::ScopeChanged));
-            }
-            let values = payload
-                .as_array()
-                .ok_or_else(|| failed(StorageError::ScopeChanged))?;
-            // Generic and semantic publishers share the same current tuple;
-            // selected-root manifests below authenticate transferred rows.
-            if values.len() != 9 {
-                return Err(failed(StorageError::ScopeChanged));
-            }
             let observations =
-                serde_json::from_value(values[4].clone()).map_err(io::Error::other)?;
-            return Ok(Some((current, observations)));
+                observations::publication(&mut tx, &current, original, &receipt).map_err(failed)?;
+            return Ok(Some((current, observations, Origin::Native(receipt))));
         }
         let reference_kind = owner.map(|owner| match owner {
             CatalogObservationOwner::Catalog => b"current".as_slice(),
             CatalogObservationOwner::History => b"history".as_slice(),
         });
-        let first_metadata = physical.as_ref().unwrap_or(&current_metadata);
-        let second_metadata = physical.as_ref().unwrap_or(&retained_metadata);
+        // Physical ownership was checked above. The proof decoder permits only
+        // the original Current row's lifecycle retag to Retained.
+        let first_metadata = &current_metadata;
+        let second_metadata = &retained_metadata;
         let rows = tx.driver.query("SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,EXISTS(SELECT 1 FROM semon_pg_native_meta m JOIN semon_pg_native_meta a ON a.namespace_digest=m.namespace_digest AND a.namespace=m.namespace AND a.key_digest=sha256('native_transfer_v1:catalog-owner:'::bytea||m.value) AND a.key='native_transfer_v1:catalog-owner:'::bytea||m.value WHERE m.namespace_digest=f.namespace_digest AND m.namespace=f.namespace AND m.key_digest=sha256('native_transfer_v1:publication:'::bytea||g.publication) AND m.key='native_transfer_v1:publication:'::bytea||g.publication AND a.value=$3) FROM semon_pg_native_selected_refs f JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) JOIN semon_pg_native_semantic_publications p ON p.namespace_digest=g.namespace_digest AND p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN semon_pg_native_selected_presentations v ON v.namespace_digest=g.namespace_digest AND v.namespace=g.namespace AND v.id=g.id AND v.key_digest=g.key_digest AND v.session_key=g.session_key WHERE f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.key_digest=sha256($2::bytea) AND f.session_key=$2 AND g.metadata IN ($4,$5) AND ($6::bytea IS NULL OR f.kind=$6) ORDER BY g.id LIMIT 1", &[&ns,&row.key.as_bytes(),&grant.as_bytes(),first_metadata,second_metadata,&reference_kind]).map_err(sqlstate::error).map_err(failed)?;
         let Some(value) = rows.into_iter().next() else {
             return Err(failed(StorageError::ScopeChanged));
@@ -174,9 +207,14 @@ impl Snapshot<'_, '_> {
             &record.proof,
         )
         .map_err(failed)?;
-        let binding = crate::storage::proof_codec::observation_binding(record, &current, row)
-            .map_err(failed)?;
-        Ok(Some((binding, observations)))
+        let id = record.id.clone();
+        let binding = crate::storage::proof_codec::observation_binding(
+            record,
+            &current,
+            physical.as_ref().unwrap_or(row),
+        )
+        .map_err(failed)?;
+        Ok(Some((binding, observations, Origin::Imported(id))))
     }
 }
 

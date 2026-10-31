@@ -83,7 +83,7 @@ fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::Prepare
 
 type BodySources = Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>;
 #[derive(Clone)]
-struct BodyHost(BodySources);
+pub(super) struct BodyHost(BodySources);
 impl crate::SessionSourceReader for BodyHost {
     fn read_range(
         &self,
@@ -118,7 +118,7 @@ impl crate::SessionSourceReader for BodyHost {
         })
     }
 }
-fn body_host(options: &Options, rows: &[CatalogRow]) -> BodyHost {
+pub(super) fn body_host(options: &Options, rows: &[CatalogRow]) -> BodyHost {
     BodyHost(
         rows.iter()
             .flat_map(|row| {
