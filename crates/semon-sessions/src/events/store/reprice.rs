@@ -1072,6 +1072,7 @@ mod tests {
                 .as_deref()
                 .unwrap(),
             &json(row).unwrap(),
+            None,
         )
         .unwrap();
         c.execute(
