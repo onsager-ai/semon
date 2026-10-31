@@ -5021,8 +5021,7 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
         tx.rollback().unwrap();
         let history_query = "sid=thinking-session&scope=retained_history&after=0&limit=100";
         assert_eq!(
-            crate::session_transcript_range(&fixture.options, "local", history_query, None)
-                .status,
+            crate::session_transcript_range(&fixture.options, "local", history_query, None).status,
             409,
             "ProviderOnly must refuse the changed local carrier"
         );
