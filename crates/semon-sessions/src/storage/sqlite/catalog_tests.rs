@@ -6400,6 +6400,27 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
             crate::events::store::ledger_row(&db, path.to_string_lossy().as_ref())
                 .unwrap()
                 .unwrap();
+        let original_response = crate::session_transcript_range(
+            &fixture.options,
+            "local",
+            "sid=native-session&limit=100",
+            None,
+        );
+        assert_eq!(original_response.status, 200);
+        let original_response: Value = serde_json::from_slice(&original_response.body).unwrap();
+        assert_eq!(original_response["entries"].as_array().unwrap().len(), 1);
+        let original_identity = original_response["identity"].clone();
+        let original_source: crate::SessionSourceRef = serde_json::from_value(
+            original_identity["source_refs"][0]["source"].clone(),
+        )
+        .unwrap();
+        assert_eq!(original_source.path, active);
+        assert_eq!(original_source.native_id, "native-session");
+        assert_eq!(original_source.offset, original_bytes.len() as u64);
+        let original_entry = original_response["entries"][0].clone();
+        assert_eq!(original_entry["text"], "synthetic prompt");
+        let original_recipe_generation = original_response["projection"]["generation"].clone();
+        assert_eq!(original_response["projection"]["total"], 1);
         let mut archived_ledger = None;
         let original: i64 = db
             .query_row(
@@ -6537,24 +6558,67 @@ fn native_codex_archive_unarchive_reuses_the_indexed_generation() {
                 "sid=native-session&limit=100",
                 None,
             );
-            let history = crate::session_transcript_range(
+            let retained_query = "sid=native-session&scope=retained_history&limit=100";
+            let default_history = crate::session_transcript_range(
                 &fixture.options,
                 "local",
-                "sid=native-session&scope=retained_history&limit=100",
+                retained_query,
                 None,
             );
-            assert_eq!(
-                (current.status, history.status),
-                (200, 200),
-                "native relocation must not create unavailable retained originals"
-            );
+            assert_eq!(current.status, 200);
+            let history = if append {
+                assert_eq!(
+                    default_history.status,
+                    409,
+                    "ProviderOnly must refuse a changed retained source"
+                );
+                let stale: Value = serde_json::from_slice(&default_history.body).unwrap();
+                assert_eq!(stale["fence_reason"], "local_source_revision");
+                assert_eq!(stale["local_revision_reason"], "size_grew");
+                let qualified = crate::session_transcript_range_with_mode(
+                    &fixture.options,
+                    "local",
+                    retained_query,
+                    None,
+                    crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                );
+                assert_eq!(qualified.status, 200);
+                qualified
+            } else {
+                assert_eq!(default_history.status, 200);
+                default_history
+            };
             let current: Value = serde_json::from_slice(&current.body).unwrap();
             let history: Value = serde_json::from_slice(&history.body).unwrap();
+            let current_entries = current["entries"].as_array().unwrap();
+            let history_entries = history["entries"].as_array().unwrap();
             assert_eq!(
-                current["entries"].as_array().unwrap().len(),
-                history["entries"].as_array().unwrap().len(),
-                "native relocation duplicated historical records"
+                current_entries.len(),
+                if append { 2 } else { 1 },
+                "current transcript content after relocation"
             );
+            assert_eq!(history_entries.len(), 1, "retained history is immutable");
+            assert_eq!(current_entries[0]["text"], original_entry["text"]);
+            assert_eq!(
+                history["identity"]["source_refs"][0]["source"],
+                original_identity["source_refs"][0]["source"]
+            );
+            if append {
+                assert_eq!(current_entries[1]["text"], "synthetic appended response");
+                assert_eq!(history_entries[0]["text"], original_entry["text"]);
+                assert_eq!(history_entries[0]["entry_id"], original_entry["entry_id"]);
+                assert_eq!(history_entries[0]["provenance"], original_entry["provenance"]);
+                assert_eq!(history["projection"]["generation"], original_recipe_generation);
+                assert_eq!(history["projection"]["total"], 1);
+                assert!(!history_entries[0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("synthetic appended response"));
+            } else {
+                assert_eq!(history_entries[0]["text"], "");
+                assert_eq!(history_entries[0]["freshness"]["state"], "incomplete");
+                assert_eq!(history["content_observation"]["state"], "incomplete");
+            }
             let rows: i64=db.query_row("SELECT count(*) FROM session_catalog WHERE session_key='native-session' AND lifecycle='current'",[],|row|row.get(0)).unwrap();
             assert_eq!(rows, 1);
             let selected: String=db.query_row("SELECT source_path FROM session_catalog_sources WHERE session_key='native-session' AND lifecycle='current'",[],|row|row.get(0)).unwrap();
