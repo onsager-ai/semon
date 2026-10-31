@@ -9949,16 +9949,17 @@ mod tests {
                                 }
                                 assert_eq!(f.db().query_row("SELECT count(*) FROM catalog_semantic_sources WHERE namespace='source-a' AND ack_done=1", [], |r| r.get::<_, i64>(0)).unwrap(), unselected_before.len() as i64);
                             }
-                            Err(_) => {
-                                assert_eq!(
-                                    FAIL_EFFECT.with(|p| p.get()),
-                                    None,
-                                    "actual ACK fault reached"
+                            Err(error) => {
+                                eprintln!("semantic_group_ack_fault_error={error}");
+                                let fault_consumed = FAIL_EFFECT.with(|p| p.get()).is_none();
+                                let group_rolled_back = shared_state(f) == before;
+                                assert!(
+                                    fault_consumed,
+                                    "actual ACK fault reached; full_state_unchanged={group_rolled_back}; error={error}"
                                 );
-                                assert_eq!(
-                                    shared_state(f),
-                                    before,
-                                    "group effects and all ACKs roll back together"
+                                assert!(
+                                    group_rolled_back,
+                                    "group effects and all ACKs roll back together; fault_consumed={fault_consumed}; error={error}"
                                 );
                                 rolled_back = true;
                                 break;
