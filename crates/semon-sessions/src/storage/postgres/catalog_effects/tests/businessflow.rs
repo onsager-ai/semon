@@ -6686,7 +6686,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .unwrap();
-    assert!(history_qualified, "withdrawn key has qualified physical History");
+    assert!(
+        history_qualified,
+        "withdrawn key has qualified physical History"
+    );
     assert_eq!(
         claude
             .iter()
