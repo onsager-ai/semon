@@ -2378,6 +2378,39 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(published.0, crate::events::Outcome::Written);
     let generation = published.1.unwrap();
+    let pid_owner_key = prepared
+        .rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.native_ids.iter().any(|id| id == "one"))
+        .unwrap()
+        .key
+        .clone();
+    let (pid_original_source, pid_original_proof) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            |snapshot| {
+                let original = snapshot
+                    .catalog(&pid_owner_key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let source = original
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?
+                    .clone();
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let proof = super::super::selected_reader::native_proof(
+                    &mut tx,
+                    &generation,
+                    &source,
+                )?;
+                Ok((source, proof.id))
+            },
+        )
+        .unwrap();
     assert!(!pg.note_catalog_audit(Some("stale"), 1790812802000).unwrap());
     assert!(
         pg.note_catalog_audit(Some(&generation), 1790812802000)
@@ -4733,10 +4766,43 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     crate::model::summary::CatalogLifecycle::Current
                 );
                 let history = snapshot.owner(&pid_owner.key)?.is_some();
+                assert!(history, "the PID owner keeps its original History source");
                 let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                let history_source = row
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(
+                    history_source == &pid_original_source,
+                    "History keeps the exact original source ledger"
+                );
+                let history_proof = super::super::selected_reader::native_proof(
+                    &mut tx,
+                    &moved_store.generation,
+                    history_source,
+                )?;
+                let current_source = current
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?;
+                let current_proof = super::super::selected_reader::native_proof(
+                    &mut tx,
+                    &moved_store.generation,
+                    current_source,
+                )?;
+                assert!(
+                    history_proof.id == pid_original_proof,
+                    "History keeps the original Native proof generation"
+                );
+                assert!(
+                    history_proof.id != current_proof.id,
+                    "a different Current proof cannot substitute for History"
+                );
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(
                         &mut tx,
