@@ -6646,7 +6646,7 @@ mod tests {
 
         // A trigger cannot smuggle changed contract metadata into a newly
         // armed witness. The whole discovery transaction must roll back.
-        store.connection.execute_batch("CREATE TEMP TRIGGER corrupt_discovery_contract AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/corrupt-contract.jsonl' BEGIN UPDATE main.meta SET value='unsupported' WHERE namespace='' AND key='cache_version'; END;").unwrap();
+        store.connection.execute_batch("CREATE TRIGGER main.corrupt_discovery_contract AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/corrupt-contract.jsonl' BEGIN UPDATE meta SET value='unsupported' WHERE namespace='' AND key='cache_version'; END;").unwrap();
         assert!(store.discover_recovery_sources().unwrap());
         assert!(
             store
@@ -6661,7 +6661,7 @@ mod tests {
         assert_eq!(store.connection.query_row("SELECT count(*) FROM session_catalog_invalidations WHERE source_path='/corrupt-contract.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         store
             .connection
-            .execute_batch("DROP TRIGGER corrupt_discovery_contract;")
+            .execute_batch("DROP TRIGGER main.corrupt_discovery_contract;")
             .unwrap();
 
         // Transient DDL never arms a witness, including a cookie ABA after its
