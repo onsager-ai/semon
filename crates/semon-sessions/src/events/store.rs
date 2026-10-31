@@ -7433,31 +7433,13 @@ mod tests {
         (open(left), open(right))
     }
 
-    fn catalog_semantic_stage_pair(
-        options: &crate::Options,
-    ) -> (
-        crate::storage::sqlite::semantic::Stage,
-        PathBuf,
-        crate::storage::sqlite::semantic::Stage,
-        PathBuf,
-    ) {
+    fn catalog_semantic_stage_paths(options: &crate::Options) -> (PathBuf, PathBuf) {
         let seed = crate::events::EventCache::path(&options.cache);
         let left = seed.with_file_name("semantic_batch.sqlite3");
         let right = seed.with_file_name("semantic_row_wise.sqlite3");
         fs::copy(&seed, &left).unwrap();
         fs::copy(&seed, &right).unwrap();
-        let open = |path: PathBuf| {
-            let config = options.source.config(&path.with_extension("json")).unwrap();
-            let capability =
-                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
-            (
-                crate::storage::sqlite::semantic::Stage::open(capability).unwrap(),
-                path,
-            )
-        };
-        let (left, left_path) = open(left);
-        let (right, right_path) = open(right);
-        (left, left_path, right, right_path)
+        (left, right)
     }
 
     fn catalog_store(options: &crate::Options) -> SqliteStore {
@@ -8745,8 +8727,7 @@ mod tests {
         use crate::model::relation_stage::Phase;
         let root = scratch("catalog-commit-boundary-semantic");
         let (options, rows, _) = catalog_native_fixture(&root, 4, false);
-        let (mut disabled, disabled_path, mut enabled, enabled_path) =
-            catalog_semantic_stage_pair(&options);
+        let (disabled_path, enabled_path) = catalog_semantic_stage_paths(&options);
         let paths = rows
             .iter()
             .flat_map(|row| &row.sources)
@@ -8757,10 +8738,7 @@ mod tests {
         let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
         let mut outcomes = Vec::new();
         let mut states = Vec::new();
-        for (store, path, timing) in [
-            (&mut disabled, &disabled_path, false),
-            (&mut enabled, &enabled_path, true),
-        ] {
+        for (path, timing) in [(&disabled_path, false), (&enabled_path, true)] {
             let scoped_options = crate::Options {
                 cache: path.with_extension("json"),
                 ..options.clone()
@@ -8771,7 +8749,15 @@ mod tests {
             )
             .unwrap();
             let stage_before = crate::model::now_ms();
-            assert_eq!(store.begin(&paths, &runtime).unwrap(), Outcome::Written);
+            assert_eq!(
+                cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+                Outcome::Written
+            );
+            let config = scoped_options.source.config(&scoped_options.cache).unwrap();
+            let mut store = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap();
             let mut written = Vec::new();
             let mut publication_states = Vec::new();
             let mut finished = false;
@@ -8788,41 +8774,21 @@ mod tests {
                     }
                     continue;
                 }
-                let mut selected = batch.paths.iter().cloned().collect::<BTreeSet<_>>();
-                if batch.phase == Phase::Relations {
-                    selected.extend(batch.context.parent_paths(&batch.paths));
-                    selected.extend(batch.context.companions.iter().cloned());
-                }
-                let inputs = selected
+                let inputs = batch
+                    .paths
                     .iter()
                     .map(|path| {
                         crate::native_evidence::catalog_input(Path::new(path), &scoped_options)
                             .unwrap()
                     })
                     .collect::<Vec<_>>();
-                let mut prepared = match batch.phase {
-                    Phase::Indexing => crate::model::prepare_semantic_index_sources(
-                        &scoped_options,
-                        &mut cache,
-                        &inputs,
-                        CATALOG_FIXTURE_NOW,
-                    ),
-                    Phase::Identity => crate::model::prepare_semantic_identity_sources(
-                        &scoped_options,
-                        &mut cache,
-                        &inputs,
-                        &batch.context,
-                        CATALOG_FIXTURE_NOW,
-                    ),
-                    Phase::Relations | Phase::Publication => crate::model::prepare_staged_sources(
-                        &scoped_options,
-                        &mut cache,
-                        &inputs,
-                        &batch.context,
-                        batch.phase == Phase::Relations,
-                        CATALOG_FIXTURE_NOW,
-                    ),
-                }
+                let mut prepared = crate::model::prepare_semantic_batch(
+                    &scoped_options,
+                    &mut cache,
+                    &inputs,
+                    &batch,
+                    CATALOG_FIXTURE_NOW,
+                )
                 .unwrap();
                 if batch.phase == Phase::Publication {
                     let user_version: i64 = store
@@ -8838,7 +8804,7 @@ mod tests {
                     let changes_before = store.connection_for_test().total_changes();
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert!(matches!(
-                        store.publish(&batch, &prepared),
+                        store.publish(&batch, prepared.prepared()),
                         Err(StoreError::Configured(
                             crate::storage::StorageError::NamespaceUpgradePending
                         ))
@@ -8857,8 +8823,9 @@ mod tests {
                         .pragma_update(None, "user_version", user_version)
                         .unwrap();
 
-                    let original_claims = prepared.claims.clone();
+                    let original_claims = prepared.prepared().claims.clone();
                     prepared
+                        .prepared_mut_for_test()
                         .claims
                         .first_mut()
                         .expect("publication captures source claims")
@@ -8867,7 +8834,7 @@ mod tests {
                         crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert_eq!(
-                        store.publish(&batch, &prepared).unwrap(),
+                        store.publish(&batch, prepared.prepared()).unwrap(),
                         (Outcome::Conflict, None),
                         "a stale source claim must refuse publication"
                     );
@@ -8878,7 +8845,7 @@ mod tests {
                     crate::native_timing::catalog_commit_tests::assert_uncommitted();
                     assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
                     drop(recording);
-                    prepared.claims = original_claims;
+                    prepared.prepared_mut_for_test().claims = original_claims;
 
                     store
                         .connection_for_test()
@@ -8903,7 +8870,7 @@ mod tests {
                     let raw_before =
                         crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
-                    let error = store.publish(&batch, &prepared).unwrap_err();
+                    let error = store.publish(&batch, prepared.prepared()).unwrap_err();
                     assert!(
                         error.to_string().contains("FOREIGN KEY constraint failed"),
                         "expected genuine deferred COMMIT FK error: {error}"
@@ -8928,7 +8895,7 @@ mod tests {
 
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     let before = crate::model::now_ms();
-                    let outcome = store.publish(&batch, &prepared).unwrap();
+                    let outcome = store.publish(&batch, prepared.prepared()).unwrap();
                     assert_eq!(outcome.0, Outcome::Written);
                     let replay_generation = outcome.1.clone();
                     written.push(outcome);
@@ -8945,7 +8912,7 @@ mod tests {
                         crate::native_timing::cleanup_tests::snapshot(store.connection_for_test());
                     let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                     assert_eq!(
-                        store.publish(&batch, &prepared).unwrap(),
+                        store.publish(&batch, prepared.prepared()).unwrap(),
                         (Outcome::Written, replay_generation)
                     );
                     assert_eq!(
@@ -8957,7 +8924,12 @@ mod tests {
                     assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
                     drop(recording);
                 } else {
-                    assert_eq!(store.record(&batch, &prepared).unwrap(), Outcome::Written);
+                    assert_eq!(
+                        cache
+                            .record_semantic_batch(&batch, prepared.prepared())
+                            .unwrap(),
+                        Outcome::Written
+                    );
                 }
                 cache.end_scan();
                 cache.release_published_indexes();
@@ -8990,8 +8962,6 @@ mod tests {
             states[0], states[1],
             "full MAIN/TEMP semantic publication parity"
         );
-        drop(disabled);
-        drop(enabled);
         fs::remove_dir_all(root).unwrap();
     }
 
