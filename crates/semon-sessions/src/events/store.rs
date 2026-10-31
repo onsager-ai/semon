@@ -577,6 +577,8 @@ struct SqliteStore {
     owner: configured::NativeOwnership,
     connection: Connection,
     path: PathBuf,
+    #[cfg(test)]
+    observation_journal: source_journal::SourceJournal,
     selected_runs: Option<std::collections::BTreeSet<String>>,
     semantic_rejection: Option<&'static str>,
     #[cfg(test)]
@@ -2113,6 +2115,18 @@ pub(crate) fn write_session_descriptions(
 impl IndexStore for SqliteStore {
     fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
         crate::facts::source_authority::Sources::sqlite(path)
+    }
+    #[cfg(test)]
+    fn source_observations(
+        &self,
+    ) -> Option<&dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&self.observation_journal)
+    }
+    #[cfg(test)]
+    fn source_observations_mut(
+        &mut self,
+    ) -> Option<&mut dyn crate::storage::source_observations::SourceObservationStore> {
+        Some(&mut self.observation_journal)
     }
     fn session_descriptions(
         &self,
@@ -6050,8 +6064,7 @@ mod tests {
     impl TestSourceObservations for SqliteStore {
         fn discover_recovery_sources(&mut self) -> Result<bool, StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "recovery");
-            let mut journal =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
+            let journal = &mut self.observation_journal;
             if journal
                 .recovery_is_current()
                 .map_err(StoreError::Configured)?
@@ -6082,8 +6095,7 @@ mod tests {
             complete: bool,
         ) -> Result<(), StoreError> {
             let _probe = crate::native_timing::DiscoveryProbe::new(&self.path, "publication");
-            let mut journal =
-                crate::storage::sqlite::source_journal::SourceJournal::owned(self.owner.clone());
+            let journal = &mut self.observation_journal;
             if journal
                 .discovery_is_current(paths, complete)
                 .map_err(StoreError::Configured)?
@@ -6516,9 +6528,10 @@ mod tests {
         for (_, counts) in records {
             assert_eq!(counts.skipped, 1);
             assert_eq!(
-                counts.statements, 7,
-                "only the transaction and committed witness probes may execute"
+                counts.statements, 6,
+                "three current-contract probes and three witness-stamp probes execute"
             );
+            assert_eq!(counts.schema_probes, 1);
             assert_eq!(counts.rows, 0);
             assert_eq!(counts.factory_opens, 0);
             assert_eq!(counts.committed_changes, 0);
@@ -6527,8 +6540,34 @@ mod tests {
 
         // A new durable recovery intent committed by a peer must invalidate the
         // previous complete pass before the next discovery publication.
-        let peer = Connection::open(&path).unwrap();
-        peer.execute_batch("BEGIN IMMEDIATE; INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES('recover','claude','recover','/recovered.jsonl'); INSERT INTO meta(key,value) VALUES('catalog_recovery_after',''); COMMIT;").unwrap();
+        let namespace = fixture_namespace();
+        let mut peer = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let transaction = peer
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO main.session_catalog(namespace,session_key,last_ms,harness,metadata) VALUES(?1,'recover',0,'claude','{}')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO main.session_catalog_sources(namespace,session_key,lifecycle,harness,native_id,source_path) VALUES(?1,'recover','current','claude','recover','/recovered.jsonl')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(?1,'catalog_recovery_after','')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        transaction.commit().unwrap();
         assert!(!store.discover_recovery_sources().unwrap());
         let records = crate::native_timing::take_discovery_records();
         assert_eq!(records.last().unwrap().1.skipped, 0);
@@ -6550,7 +6589,14 @@ mod tests {
 
         // A recovery marker introduced by discovery itself must not be hidden
         // when a completed witness is advanced across known owner writes.
-        store.connection.execute_batch("CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON catalog_backfill_sources WHEN NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_recovery_after',''); END;").unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER request_recovery_during_discovery AFTER INSERT ON main.catalog_backfill_sources WHEN NEW.namespace=semon_namespace() AND NEW.source_path='/trigger-intent.jsonl' BEGIN INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(NEW.namespace,'catalog_recovery_after',''); END;",
+            )
+            .unwrap();
         assert!(store.discover_recovery_sources().unwrap());
         store
             .discover_catalog_sources(&["/trigger-intent.jsonl".into()], false)
@@ -6567,24 +6613,32 @@ mod tests {
         );
         assert!(store.discover_recovery_sources().unwrap());
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch("DROP TRIGGER request_recovery_during_discovery;")
             .unwrap();
 
         // The schema cookie returns to A, but the rollback clock still changes.
         let schema: i64 = store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .pragma_query_value(None, "schema_version", |r| r.get(0))
             .unwrap();
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch(
                 "BEGIN IMMEDIATE; CREATE TABLE transient_discovery(value TEXT); ROLLBACK;",
             )
             .unwrap();
         assert_eq!(
             store
-                .connection
+                .observation_journal
+                .connection_for_test()
+                .unwrap()
                 .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
                 .unwrap(),
             schema
@@ -6603,11 +6657,20 @@ mod tests {
         // A failed publication rolls back both membership and claims. It cannot
         // arm a successful no-op witness or advance the recovery witness.
         let next = vec!["/fault-source.jsonl".to_owned()];
-        store.connection.execute_batch("CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON session_catalog_invalidations WHEN NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;").unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_cold_discovery BEFORE INSERT ON main.session_catalog_invalidations WHEN NEW.namespace=semon_namespace() AND NEW.source_path='/fault-source.jsonl' BEGIN SELECT RAISE(ABORT,'cold discovery fault'); END;",
+            )
+            .unwrap();
         assert!(store.discover_catalog_sources(&next, false).is_err());
         assert_eq!(store.connection.query_row("SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/fault-source.jsonl'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         store
-            .connection
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
             .execute_batch("DROP TRIGGER fail_cold_discovery;")
             .unwrap();
         crate::native_timing::take_discovery_records();
@@ -6621,7 +6684,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES('discovery-local-change','1')",
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','1')",
                 [],
             )
             .unwrap();
@@ -6636,7 +6699,7 @@ mod tests {
             0
         );
         peer.execute(
-            "INSERT INTO meta(key,value) VALUES('discovery-peer-change','1')",
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','2')",
             [],
         )
         .unwrap();
@@ -6700,6 +6763,116 @@ mod tests {
     }
 
     #[test]
+    fn recovery_witness_checks_marker_created_by_ack_trigger() {
+        let root = scratch("recovery-witness-ack-marker");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let namespace = fixture_namespace();
+        store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(?1,'catalog_recovery_after','')",
+                [namespace.as_str()],
+            )
+            .unwrap();
+        let cursor = store.observation_journal.recovery_cursor().unwrap();
+        let operation = SourceOperation::capture(
+            fixture_namespace().as_str(),
+            "recover",
+            &serde_json::to_vec(&cursor).unwrap(),
+        );
+        store
+            .observation_journal
+            .persist_intent(&SourceIntent::Recover {
+                operation: operation.clone(),
+                cursor: cursor.clone(),
+            })
+            .unwrap();
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch("CREATE TEMP TRIGGER request_recovery_after_ack AFTER DELETE ON main.source_observation_intents WHEN OLD.namespace=semon_namespace() BEGIN INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(OLD.namespace,'catalog_recovery_after',''); END;")
+            .unwrap();
+
+        let (_, done) = store
+            .observation_journal
+            .recover(&operation, cursor.as_deref())
+            .unwrap();
+        assert!(done);
+        assert!(
+            !store.observation_journal.recovery_is_current().unwrap(),
+            "an ACK trigger's marker must prevent a completed recovery witness"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_witness_requalifies_mutable_source_journal_rows() {
+        for mutation in [
+            "DELETE FROM storage_source_journal WHERE namespace='fixture-source';",
+            "UPDATE storage_source_journal SET revision=0 WHERE namespace='fixture-source';",
+        ] {
+            let root = scratch("recovery-witness-journal-row");
+            let path = root.join("index.sqlite3");
+            let (mut store, _) = opened(&path);
+            assert!(store.discover_recovery_sources().unwrap());
+            store
+                .discover_catalog_sources(&["/claimed.jsonl".into()], false)
+                .unwrap();
+            store.connection.execute_batch(mutation).unwrap();
+            let changes = store.connection.total_changes();
+            assert!(
+                store.discover_recovery_sources().is_err(),
+                "invalid mutable journal row must refuse witness promotion: {mutation}"
+            );
+            assert_eq!(store.connection.total_changes(), changes);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+
+        let root = scratch("discovery-witness-owned-journal-row");
+        let path = root.join("index.sqlite3");
+        let (mut store, _) = opened(&path);
+        let _recording = crate::native_timing::catalog_commit_tests::recording(true);
+        assert!(store.discover_recovery_sources().unwrap());
+        store
+            .observation_journal
+            .connection_for_test()
+            .unwrap()
+            .execute_batch("CREATE TEMP TRIGGER corrupt_discovery_journal_revision AFTER INSERT ON main.source_observation_receipts WHEN NEW.namespace=semon_namespace() BEGIN UPDATE storage_source_journal SET revision=0 WHERE namespace=semon_namespace(); END;")
+            .unwrap();
+        crate::native_timing::take_discovery_records();
+        assert!(
+            store
+                .discover_catalog_sources(&["/owned-corruption.jsonl".into()], false)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT count(*) FROM catalog_backfill_sources WHERE source_path='/owned-corruption.jsonl'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            crate::native_timing::take_discovery_records()
+                .last()
+                .unwrap()
+                .1
+                .committed_changes,
+            0
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn event_cache_uses_owner_committed_discovery_witness() {
         let root = scratch("producer-owner-witness");
         let path = root.join("index.sqlite3");
@@ -6715,6 +6888,7 @@ mod tests {
         }];
         let mut cache = crate::events::EventCache {
             store: Some(Box::new(store)),
+            observation_namespace: fixture_namespace().as_str().to_owned(),
             observation_path: Some(path),
             ..crate::events::EventCache::default()
         };
@@ -6733,7 +6907,11 @@ mod tests {
         assert_eq!(records.len(), 2);
         for (_, counts) in records {
             assert_eq!(counts.skipped, 1);
-            assert_eq!(counts.statements, 7);
+            assert_eq!(
+                counts.statements, 6,
+                "three current-contract probes and three witness-stamp probes execute"
+            );
+            assert_eq!(counts.schema_probes, 1);
             assert_eq!(counts.rows, 0);
             assert_eq!(counts.factory_opens, 0);
             assert_eq!(counts.committed_changes, 0);
@@ -7421,10 +7599,12 @@ mod tests {
             )
             .unwrap()
             .into_test_connection();
+            let observation_journal = prepared_observation_journal(&owner);
             SqliteStore {
                 owner,
                 connection,
                 path,
+                observation_journal,
                 selected_runs: None,
                 semantic_rejection: None,
                 traversal_observation: None,
@@ -7451,10 +7631,12 @@ mod tests {
         )
         .unwrap()
         .into_test_connection();
+        let observation_journal = prepared_observation_journal(&owner);
         SqliteStore {
             owner,
             connection,
             path,
+            observation_journal,
             selected_runs: None,
             semantic_rejection: None,
             traversal_observation: None,
@@ -10030,10 +10212,12 @@ mod tests {
                 crate::storage::NativeReaderBinding::Semantic(owner.clone())
                     .validate(&connection, &config.namespace)
                     .unwrap();
+                let observation_journal = prepared_observation_journal(&owner);
                 SqliteStore {
                     owner,
                     connection,
                     path,
+                    observation_journal,
                     selected_runs: Some(Default::default()),
                     semantic_rejection: None,
                     traversal_observation: None,
@@ -13143,12 +13327,23 @@ fn current_test_store_with_epoch(
     crate::storage::NativeReaderBinding::Semantic(owner.clone())
         .validate(&connection, namespace)
         .unwrap();
+    let observation_journal = prepared_observation_journal(&owner);
     SqliteStore {
         owner,
         connection,
         path: path.to_owned(),
+        observation_journal,
         selected_runs: None,
         semantic_rejection: None,
         traversal_observation: None,
     }
+}
+
+#[cfg(test)]
+fn prepared_observation_journal(
+    owner: &configured::NativeOwnership,
+) -> source_journal::SourceJournal {
+    let journal = source_journal::SourceJournal::owned(owner.clone());
+    journal.prepare().unwrap();
+    journal
 }
