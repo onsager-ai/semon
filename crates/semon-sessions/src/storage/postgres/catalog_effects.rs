@@ -250,11 +250,16 @@ impl CurrentPublicationStore for Effects<'_, '_> {
         if metadata.len() > MAX || row.sources.len() > 64 {
             return Err(StorageError::Busy);
         }
+        let parent_key = row
+            .parent
+            .as_deref()
+            .map(|parent| parent.as_bytes().to_vec());
         self.put(
             "semon_pg_native_catalog_rows",
             &[
                 "key_digest",
                 "session_key",
+                "parent_key",
                 "metadata",
                 "last_ms",
                 "harness",
@@ -265,6 +270,7 @@ impl CurrentPublicationStore for Effects<'_, '_> {
             &[
                 &digest(row.key.as_bytes()),
                 &row.key.as_bytes(),
+                &parent_key,
                 &metadata.as_bytes(),
                 &row.last.unwrap_or(0),
                 &row.harness.as_bytes(),
