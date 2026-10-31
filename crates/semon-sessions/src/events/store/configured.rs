@@ -11786,9 +11786,7 @@ mod tests {
             fs::write(&path, raw).unwrap();
             // Reobserve changed Raw under a new native-ingest request. Reusing
             // the prior operation ID would replay its completed receipt.
-            cache
-                .ingest(&"b".repeat(64), &path, "claude")
-                .unwrap();
+            cache.ingest(&"b".repeat(64), &path, "claude").unwrap();
             let before = shared_state(&f);
             assert!(
                 cache
@@ -11887,7 +11885,7 @@ mod tests {
             // reobservation a fresh request ID so the native reader refreshes it.
             for (i, input) in inputs[1..].iter().enumerate() {
                 let path = input.full_path(options);
-                fs::rename(path.with_extension("held"), path).unwrap();
+                fs::rename(path.with_extension("held"), &path).unwrap();
                 cache
                     .ingest(&format!("{:064x}", 10_000 + i), &path, "claude")
                     .unwrap();
