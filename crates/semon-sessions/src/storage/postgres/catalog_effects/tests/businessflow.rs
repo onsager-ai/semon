@@ -2592,36 +2592,73 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 scopes.len() > 1,
                 "publication must exercise differing row scopes"
             );
-            let stage_payload = || pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let stage_payload = || {
+                pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
                 Ok(tx.driver.query_one("SELECT payload FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND stage_epoch=$2 AND seq=0", &[&namespace.as_str().as_bytes(), &batch.epoch]).map_err(sqlstate::error)?.get::<_, Vec<u8>>(0))
-            }).unwrap();
+            }).unwrap()
+            };
             let original_stage = stage_payload();
             let mut changed_recipe = copy_prepared(saved);
-            changed_recipe.rows[0].query_recipe.as_mut().unwrap().session["busy"] = serde_json::json!([[1, 2]]);
-            assert_eq!(serde_json::to_vec(&changed_recipe.rows).unwrap(), serde_json::to_vec(&saved.rows).unwrap());
-            assert_eq!(changed_recipe.staged_model_witness().unwrap(), saved.staged_model_witness().unwrap());
-            assert_eq!(pg.publish_semantic_catalog(&batch, &changed_recipe).unwrap_err().to_string(), StorageError::Conflict.to_string());
+            changed_recipe.rows[0]
+                .query_recipe
+                .as_mut()
+                .unwrap()
+                .session["busy"] = serde_json::json!([[1, 2]]);
+            assert_eq!(
+                serde_json::to_vec(&changed_recipe.rows).unwrap(),
+                serde_json::to_vec(&saved.rows).unwrap()
+            );
+            assert_eq!(
+                changed_recipe.staged_model_witness().unwrap(),
+                saved.staged_model_witness().unwrap()
+            );
+            assert_eq!(
+                pg.publish_semantic_catalog(&batch, &changed_recipe)
+                    .unwrap_err()
+                    .to_string(),
+                StorageError::Conflict.to_string()
+            );
             assert_eq!(stage_payload(), original_stage);
             assert_eq!(pg.session_catalog_generation(), batch.base_generation);
             let rollback = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-                assert_eq!(super::super::super::semantic_stage::record(tx, &batch, &changed_recipe)?, Outcome::Written);
+                assert_eq!(
+                    super::super::super::semantic_stage::record(tx, &batch, &changed_recipe)?,
+                    Outcome::Written
+                );
                 Err::<(), _>(StorageError::Conflict)
             });
             assert_eq!(rollback, Err(StorageError::Conflict));
-            assert_eq!(stage_payload(), original_stage, "paired coordinator record rolls back");
+            assert_eq!(
+                stage_payload(),
+                original_stage,
+                "paired coordinator record rolls back"
+            );
 
             let mut boundary = copy_prepared(saved);
             boundary.message_dependencies = Some(vec![String::new()]);
-            assert_eq!(pg.record_semantic_batch(&batch, &boundary).unwrap(), Outcome::Written);
+            assert_eq!(
+                pg.record_semantic_batch(&batch, &boundary).unwrap(),
+                Outcome::Written
+            );
             let padding = 1048576 - stage_payload().len();
             boundary.message_dependencies.as_mut().unwrap()[0] = "x".repeat(padding);
-            assert_eq!(pg.record_semantic_batch(&batch, &boundary).unwrap(), Outcome::Written);
+            assert_eq!(
+                pg.record_semantic_batch(&batch, &boundary).unwrap(),
+                Outcome::Written
+            );
             assert_eq!(stage_payload().len(), 1048576);
             let at_limit = stage_payload();
             boundary.message_dependencies.as_mut().unwrap()[0].push('x');
             assert!(pg.record_semantic_batch(&batch, &boundary).is_err());
-            assert_eq!(stage_payload(), at_limit, "whole Stage cap counts encoded payloads");
-            assert_eq!(pg.record_semantic_batch(&batch, saved).unwrap(), Outcome::Written);
+            assert_eq!(
+                stage_payload(),
+                at_limit,
+                "whole Stage cap counts encoded payloads"
+            );
+            assert_eq!(
+                pg.record_semantic_batch(&batch, saved).unwrap(),
+                Outcome::Written
+            );
             for case in [
                 "tampered_query",
                 "missing_query",

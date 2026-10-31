@@ -1725,7 +1725,11 @@ impl Stage {
         let coordinator_metadata =
             crate::query_projection::SelectedRecipePublication::coordinator_metadata(&publications)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
-        if coordinator_metadata.len().saturating_add(producer_witness.len()) > 2 * 1048576 {
+        if coordinator_metadata
+            .len()
+            .saturating_add(producer_witness.len())
+            > 2 * 1048576
+        {
             return Err(refuse("semantic_context_budget"));
         }
         let metadata = prepared

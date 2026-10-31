@@ -4645,35 +4645,98 @@ mod tests {
             assert!(model.prepared().rows[0].query.is_some());
             assert!(!model.prepared().transcripts[0].slots.is_empty());
             let entries = model.prepared().selected_publications().unwrap();
-            let coordinator = crate::query_projection::SelectedRecipePublication::coordinator_metadata(&entries).unwrap();
-            let stored: String = a.db().query_row("SELECT metadata FROM storage_semantic_model_batches WHERE namespace=?1", [if i == 0 { "source-a" } else { "source-b" }], |row| row.get(0)).unwrap();
+            let coordinator =
+                crate::query_projection::SelectedRecipePublication::coordinator_metadata(&entries)
+                    .unwrap();
+            let stored: String = a
+                .db()
+                .query_row(
+                    "SELECT metadata FROM storage_semantic_model_batches WHERE namespace=?1",
+                    [if i == 0 { "source-a" } else { "source-b" }],
+                    |row| row.get(0),
+                )
+                .unwrap();
             assert_eq!(stored, coordinator);
-            assert_eq!(serde_json::to_string(&entries[0].row).unwrap(), entries[0].metadata);
+            assert_eq!(
+                serde_json::to_string(&entries[0].row).unwrap(),
+                entries[0].metadata
+            );
             let inline = serde_json::to_string(&model.prepared().rows).unwrap();
             let old_model_witness = model.prepared().staged_model_witness().unwrap();
             let recipe = model.prepared().rows[0].query_recipe.clone().unwrap();
-            model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["busy"] = serde_json::json!([[1, 2]]);
-            assert_eq!(serde_json::to_string(&model.prepared().rows).unwrap(), inline);
-            assert_eq!(model.prepared().staged_model_witness().unwrap(), old_model_witness);
+            model.prepared_mut_for_test().rows[0]
+                .query_recipe
+                .as_mut()
+                .unwrap()
+                .session["busy"] = serde_json::json!([[1, 2]]);
+            assert_eq!(
+                serde_json::to_string(&model.prepared().rows).unwrap(),
+                inline
+            );
+            assert_eq!(
+                model.prepared().staged_model_witness().unwrap(),
+                old_model_witness
+            );
             let unchanged = shared_state(&a);
-            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Conflict);
-            assert_eq!(shared_state(&a), unchanged, "changed detached bytes refuse before effects");
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict
+            );
+            assert_eq!(
+                shared_state(&a),
+                unchanged,
+                "changed detached bytes refuse before effects"
+            );
             FAIL_EFFECT.with(|point| point.set(Some("semantic_model_record")));
-            assert!(caches[i].record_semantic_batch(&batch, model.prepared()).is_err());
+            assert!(
+                caches[i]
+                    .record_semantic_batch(&batch, model.prepared())
+                    .is_err()
+            );
             FAIL_EFFECT.with(|point| point.set(None));
-            assert_eq!(shared_state(&a), unchanged, "paired coordinator record rolls back");
+            assert_eq!(
+                shared_state(&a),
+                unchanged,
+                "paired coordinator record rolls back"
+            );
             model.prepared_mut_for_test().rows[0].query_recipe = Some(recipe);
 
             if i == 0 {
                 let recipe = model.prepared().rows[0].query_recipe.clone().unwrap();
-                model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["padding"] = serde_json::json!("");
-                let empty = crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0]).unwrap();
+                model.prepared_mut_for_test().rows[0]
+                    .query_recipe
+                    .as_mut()
+                    .unwrap()
+                    .session["padding"] = serde_json::json!("");
+                let empty =
+                    crate::query_projection::SelectedRecipe::prepare(&model.prepared().rows[0])
+                        .unwrap();
                 let padding = 1048576 - empty.metadata.len() - empty.query_recipe.unwrap().len();
-                model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["padding"] = serde_json::json!("x".repeat(padding));
-                assert_eq!(caches[i].record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+                model.prepared_mut_for_test().rows[0]
+                    .query_recipe
+                    .as_mut()
+                    .unwrap()
+                    .session["padding"] = serde_json::json!("x".repeat(padding));
+                assert_eq!(
+                    caches[i]
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
+                    Outcome::Written
+                );
                 let at_limit = shared_state(&a);
-                model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["padding"] = serde_json::json!("x".repeat(padding + 1));
-                assert!(caches[i].record_semantic_batch(&batch, model.prepared()).is_err());
+                model.prepared_mut_for_test().rows[0]
+                    .query_recipe
+                    .as_mut()
+                    .unwrap()
+                    .session["padding"] = serde_json::json!("x".repeat(padding + 1));
+                assert!(
+                    caches[i]
+                        .record_semantic_batch(&batch, model.prepared())
+                        .is_err()
+                );
                 assert_eq!(shared_state(&a), at_limit, "pair cap counts detached bytes");
                 model.prepared_mut_for_test().rows[0].query_recipe = Some(recipe);
             }
@@ -4684,15 +4747,46 @@ mod tests {
             model.prepared_mut_for_test().message_dependencies = Some(vec![String::new()]);
             let empty = coordinator.len() + model.prepared().staged_model_witness().unwrap().len();
             let padding = 2 * 1048576 - empty;
-            model.prepared_mut_for_test().message_dependencies.as_mut().unwrap()[0] = "x".repeat(padding);
-            assert_eq!(caches[i].record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+            model
+                .prepared_mut_for_test()
+                .message_dependencies
+                .as_mut()
+                .unwrap()[0] = "x".repeat(padding);
+            assert_eq!(
+                caches[i]
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
+                Outcome::Written
+            );
             let at_limit = shared_state(&a);
-            model.prepared_mut_for_test().message_dependencies.as_mut().unwrap()[0].push('x');
-            assert!(caches[i].record_semantic_batch(&batch, model.prepared()).is_err());
-            assert!(caches[i].publish_semantic_catalog(&batch, model.prepared()).is_err());
-            assert_eq!(shared_state(&a), at_limit, "one encoded byte over budget has no effects");
+            model
+                .prepared_mut_for_test()
+                .message_dependencies
+                .as_mut()
+                .unwrap()[0]
+                .push('x');
+            assert!(
+                caches[i]
+                    .record_semantic_batch(&batch, model.prepared())
+                    .is_err()
+            );
+            assert!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .is_err()
+            );
+            assert_eq!(
+                shared_state(&a),
+                at_limit,
+                "one encoded byte over budget has no effects"
+            );
             model.prepared_mut_for_test().message_dependencies = dependencies;
-            assert_eq!(caches[i].record_semantic_batch(&batch, model.prepared()).unwrap(), Outcome::Written);
+            assert_eq!(
+                caches[i]
+                    .record_semantic_batch(&batch, model.prepared())
+                    .unwrap(),
+                Outcome::Written
+            );
             // Same production derivation, using the existing unbound producer
             // as the algorithm parity oracle for both Codex and Claude. The
             // frozen publication-port oracle remains unchanged in CI as well.
@@ -4759,11 +4853,30 @@ mod tests {
             );
             let published = shared_state(&a);
             let recipe = model.prepared().rows[0].query_recipe.clone().unwrap();
-            model.prepared_mut_for_test().rows[0].query_recipe.as_mut().unwrap().session["busy"] = serde_json::json!([[1, 2]]);
-            assert_eq!(serde_json::to_string(&model.prepared().rows).unwrap(), inline);
-            assert_eq!(model.prepared().staged_model_witness().unwrap(), old_model_witness);
-            assert_eq!(caches[i].publish_semantic_catalog(&batch, model.prepared()).unwrap(), (Outcome::Conflict, None));
-            assert_eq!(shared_state(&a), published, "changed detached bytes cannot replay publication");
+            model.prepared_mut_for_test().rows[0]
+                .query_recipe
+                .as_mut()
+                .unwrap()
+                .session["busy"] = serde_json::json!([[1, 2]]);
+            assert_eq!(
+                serde_json::to_string(&model.prepared().rows).unwrap(),
+                inline
+            );
+            assert_eq!(
+                model.prepared().staged_model_witness().unwrap(),
+                old_model_witness
+            );
+            assert_eq!(
+                caches[i]
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap(),
+                (Outcome::Conflict, None)
+            );
+            assert_eq!(
+                shared_state(&a),
+                published,
+                "changed detached bytes cannot replay publication"
+            );
             model.prepared_mut_for_test().rows[0].query_recipe = Some(recipe);
             assert_eq!(
                 caches[i]
