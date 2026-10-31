@@ -32,6 +32,7 @@ CREATE TABLE catalog_semantic_stage (
  namespace TEXT NOT NULL, singleton INTEGER NOT NULL CHECK(singleton=1), epoch INTEGER NOT NULL,
  phase TEXT NOT NULL CHECK(phase IN ('indexing','identity','relations','publication')),
  generation TEXT, runtime TEXT NOT NULL, revision INTEGER NOT NULL, resetting INTEGER NOT NULL DEFAULT 0, reset_after TEXT NOT NULL DEFAULT '', key_after_harness TEXT NOT NULL DEFAULT '', key_after_native TEXT NOT NULL DEFAULT '', keys_done INTEGER NOT NULL DEFAULT 0, key_candidate TEXT NOT NULL DEFAULT '', key_epoch INTEGER NOT NULL DEFAULT 0, withdrawal_authority TEXT,
+ origin_epoch INTEGER, origin_phase TEXT CHECK(origin_phase IN('discovering','sealed','draining','invalid')), origin_admission INTEGER, origin_stream TEXT, origin_sealed_revision INTEGER, origin_first_generation TEXT, origin_runtime_bound INTEGER NOT NULL DEFAULT 0 CHECK(origin_runtime_bound IN(0,1)),
  PRIMARY KEY(namespace,singleton)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE catalog_semantic_frontier (
@@ -42,11 +43,14 @@ CREATE INDEX catalog_semantic_frontier_pending ON catalog_semantic_frontier(name
 CREATE INDEX semantic_catalog_parent_key ON session_catalog(namespace,parent_key,session_key) WHERE lifecycle='current';
 CREATE INDEX semantic_catalog_native_paths ON session_catalog_sources(namespace,harness,native_id,source_path,session_key) WHERE lifecycle='current';
 CREATE TABLE catalog_semantic_sources (
- namespace TEXT NOT NULL, source_path TEXT NOT NULL, claim INTEGER, ledger TEXT, withdrawal TEXT,
+ namespace TEXT NOT NULL, source_path TEXT NOT NULL, claim INTEGER, ledger TEXT, withdrawal TEXT, origin_member INTEGER NOT NULL DEFAULT 0 CHECK(origin_member IN(0,1)), origin_claim INTEGER,
  index_done INTEGER NOT NULL DEFAULT 0, event_after INTEGER NOT NULL DEFAULT -1, events_done INTEGER NOT NULL DEFAULT 0, identity_done INTEGER NOT NULL DEFAULT 0, relation_done INTEGER NOT NULL DEFAULT 0, publication_done INTEGER NOT NULL DEFAULT 0, ack_done INTEGER NOT NULL DEFAULT 0, relation_after TEXT NOT NULL DEFAULT '',
  dev INTEGER, ino INTEGER, size INTEGER, mtime_ns BLOB, ctime_ns BLOB, resume_at INTEGER, head_sha256 BLOB, tail_sha256 BLOB,
  PRIMARY KEY(namespace,source_path)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_origin_owners(namespace TEXT NOT NULL,origin_epoch INTEGER NOT NULL,session_key TEXT NOT NULL,metadata_digest TEXT NOT NULL,publication TEXT NOT NULL,PRIMARY KEY(namespace,origin_epoch,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_origin_sources(namespace TEXT NOT NULL,origin_epoch INTEGER NOT NULL,source_path TEXT NOT NULL,accepted_claim INTEGER,acknowledged INTEGER NOT NULL CHECK(acknowledged=1),dev INTEGER NOT NULL,ino INTEGER NOT NULL,size INTEGER NOT NULL,mtime_ns BLOB NOT NULL,ctime_ns BLOB,resume_at INTEGER NOT NULL,head_sha256 BLOB NOT NULL,tail_sha256 BLOB NOT NULL,PRIMARY KEY(namespace,origin_epoch,source_path)) STRICT, WITHOUT ROWID;
+CREATE TABLE catalog_semantic_origin_publications(namespace TEXT NOT NULL,origin_epoch INTEGER NOT NULL,held_epoch INTEGER NOT NULL,request_digest TEXT NOT NULL,generation TEXT NOT NULL,PRIMARY KEY(namespace,origin_epoch,held_epoch)) STRICT, WITHOUT ROWID;
 CREATE TABLE catalog_semantic_inputs(namespace TEXT NOT NULL,source_path TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,is_top INTEGER NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,source_path)) STRICT, WITHOUT ROWID;
 CREATE TABLE catalog_semantic_keys(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL,key_epoch INTEGER NOT NULL,PRIMARY KEY(namespace,harness,native_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX semantic_input_collision ON catalog_semantic_inputs(namespace,native_id,harness);
@@ -128,6 +132,9 @@ pub(super) const STAGE_TABLES: &[&str] = &[
     "catalog_semantic_stage",
     "catalog_semantic_frontier",
     "catalog_semantic_sources",
+    "catalog_semantic_origin_owners",
+    "catalog_semantic_origin_sources",
+    "catalog_semantic_origin_publications",
     "catalog_semantic_inputs",
     "catalog_semantic_keys",
     "catalog_semantic_endpoints",

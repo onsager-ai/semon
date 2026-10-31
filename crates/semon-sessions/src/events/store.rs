@@ -2880,6 +2880,11 @@ enum CatalogWriter {
     },
 }
 
+enum CatalogStage<'a> {
+    Semantic(&'a crate::model::relation_stage::Batch),
+    Origin(&'a crate::model::relation_stage::OriginPublication),
+}
+
 /// This is optimization eligibility, not a new publication acceptance limit.
 /// Payloads are already serialized by the original publisher and stay borrowed.
 fn catalog_batch_bytes(
@@ -2947,6 +2952,23 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.publish_catalog_with_stage(publication, expected_generation, claims, preserve_complete, semantic.map(CatalogStage::Semantic), writer)
+    }
+
+    fn publish_catalog_with_stage(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        preserve_complete: bool,
+        selected_stage: Option<CatalogStage<'_>>,
+        writer: CatalogWriter,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        let (semantic, origin) = match selected_stage {
+            Some(CatalogStage::Semantic(batch)) => (Some(batch), None),
+            Some(CatalogStage::Origin(token)) => (None, Some(token)),
+            None => (None, None),
+        };
         let ownership = self.owner.clone();
         let owner = &ownership;
         #[cfg(any(test, feature = "test-hooks"))]
@@ -3025,6 +3047,14 @@ impl SqliteStore {
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
+            if let Some(token) = origin {
+                if let Some(generation) = crate::storage::sqlite::semantic::origin::replay(
+                    &transaction, owner, token, publication, claims.unwrap_or_default(),
+                ).map_err(StoreError::Configured)? {
+                    published = Some(generation);
+                    return Ok(Outcome::Written);
+                }
+            }
             use crate::storage::catalog::CatalogPublicationHead;
             let publication_head =
                 crate::storage::sqlite::publication::admitted_head(&transaction, &admitted)
@@ -3048,6 +3078,16 @@ impl SqliteStore {
                     semantic_stage::batch_rejection(&transaction, batch).map_err(failure)?
                 {
                     self.semantic_rejection = Some(reason);
+                    return Ok(Outcome::Conflict);
+                }
+            } else if let Some(token) = origin {
+                if expected_generation.is_some() || claims.is_none() || preserve_complete {
+                    return Ok(Outcome::Conflict);
+                }
+                crate::storage::sqlite::semantic::origin::validate_publication(
+                    &transaction, owner, token, claims.unwrap_or_default(),
+                ).map_err(StoreError::Configured)?;
+                if !crate::storage::sqlite::semantic::origin::empty_current(&transaction, owner.config().namespace.as_str()).map_err(failure)? {
                     return Ok(Outcome::Conflict);
                 }
             } else if semantic_stage::active(&transaction).map_err(failure)? {
@@ -3583,6 +3623,11 @@ impl SqliteStore {
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
+            if let Some(token) = origin {
+                crate::storage::sqlite::semantic::origin::record(
+                    &transaction, owner, token, publication, claims.unwrap_or_default(), &generation,
+                ).map_err(StoreError::Configured)?;
+            }
             if semantic.is_none() {
                 if let Some(claims) = claims {
                     for (path, revision) in claims {

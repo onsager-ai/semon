@@ -1141,6 +1141,9 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError>;
+    fn semantic_origin_pending(&self) -> Result<bool, StoreError> {
+        Ok(false)
+    }
     fn publish_closed_catalog_fenced(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
@@ -2658,6 +2661,14 @@ impl EventCache {
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
             )
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn semantic_origin_pending(&self) -> io::Result<bool> {
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .semantic_origin_pending()
             .map_err(|error| io::Error::other(error.to_string()))
     }
 

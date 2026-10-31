@@ -2,6 +2,8 @@
 //! Public and complete-domain publication qualifications remain closed.
 #[path = "semantic_owners.rs"]
 mod owners;
+#[path = "semantic_origin.rs"]
+pub(crate) mod origin;
 use super::source_journal::SourceJournal;
 use super::{failed, namespace};
 use crate::events::{Ledger, Outcome, StoreError};
@@ -256,7 +258,7 @@ impl SemanticStaging {
     pub(crate) fn journal(&self) -> SourceJournal {
         self.owner
             .as_ref()
-            .map(|owner| SourceJournal::owned(owner.clone()))
+            .map(|owner| SourceJournal::owned_origin(owner.clone()))
             .unwrap_or_else(|| SourceJournal(self.config.clone()))
     }
     pub(super) fn writer(&self) -> Result<crate::events::store::configured::Writer, StorageError> {
@@ -2296,6 +2298,24 @@ impl Stage {
         }
     }
 
+    /// The caller received Written from the fallible, held-origin publisher.
+    /// This updates only its local expected head; every later write rechecks CAS.
+    pub(crate) fn acknowledge_origin_publication(&mut self, expected: Option<&str>, generation: &str, token: &crate::model::relation_stage::OriginPublication) {
+        if self.epoch == Some(token.held_epoch) && self.source.generation.as_deref() == expected {
+            self.source.generation = Some(generation.to_owned());
+        }
+    }
+
+    pub(crate) fn origin_pending(&self) -> Result<bool, StoreError> {
+        self.source.validate(&self.db).map_err(StoreError::Configured)?;
+        origin::pending(&self.db, self.source.namespace()).map_err(error)
+    }
+
+    pub(crate) fn origin_publication(&self) -> Result<Option<crate::model::relation_stage::OriginPublication>, StoreError> {
+        self.source.validate(&self.db).map_err(StoreError::Configured)?;
+        origin::publication(&self.db, self.source.namespace(), self.epoch).map_err(error)
+    }
+
     pub(crate) fn runtime_binding(
         &self,
     ) -> Result<crate::storage::QueryRuntimeBinding, StoreError> {
@@ -2381,6 +2401,36 @@ impl Stage {
         // may take over, but must fence every old holder atomically below.
         if actual_epoch != self.epoch && self.epoch.is_some() {
             return Ok(Outcome::Conflict);
+        }
+        let initial: Option<(String, bool, String)> = tx.query_row(
+            "SELECT origin_phase,origin_runtime_bound,runtime FROM main.catalog_semantic_stage WHERE namespace=?1 AND origin_phase IN('discovering','sealed')",
+            [ns], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(error)?;
+        if let Some((phase, bound, old_runtime)) = initial {
+            if phase == "discovering" {
+                return Ok(Outcome::Conflict);
+            }
+            if !paths.is_empty() || self.source.owner.is_none() || self.source.generation.is_some() {
+                return Ok(Outcome::Conflict);
+            }
+            let binding: bool = tx.query_row(
+                "SELECT origin_admission=?2 AND origin_stream=?3 FROM main.catalog_semantic_stage WHERE namespace=?1",
+                params![ns, self.source.admission, self.source.config.expected_stream_epoch], |row| row.get(0),
+            ).map_err(error)?;
+            if !binding || (bound && old_runtime != runtime) {
+                return Ok(Outcome::Conflict);
+            }
+            if !self.begun {
+                if tx.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,?2)+1 WHERE namespace=?1 AND max(epoch,?2)<9223372036854775807", params![ns,actual_epoch]).map_err(error)? != 1 {
+                    return Ok(Outcome::Conflict);
+                }
+                tx.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1),runtime=?2,origin_runtime_bound=1 WHERE namespace=?1 AND origin_phase='sealed'", params![ns,runtime]).map_err(error)?;
+            }
+            let epoch = tx.query_row("SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |row| row.get(0)).map_err(error)?;
+            tx.commit().map_err(error)?;
+            self.epoch = Some(epoch);
+            self.begun = true;
+            return Ok(Outcome::Written);
         }
         let existing: Option<(String, Option<String>)> = tx
             .query_row(
@@ -2517,6 +2567,9 @@ impl Stage {
             #[cfg(test)]
             eprintln!("semantic_batch_conflict reason=generation");
             return Err(StoreError::Configured(StorageError::Conflict));
+        }
+        if origin::pending(&tx, ns).map_err(error)? {
+            return Ok(None);
         }
         if phase != "indexing" && !self.reduction {
             return Err(StoreError::Configured(

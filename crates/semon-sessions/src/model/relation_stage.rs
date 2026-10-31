@@ -94,6 +94,19 @@ pub(crate) struct Batch {
     pub(crate) relation_cursor: Option<String>,
 }
 
+/// The initial epoch of one existing stage lifecycle, retained across takeover.
+/// This is a comparison witness; it conveys no Source or publication authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub(crate) struct OriginId(pub(crate) i64);
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OriginPublication {
+    pub(crate) origin: OriginId,
+    pub(crate) held_epoch: i64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Context {
