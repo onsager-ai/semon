@@ -391,8 +391,8 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         row,
     )
     .unwrap();
-    assert_eq!(tx.execute("UPDATE session_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap(), 1);
-    assert!(tx.execute("UPDATE storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap() > 0);
+    assert_eq!(tx.execute("UPDATE main.session_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap(), 1);
+    assert!(tx.execute("UPDATE main.storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4", rusqlite::params![payload, source.namespace.as_str(), row.key, compact.metadata]).unwrap() > 0);
     tx.commit().unwrap();
     drop(db);
     drop(cache);
