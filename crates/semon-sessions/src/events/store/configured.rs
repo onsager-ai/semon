@@ -4847,8 +4847,9 @@ mod tests {
     #[test]
     fn configured_semantic_reprice_preserves_stage_only_authority() {
         use crate::storage::native_events::NativeEventStore;
-        use crate::storage::sqlite::proof_generations::{
-            CatalogObservationOwner, observation_binding, prepare_repriced_observation,
+        use crate::storage::catalog::CatalogObservationOwner;
+    use crate::storage::sqlite::proof_generations::{
+            observation_binding, prepare_repriced_observation,
         };
         use std::io::Write;
         let (a, b, options, inputs) = model_sources();

@@ -1366,10 +1366,26 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
             &tx,
             &current_binding,
             &retained_history,
+            crate::storage::catalog::CatalogObservationOwner::History,
         )
         .is_ok()
     );
     tx.rollback().unwrap();
+    // This is actual History metadata, independently retained by the producer.
+    // Removing its immutable root cannot be bypassed by either native grant.
+    let proof = recovery_proof_snapshot(&db, "reused").into_iter().find(|proof| proof.0 == "history").unwrap();
+    let (base, manifest): (String, String) = db.query_row(
+        "SELECT base,manifest FROM storage_proof_presentation_roots WHERE namespace=semon_namespace() AND digest=?1",
+        [&proof.3], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    db.execute("DELETE FROM storage_proof_presentation_roots WHERE namespace=semon_namespace() AND digest=?1", [&proof.3]).unwrap();
+    let tx = db.transaction().unwrap();
+    assert!(crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+        &tx, &current_binding, &retained_history, crate::storage::catalog::CatalogObservationOwner::History,
+    ).is_err());
+    tx.rollback().unwrap();
+    db.execute("INSERT INTO storage_proof_presentation_roots VALUES(semon_namespace(),?1,?2,?3,?4)", rusqlite::params![proof.2, base, manifest, proof.3]).unwrap();
+
     let history_query = history.query.as_ref().unwrap();
     let current_query = current.query.as_ref().unwrap();
     assert_ne!(history_query["runtime"], current_query["runtime"]);
@@ -1398,7 +1414,7 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
     crate::storage::sqlite::proof_generations::publish_repaired_query_observation(
         &tx,
         &current_binding,
-        crate::storage::sqlite::proof_generations::CatalogObservationOwner::History,
+        crate::storage::catalog::CatalogObservationOwner::History,
         &history,
         &repaired_query,
     )
@@ -1512,6 +1528,7 @@ fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
             &tx,
             &current_binding,
             &retained,
+            crate::storage::catalog::CatalogObservationOwner::History,
         )
         .unwrap();
     assert_eq!(original_binding.namespace, current_binding.namespace);
@@ -1679,8 +1696,9 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 #[test]
 fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     use crate::storage::catalog::CatalogSnapshot;
+    use crate::storage::catalog::CatalogObservationOwner;
     use crate::storage::sqlite::proof_generations::{
-        CatalogObservationOwner, prepare_repriced_observation,
+        prepare_repriced_observation,
     };
 
     let home = Home::new("recovery-index-ahead-runtime");
@@ -1832,6 +1850,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
             &tx,
             &current_binding,
             &selected,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
         )
         .unwrap();
     let captured_source_runtime =
@@ -1895,7 +1914,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
         .unwrap();
     assert_eq!(
         snapshot
-            .runtime_observation(&home.options, &repriced, &global)
+            .runtime_observation(&home.options, &repriced, crate::storage::catalog::CatalogObservationOwner::Catalog, &global)
             .unwrap()
             .as_deref(),
         Some(captured_runtime),
@@ -1906,7 +1925,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     let original_hostname = fs::read(&hostname).unwrap();
     fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
     let changed_global = snapshot.runtime_generation(&home.options).unwrap();
-    let refused = snapshot.runtime_observation(&home.options, &repriced, &changed_global);
+    let refused = snapshot.runtime_observation(&home.options, &repriced, crate::storage::catalog::CatalogObservationOwner::Catalog, &changed_global);
     fs::write(&hostname, original_hostname).unwrap();
     assert_ne!(changed_global, global);
     assert!(
@@ -1994,8 +2013,9 @@ fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
 
 #[test]
 fn recovery_immutable_corruption_blocks_selected_bytes_and_preimage_publication() {
+    use crate::storage::catalog::CatalogObservationOwner;
     use crate::storage::sqlite::proof_generations::{
-        CatalogObservationOwner, ObservationPreparationError, prepare_repriced_observation,
+        ObservationPreparationError, prepare_repriced_observation,
     };
 
     for corruption in ["root", "entry", "generation"] {
