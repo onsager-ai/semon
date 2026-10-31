@@ -71,7 +71,23 @@ jobs:
         continue-on-error: true
         env:
           SEMON_BUILD_TIMING: "1"
-        run: cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture
+        run: |
+          failures=0
+          for attempt in 1 2 3 4; do
+            echo "::group::Cold Index diagnostic attempt ${attempt}/4"
+            if cargo test -p semon-sessions --locked initial_catalog_page_precedes_global_native_observation -- --nocapture; then
+              echo "diagnostic_attempt=${attempt} result=passed"
+            else
+              status=$?
+              echo "diagnostic_attempt=${attempt} result=failed exit=${status}"
+              failures=$((failures + 1))
+            fi
+            echo "::endgroup::"
+          done
+          echo "diagnostic_summary attempts=4 failures=${failures} qualification=false"
+          if [ "$failures" -gt 0 ]; then
+            exit 1
+          fi
 
       - name: Cold Catalog foreground and background gate
         env:
