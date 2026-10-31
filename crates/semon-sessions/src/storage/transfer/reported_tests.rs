@@ -566,8 +566,13 @@ pub(crate) fn finish_catalog(
                     .expect("every staged path must map to a declared fixture Input")
             })
             .collect::<Vec<_>>();
-        let model = cache
-            .prepare_semantic_model_batch(options, &batch_inputs, &batch, 1_790_000_000_000)
+        let model = crate::model::prepare_semantic_batch(
+            options,
+            cache,
+            &batch_inputs,
+            &batch,
+            1_790_000_000_000,
+        )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             if model.prepared().rows.len() == 17 {
@@ -609,6 +614,13 @@ pub(crate) fn finish_catalog(
                     metadata_bytes.saturating_add(witness_bytes),
                 );
             }
+        }
+        if cache.record_semantic_batch(&batch, model.prepared()).unwrap()
+            != crate::events::Outcome::Written
+        {
+            panic!("semantic model stage changed");
+        }
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(
                 model.prepared().rows.is_empty()
                     || model
