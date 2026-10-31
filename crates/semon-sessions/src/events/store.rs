@@ -3288,7 +3288,9 @@ impl SqliteStore {
                     };
                     for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
                         #[cfg(test)]
-                        eprintln!("catalog_publication_probe stage=catalog_row_sources row_index={position}");
+                        eprintln!(
+                            "catalog_publication_probe stage=catalog_row_sources row_index={position}"
+                        );
                         // The first selected row may be unchanged. These
                         // intervals are nested in catalog_metadata, not
                         // additive publication totals.
@@ -3677,7 +3679,9 @@ impl SqliteStore {
             }
             for (_row_index, (row, output)) in rows.iter().zip(&metadata).enumerate() {
                 #[cfg(test)]
-                eprintln!("catalog_publication_probe stage=observation_grant row_index={_row_index}");
+                eprintln!(
+                    "catalog_publication_probe stage=observation_grant row_index={_row_index}"
+                );
                 crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
                     &transaction,
                     owner.config().namespace.as_str(),
