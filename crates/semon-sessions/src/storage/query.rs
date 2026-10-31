@@ -1,5 +1,9 @@
 //! Backend-neutral Query metadata operations; derivation and native parsing stay shared.
-use crate::{QueryError, storage::LogicalSourceNamespace};
+use crate::{
+    QueryError,
+    model::summary::CatalogRow,
+    storage::{LogicalSourceNamespace, StorageError},
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,6 +40,223 @@ pub(crate) struct Part {
     pub(crate) witnesses: Vec<(String, String, bool)>,
     pub(crate) edges: BTreeSet<String>,
     pub(crate) turns: BTreeSet<String>,
+}
+
+struct EdgeSourceNeed {
+    source: crate::model::summary::CatalogSource,
+    owners: BTreeSet<String>,
+}
+
+fn edge_source_needs(
+    row: &CatalogRow,
+) -> Result<(Vec<EdgeSourceNeed>, BTreeSet<String>), StorageError> {
+    let edges = row
+        .query
+        .as_ref()
+        .and_then(|query| query["selected"]["edges"].as_array())
+        .ok_or(StorageError::ScopeChanged)?;
+    let mut needs = Vec::<EdgeSourceNeed>::new();
+    let mut endpoint_owners = BTreeSet::new();
+    for edge in edges {
+        let mut owners = BTreeSet::from([row.key.clone()]);
+        for field in ["from", "to"] {
+            if let Some(owner) = edge["query"][field].as_str() {
+                endpoint_owners.insert(owner.to_owned());
+                if owner != "you" {
+                    owners.insert(owner.to_owned());
+                }
+            }
+        }
+        for recipe in edge["query_content"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .map(|(_, recipe)| recipe)
+            .filter(|recipe| !recipe.is_null())
+        {
+            let path = recipe["path"].as_str().ok_or(StorageError::ScopeChanged)?;
+            let source: crate::model::summary::CatalogSource =
+                serde_json::from_value(recipe["source"].clone())
+                    .map_err(|_| StorageError::ScopeChanged)?;
+            if source.path != std::path::Path::new(path) {
+                return Err(StorageError::ScopeChanged);
+            }
+            if let Some(need) = needs.iter_mut().find(|need| need.source == source) {
+                need.owners.extend(owners.iter().cloned());
+                if need.owners.len() > 64 {
+                    return Err(StorageError::Busy);
+                }
+            } else {
+                if needs.len() >= 64 {
+                    return Err(StorageError::Busy);
+                }
+                needs.push(EdgeSourceNeed {
+                    source,
+                    owners: owners.clone(),
+                });
+            }
+        }
+    }
+    if endpoint_owners.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    if let Some(summary) = row
+        .query
+        .as_ref()
+        .and_then(|query| query["rows"].get(&row.key))
+        .and_then(|owner| owner["summary"].as_object())
+    {
+        if let Some(parent) = summary.get("parent").and_then(Value::as_str) {
+            endpoint_owners.insert(parent.to_owned());
+        }
+        if let Some(children) = summary.get("children").and_then(Value::as_array) {
+            for child in children {
+                endpoint_owners
+                    .insert(child.as_str().ok_or(StorageError::ScopeChanged)?.to_owned());
+            }
+        }
+    }
+    if endpoint_owners.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    Ok((needs, endpoint_owners))
+}
+
+/// Resolve saved field dependencies by their exact publication source, rather
+/// than applying the selected owner's History preference to every endpoint.
+/// The boolean preserves each candidate's physical Catalog/History ownership.
+/// Adapters load bounded metadata and qualify their own namespace/proof grants.
+pub(crate) fn selected_edge_context(
+    row: &CatalogRow,
+    history: bool,
+    mut candidate: impl FnMut(&str, bool) -> Result<Option<CatalogRow>, StorageError>,
+    mut qualify: impl FnMut(&CatalogRow, bool) -> Result<(), StorageError>,
+) -> Result<Vec<(CatalogRow, bool)>, StorageError> {
+    let (needs, endpoint_owners) = edge_source_needs(row)?;
+    let mut context = vec![(row.clone(), history)];
+    let mut sources = BTreeMap::new();
+    for source in &row.sources {
+        if let Some(prior) = sources.insert(source.path.clone(), source.clone())
+            && prior != *source
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    if sources.is_empty() || sources.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    let mut candidates = BTreeMap::<(String, bool), Option<CatalogRow>>::new();
+    let mut qualified = BTreeSet::new();
+    for need in needs {
+        match sources.get(&need.source.path) {
+            Some(source) if source == &need.source => continue,
+            Some(_) => return Err(StorageError::ScopeChanged),
+            None => {}
+        }
+        let mut matched = false;
+        for owner in &need.owners {
+            for candidate_history in [history, !history] {
+                let key = (owner.clone(), candidate_history);
+                if !candidates.contains_key(&key) {
+                    candidates.insert(key.clone(), candidate(owner, candidate_history)?);
+                }
+                let Some(row) = candidates.get(&key).cloned().flatten() else {
+                    continue;
+                };
+                if row.key != *owner || !row.sources.contains(&need.source) {
+                    continue;
+                }
+                if qualified.insert(key) {
+                    qualify(&row, candidate_history)?;
+                }
+                let mut additions = Vec::new();
+                let mut compatible = true;
+                for source in &row.sources {
+                    if let Some(prior) = sources.get(&source.path) {
+                        if prior != source {
+                            compatible = false;
+                            break;
+                        }
+                    } else {
+                        additions.push(source.clone());
+                    }
+                }
+                if !compatible || sources.len() + additions.len() > 64 || context.len() >= 64 {
+                    continue;
+                }
+                context.push((row, candidate_history));
+                for source in additions {
+                    sources.insert(source.path.clone(), source);
+                }
+                matched = true;
+                break;
+            }
+            if matched {
+                break;
+            }
+        }
+        if !matched {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+
+    // Recipe sources above establish exact body ownership first. Endpoint
+    // metadata is then added for saved parent/child fields and edge labels that
+    // are not already represented by one of those owners.
+    for owner in endpoint_owners {
+        if owner == "you" || context.iter().any(|(row, _)| row.key == owner) {
+            continue;
+        }
+
+        let attempts = if history { 2 } else { 1 };
+        let mut selected = None;
+        for candidate_history in [history, false].into_iter().take(attempts) {
+            let key = (owner.clone(), candidate_history);
+            if !candidates.contains_key(&key) {
+                candidates.insert(key.clone(), candidate(&owner, candidate_history)?);
+            }
+            if let Some(row) = candidates.get(&key).cloned().flatten() {
+                selected = Some((row, candidate_history));
+                break;
+            }
+        }
+        let Some((row, candidate_history)) = selected else {
+            continue;
+        };
+        if row.key != owner {
+            return Err(StorageError::ScopeChanged);
+        }
+        // A source-less native stub has no independent Query observation for
+        // finite-window child membership. The saved parent result will filter
+        // it as before.
+        if row.query.is_none() {
+            continue;
+        }
+
+        let mut additions = Vec::new();
+        for source in &row.sources {
+            if let Some(prior) = sources.get(&source.path) {
+                if prior != source {
+                    return Err(StorageError::ScopeChanged);
+                }
+            } else {
+                additions.push(source.clone());
+            }
+        }
+        if sources.len() + additions.len() > 64 || context.len() >= 64 {
+            return Err(StorageError::Busy);
+        }
+
+        let key = (owner, candidate_history);
+        if qualified.insert(key) {
+            qualify(&row, candidate_history)?;
+        }
+        context.push((row, candidate_history));
+        for source in additions {
+            sources.insert(source.path.clone(), source);
+        }
+    }
+    Ok(context)
 }
 
 /// Exact retained Query context selected from a row's immutable publication.

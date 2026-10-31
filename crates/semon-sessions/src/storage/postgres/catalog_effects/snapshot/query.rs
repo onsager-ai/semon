@@ -38,89 +38,46 @@ fn current_runtime_owner<'a>(
     })
 }
 
-struct EdgeSourceNeed {
-    source: crate::model::summary::CatalogSource,
-    owners: BTreeSet<String>,
-}
-
-fn edge_source_needs(
-    row: &crate::model::summary::CatalogRow,
-) -> Result<(BTreeSet<String>, Vec<EdgeSourceNeed>), StorageError> {
-    let selected = row
-        .query
-        .as_ref()
-        .ok_or(StorageError::ScopeChanged)?
-        .get("selected");
-    let edges = selected
-        .and_then(|selected| selected.get("edges"))
-        .and_then(serde_json::Value::as_array)
-        .ok_or(StorageError::ScopeChanged)?;
-    let mut owners = BTreeSet::new();
-    let mut needs = Vec::<EdgeSourceNeed>::new();
-    for edge in edges {
-        let mut edge_owners = BTreeSet::from([row.key.clone()]);
-        for field in ["from", "to"] {
-            if let Some(owner) = edge["query"][field].as_str() {
-                owners.insert(owner.to_owned());
-                if owner != "you" {
-                    edge_owners.insert(owner.to_owned());
-                }
-            }
-        }
-        for recipe in edge["query_content"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(_, recipe)| recipe)
-            .filter(|recipe| !recipe.is_null())
-        {
-            let path = recipe["path"].as_str().ok_or(StorageError::ScopeChanged)?;
-            let source: crate::model::summary::CatalogSource =
-                serde_json::from_value(recipe["source"].clone())
-                    .map_err(|_| StorageError::ScopeChanged)?;
-            if source.path != std::path::Path::new(path) {
-                return Err(StorageError::ScopeChanged);
-            }
-            if let Some(need) = needs.iter_mut().find(|need| need.source == source) {
-                need.owners.extend(edge_owners.iter().cloned());
-            } else {
-                if needs.len() >= 64 {
-                    return Err(StorageError::Busy);
-                }
-                needs.push(EdgeSourceNeed {
-                    source,
-                    owners: edge_owners.clone(),
-                });
-            }
-        }
-    }
-    if owners.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-    Ok((owners, needs))
-}
-
-fn qualify_context_candidate(
+pub(in crate::storage::postgres::catalog_effects) fn qualify_context_candidate(
     snapshot: &Snapshot<'_, '_>,
     options: &Options,
     row: &crate::model::summary::CatalogRow,
+    history: bool,
 ) -> Result<(), StorageError> {
+    let owner = if history {
+        crate::storage::catalog::CatalogObservationOwner::History
+    } else {
+        crate::storage::catalog::CatalogObservationOwner::Catalog
+    };
     if row.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
     let source_generation = crate::retention::source_generation(&row.sources)
         .map_err(|_| StorageError::ScopeChanged)?;
-    if let Some(query) = &row.query
-        && (query["source_generation"] != source_generation
-            || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
-                .map_err(|_| StorageError::ScopeChanged)?)
+    let query = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+    if query["source_generation"] != source_generation
+        || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
+            .map_err(|_| StorageError::ScopeChanged)?
     {
         return Err(StorageError::ScopeChanged);
     }
     if snapshot
-        .row_runtime_binding(row)
-        .map_err(|_| StorageError::Unavailable)?
+        .row_runtime_binding_with_observations(row, Some(owner))
+        .map_err(|error| {
+            error
+                .get_ref()
+                .and_then(|error| error.downcast_ref::<StorageError>())
+                .copied()
+                .unwrap_or(StorageError::Unavailable)
+        })?
         .is_none()
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    if history
+        && !snapshot
+            .history_qualified(row)
+            .map_err(|_| StorageError::ScopeChanged)?
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -138,88 +95,18 @@ fn selected_edge_context(
     row: &crate::model::summary::CatalogRow,
     history: bool,
 ) -> Result<Vec<crate::model::summary::CatalogRow>, StorageError> {
-    let (_, needs) = edge_source_needs(row)?;
-    let mut context = vec![row.clone()];
-    let mut context_sources = BTreeMap::new();
     for source in &row.sources {
         if crate::catalog::source_relative(options, &row.harness, source).is_none() {
             return Err(StorageError::ScopeChanged);
         }
-        if let Some(prior) = context_sources.insert(source.path.clone(), source.clone())
-            && prior != *source
-        {
-            return Err(StorageError::ScopeChanged);
-        }
     }
-    if context_sources.len() > 64 {
-        return Err(StorageError::Busy);
-    }
-
-    let mut candidates =
-        BTreeMap::<(String, bool), Option<crate::model::summary::CatalogRow>>::new();
-    let mut qualified = BTreeSet::<(String, bool)>::new();
-    for need in needs {
-        match context_sources.get(&need.source.path) {
-            Some(source) if source == &need.source => continue,
-            Some(_) => return Err(StorageError::ScopeChanged),
-            None => {}
-        }
-
-        let mut matched = false;
-        for owner in &need.owners {
-            for candidate_history in [history, !history] {
-                let candidate_key = (owner.clone(), candidate_history);
-                if !candidates.contains_key(&candidate_key) {
-                    candidates.insert(
-                        candidate_key.clone(),
-                        snapshot.catalog(owner, candidate_history)?,
-                    );
-                }
-                let Some(candidate) = candidates.get(&candidate_key).cloned().flatten() else {
-                    continue;
-                };
-                if candidate.key != *owner
-                    || !candidate.sources.contains(&need.source)
-                    || crate::catalog::source_relative(options, &candidate.harness, &need.source)
-                        .is_none()
-                {
-                    continue;
-                }
-                if qualified.insert(candidate_key.clone()) {
-                    qualify_context_candidate(snapshot, options, &candidate)?;
-                }
-
-                let mut additions = Vec::new();
-                let mut compatible = true;
-                for source in &candidate.sources {
-                    if let Some(prior) = context_sources.get(&source.path) {
-                        if prior != source {
-                            compatible = false;
-                            break;
-                        }
-                    } else {
-                        additions.push(source.clone());
-                    }
-                }
-                if !compatible || context_sources.len() + additions.len() > 64 {
-                    continue;
-                }
-                context.push(candidate.clone());
-                for source in additions {
-                    context_sources.insert(source.path.clone(), source);
-                }
-                matched = true;
-                break;
-            }
-            if matched {
-                break;
-            }
-        }
-        if !matched {
-            return Err(StorageError::ScopeChanged);
-        }
-    }
-    Ok(context)
+    crate::storage::query::selected_edge_context(
+        row,
+        history,
+        |owner, history| snapshot.catalog(owner, history),
+        |candidate, history| qualify_context_candidate(snapshot, options, candidate, history),
+    )
+    .map(|context| context.into_iter().map(|(row, _history)| row).collect())
 }
 
 /// Query includes retained-only owners without changing the Current Catalog
@@ -479,7 +366,14 @@ impl QueryCatalogStore for QueryCatalog {
                         .selected(key, history, 0, 1)?
                         .map(|(row, _, _)| {
                             snapshot
-                                .row_runtime_binding(&row)
+                                .row_runtime_binding_with_observations(
+                                    &row,
+                                    Some(if history {
+                                        crate::storage::catalog::CatalogObservationOwner::History
+                                    } else {
+                                        crate::storage::catalog::CatalogObservationOwner::Catalog
+                                    }),
+                                )
                                 .map_err(|_| StorageError::ScopeChanged)?
                                 .ok_or(StorageError::ScopeChanged)?;
                             let saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
@@ -590,7 +484,14 @@ impl QueryCatalogStore for QueryCatalog {
                 // receipt. A still-Current owner supplies the separate live
                 // runtime observation for that same harness identity.
                 snapshot
-                    .row_runtime_binding(&row)
+                    .row_runtime_binding_with_observations(
+                        &row,
+                        Some(if history {
+                            crate::storage::catalog::CatalogObservationOwner::History
+                        } else {
+                            crate::storage::catalog::CatalogObservationOwner::Catalog
+                        }),
+                    )
                     .map_err(|_| StorageError::ScopeChanged)?
                     .ok_or(StorageError::ScopeChanged)?;
                 let selected_saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
@@ -827,7 +728,7 @@ impl QueryCatalogStore for QueryCatalog {
                     snapshot.runtime_observation(&self.options, &row, crate::storage::catalog::CatalogObservationOwner::Catalog, &runtime)
                         .map_err(|_| cohort_scope_changed("query_runtime_observation_refused"))?
                 } else {
-                    snapshot.row_runtime_binding(&row)
+                    snapshot.row_runtime_binding_with_observations(&row, Some(if selected_history { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog }))
                         .map_err(|_| cohort_scope_changed("query_runtime_binding_refused"))?
                         .ok_or_else(|| cohort_scope_changed("query_runtime_binding_missing"))?;
                     None
@@ -1283,7 +1184,9 @@ impl Snapshot<'_, '_> {
     ) -> Result<(usize, crate::slot_projection::SavedSlot), StorageError> {
         let (owner, slots) = if history {
             (
-                self.owner(key)?.ok_or(StorageError::ScopeChanged)?,
+                self.owner(key)?
+                    .ok_or(StorageError::ScopeChanged)?
+                    .generation,
                 "semon_pg_native_catalog_history_slots",
             )
         } else {
