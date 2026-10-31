@@ -1331,6 +1331,8 @@ pub(crate) fn read_page_snapshot_with_search(
             item["details"] = details.clone();
             item["details"]["live_observation"] = json!(
                 details["live_observation"] == true
+                    && request.scope == CatalogReadScope::Current
+                    && row.lifecycle == crate::model::summary::CatalogLifecycle::Current
                     && facts_known
                     && !retired_native
                     && state == "cached"

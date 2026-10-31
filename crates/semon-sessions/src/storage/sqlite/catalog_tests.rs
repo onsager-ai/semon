@@ -1372,6 +1372,13 @@ fn selected_claude_parent_keeps_codex_unknown_and_idle_child_ranges_readable() {
 fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generation() {
     let fixture = Fixture::new();
     fixture.publish(2);
+    let (status, current) = fixture.body("sid=session-00000");
+    assert_eq!(status, 200);
+    assert_eq!(
+        current["items"][0]["details"]["live_observation"],
+        true,
+        "same-source Current control must observe its native status"
+    );
     let original = session_catalog_identity(&fixture.options, "source", "session-00000")
         .unwrap()
         .unwrap();
@@ -1387,6 +1394,11 @@ fn selected_details_are_body_free_exact_and_bound_to_the_original_source_generat
     let (status, selected) = fixture.body("sid=session-00000&scope=retained_history");
     assert_eq!(status, 200);
     let details = &selected["items"][0]["details"];
+    assert_eq!(
+        details["live_observation"],
+        false,
+        "retained reads cannot claim a live observation for the same Current key"
+    );
     assert_eq!(details["turns"], 1);
     assert_eq!(details["copied_usage"], false);
     assert_eq!(details["tokens_by_model"], json!({}));

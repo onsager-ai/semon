@@ -1214,6 +1214,24 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     let sqlite_retained = sqlite_scoped("scope=retained_history&", 50);
+    let sqlite_parent_exact = crate::catalog::session_catalog_page(
+        &withdraw_options,
+        recent_machine,
+        "sid=one&scope=retained_history&limit=50",
+    );
+    assert_eq!(sqlite_parent_exact.status, 200);
+    let sqlite_parent_exact: serde_json::Value =
+        serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
+    let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
+        &withdraw_options,
+        recent_machine,
+        "sid=one&scope=retained_history&limit=100",
+        Some(&sqlite_host),
+        crate::SessionSourceReadMode::ProviderOnly,
+    );
+    assert_eq!(sqlite_parent_transcript.status, 200);
+    let sqlite_parent_transcript: serde_json::Value =
+        serde_json::from_slice(&sqlite_parent_transcript.body).unwrap();
     // Keyset pages over equal timestamps continue without gap or overlap.
     assert_eq!(
         sqlite_scoped("scope=retained_history&", 3)
@@ -2080,6 +2098,40 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page.status, 200);
     let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
     assert!(page.to_string().contains(&prepared.rows[0].key));
+    let exact_catalog_item = |query: &str| {
+        let request = crate::catalog::Request::parse(query).unwrap();
+        let reply = super::super::snapshot::with_admitted_generation(
+            &pool,
+            &namespace,
+            &control,
+            &generation,
+            |snapshot| {
+                crate::catalog::read_page_snapshot(
+                    &options,
+                    recent_machine,
+                    &request,
+                    snapshot,
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            },
+        )
+        .unwrap();
+        assert_eq!(reply.status, 200, "{query}");
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        page["items"][0].clone()
+    };
+    let current_parent_item = exact_catalog_item("sid=one&limit=50");
+    assert_eq!(
+        current_parent_item["details"]["live_observation"],
+        true,
+        "same-source Current details preserve the PG live observation"
+    );
+    let history_parent_item = exact_catalog_item("sid=one&scope=retained_history&limit=50");
+    assert_eq!(
+        history_parent_item["details"]["live_observation"],
+        false,
+        "retained reads cannot claim a live observation for a Current PG row"
+    );
     // P3: retained history over the admitted PG generation equals the SQLite
     // oracle page: exact ordered keys and full producer rows, then a keyset
     // second page continues without overlap.
@@ -5223,15 +5275,32 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .find(|item| item["key"] == "one")
         .expect("appended Claude parent in retained list");
-    let exact_history = crate::catalog::session_catalog_page(
-        &withdraw_options,
-        recent_machine,
-        "sid=one&scope=retained_history&limit=50",
+    let exact_history_request =
+        crate::catalog::Request::parse("sid=one&scope=retained_history&limit=50").unwrap();
+    let pg_parent_exact = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &options,
+                recent_machine,
+                &exact_history_request,
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    assert_eq!(pg_parent_exact.status, 200);
+    let pg_parent_exact: serde_json::Value = serde_json::from_slice(&pg_parent_exact.body).unwrap();
+    assert_eq!(
+        pg_parent_exact["items"], sqlite_parent_exact["items"],
+        "exact retained History selection preserves the SQLite item"
     );
-    assert_eq!(exact_history.status, 200);
-    let exact_history: serde_json::Value = serde_json::from_slice(&exact_history.body).unwrap();
     assert_ne!(
-        sqlite_parent["last"], exact_history["items"][0]["last"],
+        sqlite_parent["last"], sqlite_parent_exact["items"][0]["last"],
         "parent append must move the retained list position"
     );
     let pg_parent = scoped_items(&caught, "scope=retained_history&")
@@ -5239,6 +5308,41 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .find(|item| item["key"] == "one")
         .expect("appended Claude parent in PostgreSQL retained list");
     assert_eq!(stable(&pg_parent), stable(sqlite_parent));
+    let caught_store = super::super::snapshot::query::QueryCatalog {
+        captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: caught.clone(),
+        options: options.clone(),
+    };
+    let pg_parent_transcript = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":"one","limit":100}),
+            1790812802000,
+            &caught_store,
+            &sqlite_host,
+            None,
+        )
+        .expect("PG retained parent transcript through its original source generation");
+    let transcript_entries = |value: &serde_json::Value| {
+        value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| serde_json::json!({"k":entry["k"],"text":entry["text"]}))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pg_parent_transcript["total"], sqlite_parent_transcript["total"],
+        "retained parent transcript totals match SQLite"
+    );
+    assert_eq!(
+        transcript_entries(&pg_parent_transcript),
+        transcript_entries(&sqlite_parent_transcript),
+        "retained parent transcript content matches SQLite"
+    );
     assert_eq!(
         scoped_items(&caught, "scope=retained_history&q=one&")
             .iter()
@@ -5313,14 +5417,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Retained-only selected body: on the successor a withdrawn key has no
     // Current row, so its body is read through the proof-owned retained
     // recipe from Raw bytes and equals the SQLite ordinary body exactly.
-    let caught_store = super::super::snapshot::query::QueryCatalog {
-        captured: false,
-        pool: pool.clone(),
-        namespace: namespace.clone(),
-        control: control.clone(),
-        generation: caught.clone(),
-        options: options.clone(),
-    };
     // Session fields also read the qualified connected parent, whose Raw
     // prefix advanced during the ordinary Source/Facts writes above. Retain
     // both actual captures explicitly; the original-only host still serves
