@@ -5907,10 +5907,10 @@ fn legacy_source_metadata_does_not_invent_a_local_generation_proof() {
     source.changed_ns = None;
     let expected = crate::source_carrier::ledger(&source);
     let actual = crate::source_carrier::ledger(&row.sources[0]);
-    assert_eq!(
+    assert!(matches!(
         crate::source_carrier::mismatch(&expected.stat, &actual.stat),
         Some(crate::source_carrier::RevisionReason::MissingChangeToken)
-    );
+    ));
     let legacy = serde_json::to_value(&source).unwrap();
     assert!(legacy.get("changed_ns").is_none());
     let migrated: CatalogSource = serde_json::from_value(legacy).unwrap();

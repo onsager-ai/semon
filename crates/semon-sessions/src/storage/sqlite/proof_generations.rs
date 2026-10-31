@@ -680,7 +680,6 @@ pub(crate) fn observation_binding_with_observations(
     let (reference_kind, owner_kind) = match selected.lifecycle {
         crate::model::summary::CatalogLifecycle::Current => ("current", "catalog"),
         crate::model::summary::CatalogLifecycle::Retained => ("history", "history"),
-        _ => return Err(StorageError::ScopeChanged),
     };
     let mut normalized = selected.clone();
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
