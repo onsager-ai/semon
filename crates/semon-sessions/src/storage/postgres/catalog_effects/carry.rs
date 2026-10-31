@@ -104,8 +104,46 @@ pub(in crate::storage::postgres) fn unmentioned(
         after = keys.last().cloned();
     }
     history(tx, generation, previous, mentioned)?;
-    super::history::project_mentioned(tx, generation, mentioned)?;
+    all_history_proofs(tx, generation)?;
     Ok(carried)
+}
+
+/// Projects retained proof references for a bounded page of History owners in
+/// the successor. The History source rows identify the exact owner and source;
+/// the referenced Native tuple is copied without resolving a newer path head.
+fn history_proofs(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    digests: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    if digests.is_empty() {
+        return Ok(());
+    }
+    tx.check()?;
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT DISTINCT p.namespace,$2::bytea,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_sources s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key JOIN semon_pg_native_catalog_proofs p ON p.namespace_digest=s.namespace_digest AND p.namespace=s.namespace AND p.generation=s.generation AND p.path_digest=s.path_digest AND p.source_path=s.source_path WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &digests]).map_err(sqlstate::error)?;
+    tx.check()
+}
+
+/// Project every final successor History owner after carry has completed. This
+/// includes linked composite owners whose Current sources already have staged
+/// proofs and whose retained source rows contain only the missing sources.
+fn all_history_proofs(tx: &mut PgTxn<'_>, generation: &str) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let mut after: Option<Vec<u8>> = None;
+    loop {
+        tx.check()?;
+        let page = tx.driver.query("SELECT key_digest FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND ($3::bytea IS NULL OR key_digest>$3) ORDER BY key_digest LIMIT $4", &[&ns, &generation.as_bytes(), &after, &PAGE]).map_err(sqlstate::error)?;
+        let digests = page.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
+        let Some(last) = digests.last().cloned() else {
+            return Ok(());
+        };
+        history_proofs(tx, generation, &digests)?;
+        after = Some(last);
+        if digests.len() < PAGE as usize {
+            return Ok(());
+        }
+    }
 }
 
 // Retained history stays owned by its original generation. The successor only
@@ -126,9 +164,6 @@ fn history(
         };
         after = Some(last.get(0));
         let digests = page.iter().map(|row| row.get(0)).collect::<Vec<Vec<u8>>>();
-        // The leased successor owns the Native prefixes of its linked history,
-        // even when a newer Current prefix has the same physical source path.
-        tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT DISTINCT p.namespace,$2::bytea,p.path_digest,p.source_path,p.page_generation,p.usage_generation,p.usage_ready FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_sources s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest JOIN semon_pg_native_catalog_proofs p ON p.namespace_digest=s.namespace_digest AND p.namespace=s.namespace AND p.generation=s.generation AND p.path_digest=s.path_digest AND p.source_path=s.source_path WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$3 AND o.key_digest=ANY($4::bytea[]) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &previous.as_bytes(), &digests]).map_err(sqlstate::error)?;
         retained_search(tx, generation, previous, &digests)?;
     }
 }
