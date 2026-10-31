@@ -437,8 +437,17 @@ jobs:
           name: recovery-owner-tests
           path: ${{ runner.temp }}/recovery-owner-tests.log
       - name: Current SQLite transfer inbox restart and atomic checkpoint
+        id: current_transfer
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
-        run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture
+        shell: bash
+        run: cargo test --locked -p semon-sessions --lib current_transfer225 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/current-transfer225.log"
+      - name: Retain SQLite transfer qualification diagnostics
+        if: ${{ !cancelled() && steps.current_transfer.outcome != 'skipped' && steps.production.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: sqlite-current-transfer225-${{ github.sha }}
+          path: ${{ runner.temp }}/current-transfer225.log
+          if-no-files-found: error
       - name: Current owner recovery custody search and navigation
         id: current_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
