@@ -9116,7 +9116,23 @@ mod tests {
             let transaction = batch.connection.transaction().unwrap();
             assert!(crate::catalog_search::row_present(&transaction, &rows[3].key).unwrap());
         }
-        for store in [&batch, &row_wise] {
+        eprintln!("catalog_publication_probe round=version_refusal");
+        for (store, writer, timing) in [
+            (&mut batch, CatalogWriter::Auto, false),
+            (&mut row_wise, CatalogWriter::RowWise, true),
+        ] {
+            let saved_catalog_version: String = store
+                .connection
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                saved_catalog_version,
+                crate::model::summary::CATALOG_VERSION.to_string()
+            );
             store
                 .connection
                 .execute(
@@ -9124,17 +9140,33 @@ mod tests {
                     [(crate::model::summary::CATALOG_VERSION - 1).to_string()],
                 )
                 .unwrap();
+            let state_after_downgrade =
+                crate::native_timing::cleanup_tests::snapshot(&store.connection);
+            let changes_after_downgrade = store.connection.total_changes();
+            let recording = crate::native_timing::catalog_commit_tests::recording(timing);
+            assert!(matches!(
+                catalog_write(store, &rows, &projections, false, writer),
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::NamespaceUpgradePending
+                ))
+            ));
+            assert_eq!(
+                crate::native_timing::cleanup_tests::snapshot(&store.connection),
+                state_after_downgrade,
+                "unsupported catalog version must refuse without changing MAIN/TEMP state"
+            );
+            assert_eq!(store.connection.total_changes(), changes_after_downgrade);
+            crate::native_timing::catalog_commit_tests::assert_uncommitted();
+            assert_eq!(crate::native_timing::catalog_commit_tests::counts(), (0, 0));
+            drop(recording);
             store
                 .connection
                 .execute(
-                    "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=semon_namespace() AND session_key=?1",
-                    [&rows[8].key],
+                    "UPDATE main.meta SET value=?1 WHERE namespace=semon_meta_scope('catalog_version') AND key='catalog_version'",
+                    [&saved_catalog_version],
                 )
                 .unwrap();
         }
-        eprintln!("catalog_publication_probe round=version");
-        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
-        assert_eq!(batch.connection.query_row("SELECT COUNT(*) FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current'", [&rows[8].key], |row| row.get::<_, i64>(0)).unwrap(), rows[8].sources.len() as i64, "unchanged metadata still repairs old-version sources");
         // A two-row scoped no-op keeps unrelated rows and exact source claims.
         let metadata = rows[10..12]
             .iter()
