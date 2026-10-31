@@ -4569,6 +4569,7 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
         )
         .unwrap();
         let mut query = home.query();
+        let mut original_history = None;
         for phase in ["append", "rewrite"] {
             if phase == "append" {
                 let mut file = fs::OpenOptions::new()
@@ -4610,6 +4611,45 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
                 loads <= 5,
                 "focused refresh loaded unrelated indexes: {loads}"
             );
+            // Refresh renders Current while original-evidence readers keep
+            // the first replaced revision and its exact recipe bytes.
+            let mut connection = home.semantic_publisher_connection();
+            let db = connection.transaction().unwrap();
+            let current = crate::overview_repair::query_context(
+                &db,
+                "lead",
+                crate::CatalogReadScope::Current,
+            )
+            .unwrap();
+            let history = crate::overview_repair::query_context(
+                &db,
+                "lead",
+                crate::CatalogReadScope::RetainedHistory,
+            )
+            .unwrap();
+            assert_ne!(current[0].sources, history[0].sources);
+            assert!(
+                current[0]
+                    .sources
+                    .iter()
+                    .all(|source| crate::catalog::source_state(source) == "cached")
+            );
+            let metadata = crate::history_projection::catalog(&db, "lead")
+                .unwrap()
+                .unwrap();
+            let slots = db
+                .prepare("SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='lead' ORDER BY slot")
+                .unwrap()
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let retained = (metadata, slots);
+            if let Some(original) = &original_history {
+                assert_eq!(&retained, original, "{phase} changed original custody");
+            } else {
+                original_history = Some(retained);
+            }
             assert_eq!(
                 crate::session_catalog_identity(&home.options, "local", "lead")
                     .unwrap()

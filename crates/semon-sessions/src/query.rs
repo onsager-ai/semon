@@ -1020,6 +1020,7 @@ impl Query {
                 return self.execute_selected_at(
                     &source_key,
                     &catalog_key,
+                    crate::CatalogReadScope::Current,
                     tool,
                     args,
                     None,
@@ -1070,6 +1071,7 @@ impl Query {
                 return self.execute_selected_at(
                     &source_key,
                     &catalog_key,
+                    crate::CatalogReadScope::Current,
                     tool,
                     args,
                     None,
@@ -1173,7 +1175,16 @@ impl Query {
                 "A focused tool requires the selected Catalog id",
             ));
         }
-        self.execute_selected_at(source_key, catalog_key, tool, args, provider, mode, now)
+        self.execute_selected_at(
+            source_key,
+            catalog_key,
+            crate::CatalogReadScope::RetainedHistory,
+            tool,
+            args,
+            provider,
+            mode,
+            now,
+        )
     }
 
     // Public selected reads validate the exact host-selected Catalog ID above.
@@ -1185,6 +1196,7 @@ impl Query {
         &mut self,
         source_key: &str,
         catalog_key: &str,
+        scope: crate::CatalogReadScope,
         tool: &str,
         args: &Value,
         provider: Option<&dyn crate::SessionSourceReader>,
@@ -1260,6 +1272,7 @@ impl Query {
             && let Some(mut answer) = transcript::session(
                 &evidence.options,
                 catalog_key,
+                scope,
                 &focused_args,
                 provider,
                 mode,
@@ -1293,6 +1306,7 @@ impl Query {
             && let Some(mut answer) = transcript::read(
                 &evidence.options,
                 catalog_key,
+                scope,
                 &focused_args,
                 provider,
                 mode,
@@ -1316,6 +1330,7 @@ impl Query {
         let result = crate::overview_repair::with_query(
             &evidence.options,
             catalog_key,
+            scope,
             provider,
             mode,
             now,
