@@ -3267,7 +3267,7 @@ impl SqliteStore {
                         // UNIQUE keys were certified before reordering. These
                         // helpers read their own History/Overview, never another
                         // row's newly written Current/source membership.
-                        for (_position, row) in rows.iter().enumerate() {
+                        for row in rows {
                             let started = metadata_measurements.start();
                             crate::overview::publish_current_owned(
                                 &transaction,
@@ -3278,7 +3278,7 @@ impl SqliteStore {
                             .map_err(|error| {
                                 #[cfg(test)]
                                 eprintln!(
-                                    "catalog_publication_probe stage=overview_publish_failed row_index={_position}"
+                                    "catalog_publication_probe stage=overview_publish_failed"
                                 );
                                 failure(error)
                             })?;
@@ -3701,10 +3701,10 @@ impl SqliteStore {
                 )
                 .map_err(StoreError::Configured)?;
             }
-            for (_row_index, (row, output)) in rows.iter().zip(&metadata).enumerate() {
+            for (row, output) in rows.iter().zip(&metadata) {
                 #[cfg(test)]
                 eprintln!(
-                    "catalog_publication_probe stage=observation_grant row_index={_row_index}"
+                    "catalog_publication_probe stage=observation_grant"
                 );
                 crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
                     &transaction,
