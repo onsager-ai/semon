@@ -141,6 +141,286 @@ pages in the existing stage-item family; its stage header and each metadata page
 retain their existing payload limits. This origin extension and its first-page
 cost remain unqualified until the exact final Source/Hub checks pass.
 
+### Proposed shared origin checkpoint
+
+This subsection is an implementation plan, not an implemented storage format.
+SQLite and PostgreSQL must implement the same transitions before integration.
+It does not explain the independently observed ordinary-discovery first-page
+timings or change their two-second, five-second or sixty-second gates.
+
+The shared private value types are:
+
+```rust,ignore
+struct OriginId { initial_stage_epoch: i64 }
+enum OriginPhase { Discovering, Sealed, Draining, Invalid, Finished }
+struct OriginHeader {
+    id: OriginId,
+    phase: OriginPhase,
+    admission: u64,
+    stream: String,
+    sealed_revision: Option<i64>,
+    first_publication: Option<String>,
+}
+struct OriginMember {
+    path: String,
+    admission_claim: Option<i64>,
+}
+struct OriginPublication {
+    origin: OriginId,
+    held_epoch: i64,
+    expected_generation: Option<String>,
+    group_digest: String,
+}
+struct OriginOwnerWitness {
+    key: String,
+    metadata_digest: String,
+    publication: String,
+}
+struct OriginSourceWitness {
+    path: String,
+    accepted_claim: Option<i64>,
+    accepted_ledger: Ledger,
+    acknowledged: bool,
+}
+```
+
+Namespace, runtime and live generation remain in the existing admitted stage
+binding; these values do not introduce another native identity or authority.
+`OriginId` is the epoch allocated when that same stage was first created. It is
+immutable across holder takeover and derived reset. The existing held epoch
+still changes on takeover/reset and fences old callers; no second epoch counter
+is allocated. A publication group digest hashes its origin, held epoch, expected
+head, canonical selected keys, exact claims and prepared-model witness. Exact
+receipt replay precedes the now-stale head/claim CAS, as in existing publication.
+
+Only an owned native discovery producer may create the origin. The proposed
+private operations are `enroll_origin_page`, `seal_origin`,
+`activate_origin(runtime)`, `publish_origin_group`, `origin_owner_matches` and
+`invalidate_origin`. They take the existing admitted native transaction or
+`NativeOwnership`; no public journal method accepts a caller-constructed token
+as authority. Generic configured journals continue their existing discovery
+behavior. Origin enrollment validates the enrolled semantic profile, namespace,
+admission and stream. Runtime is unbound during metadata discovery and is bound
+once by the actual producer after sealing, before any Current publication.
+
+#### Persistent rows and pages
+
+SQLite keeps the existing `catalog_semantic_stage` row and adds nullable origin
+header fields: `origin_epoch`, `origin_phase`, `origin_admission`, `origin_stream`,
+`origin_sealed_revision` and `origin_first_generation`. Existing `generation`,
+`runtime`, `epoch` and reduction cursors keep their current jobs. Runtime is
+nullable only for an unactivated `discovering`/`sealed` origin; a constraint
+requires it for every warm stage and every draining origin. PostgreSQL encodes
+the same distinction as an optional bound runtime in its header, never an empty
+string treated as authority. Existing `catalog_semantic_sources` rows gain immutable
+origin membership/admission-claim fields; the normal mutable claim and derived
+progress fields are separate. The source row is enrolled in the same discovery
+transaction that records its backfill membership and initial invalidation.
+
+Two small witness relations belong to that same stage family:
+
+```sql
+-- Conceptual DDL; final constraints/guards require schema review.
+catalog_semantic_origin_owners(
+  namespace, origin_epoch, session_key, metadata_digest, publication,
+  PRIMARY KEY(namespace, origin_epoch, session_key));
+catalog_semantic_origin_sources(
+  namespace, origin_epoch, source_path, accepted_claim, accepted_ledger,
+  acknowledged, dev, ino, size, mtime_ns, ctime_ns, resume_at,
+  head_sha256, tail_sha256,
+  PRIMARY KEY(namespace, origin_epoch, source_path));
+```
+
+The owner witness references the already required native Catalog observation
+grant and canonical metadata digest. It does not duplicate the Catalog row or
+mint another grant. `Ledger` is exactly the existing stat/offset/prefix/tail
+value; the scalar columns permit indexed SQL mismatch detection without loading
+every ledger. This is a non-authorizing comparison witness, never a Raw recipe,
+lease, source grant or substitute for current canonical qualification. The
+current owner row's complete source cohort supplies owner-to-source membership;
+its existing membership check must still pass. Source witnesses are deduplicated
+by physical path within the origin.
+
+PostgreSQL uses the existing `catalog_stage_items` family. `seq=0` remains a
+bounded header; other rows are typed items for source progress, endpoints,
+frontiers, relations, origin owners, origin sources and publication receipts.
+The physical `stage_epoch` key is the stable lifecycle root (`OriginId` for an
+origin stage); the header records the current held epoch. Takeover changes the
+held epoch by CAS and never copies all item rows into another epoch.
+
+Add typed item kind, key digest and full key to this existing family, with a
+namespace/root/kind/digest index. Full namespace and key bytes qualify every
+digest match; collisions refuse explicitly. Work pages seek by digest and
+retain that opaque cursor, while each returned `Batch.paths` is canonically
+sorted. Do not search an unbounded collection of JSON pages for a path. A typed
+item can hold one source/owner or a bounded metadata page; every row payload
+remains at most 1 MiB and every fetch returns at most 64 items. A full `Stage`
+with all sources/endpoints is never serialized or reconstructed. Existing
+publication epochs and the current header supply epoch allocation under the
+namespace lock; this adds neither a parallel lifecycle nor a second allocator.
+The `seq` value is only an item ordinal allocated under that same header lock;
+it is not an origin/holder epoch. Conceptual item mappings are:
+
+| Logical record | SQLite | PostgreSQL item kind/key |
+| --- | --- | --- |
+| Origin and held state | Existing stage row | `seq=0`, header with stable root/current held epoch |
+| Admitted membership and claim | Existing source row plus immutable origin fields | `source`, full physical path |
+| Accepted owner comparison | Origin-owner witness row | `origin-owner`, full session key |
+| Accepted source comparison | Origin-source witness row | `origin-source`, full physical path |
+| Selected-group replay | Group-qualified stage publication receipt | `publication`, canonical group digest |
+| Existing derived work | Existing sources/endpoints/frontiers/relations | Typed item with its complete existing logical key |
+
+For example, a PostgreSQL source lookup qualifies namespace bytes, stable root,
+`kind='source'`, the existing key digest and the full path. A page selects one
+kind with `digest > cursor ORDER BY digest LIMIT 64`; a digest collision or
+unexpected full key refuses. SQLite uses its existing namespace/path or
+namespace/session-key indexes with the equivalent keyset predicate. Neither
+adapter discovers membership by scanning payloads of unrelated stage items.
+
+The existing semantic publication receipt key must distinguish selected groups
+within a held stage epoch. Use the deterministic group digest, retaining the
+held epoch as a fence and indexed receipt qualifier. One receipt per entire
+stage cannot acknowledge a second group. First ordinary publication records its
+group receipt in the same stage family; later semantic publications use their
+existing proof/presentation authority and selected-group receipts.
+
+#### State and first-publication CAS
+
+1. Under the existing discovery writer reservation/namespace lock, verify an
+   absent Catalog head and no competing active stage, allocate the existing
+   stage epoch, and enter `Discovering`. Each discovery transaction appends only
+   its admitted page and exact claims. A replay checks the existing operation
+   receipt and does not append a second membership. No whole-inventory copy,
+   hash pass or payload preparation occurs here.
+2. The final discovery transaction seals the exact accumulated membership and
+   its journal revision. A sealed origin cannot admit another discovery page.
+   The producer activates the sealed stage with its actual runtime/admission
+   binding. The existing newest64 derivation remains the first builder.
+3. The first publisher presents the held epoch and origin id. In the publication
+   transaction, require `Sealed`, the exact held binding, no prior origin
+   publication and the still-absent expected head. Require every selected path
+   to be an enrolled member. Run all ordinary native source, role, membership,
+   ledger, physical-generation, claim, proof and presentation checks unchanged.
+4. Capture only this group's accepted owner digests and source witnesses from
+   those validated rows/ledgers/claims. Publish Current and the existing native
+   grants, write the group receipt, ACK only its exact claims, and move the same
+   stage to `Draining` with its resulting live generation. All effects commit
+   atomically. Any receipt/capture failure rolls back publication and ACK.
+5. Later groups require the current held epoch and live head, complete selected
+   owner closures and the ordinary current claims. They publish/ACK only their
+   selected paths/owners, advance only those progress flags and witnesses, and
+   update the stage's live head in that same transaction. Unselected pending
+   work is untouched. Empty publication requests finish only after all durable
+   queues and final witnesses qualify.
+
+The SQLite first-publication header CAS is conceptually the following guarded
+update, inside the transaction that already validates/updates the Catalog head:
+
+```sql
+UPDATE catalog_semantic_stage
+SET generation=:new_head, origin_phase='draining',
+    origin_first_generation=:new_head
+WHERE namespace=:namespace AND epoch=:held_epoch
+  AND origin_epoch=:origin_epoch AND origin_phase='sealed'
+  AND origin_admission=:admission AND origin_stream=:stream
+  AND runtime=:bound_runtime AND generation IS NULL
+  AND origin_first_generation IS NULL AND resetting=0;
+```
+
+Require exactly one changed row; otherwise roll back every publication effect.
+Subsequent group CAS requires `origin_phase='draining'` and exact live generation
+instead of the absent head. The PostgreSQL equivalent locks the existing source
+state row, validates the decoded header/binding, then updates the stable-root
+`seq=0` item with `WHERE namespace_digest=... AND namespace=:full_namespace AND
+stage_epoch=:origin_epoch AND seq=0 AND active AND payload_hash=:old_header_hash`.
+The new payload contains the exact held epoch and live head. Require one row and
+retain the full bytes/hash validation. This CAS and Catalog-head CAS are in the
+same transaction. Header revision/watermark alone cannot substitute for either.
+
+Completed exact group-receipt replay may return its acknowledgement without
+effects before checking a now-stale held epoch/head, matching the existing replay
+contract. An unfinished stale-holder request conflicts and writes nothing.
+
+Admission claims are historical discovery evidence, not a frozen post-seal
+journal. Initial indexing legitimately advances claims. After sealing, native
+index commits, source changes and claim capture keep their ordinary CAS/restart
+semantics; origin never blesses a newer claim using a watermark or membership.
+The first accepted publication records the actual validated claims before ACK,
+including an explicit acknowledged bit to distinguish an accepted null claim
+from a missing receipt. For an already published origin source, a changed
+claim/ledger/runtime/admission disables its old comparison witness. Only a new
+ordinary validated publication can record a successor witness; provenance alone
+cannot authorize that publication or bypass the prior-owner refusal.
+
+An origin owner may be excluded from the pre-origin baseline only while its
+canonical Current digest and existing native grant match its witness, its
+complete Current membership matches the row, all incident source witnesses
+still match live ledgers, and the held origin binding is valid. Perform mismatch
+and membership selection through indexed metadata predicates, then load only
+the selected bounded page. Do not enumerate all origin owners into memory.
+Missing/corrupt/inconsistent origin state provides no exclusion. Preserve
+Current/History/Raw and either use the ordinary bounded refusal or report a
+conflict; never fall back to an inferred `draining` origin.
+
+An origin exception also requires every selected/replayed physical path to
+belong to the sealed initial inventory. A post-seal new child cannot be appended
+to that inventory or inherit an exception from its parent's receipt. Work that
+needs such a path must use the ordinary prior-owner closure/refusal semantics;
+its pending journal claim is preserved. For ordinary work, the complete union of
+selected changed sources and affected prior sources still must fit 64 before
+Raw preparation. In particular, finishing an initial 64-owner origin never
+allows a later 65th source to reuse its exception.
+
+Derived reset/takeover may retain immutable membership and accepted provenance,
+but must invalidate old held batches/model witnesses and recheck every
+exception. Recovery fences/invalidates the origin before replacing admitted
+membership. A concurrent publisher cannot adopt or advance its live head. A
+new admission, stream or incompatible runtime cannot inherit the exception.
+
+#### Operation bounds and implementation checkpoints
+
+| Operation | Resident/operation bound | Durable progress |
+| --- | --- | --- |
+| Discovery | Existing 512 examined entries, at most 64 accepted paths | Append the same accepted page and claims; seal in final transaction |
+| Index/identity | At most 64 physical sources, existing 4 MiB source slices and complete-owner closure rules | Per-source progress and existing ledger witnesses |
+| Relationship preparation | Existing actor/seed and event limits, at most 64 physical companions, 1 MiB context | Frontier/event/relation cursors; no all-endpoint map |
+| Witness/context reads | At most 64 metadata items per page, 1 MiB per payload/context | Keyset cursor; no uncapped loop inside one producer tick |
+| Publication | At most 64 selected owners and 64 distinct physical sources; existing metadata/projection byte limits | Selected-group receipt, flags, ACK and live head in one transaction |
+| Prior owners outside origin | Existing complete 64-owner/source and 1 MiB closure refusal | No origin-based increase or truncation |
+| Reset/cleanup | Existing 64 metadata-item mutation budget | Preserve origin root/provenance separately from derived reset cursors |
+
+Receipt records contain keys/digests and source witnesses, not another copy of
+all model metadata. PostgreSQL packs them by both item count and bytes; it may
+write several bounded typed pages for an already bounded publication group.
+An individual oversized item refuses, and a multi-item page is shortened before
+the payload limit. Neither `Batch.paths`, a context map, a page nor its payload
+limit is enlarged to fit a cumulative stage. Parent child names and incident
+placements use the existing bounded metadata/replay ports, not Raw loading of
+all children.
+
+Implementation checkpoints, each requiring review before the next:
+
+1. Review these shared types, lifecycle-root/held-epoch distinction, native-only
+   discovery hook, keyed item layout and deterministic selected receipt key.
+2. Implement SQLite owned discovery plus atomic first-publication transition,
+   including rollback, crash/replay, stale holder and generic-journal refusal
+   controls. This alone is not an integrable oversized-component fix.
+3. Implement SQLite cumulative queues, selected-owner context/publication,
+   receipt matching, selected ACK and bounded reset/recovery. Require unchanged
+   cold81 and old-window completion, every parent/parent-summary assertion,
+   unchanged Domain52 64-prior-plus-new refusal and zero-effects assertions.
+4. Implement PostgreSQL typed stage items and the identical transitions with
+   independent adapter/conformance oracles. Do not retain a second all-stage
+   JSON implementation or different origin semantics.
+5. Run cross-backend corruption/missing-witness, post-seal mutation, collision,
+   takeover, runtime/admission replacement and competing-publication controls;
+   then exact final Source/Hub checks and original first-page/background gates.
+
+No local cargo (including formatting), Node tests, project typechecks or other
+CPU-bound validation is authorized while thermal readings are unavailable.
+Stop CPU-bound work at 85 C. Validation remains CI-only; the runtime hold grants
+no E2B, SSH, cloud execution, deployment or publication authority.
+
 A new machine discovers source metadata in bounded pages. Discovered paths and
 backfill state are persisted in SQLite, and committed source offsets survive
 restart. Filesystem enumeration itself restarts after process loss; discovered
