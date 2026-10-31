@@ -44,6 +44,89 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - name: Inventory native SQLite coupling
         run: python3 scripts/check-native-storage-boundary.py
+  retained-join-diagnostic:
+    name: Retained join diagnostic (not qualification)
+    runs-on: ubuntu-latest
+    env:
+      SEMON_BUILD_TIMING: "1"
+      SEMON_PRICING_REFRESH: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Run retained family status failure cases
+        id: retained_join_diagnostic
+        shell: bash
+        run: |
+          python3 - <<'PYSAFE'
+          import os, subprocess
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          report_path = root / 'retained-join-diagnostic.txt'
+          report_path.write_text('Diagnostic did not complete.\n')
+          cases = (
+              'catalog::tests::family_status_does_not_treat_a_retired_native_selection_as_current',
+              'catalog::tests::family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification',
+          )
+          prefixes = (
+              'catalog_retained_join_probe ',
+              'catalog_retained_observation_refused ',
+              'catalog_runtime_refused ',
+              'catalog_relative_status_refused ',
+          )
+          report = []
+          failed = False
+          for index, case in enumerate(cases):
+              raw = root / f'retained-join-case-{index}.log'
+              with raw.open('w') as output:
+                  process = subprocess.run(
+                      ['cargo', 'test', '--locked', '-p', 'semon-sessions', '--lib', case,
+                       '--', '--exact', '--nocapture'], stdout=output, stderr=subprocess.STDOUT,
+                  )
+              stages, results = [], []
+              running_one = 0
+              stage_count = 0
+              with raw.open() as source:
+                  for line in source:
+                      line = line.rstrip()
+                      running_one += line == 'running 1 test'
+                      if line.startswith(prefixes):
+                          stage_count += 1
+                          if len(stages) < 64:
+                              stages.append(line[:1024])
+                      if line.startswith('test result:'):
+                          results.append(line[:1024])
+              execution_ok = running_one == 1 and len(results) == 1
+              case_failed = process.returncode != 0 or not execution_ok
+              failed |= case_failed
+              report.append(
+                  f'CASE name={case} process_status={process.returncode} '
+                  f'execution_ok={execution_ok} status={"failed" if case_failed else "passed"} '
+                  f'stage_count={stage_count} retained_stage_count={len(stages)}'
+              )
+              report.extend(stages)
+              report.extend(results[:1])
+          text = '\n'.join(report) + '\n'
+          report_path.write_text(text)
+          print(text, end='')
+          if failed:
+              raise SystemExit('Retained family status diagnostic cases failed; this is not qualification')
+          PYSAFE
+      - name: Retain retained join diagnostic
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: retained-join-diagnostic
+          path: ${{ runner.temp }}/retained-join-diagnostic.txt
+          if-no-files-found: warn
   conformance:
     runs-on: ubuntu-latest
     env:
@@ -155,8 +238,8 @@ jobs:
         with:
           name: retained-contract-tests
           path: ${{ runner.temp }}/retained-contract-tests.log
-      - name: Retained row authority diagnostic (not qualification)
-        id: retained_authority_diagnostic
+      - name: Retained Claude replacement diagnostic (not qualification)
+        id: retained_claude_diagnostic
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         env:
           SEMON_BUILD_TIMING: "1"
@@ -165,11 +248,7 @@ jobs:
           import os, subprocess
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
-          cases = (
-              'events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history',
-              'catalog::tests::family_status_does_not_treat_a_retired_native_selection_as_current',
-              'catalog::tests::family_and_unjoined_trace_extent_share_source_runtime_and_retained_qualification',
-          )
+          case = 'events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history'
           prefixes = (
               'semon sessions native: observation_direct_grant_',
               'semon sessions native: observation_stage_refused ',
@@ -177,49 +256,45 @@ jobs:
               'catalog_runtime_refused ',
               'catalog_relative_status_refused ',
           )
-          report = []
-          valid_execution = True
-          for index, case in enumerate(cases):
-              raw = root / f'retained-authority-case-{index}.log'
-              with raw.open('w') as output:
-                  result = subprocess.run(
-                      ['cargo', 'test', '--locked', '-p', 'semon-sessions', '--lib', case,
-                       '--', '--exact', '--nocapture'], stdout=output, stderr=subprocess.STDOUT,
-                  )
-              stages, results = [], []
-              running_one = 0
-              stage_count = 0
-              with raw.open() as source:
-                  for line in source:
-                      line = line.rstrip()
-                      running_one += line == 'running 1 test'
-                      if line.startswith(prefixes):
-                          stage_count += 1
-                          if len(stages) < 64:
-                              stages.append(line[:1024])
-                      if line.startswith('test result:'):
-                          results.append(line[:1024])
-              execution_ok = running_one == 1 and len(results) == 1
-              valid_execution &= execution_ok
-              report.append(
-                  f'CASE name={case} process_status={result.returncode} '
-                  f'running_one_count={running_one} result_count={len(results)} '
-                  f'stage_count={stage_count} retained_stage_count={len(stages)}'
+          raw = root / 'retained-claude-case.log'
+          with raw.open('w') as output:
+              result = subprocess.run(
+                  ['cargo', 'test', '--locked', '-p', 'semon-sessions', '--lib', case,
+                   '--', '--exact', '--nocapture'], stdout=output, stderr=subprocess.STDOUT,
               )
-              report.extend(stages)
-              report.extend(results[:1])
+          stages, results = [], []
+          running_one = 0
+          stage_count = 0
+          with raw.open() as source:
+              for line in source:
+                  line = line.rstrip()
+                  running_one += line == 'running 1 test'
+                  if line.startswith(prefixes):
+                      stage_count += 1
+                      if len(stages) < 64:
+                          stages.append(line[:1024])
+                  if line.startswith('test result:'):
+                      results.append(line[:1024])
+          execution_ok = running_one == 1 and len(results) == 1
+          report = [
+              f'CASE name={case} process_status={result.returncode} '
+              f'running_one_count={running_one} result_count={len(results)} '
+              f'stage_count={stage_count} retained_stage_count={len(stages)}',
+              *stages,
+              *results[:1],
+          ]
           text = '\n'.join(report) + '\n'
-          (root / 'retained-authority-diagnostic.txt').write_text(text)
+          (root / 'retained-claude-diagnostic.txt').write_text(text)
           print(text, end='')
-          if not valid_execution:
-              raise SystemExit('Exact diagnostic case did not produce one running test and result')
+          if not execution_ok:
+              raise SystemExit('Exact Claude diagnostic did not produce one test result')
           PYSAFE
-      - name: Retain bounded row authority diagnostic
-        if: ${{ !cancelled() && steps.retained_authority_diagnostic.outcome != 'skipped' && steps.production.outcome == 'success' }}
+      - name: Retain retained Claude diagnostic
+        if: ${{ !cancelled() && steps.retained_claude_diagnostic.outcome != 'skipped' && steps.production.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: retained-authority-diagnostic
-          path: ${{ runner.temp }}/retained-authority-diagnostic.txt
+          name: retained-claude-diagnostic
+          path: ${{ runner.temp }}/retained-claude-diagnostic.txt
       - name: Selected recovery range authority reconciliation
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: cargo test --locked -p semon-sessions --lib query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement -- --exact --nocapture
