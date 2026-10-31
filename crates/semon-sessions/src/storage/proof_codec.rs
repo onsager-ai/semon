@@ -26,7 +26,6 @@ pub(crate) fn verify_presentation_entry(
     verify_presentation_manifest_entry(key, metadata, slots, text, manifest).map(|_| ())
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) fn verify_presentation_observations(
     key: &str,
     metadata: &str,

@@ -1509,6 +1509,96 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 }
 
 #[test]
+fn recovery_index_ahead_repriced_get_session_uses_bound_global_runtime() {
+    use crate::storage::sqlite::proof_generations::{
+        CatalogObservationOwner, prepare_repriced_observation,
+    };
+
+    let home = Home::new("recovery-index-ahead-runtime");
+    home.top(
+        "first",
+        &[
+            human("first", ts(1, 0), "Index ahead prompt"),
+            assistant("first", ts(1, 1), vec![text("Index ahead answer")]),
+        ],
+    );
+    publish_semantic(&home);
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
+
+    let page = crate::session_catalog_page(&home.options, "local", "sid=first");
+    assert_eq!(page.status, 200);
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let selected = recovery_catalog_row(&db, "session_catalog", "first");
+    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+    let tx = db.transaction().unwrap();
+    let current_binding = binding.runtime_binding_at(&tx).unwrap();
+    let mut cost = selected.cost.clone();
+    cost.usd = Some(cost.usd.unwrap_or_default() + 1.0);
+    prepare_repriced_observation(
+        &tx,
+        &current_binding,
+        CatalogObservationOwner::Catalog,
+        &selected,
+        &cost,
+        selected.query.as_ref(),
+    )
+    .unwrap()
+    .publish(&tx)
+    .unwrap();
+    tx.commit().unwrap();
+    let repriced = recovery_catalog_row(&db, "session_catalog", "first");
+    assert_ne!(repriced.cost.usd, selected.cost.usd);
+    let expected = Query::from_sources(admitted(home.options.clone()))
+        .call_at("get_session", &json!({"id":"first"}), NOW)
+        .unwrap();
+    let global = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+
+    let path = repriced.sources[0].path.to_string_lossy().into_owned();
+    assert_eq!(
+        db.execute(
+            "UPDATE main.files SET size=size+1,resume_at=resume_at+1 WHERE namespace=semon_namespace() AND path=?1",
+            [&path],
+        )
+        .unwrap(),
+        1
+    );
+    assert!(
+        crate::storage::sqlite::catalog::runtime_source_cwds_if_current(&db, &repriced.sources)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        crate::native_evidence::query_runtime_generation(&home.options).unwrap(),
+        global
+    );
+    let actual = Query::from_sources(admitted(home.options.clone()))
+        .call_at("get_session", &json!({"id":"first"}), NOW)
+        .unwrap();
+    assert_eq!(actual, expected);
+
+    let hostname = home.options.proc_root.join("sys/kernel/hostname");
+    let original_hostname = fs::read(&hostname).unwrap();
+    fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
+    let changed_global = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let refused = Query::from_sources(admitted(home.options.clone()))
+        .call_at("get_session", &json!({"id":"first"}), NOW);
+    fs::write(&hostname, original_hostname).unwrap();
+    assert_ne!(changed_global, global);
+    assert!(refused.is_err());
+}
+
+#[test]
 fn recovery_query_row_and_grant_roll_back_when_grant_update_fails() {
     let home = Home::new("recovery-grant-rollback");
     home.top("first", &[human("first", ts(1, 0), "atomic query repair")]);
