@@ -384,35 +384,77 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         row: &CatalogRow,
         runtime: &str,
     ) -> io::Result<Option<String>> {
-        match runtime_source_cwds_if_current(self.0, &row.sources)? {
+        let diagnose = |stage: &'static str, error: &io::Error| {
+            if cfg!(test) || crate::native_timing::enabled() {
+                eprintln!(
+                    "catalog_runtime_refused stage={stage} error_kind={:?} storage_error={:?}",
+                    error.kind(),
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+                );
+            }
+        };
+        match runtime_source_cwds_if_current(self.0, &row.sources)
+            .inspect_err(|error| diagnose("current_source_cwds", error))?
+        {
             Some(cwds) => {
-                let Some(binding) = self.row_runtime_binding(row)? else {
+                let Some(binding) = self
+                    .row_runtime_binding(row)
+                    .inspect_err(|error| diagnose("current_row_binding", error))?
+                else {
+                    if cfg!(test) || crate::native_timing::enabled() {
+                        eprintln!(
+                            "catalog_runtime_refused stage=current_row_binding error_class=missing"
+                        );
+                    }
                     return Ok(None);
                 };
                 let scoped = self
                     .3
                     .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
-                    .scope(row, &cwds)?;
-                binding.witness(&scoped).map(Some)
+                    .scope(row, &cwds)
+                    .inspect_err(|error| diagnose("current_scope", error))?;
+                binding
+                    .witness(&scoped)
+                    .inspect_err(|error| diagnose("current_runtime_witness", error))
+                    .map(Some)
             }
             None => {
                 let (binding, observations) =
                     super::proof_generations::observation_binding_with_observations(
                         self.0, &self.2, row,
                     )
-                    .map_err(io::Error::other)?;
+                    .map_err(io::Error::other)
+                    .inspect_err(|error| diagnose("captured_observation_binding", error))?;
                 let captured = observations
                     .runtime_for(row)
-                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))
+                    .inspect_err(|error| {
+                        let stage = if observations.runtime.is_none() {
+                            "captured_global_runtime"
+                        } else {
+                            "captured_row_runtime"
+                        };
+                        diagnose(stage, error);
+                    })?;
                 let captured_global = observations
                     .runtime
                     .as_deref()
-                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))
+                    .inspect_err(|error| diagnose("captured_global_runtime", error))?;
                 // A changed Index source ledger may make the captured CWD scope
                 // unavailable. Retain the row observation only while the live
                 // global input still matches this publication's bound witness.
-                let current_global = binding.witness(runtime)?;
+                let current_global = binding
+                    .witness(runtime)
+                    .inspect_err(|error| diagnose("captured_current_global_witness", error))?;
                 if current_global != captured_global {
+                    if cfg!(test) || crate::native_timing::enabled() {
+                        eprintln!(
+                            "catalog_runtime_refused stage=captured_global_equality error_class=scope_changed equal=false"
+                        );
+                    }
                     return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
                 }
                 Ok(Some(captured))
