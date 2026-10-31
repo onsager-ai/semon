@@ -600,59 +600,117 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         path: "projects/sanitized/catalog.jsonl".into(),
     };
     let path = input.full_path(&options);
-    let mut raw = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut raw = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     writeln!(raw, "{}", serde_json::json!({"type":"assistant","sessionId":"catalog","uuid":"price-answer","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","message":{"id":"price-answer","role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"priced original"}],"usage":{"input_tokens":11,"output_tokens":7}}})).unwrap();
     drop(raw);
     let mut producer = cache(&source);
     producer.ingest(&"9".repeat(64), &path, "claude").unwrap();
     producer.flush_cold_writes().unwrap();
-    assert_eq!(producer.begin_semantic_stage_with_journal(
-        &[path.to_str().unwrap().to_owned()], "transfer-real-model", true,
-    ).unwrap(), crate::events::Outcome::Written);
+    assert_eq!(
+        producer
+            .begin_semantic_stage_with_journal(
+                &[path.to_str().unwrap().to_owned()],
+                "transfer-real-model",
+                true,
+            )
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
     let rows = finish_catalog(&mut producer, &options, std::slice::from_ref(&input));
     let original = &rows[0];
     assert!(original.cost.usd.is_some_and(|usd| usd > 0.0));
     let manifest = stage(&source, &target, &[177; 32]);
     apply(&target, &manifest);
-    target.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), &manifest, &options).unwrap();
+    target
+        .transfer_inbox()
+        .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
+        .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::restore(&target).unwrap();
     let binding = crate::storage::QueryRuntimeBinding {
         namespace: target.namespace.clone(),
         admission: owner.admission(),
         stream_epoch: target.expected_stream_epoch.clone().unwrap(),
     };
-    assert_eq!(binding.admission, manifest.binding_epoch, "coincident admission counters cannot authorize a local rewrite");
+    assert_eq!(
+        binding.admission, manifest.binding_epoch,
+        "coincident admission counters cannot authorize a local rewrite"
+    );
     let mut db = crate::storage::sqlite::semantic::pricing_connection(&owner).unwrap();
-    assert!(observation_binding(&db, &binding, original).is_ok(), "the actual transfer receipt authorizes the original row");
-    let before: String = db.query_row(
-        "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
-        rusqlite::params![target.namespace.as_str(), original.key], |r| r.get(0),
-    ).unwrap();
+    assert!(
+        observation_binding(&db, &binding, original).is_ok(),
+        "the actual transfer receipt authorizes the original row"
+    );
+    let before: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![target.namespace.as_str(), original.key],
+            |r| r.get(0),
+        )
+        .unwrap();
     let receipts = |db: &rusqlite::Connection| {
         let mut statement = db.prepare("SELECT generation,proof_digest,metadata FROM storage_semantic_publications WHERE namespace=?1 ORDER BY generation").unwrap();
-        statement.query_map([target.namespace.as_str()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        statement
+            .query_map([target.namespace.as_str()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
     };
     let original_receipts = receipts(&db);
     let mut changed = original.cost.clone();
     changed.usd = Some(123.0);
     {
         let tx = db.transaction().unwrap();
-        assert!(prepare_repriced_observation(&tx, &binding, CatalogObservationOwner::Catalog, original, &changed, original.query.as_ref()).is_err());
+        assert!(
+            prepare_repriced_observation(
+                &tx,
+                &binding,
+                CatalogObservationOwner::Catalog,
+                original,
+                &changed,
+                original.query.as_ref()
+            )
+            .is_err()
+        );
     }
-    let mut fixture: serde_json::Value = serde_json::from_slice(include_bytes!("../../pricing/fixtures/models-dev.json")).unwrap();
-    fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] = serde_json::Value::from(300.0);
-    let table = std::sync::Arc::new(crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap());
+    let mut fixture: serde_json::Value =
+        serde_json::from_slice(include_bytes!("../../pricing/fixtures/models-dev.json")).unwrap();
+    fixture["anthropic"]["models"]["claude-sonnet-4-5"]["cost"]["input"] =
+        serde_json::Value::from(300.0);
+    let table = std::sync::Arc::new(
+        crate::pricing::runtime::adapt(&serde_json::to_vec(&fixture).unwrap(), 1).unwrap(),
+    );
     crate::events::store::reprice::drain_for_store_test(&owner, table).unwrap();
-    let after: String = db.query_row(
-        "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
-        rusqlite::params![target.namespace.as_str(), original.key], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(after, before, "cost publication preserves imported metadata authority");
+    let after: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![target.namespace.as_str(), original.key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "cost publication preserves imported metadata authority"
+    );
     assert_eq!(receipts(&db), original_receipts);
-    assert_eq!(db.query_row(
-        "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
-        [target.namespace.as_str()], |r| r.get::<_, i64>(0),
-    ).unwrap(), 0, "an imported preimage cannot mint a local owner grant");
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
+            [target.namespace.as_str()],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap(),
+        0,
+        "an imported preimage cannot mint a local owner grant"
+    );
     assert!(observation_binding(&db, &binding, original).is_ok());
     drop(db);
     drop(producer);

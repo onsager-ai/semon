@@ -625,17 +625,21 @@ struct ObservationReadFault<'a>(&'a Connection);
 impl<'a> ObservationReadFault<'a> {
     fn install(db: &'a Connection, owner: CatalogObservationOwner) -> Option<Self> {
         let table = FAIL_OBSERVATION_READ.with(|fault| {
-            fault.get().filter(|(kind, _)| *kind == owner.kind()).map(|(_, table)| table)
+            fault
+                .get()
+                .filter(|(kind, _)| *kind == owner.kind())
+                .map(|(_, table)| table)
         })?;
         // Deny the real preparation statement without damaging the fixture DB.
-        db.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
-            match context.action {
+        db.authorizer(Some(
+            move |context: rusqlite::hooks::AuthContext<'_>| match context.action {
                 rusqlite::hooks::AuthAction::Read { table_name, .. } if table_name == table => {
                     rusqlite::hooks::Authorization::Deny
                 }
                 _ => rusqlite::hooks::Authorization::Allow,
-            }
-        })).unwrap();
+            },
+        ))
+        .unwrap();
         Some(Self(db))
     }
 }
@@ -643,7 +647,11 @@ impl<'a> ObservationReadFault<'a> {
 #[cfg(test)]
 impl Drop for ObservationReadFault<'_> {
     fn drop(&mut self) {
-        self.0.authorizer(None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>).unwrap();
+        self.0
+            .authorizer(
+                None::<fn(rusqlite::hooks::AuthContext<'_>) -> rusqlite::hooks::Authorization>,
+            )
+            .unwrap();
     }
 }
 
@@ -894,11 +902,13 @@ fn observation_binding_for_owner(
             );
         }
     })?;
-    proof_codec::observation_binding(record, current, selected).inspect_err(|_| {
-        if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
-        }
-    }).map_err(ObservationPreparationError::Evidence)
+    proof_codec::observation_binding(record, current, selected)
+        .inspect_err(|_| {
+            if crate::native_timing::enabled() {
+                eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
+            }
+        })
+        .map_err(ObservationPreparationError::Evidence)
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable
