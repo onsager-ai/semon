@@ -2,6 +2,87 @@ use super::*;
 use crate::storage::transfer::reported::tests::{root, seed_catalog, sqlite, stage};
 
 #[test]
+fn current_transfer225_unsupported_catalog_custody_preserves_capture_cursor_and_row() {
+    let root = root();
+    let source = sqlite(&root, "unsupported-custody-source");
+    let _ = seed_catalog(&source, &root);
+    let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
+    let length = catalog_rows::MAX_CATALOG_ROW_BYTES as i64 + 1;
+    db.execute(
+        "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_original_header:unsupported',CAST(zeroblob(?2) AS TEXT))",
+        params![source.namespace.as_str(), length],
+    ).unwrap();
+    let operation = [182; 32];
+    let cursor_key = transfer::key(&operation, "capture");
+    let mut previous: Option<String> = None;
+    loop {
+        match source.transfer_inbox().capture(&operation) {
+            Ok(transfer::CaptureProgress::Capturing { .. }) => {
+                previous = Some(db.query_row(
+                    "SELECT value FROM meta WHERE namespace=?1 AND key=?2",
+                    params![source.namespace.as_str(), cursor_key], |row| row.get(0),
+                ).unwrap());
+            }
+            Err(StorageError::HistoryRetentionBounds) => break,
+            other => panic!("unsupported custody must stop explicitly: {other:?}"),
+        }
+    }
+    let unchanged: String = db.query_row(
+        "SELECT value FROM meta WHERE namespace=?1 AND key=?2",
+        params![source.namespace.as_str(), cursor_key], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(Some(unchanged), previous);
+    let retained: i64 = db.query_row(
+        "SELECT octet_length(value) FROM meta WHERE namespace=?1 AND key='history_original_header:unsupported'",
+        [source.namespace.as_str()], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(retained, length);
+    assert_eq!(source.transfer_inbox().capture(&operation), Err(StorageError::HistoryRetentionBounds));
+    drop(db);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn current_transfer225_sqlite_real_large_presentation_reverse_without_raw() {
+    use crate::storage::transfer::catalog_rows::tests::{
+        assert_provider_transcript, seed_large_presentation,
+    };
+    use crate::storage::transfer::reported::tests::{apply, selected_receipts::{originals, AuthorizedOriginals}};
+    let root = root();
+    let source = sqlite(&root, "real-large-source");
+    let target = sqlite(&root, "real-large-target");
+    let reverse = sqlite(&root, "real-large-reverse");
+    let (options, key, id) = seed_large_presentation(&source, &root);
+    let mut host = AuthorizedOriginals::default();
+    originals(&source, &options, &mut host);
+    assert_provider_transcript(&source, &options, &host, &key);
+    let manifest = stage(&source, &target, &[178; 32]);
+    let mut presentation_parts = 0;
+    for sequence in 1..=source.transfer_inbox().checkpoint(&manifest).unwrap().sequence {
+        let page = source.transfer_inbox().staged_page(&manifest, sequence).unwrap();
+        assert!(page.encoded().unwrap().len() <= transfer::MAX_PAGE_BYTES);
+        for record in page.records {
+            if let TransferRecord::CatalogRow { kind: CatalogRowKind::Presentation, key, parts, .. } = record
+                && key[0].as_str() == Some(id.as_str())
+            {
+                assert!(parts > 1);
+                presentation_parts += 1;
+            }
+        }
+    }
+    assert!(presentation_parts > 1);
+    std::fs::remove_dir_all(&options.claude_home).unwrap();
+    apply(&target, &manifest);
+    target.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), &manifest, &options).unwrap();
+    assert_provider_transcript(&target, &options, &host, &key);
+    let reverse_manifest = stage(&target, &reverse, &[179; 32]);
+    apply(&reverse, &reverse_manifest);
+    reverse.transfer_inbox().admit_catalog_from(&target.transfer_inbox(), &reverse_manifest, &options).unwrap();
+    assert_provider_transcript(&reverse, &options, &host, &key);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() {
     let root = root();
     let source = sqlite(&root, "large-catalog-source");
@@ -19,6 +100,16 @@ fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() 
         "INSERT INTO meta(namespace,key,value) VALUES(?1,'history_transfer:large-row',?2)",
         params![source.namespace.as_str(), value],
     ).unwrap();
+    // Its raw cells fit one page, but escaped JSON and wire byte arrays span
+    // several pages. The following row must wait for this row's final part.
+    let escaped = serde_json::to_string(&"\\".repeat(250_000)).unwrap();
+    assert!(escaped.len() < transfer::MAX_PAGE_BYTES);
+    for (key, metadata) in [("00-escaped", escaped.as_str()), ("01-following", "null")] {
+        db.execute(
+            "INSERT INTO meta(namespace,key,value) VALUES(?1,?2,?3)",
+            params![source.namespace.as_str(), format!("history_transfer:{key}"), metadata],
+        ).unwrap();
+    }
     drop(db);
     let manifest = stage(&source, &target, &[177; 32]);
     let source_inbox = source.transfer_inbox();
@@ -38,6 +129,7 @@ fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() 
     };
     let mut saw_partial = false;
     let mut saw_final = false;
+    let mut escaped_partial_pages = 0;
     for sequence in 1..=count {
         let page = source_inbox.staged_page(&manifest, sequence).unwrap();
         assert!(page.encoded().unwrap().len() <= transfer::MAX_PAGE_BYTES);
@@ -46,7 +138,15 @@ fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() 
             _ => None,
         }).collect::<Vec<_>>();
         let final_row = fragments.iter().any(|(part, parts)| part + 1 == *parts);
-        if final_row {
+        let final_large_row = page.records.iter().any(|record| matches!(record,
+            TransferRecord::CatalogRow { kind: CatalogRowKind::HistoryProgress, key, part, parts, .. }
+                if key[0].as_str() == Some("large-row") && part + 1 == *parts
+        ));
+        let escaped_partial = page.records.iter().any(|record| matches!(record,
+            TransferRecord::CatalogRow { kind: CatalogRowKind::HistoryProgress, key, part, parts, .. }
+                if key[0].as_str() == Some("00-escaped") && part + 1 < *parts
+        ));
+        if final_large_row {
             let receipt = transfer::key(&manifest.identity(), &format!("applied:{sequence}"));
             db.execute_batch(&format!(
                 "CREATE TRIGGER fail_catalog_final_receipt BEFORE INSERT ON meta WHEN NEW.key='{receipt}' BEGIN SELECT RAISE(ABORT,'injected final fragment receipt failure'); END"
@@ -70,11 +170,19 @@ fn current_transfer225_sqlite_large_catalog_restart_replay_and_final_rollback() 
             assert!(stored(&db).is_none());
             saw_partial = true;
         }
-        if final_row {
+        if final_large_row {
             assert_eq!(stored(&db).as_deref(), Some(value.as_str()));
         }
+        escaped_partial_pages += usize::from(escaped_partial);
     }
     assert!(saw_partial && saw_final);
+    assert!(escaped_partial_pages > 1);
+    let stored_escaped: String = db.query_row(
+        "SELECT value FROM meta WHERE namespace=?1 AND key='history_transfer:00-escaped'",
+        [target.namespace.as_str()],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(stored_escaped, escaped);
     drop(db);
     std::fs::remove_dir_all(root).unwrap();
 }

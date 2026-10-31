@@ -37,7 +37,10 @@ impl InboxTransaction for Inbox<'_> {
 
     fn delete(&mut self, key: &str) -> Result<(), StorageError> {
         self.0
-            .execute("DELETE FROM main.meta WHERE namespace=?1 AND key=?2", params![self.1, key])
+            .execute(
+                "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
+                params![self.1, key],
+            )
             .map_err(failed)?;
         Ok(())
     }

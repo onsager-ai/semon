@@ -10,8 +10,7 @@ pub(crate) const IMPORTED_GENERATION: &str = "native_transfer_v1:catalog-content
 // JSON escapes each input byte to at most six bytes (e.g. NUL -> \u0000).
 // The fixed typed envelope, numeric cells and punctuation fit in 4 KiB.
 const MAX_CATALOG_CELLS: usize = 10;
-pub(crate) const MAX_CATALOG_ROW_BYTES: usize =
-    MAX_CATALOG_CELLS * MAX_PAGE_BYTES * 6 + 4096;
+pub(crate) const MAX_CATALOG_ROW_BYTES: usize = MAX_CATALOG_CELLS * MAX_PAGE_BYTES * 6 + 4096;
 pub(crate) const CATALOG_ROW_FRAGMENT_BYTES: usize = 64 * 1024;
 
 #[cfg(test)]
@@ -206,8 +205,7 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
         || total_bytes == 0
         || total_bytes > MAX_CATALOG_ROW_BYTES
         || *parts == 0
-        || usize::try_from(*parts).ok()
-            != Some(total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES))
+        || usize::try_from(*parts).ok() != Some(total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES))
         || *part >= *parts
     {
         return Err(StorageError::ScopeChanged);
@@ -470,7 +468,9 @@ pub(crate) fn capture_cursor(value: Option<&str>) -> Result<Option<CaptureCursor
             || cursor.total_bytes == 0
             || cursor.total_bytes > MAX_CATALOG_ROW_BYTES as u64
             || cursor.parts as u64
-                != cursor.total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES as u64)
+                != cursor
+                    .total_bytes
+                    .div_ceil(CATALOG_ROW_FRAGMENT_BYTES as u64)
     }) {
         return Err(StorageError::ScopeChanged);
     }
@@ -483,8 +483,13 @@ pub(crate) fn resume_fragments(
 ) -> Result<Vec<TransferRecord>, StorageError> {
     if let Some(cursor) = cursor.filter(|cursor| cursor.pending()) {
         let Some(TransferRecord::CatalogRow {
-            key, parts, total_bytes, row_digest, ..
-        }) = fragments.first() else {
+            key,
+            parts,
+            total_bytes,
+            row_digest,
+            ..
+        }) = fragments.first()
+        else {
             return Err(StorageError::ScopeChanged);
         };
         if cursor.key != *key
@@ -718,7 +723,10 @@ pub(crate) fn require_complete(
     tx: &mut impl InboxTransaction,
     snapshot: &[u8; 32],
 ) -> Result<(), StorageError> {
-    if tx.get(&pending_key(snapshot), MAX_MANIFEST_BYTES)?.is_some() {
+    if tx
+        .get(&pending_key(snapshot), MAX_MANIFEST_BYTES)?
+        .is_some()
+    {
         return Err(StorageError::Conflict);
     }
     Ok(())
