@@ -5409,7 +5409,7 @@ mod tests {
         finite_options.since =
             std::time::Duration::from_millis(u64::try_from(finite_now - finite_cutoff).unwrap());
         let finite_port = crate::storage::sqlite::query::SqliteQueryCatalog {
-            options: finite_options,
+            options: finite_options.clone(),
             binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&b)
                 .unwrap()
                 .reader_binding()
@@ -5438,24 +5438,47 @@ mod tests {
         finite_port.validate(&b.namespace, &finite_part).unwrap();
 
         let facts_path = options[1].facts.as_ref().unwrap();
-        let mut changed_facts = crate::read_facts(facts_path).unwrap();
+        let original_facts = crate::read_facts(facts_path).unwrap();
+        let mut changed_facts = original_facts.clone();
         changed_facts.hostname = "changed-after-current-query-read".into();
         crate::write_facts(facts_path, &changed_facts, &options[1].source).unwrap();
         assert!(
             finite_port.validate(&b.namespace, &finite_part).is_err(),
             "Current Query facts are stale after runtime changes"
         );
-        let invalidated_source = inputs[1]
-            .full_path(&options[1])
-            .to_string_lossy()
-            .into_owned();
-        a.db().execute(
-            "INSERT INTO session_catalog_invalidations(namespace,source_path,revision,reason,observed_at) VALUES(?1,?2,1,'changed',0)",
-            params![b.namespace.as_str(), invalidated_source],
-        ).unwrap();
+        crate::write_facts(facts_path, &original_facts, &options[1].source).unwrap();
+        let restored_port = crate::storage::sqlite::query::SqliteQueryCatalog {
+            options: finite_options,
+            binding: crate::storage::sqlite::semantic::SemanticStaging::admit(&b)
+                .unwrap()
+                .reader_binding()
+                .unwrap(),
+        };
+        let mut restored_budget = 8 * 1024 * 1024;
+        let restored_part = restored_port
+            .read_cohort(&b.namespace, finite_now, &mut restored_budget)
+            .unwrap();
+        assert_eq!(
+            restored_part.rows[&current.key], current_facts,
+            "restoring Facts requalifies the exact Current Query facts"
+        );
+        restored_port
+            .validate(&b.namespace, &restored_part)
+            .unwrap();
+        let mut invalidation_options = options[1].clone();
+        invalidation_options.source = invalidation_options
+            .source
+            .clone()
+            .with_store(b.clone())
+            .unwrap();
+        crate::invalidate_session_sources(
+            &invalidation_options,
+            std::slice::from_ref(&inputs[1]),
+        )
+        .unwrap();
         let mut invalidated_budget = 8 * 1024 * 1024;
         assert!(
-            finite_port
+            restored_port
                 .read_cohort(&b.namespace, finite_now, &mut invalidated_budget)
                 .is_err(),
             "Current Query reads refuse catalog invalidation"
