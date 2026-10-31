@@ -4425,6 +4425,8 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             .is_some_and(|entries| !entries.is_empty()),
         "the original body oracle must contain transcript entries"
     );
+    let first_runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+    let mut runtime_phases = vec![("first_current", first_runtime.clone())];
     writeln!(
         fs::OpenOptions::new().append(true).open(&source).unwrap(),
         "{}",
@@ -4438,7 +4440,15 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         })
     )
     .unwrap();
+    runtime_phases.push((
+        "after_append",
+        crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+    ));
     fixture.publish_existing();
+    runtime_phases.push((
+        "after_publish",
+        crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+    ));
 
     let mut db = fixture.db();
     let current_lifecycle: String = db
@@ -4498,22 +4508,27 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     let current = binding.runtime_binding_at(&tx).unwrap();
     let admission = i64::try_from(current.admission).unwrap();
     let original_digest = crate::storage::proof_codec::digest(original_metadata.as_bytes());
-    let history_grant: bool = tx
+    let (history_grant, history_capture): (bool, Option<String>) = tx
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='live-history' AND owner_kind='history' AND metadata_digest=?2 AND admission=?3 AND stream=?4)",
+            "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='live-history' AND owner_kind='history' AND metadata_digest=?2 AND admission=?3 AND stream=?4),(SELECT CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='live-history' AND owner_kind='history' AND metadata_digest=?2 AND admission=?3 AND stream=?4)",
             rusqlite::params![
                 current.namespace.as_str(),
                 original_digest,
                 admission,
                 current.stream_epoch,
             ],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
     assert!(
         history_grant,
         "the producer must mint an exact History observation grant"
     );
+    let captured_runtime = history_capture
+        .and_then(|capture| {
+            serde_json::from_str::<crate::storage::selected::PresentationObservations>(&capture).ok()
+        })
+        .and_then(|observations| observations.source_runtime);
     tx.commit().unwrap();
 
     let mut query = crate::Query::with_machines(vec![("source".into(), fixture.options.clone())]);
@@ -4527,6 +4542,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             crate::SessionSourceReadMode::LocalThenProvider,
         )
         .unwrap();
+    runtime_phases.push((
+        "after_get_session",
+        crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+    ));
     assert_eq!(live_fields["session"]["alive"], true);
     assert_eq!(
         live_fields["session"]["run"]["OSTROM_RUN_ID"],
@@ -4545,6 +4564,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     )
     .unwrap()
     .expect("the Current MCP recipe must remain qualified beside History");
+    runtime_phases.push((
+        "after_current_body",
+        crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+    ));
     let read = || {
         crate::query::transcript::read(
             &fixture.options,
@@ -4556,6 +4579,17 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             crate::model::now_ms(),
         )
     };
+    runtime_phases.push((
+        "before_history",
+        crate::native_evidence::query_runtime_generation(&fixture.options).unwrap(),
+    ));
+    for (phase, runtime) in &runtime_phases {
+        eprintln!(
+            "mcp_history_runtime_phase phase={phase} equals_first={} equals_capture={}",
+            runtime == &first_runtime,
+            captured_runtime.as_ref().is_some_and(|captured| captured == runtime)
+        );
+    }
     let history_transcript = read()
         .unwrap()
         .expect("exact History recipe must qualify through its original source prefix");
