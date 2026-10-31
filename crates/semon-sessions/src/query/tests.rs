@@ -254,18 +254,27 @@ fn configured_options(
         .unwrap();
     config.create_native_store().unwrap();
     let mut options = home.options.clone();
-    options.source = source.with_store(config.clone()).unwrap();
+    // The producer keeps its admitted semantic capability explicit. The
+    // configured query factory attaches this StoreConfig to the HostSource.
+    options.source = source;
     (options, config)
 }
 
-fn catalog_generation(home: &Home) -> Option<String> {
-    catalog_generation_options(&home.options)
+fn admitted_semantic_cache(config: &crate::storage::StoreConfig) -> crate::events::EventCache {
+    crate::events::EventCache::open_semantic(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+    )
+    .unwrap()
 }
 
-fn catalog_generation_options(options: &Options) -> Option<String> {
-    crate::events::EventCache::open_scoped(&options.cache, &options.source)
+fn catalog_generation(home: &Home) -> Option<String> {
+    crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
         .unwrap()
         .session_catalog_generation()
+}
+
+fn admitted_catalog_generation(config: &crate::storage::StoreConfig) -> Option<String> {
+    admitted_semantic_cache(config).session_catalog_generation()
 }
 
 #[test]
@@ -5494,8 +5503,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             &[human("unrelated", ts(1, 0), "unrelated archive history")],
         );
         let (options, config) = configured_options(&home, "catalog-archive-search", 'a');
-        let mut cache =
-            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let mut cache = admitted_semantic_cache(&config);
         crate::model::observe_catalog(
             &options,
             &mut cache,
@@ -5504,7 +5512,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
             NOW,
         )
         .unwrap();
-        let generation = catalog_generation_options(&options).expect("published Catalog");
+        let generation = admitted_catalog_generation(&config).expect("published Catalog");
         let args = json!({"text":"needle","limit":1});
         let sources = || {
             Arc::new(
@@ -5558,7 +5566,7 @@ fn catalog_search_admits_only_selected_archives_before_its_stop_boundary() {
                 "invalid native bytes, replacement or revocation was accepted: {fault}"
             );
         }
-        assert_eq!(catalog_generation_options(&options), Some(generation));
+        assert_eq!(admitted_catalog_generation(&config), Some(generation));
     }
 }
 
@@ -5576,9 +5584,8 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
     second.top("peer", &[human("peer", ts(23, 0), "needle newer")]);
     let (first_options, first_config) = configured_options(&first, "catalog-first", 'b');
     let (second_options, second_config) = configured_options(&second, "catalog-second", 'c');
-    for options in [&first_options, &second_options] {
-        let mut cache =
-            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    for (options, config) in [(&first_options, &first_config), (&second_options, &second_config)] {
+        let mut cache = admitted_semantic_cache(config);
         crate::model::observe_catalog(
             options,
             &mut cache,
@@ -5592,9 +5599,7 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         ("a".into(), first_options.clone(), first_config.clone()),
         ("b".into(), second_options.clone(), second_config.clone()),
     ];
-    let sources = || {
-        Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap())
-    };
+    let sources = || Arc::new(SessionSources::with_configured_machines(machines.clone()).unwrap());
     let mut native = Query::from_sources(sources());
     for args in [
         json!({"text":"needle"}),
@@ -5617,9 +5622,7 @@ fn catalog_search_qualifies_multi_machine_order_and_conflicts() {
         "lead",
         &[human("lead", ts(1, 0), "duplicate native identity")],
     );
-    let mut updated_cache =
-        crate::events::EventCache::open_scoped(&second_options.cache, &second_options.source)
-            .unwrap();
+    let mut updated_cache = admitted_semantic_cache(&second_config);
     crate::model::observe_catalog(
         &second_options,
         &mut updated_cache,
