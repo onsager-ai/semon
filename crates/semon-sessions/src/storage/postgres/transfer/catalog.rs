@@ -943,7 +943,10 @@ mod tests {
         let (expected, current_recipes) = advance_catalog_with_recipes(&source, &options);
         let history_recipe = recipe_for(&initial_recipes, &initial[0].key);
         let current_recipe = recipe_for(&current_recipes, &expected[0].key);
-        assert!(history_recipe.contains(r#"catalog-é \t漢字"#));
+        assert!(
+            history_recipe.contains(r#"catalog-é \t漢字"#),
+            "producer history recipe did not retain the native session ID: {history_recipe}"
+        );
         assert!(current_recipe.contains(r#"catalog-é \t漢字"#));
         assert_ne!(
             current_recipe, history_recipe,
