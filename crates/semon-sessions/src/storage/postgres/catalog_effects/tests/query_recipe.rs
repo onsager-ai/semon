@@ -6,6 +6,72 @@ use crate::storage::{
     query::{QueryRecipeLoadError as Error, QueryRecipeResidence},
 };
 
+// A completed semantic publication schedules bounded cleanup. A Written
+// begin may only advance that cleanup; establish an actual stage before the
+// shared publication fixture starts consuming batches.
+fn begin_fixture_stage(cache: &mut crate::events::EventCache, paths: &[String]) {
+    for _ in 0..256 {
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(paths, "transfer-real-model", true)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        if cache.semantic_batch(64).unwrap().is_some() {
+            return;
+        }
+    }
+    panic!("semantic cleanup did not establish the successor stage");
+}
+
+fn advance_imported_fixture(
+    config: &crate::storage::StoreConfig,
+    options: &Options,
+) -> (String, Vec<CatalogRow>) {
+    let old = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/sanitized/catalog.jsonl".into(),
+    };
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/sanitized/successor.jsonl".into(),
+    };
+    let old_path = old.full_path(options);
+    let path = input.full_path(options);
+    let mut body = fs::read_to_string(&old_path).unwrap();
+    body.push_str(&format!("{}\n", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"query-recipe-import-next","parentUuid":"recipe-import-successor","timestamp":"2026-10-01T00:02:00Z","cwd":"/sanitized","message":{"role":"user","content":"recipe imported History successor"}})));
+    fs::remove_file(&old_path).unwrap();
+    let mut cache = crate::storage::transfer::reported::tests::cache(config);
+    cache
+        .retire_scoped_sources(
+            options,
+            std::slice::from_ref(&old),
+            &std::collections::BTreeSet::new(),
+            &crate::facts::MachineFacts::Local,
+        )
+        .unwrap();
+    begin_fixture_stage(&mut cache, &[old_path.to_str().unwrap().to_owned()]);
+    assert!(
+        crate::storage::transfer::reported::tests::finish_catalog(
+            &mut cache,
+            options,
+            std::slice::from_ref(&old),
+        )
+        .is_empty()
+    );
+    fs::write(&path, body).unwrap();
+    cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
+    cache.flush_cold_writes().unwrap();
+    begin_fixture_stage(&mut cache, &[path.to_str().unwrap().to_owned()]);
+    let rows = crate::storage::transfer::reported::tests::finish_catalog(
+        &mut cache,
+        options,
+        std::slice::from_ref(&input),
+    );
+    let generation = cache.session_catalog_generation().unwrap();
+    (generation, rows)
+}
+
 #[test]
 fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     let data = build_oracle(true, false);
@@ -433,15 +499,11 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     // History, preserving its existing producer proof and detached payload.
     snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
         let selected = held.catalog(&row.key, false)?.unwrap();
-        let continued =
-            crate::storage::transfer::reported::tests::advance_catalog(&config, &pg_options);
+        let (next, continued) = advance_imported_fixture(&config, &pg_options);
         assert_eq!(continued.len(), 1);
         assert_eq!(continued[0].key, selected.key);
         assert_ne!(continued[0].sources, selected.sources);
-        let next = crate::events::EventCache::open_configured(&config)
-            .unwrap()
-            .session_catalog_generation()
-            .unwrap();
+
         assert_eq!(
             held.load_query_recipe(&token).unwrap().as_ref(),
             Some(expected)
