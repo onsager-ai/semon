@@ -1012,7 +1012,8 @@ pub(crate) fn read_page_snapshot_with_search(
                             ));
                         }
                         current.row = history;
-                        current.owner = Some(crate::storage::catalog::CatalogObservationOwner::History);
+                        current.owner =
+                            Some(crate::storage::catalog::CatalogObservationOwner::History);
                     }
                     continue;
                 }
@@ -1136,8 +1137,13 @@ pub(crate) fn read_page_snapshot_with_search(
                             .as_deref()
                             .map(|runtime| {
                                 let started = measurements.start();
-                                let expected =
-                                    owner.map(|owner| transaction.runtime_observation(options, relative, owner, runtime)).transpose().map(Option::flatten);
+                                let expected = owner
+                                    .map(|owner| {
+                                        transaction
+                                            .runtime_observation(options, relative, owner, runtime)
+                                    })
+                                    .transpose()
+                                    .map(Option::flatten);
                                 measurements.record("catalog_runtime_observation", started, 1);
                                 expected
                             })
@@ -1297,7 +1303,10 @@ pub(crate) fn read_page_snapshot_with_search(
             Some(runtime) => Some(runtime),
             None => runtime.as_deref().and_then(|runtime| {
                 let started = measurements.start();
-                let observed = owner.map(|owner| transaction.runtime_observation(options, &row, owner, runtime)).transpose().map(Option::flatten);
+                let observed = owner
+                    .map(|owner| transaction.runtime_observation(options, &row, owner, runtime))
+                    .transpose()
+                    .map(Option::flatten);
                 measurements.record("catalog_runtime_observation", started, 1);
                 observed.ok().flatten()
             }),

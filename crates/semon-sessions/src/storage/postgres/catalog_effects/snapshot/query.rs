@@ -612,7 +612,12 @@ impl QueryCatalogStore for QueryCatalog {
                         .as_ref()
                         .ok_or(StorageError::ScopeChanged)?;
                     let expected = snapshot
-                        .runtime_observation(&self.options, current_row, crate::storage::catalog::CatalogObservationOwner::Catalog, runtime)
+                        .runtime_observation(
+                            &self.options,
+                            current_row,
+                            crate::storage::catalog::CatalogObservationOwner::Catalog,
+                            runtime,
+                        )
                         .map_err(|_| StorageError::ScopeChanged)?
                         .ok_or(StorageError::ScopeChanged)?;
                     if !crate::model::summary::query_observation_matches(

@@ -593,7 +593,7 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         &self,
         key: &str,
         sources: &[CatalogSource],
-        status: &mut dyn FnMut(&CatalogRow) -> serde_json::Value,
+        status: &mut dyn FnMut(&CatalogRow, Option<CatalogObservationOwner>) -> serde_json::Value,
     ) -> io::Result<Option<serde_json::Value>> {
         self.require_current()?;
         crate::storage::selected::selected_details(self, key, sources, &mut |row, owner| {
