@@ -269,12 +269,9 @@ pub(crate) fn seed_large_presentation(
         path: "projects/sanitized/catalog.jsonl".into(),
     };
     let path = input.full_path(&options);
-    // Claude's native IDs are strings (the ordinary fixture already uses u0,
-    // rather than UUIDv4). Quotes stress the additional context JSON nesting
-    // without adding Raw body bytes to the immutable presentation.
-    let ids = (0..80)
-        .map(|i| format!("u{i}-{}", "\"".repeat(1152)))
-        .collect::<Vec<_>>();
+    // Ordinary short native IDs keep the independent slot cell bounded while
+    // real turn cardinality grows the immutable, body-free context witness.
+    let ids = (0..1800).map(|i| format!("u{i}")).collect::<Vec<_>>();
     let body = ids
         .iter()
         .enumerate()
