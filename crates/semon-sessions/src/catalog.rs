@@ -1162,7 +1162,8 @@ pub(crate) fn read_page_snapshot_with_search(
                 let observation = transaction.transcript_observation(
                     &row.key,
                     &generation,
-                    request.scope == CatalogReadScope::RetainedHistory,
+                    request.scope == CatalogReadScope::RetainedHistory
+                        && partial_history.contains(&row.key),
                 );
                 observation.inspect_err(|_| {
                     #[cfg(test)]

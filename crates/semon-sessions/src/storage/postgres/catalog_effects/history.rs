@@ -34,13 +34,13 @@ impl History<'_, '_> {
             })
             .transpose()
     }
-    /// The owner row carries its header's keyset columns, so retained history
-    /// filters and pages on the owner index without joining every header.
+    /// The owner row carries its header's keyset and parent columns, so
+    /// retained history filters, pages and family traversal use indexes.
     fn link(&self, key: &str, owner: &str, original: bool) -> Result<(), StorageError> {
         let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
-        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model,query_activity,query_active FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model AND semon_pg_native_catalog_history_owners.query_activity IS NOT DISTINCT FROM excluded.query_activity AND semon_pg_native_catalog_history_owners.query_active=excluded.query_active", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
+        let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$2,key_digest,session_key,$5,$6,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$5 AND key_digest=$3 AND session_key=$4 ON CONFLICT(namespace_digest,generation,key_digest) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_history_owners.namespace=excluded.namespace AND semon_pg_native_catalog_history_owners.session_key=excluded.session_key AND semon_pg_native_catalog_history_owners.owner_generation=excluded.owner_generation AND semon_pg_native_catalog_history_owners.original=excluded.original AND semon_pg_native_catalog_history_owners.last_ms=excluded.last_ms AND semon_pg_native_catalog_history_owners.harness=excluded.harness AND semon_pg_native_catalog_history_owners.repo=excluded.repo AND semon_pg_native_catalog_history_owners.model=excluded.model AND semon_pg_native_catalog_history_owners.query_activity IS NOT DISTINCT FROM excluded.query_activity AND semon_pg_native_catalog_history_owners.query_active=excluded.query_active AND semon_pg_native_catalog_history_owners.parent_key IS NOT DISTINCT FROM excluded.parent_key", &[&ns, &self.effects.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner.as_bytes(), &original]).map_err(sqlstate::error)?;
         if changed != 1 {
             return Err(StorageError::ScopeChanged);
         }
@@ -115,13 +115,18 @@ impl History<'_, '_> {
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
         let original = original.map(|value| value.as_bytes().to_vec());
-        // Header columns mirror catalog_rows so retained history filters and
-        // keysets in SQL; the reader re-checks them against the metadata.
+        // Header columns mirror catalog_rows so retained history filters,
+        // family traversal and keysets in SQL; the reader re-checks them
+        // against the metadata.
         let row: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         if row.key != key {
             return Err(StorageError::ScopeChanged);
         }
+        let parent_key = row
+            .parent
+            .as_deref()
+            .map(|parent| parent.as_bytes().to_vec());
         let (activity, active) = crate::storage::query::history_activity(&row);
         self.effects.put(
             "semon_pg_native_catalog_history_headers",
@@ -141,6 +146,7 @@ impl History<'_, '_> {
                 "model",
                 "query_activity",
                 "query_active",
+                "parent_key",
             ],
             "key_digest",
             &[
@@ -159,6 +165,7 @@ impl History<'_, '_> {
                 &row.model.as_bytes(),
                 &activity,
                 &active,
+                &parent_key,
             ],
         )?;
         self.link(key, self.effects.generation, original.is_some())
@@ -201,8 +208,9 @@ impl OriginalHistoryStore for History<'_, '_> {
     }
     fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {
         let previous = self.metadata("semon_pg_native_catalog_rows", self.previous, &row.key)?;
-        // Same-harness source withdrawal composes retained sources; only a
-        // different native harness replaces the original owner.
+        // Same-harness Source revision changes retain their original recipe;
+        // withdrawals compose retained sources. A different native harness
+        // replaces the original owner.
         if previous.as_deref()
             == Some(
                 serde_json::to_string(row)
@@ -217,7 +225,13 @@ impl OriginalHistoryStore for History<'_, '_> {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|_| StorageError::ScopeChanged)?;
-        Ok(old.filter(|old| old.harness != row.harness))
+        Ok(old.filter(|old| {
+            old.harness != row.harness
+                || row
+                    .sources
+                    .iter()
+                    .any(|source| !old.sources.contains(source))
+        }))
     }
     fn header(&self, key: &str) -> Result<Option<OriginalHeader>, StorageError> {
         Ok(self
