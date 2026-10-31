@@ -466,6 +466,15 @@ pub(crate) fn advance_catalog(
     config: &StoreConfig,
     options: &crate::Options,
 ) -> Vec<crate::model::summary::CatalogRow> {
+    advance_catalog_with_retirement_observer(config, options, || {})
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn advance_catalog_with_retirement_observer(
+    config: &StoreConfig,
+    options: &crate::Options,
+    after_retirement: impl FnOnce(),
+) -> Vec<crate::model::summary::CatalogRow> {
     let old = crate::Input {
         root: crate::InputRoot::Claude,
         path: "projects/sanitized/catalog.jsonl".into(),
@@ -490,6 +499,7 @@ pub(crate) fn advance_catalog(
             &crate::facts::MachineFacts::Local,
         )
         .unwrap();
+    after_retirement();
     assert_eq!(
         cache
             .begin_semantic_stage_with_journal(

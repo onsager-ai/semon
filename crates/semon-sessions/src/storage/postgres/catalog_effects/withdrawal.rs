@@ -147,7 +147,13 @@ pub(in crate::storage::postgres) fn remove(
         return defer(tx, files, &deferred);
     }
     let generation = format!("{:x}", Sha256::digest(&operation));
-    let stage=tx.driver.query_one("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let stage=tx.driver.query_opt("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let Some(stage) = stage else {
+        // An imported Catalog can be admitted before this destination has a
+        // producer runtime. Preserve its Current head and let the ordinary
+        // semantic producer create the successor with a fresh runtime.
+        return defer(tx, files, &deferred);
+    };
     let prior_epoch: i64 = stage.get(0);
     let epoch = prior_epoch
         .checked_add(1)
