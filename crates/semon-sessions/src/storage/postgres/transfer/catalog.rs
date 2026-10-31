@@ -606,67 +606,245 @@ mod tests {
     use crate::storage::transfer::reported::tests::selected_receipts::{
         originals, selected_receipts,
     };
-    use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
+    use crate::storage::transfer::reported::tests::{apply, root, sqlite, stage};
 
-    fn seed_recipe_cells(
-        source: &StoreConfig,
-        current_key: &str,
-        history_key: &str,
-    ) -> (String, String, String, String) {
-        let current_recipe = "{ \"recipe\" : \"current-é\" }\n".to_owned();
-        let history_recipe = "{\n  \"recipe\": \"history-漢字\"\n}\t".to_owned();
-        let current_proof_recipe = "{ \"proof\": \"current-é\" }".to_owned();
-        let mut history_proof_recipe = "{\"proof\" : \"history-漢字\"}".to_owned();
-        let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
-        let namespace = source.namespace.as_str();
-        db.execute(
-            "UPDATE session_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3",
-            rusqlite::params![&current_recipe, namespace, current_key],
-        )
-        .unwrap();
-        db.execute(
-            "UPDATE session_history_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3",
-            rusqlite::params![&history_recipe, namespace, history_key],
-        )
-        .unwrap();
-        let current_proof_id: String = db
-            .query_row(
-                "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' ORDER BY id LIMIT 1",
-                rusqlite::params![namespace, current_key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let history_proof_id: String = db
-            .query_row(
-                "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id LIMIT 1",
-                rusqlite::params![namespace, history_key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        if current_proof_id == history_proof_id {
-            history_proof_recipe = current_proof_recipe.clone();
+    fn publish_catalog_with_recipes(
+        cache: &mut crate::events::EventCache,
+        options: &crate::Options,
+        inputs: &[crate::Input],
+    ) -> (Vec<crate::model::summary::CatalogRow>, Vec<(String, String)>) {
+        use crate::model::relation_stage::Phase;
+        use crate::storage::sqlite::proof_generations::with_prepared_query_recipe_for_test;
+
+        for _ in 0..256 {
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            if batch.paths.is_empty() {
+                continue;
+            }
+            let mut model = cache
+                .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
+                .unwrap();
+            if batch.phase != Phase::Publication {
+                continue;
+            }
+            assert!(
+                model.prepared().rows.is_empty()
+                    || model
+                        .prepared()
+                        .transcripts
+                        .iter()
+                        .map(|projection| projection.slots.len())
+                        .sum::<usize>()
+                        > 64
+            );
+            let mut recipes = Vec::new();
+            for row in &mut model.prepared_mut_for_test().rows {
+                let prepared = crate::query_projection::SelectedRecipe::prepare(row).unwrap();
+                let payload = prepared
+                    .query_recipe
+                    .expect("fixture row has a producer-authored selected recipe");
+                let compact: crate::model::summary::CatalogRow =
+                    serde_json::from_str(&prepared.metadata).unwrap();
+                row.query = compact.query;
+                recipes.push((row.key.clone(), payload));
+            }
+            let mut published = false;
+            for _ in 0..256 {
+                match with_prepared_query_recipe_for_test(|| {
+                    cache.publish_semantic_catalog(&batch, model.prepared())
+                })
+                .unwrap()
+                {
+                    (crate::events::Outcome::Deferred, None) => continue,
+                    (crate::events::Outcome::Written, Some(_)) => {
+                        published = true;
+                        break;
+                    }
+                    result => panic!("real recipe publication failed: {result:?}"),
+                }
+            }
+            assert!(published, "selected recipe publication must complete");
+            let rows = model.prepared().rows.clone();
+            if let Some(row) = rows.first() {
+                cache.save_session_description(
+                    &row.key,
+                    1,
+                    "transfer-inputs",
+                    "sanitized transfer description",
+                );
+                cache.publish_session_descriptions();
+                assert_eq!(
+                    cache.session_descriptions(&[crate::events::SessionDescriptionRequest {
+                        key: row.key.clone(),
+                        version: 1,
+                        inputs: "transfer-inputs".into(),
+                    }]),
+                    vec![Some("sanitized transfer description".into())]
+                );
+            }
+            cache.finish_semantic_stage(batch.epoch).unwrap();
+            return (rows, recipes);
         }
-        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable")
+        panic!("real source Catalog did not publish selected recipes");
+    }
+
+    fn seed_catalog_with_recipes(
+        source: &StoreConfig,
+        root: &std::path::Path,
+    ) -> (
+        crate::Options,
+        Vec<crate::model::summary::CatalogRow>,
+        Vec<(String, String)>,
+    ) {
+        let (options, input) = crate::storage::transfer::reported::tests::seed_catalog_input(
+            source, root,
+        );
+        let path = input.full_path(&options);
+        let body = std::fs::read_to_string(&path).unwrap();
+        let producer_id = r#"u0-é \t漢字 "#;
+        assert!(body.contains("\"uuid\":\"u0\""));
+        assert!(body.contains("\"parentUuid\":\"u0\""));
+        let body = body
+            .replacen(
+                "\"uuid\":\"u0\"",
+                &format!("\"uuid\":\"{producer_id}\""),
+                1,
+            )
+            .replacen(
+                "\"parentUuid\":\"u0\"",
+                &format!("\"parentUuid\":\"{producer_id}\""),
+                1,
+            );
+        std::fs::write(&path, body).unwrap();
+
+        let mut cache = crate::storage::transfer::reported::tests::cache(source);
+        cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
+        cache.flush_cold_writes().unwrap();
+        let paths = vec![path.to_str().unwrap().to_owned()];
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(&paths, "transfer-real-model", true)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        let (rows, recipes) = publish_catalog_with_recipes(
+            &mut cache,
+            &options,
+            std::slice::from_ref(&input),
+        );
+        assert_eq!(rows[0].repo.as_deref(), Some("facts-transfer-repo"));
+        (options, rows, recipes)
+    }
+
+    fn advance_catalog_with_recipes(
+        config: &StoreConfig,
+        options: &crate::Options,
+    ) -> (Vec<crate::model::summary::CatalogRow>, Vec<(String, String)>) {
+        let old = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/catalog.jsonl".into(),
+        };
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/successor.jsonl".into(),
+        };
+        let old_path = old.full_path(options);
+        let path = input.full_path(options);
+        let mut body = std::fs::read_to_string(&old_path).unwrap();
+        body.push_str(&format!(
+            "{}\n",
+            serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})
+        ));
+        std::fs::remove_file(&old_path).unwrap();
+        let mut cache = crate::storage::transfer::reported::tests::cache(config);
+        cache
+            .retire_scoped_sources(
+                options,
+                std::slice::from_ref(&old),
+                &std::collections::BTreeSet::new(),
+                &crate::facts::MachineFacts::Local,
+            )
             .unwrap();
-        db.execute(
-            "UPDATE storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
-            rusqlite::params![&current_proof_recipe, namespace, current_proof_id, current_key],
+        crate::storage::transfer::reported::tests::begin_active_catalog(
+            &mut cache,
+            &[old_path.to_str().unwrap().to_owned()],
+            "transfer-real-model",
+            true,
+        );
+        assert!(
+            crate::storage::transfer::reported::tests::finish_catalog(
+                &mut cache,
+                options,
+                std::slice::from_ref(&old),
+            )
+            .is_empty()
+        );
+        std::fs::write(&path, body).unwrap();
+        cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
+        cache.flush_cold_writes().unwrap();
+        crate::storage::transfer::reported::tests::begin_active_catalog(
+            &mut cache,
+            &[path.to_str().unwrap().to_owned()],
+            "transfer-real-model",
+            true,
+        );
+        publish_catalog_with_recipes(&mut cache, options, std::slice::from_ref(&input))
+    }
+
+    fn recipe_for(recipes: &[(String, String)], key: &str) -> String {
+        recipes
+            .iter()
+            .find(|(recipe_key, _)| recipe_key == key)
+            .map(|(_, recipe)| recipe.clone())
+            .expect("fixture publication retains the selected recipe")
+    }
+
+    fn publish_catalog_recipe_cell(
+        source: &StoreConfig,
+        key: &str,
+        owner: crate::storage::catalog::CatalogObservationOwner,
+        payload: &str,
+    ) {
+        use crate::storage::sqlite::proof_generations::query_recipe_observation;
+
+        let mut db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(source).unwrap(),
         )
-        .unwrap();
-        db.execute(
-            "UPDATE storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
-            rusqlite::params![&history_proof_recipe, namespace, history_proof_id, history_key],
-        )
-        .unwrap();
-        db.execute_batch("CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END;")
+        .unwrap()
+        .into_test_connection();
+        let tx = db.transaction().unwrap();
+        let reader = crate::storage::NativeReaderBinding::Semantic(
+            crate::events::store::configured::NativeOwnership::restore(source).unwrap(),
+        );
+        let binding = reader.runtime_binding_at(&tx).unwrap();
+        let (table, owner) = match owner {
+            crate::storage::catalog::CatalogObservationOwner::Catalog => {
+                ("session_catalog", crate::storage::catalog::CatalogObservationOwner::Catalog)
+            }
+            crate::storage::catalog::CatalogObservationOwner::History => (
+                "session_history_catalog",
+                crate::storage::catalog::CatalogObservationOwner::History,
+            ),
+        };
+        let metadata: String = tx
+            .query_row(
+                &format!("SELECT metadata FROM main.{table} WHERE namespace=?1 AND session_key=?2"),
+                rusqlite::params![binding.namespace.as_str(), key],
+                |row| row.get(0),
+            )
             .unwrap();
-        drop(db);
-        (
-            current_recipe,
-            history_recipe,
-            current_proof_recipe,
-            history_proof_recipe,
-        )
+        let selected: crate::model::summary::CatalogRow =
+            serde_json::from_str(&metadata).unwrap();
+        let _observation = query_recipe_observation(&tx, &binding, owner, &selected).unwrap();
+        assert_eq!(
+            tx.execute(
+                &format!("UPDATE main.{table} SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3 AND metadata=?4"),
+                rusqlite::params![payload, binding.namespace.as_str(), key, metadata],
+            )
+            .unwrap(),
+            1
+        );
+        tx.commit().unwrap();
     }
 
     #[test]
@@ -738,7 +916,7 @@ mod tests {
         let source = sqlite(&root, "pg-catalog-source");
         let reverse = sqlite(&root, "pg-catalog-reverse");
         use crate::storage::proof_lifetime::ProofReaderLease;
-        let (options, initial) = seed_catalog(&source, &root);
+        let (options, initial, initial_recipes) = seed_catalog_with_recipes(&source, &root);
         let original_facts = crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap();
         let mut host = crate::storage::transfer::reported::tests::selected_receipts::AuthorizedOriginals::default();
         originals(&source, &options, &mut host);
@@ -751,10 +929,29 @@ mod tests {
         let mut original_lease = runtime
             .selected_generation(&initial[0].key, &original_id, &"f".repeat(64), 30_000)
             .unwrap();
-        let expected =
-            crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
-        let (current_recipe, history_recipe, current_proof_recipe, history_proof_recipe) =
-            seed_recipe_cells(&source, &expected[0].key, &initial[0].key);
+        let (expected, current_recipes) = advance_catalog_with_recipes(&source, &options);
+        let history_recipe = recipe_for(&initial_recipes, &initial[0].key);
+        let current_recipe = recipe_for(&current_recipes, &expected[0].key);
+        assert!(history_recipe.contains(r#"u0-é \t漢字 "#));
+        assert!(current_recipe.contains(r#"u0-é \t漢字 "#));
+        assert_ne!(
+            current_recipe, history_recipe,
+            "the successor publication owns a distinct selected recipe"
+        );
+        publish_catalog_recipe_cell(
+            &source,
+            &expected[0].key,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
+            &current_recipe,
+        );
+        publish_catalog_recipe_cell(
+            &source,
+            &initial[0].key,
+            crate::storage::catalog::CatalogObservationOwner::History,
+            &history_recipe,
+        );
+        let current_proof_recipe = current_recipe.clone();
+        let history_proof_recipe = history_recipe.clone();
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
         originals(&source, &options, &mut host);
