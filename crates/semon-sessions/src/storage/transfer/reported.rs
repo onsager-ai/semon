@@ -533,7 +533,12 @@ pub(crate) fn prepare_apply(
     for record in &page.records {
         match record {
             TransferRecord::SourceJournal(row) => row.validate()?,
-            TransferRecord::CatalogRow { .. } => super::catalog_rows::validate(record)?,
+            TransferRecord::CatalogRow { snapshot, .. } => {
+                super::catalog_rows::validate(record)?;
+                if *snapshot != manifest.identity() {
+                    return Err(StorageError::Conflict);
+                }
+            }
             TransferRecord::ReportedFact(run) => {
                 crate::events::reported_rows::ReportedRow::new(run)
                     .map_err(|_| StorageError::ScopeChanged)?;
@@ -566,6 +571,9 @@ pub(crate) fn acknowledge_apply(
     page: &ApplyPage,
 ) -> Result<(), StorageError> {
     let id = page.checkpoint.snapshot;
+    if page.complete {
+        super::catalog_rows::require_complete(tx, &id)?;
+    }
     let bytes = encode_bounded(&page.checkpoint, MAX_MANIFEST_BYTES)?;
     tx.put(
         &key(&id, &format!("applied:{}", page.checkpoint.sequence)),

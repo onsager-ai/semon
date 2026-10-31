@@ -34,6 +34,13 @@ impl InboxTransaction for Inbox<'_> {
         self.0.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", params![self.1, key, value]).map_err(failed)?;
         Ok(())
     }
+
+    fn delete(&mut self, key: &str) -> Result<(), StorageError> {
+        self.0
+            .execute("DELETE FROM main.meta WHERE namespace=?1 AND key=?2", params![self.1, key])
+            .map_err(failed)?;
+        Ok(())
+    }
 }
 
 fn transaction<T>(
@@ -477,7 +484,9 @@ pub(crate) fn apply(
                     tx.put(key, value.as_bytes())?
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
-                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => {
+                    catalog::apply(tx, record, &page.checkpoint.snapshot)?
+                }
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,

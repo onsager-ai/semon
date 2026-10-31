@@ -197,6 +197,30 @@ completes an actually empty manifest. Current materialization includes reported
 Facts/stamps, native file/event/usage pages and Catalog content with original
 publication receipts, proof generations and presentations. These mappings remain
 partially qualified; physical row IDs are adapter-local.
+Current transfer format 3 carries every logical Catalog row in ordered 64-KiB
+byte fragments, including one-part rows. The existing encoded page limits remain
+64 records and 1 MiB; category counts/digests count those fragment records. Each
+fragment binds the snapshot (and thus namespace/stream), Catalog generation,
+kind, typed key, part ordinal/count, encoded row length and whole-row SHA-256.
+Capture checkpoints retain the typed row key and next part atomically with the
+page. Resume rechecks the complete row witness before continuing it.
+
+The destination retains one incomplete Catalog row per snapshot in its existing
+inbox metadata. It enforces order and identity, reconstructs only at the final
+part, checks the digest and original row validation/authority, and inserts the
+row together with that page's receipt/checkpoint. Partial parts grant no reader
+or publication authority. Exact applied-page replay uses the existing receipt;
+final failure rolls back its fragment, row and receipt. Completion refuses any
+pending row. The reconstruction limit is six times ten 1-MiB cells plus a 4-KiB
+fixed envelope: ten covers ProofGeneration's column count and Presentation's
+8-MiB cell plus two keys, while six covers worst JSON byte escaping. The current
+metadata/recipe combined 1-MiB and proof metadata/slots independent 1-MiB limits
+remain enforced by their ordinary validators. This is a bounded whole-row
+transfer contract, not a new per-cell limit. Larger or otherwise unsupported
+original-custody rows stop with an explicit bounds refusal, preserving stored
+custody and the capture cursor. Old transfer state is refused without migration
+or reset. Authenticated large-presentation/backend qualification remains pending
+until the existing CI suites exercise it.
 Source journal revision/backfill, exact selected-demand marker, invalidation
 claims and source membership now have fixed typed pages and authoritative target
 effects, independent of Catalog presence. This does not cover all pending state:

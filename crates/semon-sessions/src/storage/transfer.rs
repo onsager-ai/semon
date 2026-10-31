@@ -18,7 +18,7 @@ pub use native_rows::NativeRowKind;
 pub use reported::CaptureProgress;
 pub use source_rows::SourceJournalRecord;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 3;
 pub const MAX_PAGE_ROWS: usize = 64;
 pub const MAX_PAGE_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_MANIFEST_BYTES: usize = 32768;
@@ -149,7 +149,7 @@ impl SnapshotManifest {
 
     fn content_digest(&self) -> Result<[u8; 32], StorageError> {
         hash(&(
-            "semon-current-transfer-manifest-v1",
+            "semon-current-transfer-manifest-v2",
             self.version,
             self.snapshot_id,
             &self.namespace,
@@ -199,9 +199,15 @@ impl SnapshotManifest {
 pub enum TransferRecord {
     SourceJournal(SourceJournalRecord),
     CatalogRow {
+        snapshot: [u8; 32],
         generation: String,
         kind: CatalogRowKind,
-        values: Vec<serde_json::Value>,
+        key: Vec<serde_json::Value>,
+        part: u32,
+        parts: u32,
+        total_bytes: u64,
+        row_digest: [u8; 32],
+        bytes: Vec<u8>,
     },
     Metadata {
         key: String,
@@ -336,7 +342,7 @@ impl TransferPage {
 
     fn content_digest(&self) -> Result<[u8; 32], StorageError> {
         hash(&(
-            "semon-current-transfer-page-v1",
+            "semon-current-transfer-page-v3",
             self.snapshot,
             self.sequence,
             self.operation,
@@ -483,7 +489,12 @@ impl TransferInbox {
         for record in &page.records {
             match record {
                 TransferRecord::SourceJournal(row) => row.validate()?,
-                TransferRecord::CatalogRow { .. } => catalog_rows::validate(record)?,
+                TransferRecord::CatalogRow { snapshot, .. } => {
+                    catalog_rows::validate(record)?;
+                    if *snapshot != manifest.identity() {
+                        return Err(StorageError::ScopeChanged);
+                    }
+                }
                 TransferRecord::SourceIntent(intent) => {
                     super::source_observations::validate_intent(Some(&manifest.namespace), intent)?;
                 }
@@ -560,6 +571,7 @@ pub(crate) fn key(snapshot: &[u8; 32], suffix: &str) -> String {
 pub(crate) trait InboxTransaction {
     fn get(&mut self, key: &str, limit: usize) -> Result<Option<Vec<u8>>, StorageError>;
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError>;
+    fn delete(&mut self, key: &str) -> Result<(), StorageError>;
 }
 
 pub(crate) fn begin_tx(

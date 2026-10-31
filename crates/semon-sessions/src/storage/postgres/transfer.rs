@@ -34,6 +34,14 @@ impl InboxTransaction for Inbox<'_, '_> {
     fn put(&mut self, key: &str, value: &[u8]) -> Result<(), StorageError> {
         super::native_keys::put_meta(self.0, key.as_bytes(), value)
     }
+
+    fn delete(&mut self, key: &str) -> Result<(), StorageError> {
+        self.0.driver.execute(
+            "DELETE FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND key=$2",
+            &[&self.0.namespace.as_str().as_bytes(), &key.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        Ok(())
+    }
 }
 
 fn transaction<T>(
@@ -321,7 +329,9 @@ pub(crate) fn apply(
                     tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&value.as_bytes()]).map_err(sqlstate::error)?;
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
-                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => {
+                    catalog::apply(tx, record, &page.checkpoint.snapshot)?
+                }
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,

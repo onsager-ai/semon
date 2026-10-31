@@ -3,6 +3,44 @@
 use super::*;
 pub(crate) const IMPORTED_GENERATION: &str = "native_transfer_v1:catalog-content-generation";
 
+// ProofGeneration has the largest column count (ten). Ten 1 MiB cells cover
+// its bounded metadata/recipe/slots and typed coordinates; Presentation instead
+// has two keys and an 8 MiB cell. This is a whole-row transfer bound, not a new
+// per-cell limit: unbounded/unsupported original-custody shapes refuse intact.
+// JSON escapes each input byte to at most six bytes (e.g. NUL -> \u0000).
+// The fixed typed envelope, numeric cells and punctuation fit in 4 KiB.
+const MAX_CATALOG_CELLS: usize = 10;
+pub(crate) const MAX_CATALOG_ROW_BYTES: usize =
+    MAX_CATALOG_CELLS * MAX_PAGE_BYTES * 6 + 4096;
+pub(crate) const CATALOG_ROW_FRAGMENT_BYTES: usize = 64 * 1024;
+
+#[cfg(test)]
+pub(crate) mod tests;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CatalogRowData {
+    pub(crate) generation: String,
+    pub(crate) kind: CatalogRowKind,
+    pub(crate) values: Vec<serde_json::Value>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CaptureCursor {
+    pub(crate) key: Vec<serde_json::Value>,
+    pub(crate) next_part: u32,
+    pub(crate) parts: u32,
+    pub(crate) total_bytes: u64,
+    pub(crate) row_digest: [u8; 32],
+}
+
+impl CaptureCursor {
+    pub(crate) fn pending(&self) -> bool {
+        self.next_part < self.parts
+    }
+}
+
 // Producer coordinates remain in the immutable receipt. These local records
 // bind that receipt to the destination import; application alone grants nothing.
 pub(crate) fn bind_imported_publication(
@@ -148,13 +186,46 @@ impl CatalogRowKind {
 
 pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
     let TransferRecord::CatalogRow {
+        snapshot: _,
         generation,
         kind,
-        values,
+        key,
+        part,
+        parts,
+        total_bytes,
+        row_digest: _,
+        bytes,
     } = record
     else {
         return Err(StorageError::InvalidArguments);
     };
+    let total_bytes = usize::try_from(*total_bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if generation.len() != 64
+        || !generation.bytes().all(|b| b.is_ascii_hexdigit())
+        || key.len() != kind.keys().len()
+        || total_bytes == 0
+        || total_bytes > MAX_CATALOG_ROW_BYTES
+        || *parts == 0
+        || usize::try_from(*parts).ok()
+            != Some(total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES))
+        || *part >= *parts
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let expected_len = (total_bytes - (*part as usize * CATALOG_ROW_FRAGMENT_BYTES))
+        .min(CATALOG_ROW_FRAGMENT_BYTES);
+    if bytes.len() != expected_len {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_row(row: &CatalogRowData) -> Result<(), StorageError> {
+    let CatalogRowData {
+        generation,
+        kind,
+        values,
+    } = row;
     if generation.len() != 64 || !generation.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(StorageError::ScopeChanged);
     }
@@ -388,6 +459,271 @@ pub(crate) fn verify_source_edge(
     Ok(())
 }
 
+pub(crate) fn capture_cursor(value: Option<&str>) -> Result<Option<CaptureCursor>, StorageError> {
+    let cursor: Option<CaptureCursor> = value
+        .map(|text| serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged))
+        .transpose()?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.parts == 0
+            || cursor.next_part == 0
+            || cursor.next_part > cursor.parts
+            || cursor.total_bytes == 0
+            || cursor.total_bytes > MAX_CATALOG_ROW_BYTES as u64
+            || cursor.parts as u64
+                != cursor.total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES as u64)
+    }) {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(cursor)
+}
+
+pub(crate) fn resume_fragments(
+    mut fragments: Vec<TransferRecord>,
+    cursor: Option<&CaptureCursor>,
+) -> Result<Vec<TransferRecord>, StorageError> {
+    if let Some(cursor) = cursor.filter(|cursor| cursor.pending()) {
+        let Some(TransferRecord::CatalogRow {
+            key, parts, total_bytes, row_digest, ..
+        }) = fragments.first() else {
+            return Err(StorageError::ScopeChanged);
+        };
+        if cursor.key != *key
+            || cursor.parts != *parts
+            || cursor.total_bytes != *total_bytes
+            || cursor.row_digest != *row_digest
+            || cursor.next_part as usize >= fragments.len()
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        fragments.drain(..cursor.next_part as usize);
+    }
+    Ok(fragments)
+}
+
+pub(crate) fn row_key(row: &CatalogRowData) -> Result<Vec<serde_json::Value>, StorageError> {
+    row.kind
+        .keys()
+        .iter()
+        .map(|index| {
+            row.values
+                .get(*index)
+                .cloned()
+                .ok_or(StorageError::ScopeChanged)
+        })
+        .collect()
+}
+
+pub(crate) fn fragments(
+    snapshot: [u8; 32],
+    row: CatalogRowData,
+) -> Result<Vec<TransferRecord>, StorageError> {
+    validate_row(&row)?;
+    let key = row_key(&row)?;
+    let bytes = encode_bounded(&row, MAX_CATALOG_ROW_BYTES)
+        .map_err(|_| StorageError::HistoryRetentionBounds)?;
+    let total_bytes = bytes.len();
+    let row_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let parts = u32::try_from(total_bytes.div_ceil(CATALOG_ROW_FRAGMENT_BYTES))
+        .map_err(|_| StorageError::InvalidArguments)?;
+    // Capture has always persisted its typed cursor in a bounded metadata
+    // envelope. Refuse an uncheckpointable key before cloning it per part.
+    encode_bounded(
+        &CaptureCursor {
+            key: key.clone(),
+            next_part: 1,
+            parts,
+            total_bytes: total_bytes as u64,
+            row_digest,
+        },
+        MAX_MANIFEST_BYTES,
+    )?;
+    bytes
+        .chunks(CATALOG_ROW_FRAGMENT_BYTES)
+        .enumerate()
+        .map(|(part, bytes)| {
+            let record = TransferRecord::CatalogRow {
+                snapshot,
+                generation: row.generation.clone(),
+                kind: row.kind,
+                key: key.clone(),
+                part: u32::try_from(part).map_err(|_| StorageError::InvalidArguments)?,
+                parts,
+                total_bytes: u64::try_from(total_bytes)
+                    .map_err(|_| StorageError::InvalidArguments)?,
+                row_digest,
+                bytes: bytes.to_vec(),
+            };
+            validate(&record)?;
+            Ok(record)
+        })
+        .collect()
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FragmentState {
+    snapshot: [u8; 32],
+    generation: String,
+    kind: CatalogRowKind,
+    key_digest: [u8; 32],
+    parts: u32,
+    total_bytes: u64,
+    row_digest: [u8; 32],
+    next_part: u32,
+}
+
+fn fragment_token(
+    snapshot: &[u8; 32],
+    generation: &str,
+    kind: CatalogRowKind,
+    key: &[serde_json::Value],
+) -> Result<String, StorageError> {
+    let bytes = serde_json::to_vec(&(snapshot, generation, kind, key))
+        .map_err(|_| StorageError::InvalidArguments)?;
+    let digest: [u8; 32] = Sha256::digest(bytes).into();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+fn key_digest(key: &[serde_json::Value]) -> Result<[u8; 32], StorageError> {
+    let bytes = encode_bounded(&key, MAX_PAGE_BYTES)?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+pub(crate) fn apply_fragment(
+    tx: &mut impl InboxTransaction,
+    record: &TransferRecord,
+    expected_snapshot: &[u8; 32],
+) -> Result<Option<CatalogRowData>, StorageError> {
+    validate(record)?;
+    let TransferRecord::CatalogRow {
+        snapshot,
+        generation,
+        kind,
+        key,
+        part,
+        parts,
+        total_bytes,
+        row_digest,
+        bytes,
+    } = record
+    else {
+        return Err(StorageError::InvalidArguments);
+    };
+    if snapshot != expected_snapshot {
+        return Err(StorageError::Conflict);
+    }
+    let token = fragment_token(snapshot, generation, *kind, key)?;
+    let key_digest = key_digest(key)?;
+    // One logical row at a time: neither interleaving another row nor finishing
+    // a manifest may hide an unfinished row in this snapshot's inbox.
+    let descriptor_key = pending_key(snapshot);
+    let part_key = |index| super::key(snapshot, &format!("catalog-row:{token}:part:{index:08}"));
+    let mut state = match tx.get(&descriptor_key, MAX_MANIFEST_BYTES)? {
+        Some(value) => {
+            let state: FragmentState =
+                serde_json::from_slice(&value).map_err(|_| StorageError::ScopeChanged)?;
+            if state.snapshot != *snapshot
+                || state.generation != *generation
+                || state.kind != *kind
+                || state.key_digest != key_digest
+                || state.parts != *parts
+                || state.total_bytes != *total_bytes
+                || state.row_digest != *row_digest
+            {
+                return Err(StorageError::Conflict);
+            }
+            state
+        }
+        None => {
+            if *part != 0 {
+                return Err(StorageError::Conflict);
+            }
+            FragmentState {
+                snapshot: *snapshot,
+                generation: generation.clone(),
+                kind: *kind,
+                key_digest,
+                parts: *parts,
+                total_bytes: *total_bytes,
+                row_digest: *row_digest,
+                next_part: 0,
+            }
+        }
+    };
+    if state.next_part != *part || tx.get(&part_key(*part), MAX_PAGE_BYTES)?.is_some() {
+        return Err(StorageError::Conflict);
+    }
+    let encoded_part = serde_json::to_vec(bytes).map_err(|_| StorageError::InvalidArguments)?;
+    tx.put(&part_key(*part), &encoded_part)?;
+    state.next_part += 1;
+    tx.put(
+        &descriptor_key,
+        &encode_bounded(&state, MAX_MANIFEST_BYTES)?,
+    )?;
+    if state.next_part != state.parts {
+        return Ok(None);
+    }
+
+    let total_bytes = usize::try_from(state.total_bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if total_bytes > MAX_CATALOG_ROW_BYTES {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut joined = Vec::new();
+    joined
+        .try_reserve_exact(total_bytes)
+        .map_err(|_| StorageError::Busy)?;
+    for index in 0..state.parts {
+        let bytes = tx
+            .get(&part_key(index), MAX_PAGE_BYTES)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let fragment: Vec<u8> =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        let expected_len = (total_bytes - (index as usize * CATALOG_ROW_FRAGMENT_BYTES))
+            .min(CATALOG_ROW_FRAGMENT_BYTES);
+        if fragment.len() != expected_len
+            || joined
+                .len()
+                .checked_add(fragment.len())
+                .is_none_or(|length| length > total_bytes)
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        joined.extend_from_slice(&fragment);
+    }
+    let joined_digest: [u8; 32] = Sha256::digest(&joined).into();
+    if joined.len() != total_bytes || joined_digest != state.row_digest {
+        return Err(StorageError::ScopeChanged);
+    }
+    let row: CatalogRowData =
+        serde_json::from_slice(&joined).map_err(|_| StorageError::ScopeChanged)?;
+    validate_row(&row)?;
+    if row.generation != state.generation
+        || row.kind != state.kind
+        || self::key_digest(&row_key(&row)?)? != state.key_digest
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    tx.delete(&descriptor_key)?;
+    for index in 0..state.parts {
+        tx.delete(&part_key(index))?;
+    }
+    Ok(Some(row))
+}
+
+fn pending_key(snapshot: &[u8; 32]) -> String {
+    super::key(snapshot, "catalog-row:pending")
+}
+
+pub(crate) fn require_complete(
+    tx: &mut impl InboxTransaction,
+    snapshot: &[u8; 32],
+) -> Result<(), StorageError> {
+    if tx.get(&pending_key(snapshot), MAX_MANIFEST_BYTES)?.is_some() {
+        return Err(StorageError::Conflict);
+    }
+    Ok(())
+}
+
 pub(crate) fn append(
     tx: &mut impl InboxTransaction,
     state: &mut reported::CaptureState,
@@ -396,7 +732,15 @@ pub(crate) fn append(
     let mut fitted = Vec::new();
     let mut bytes = 4096usize;
     for record in records {
+        if fitted.len() == MAX_PAGE_ROWS {
+            break;
+        }
         validate(&record)?;
+        if let TransferRecord::CatalogRow { snapshot, .. } = &record
+            && *snapshot != state.manifest.identity()
+        {
+            return Err(StorageError::ScopeChanged);
+        }
         let size = encode_bounded(&record, MAX_PAGE_BYTES)?.len() + 1;
         if bytes.checked_add(size).is_none_or(|n| n > MAX_PAGE_BYTES) {
             break;
@@ -404,17 +748,29 @@ pub(crate) fn append(
         bytes += size;
         fitted.push(record);
     }
-    let Some(TransferRecord::CatalogRow { kind, values, .. }) = fitted.last() else {
+    let Some(TransferRecord::CatalogRow {
+        kind,
+        key,
+        part,
+        parts,
+        total_bytes,
+        row_digest,
+        ..
+    }) = fitted.last()
+    else {
         return Err(StorageError::Busy);
     };
-    let cursor = kind
-        .keys()
-        .iter()
-        .map(|i| values[*i].clone())
-        .collect::<Vec<_>>();
     let category = kind.category();
-    state.native_key =
-        Some(serde_json::to_string(&cursor).map_err(|_| StorageError::ScopeChanged)?);
+    state.native_key = Some(
+        serde_json::to_string(&CaptureCursor {
+            key: key.clone(),
+            next_part: *part + 1,
+            parts: *parts,
+            total_bytes: *total_bytes,
+            row_digest: *row_digest,
+        })
+        .map_err(|_| StorageError::ScopeChanged)?,
+    );
     reported::append_capture(tx, state, category, fitted)
 }
 

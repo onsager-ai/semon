@@ -210,15 +210,14 @@ pub(super) fn capture(
         .map(|i| names[*i])
         .collect::<Vec<_>>()
         .join(",");
+    let cursor = catalog_rows::capture_cursor(state.native_key.as_deref())?;
     let mut binds: Vec<Box<dyn ToSql + Sync>> =
         vec![Box::new(ns), Box::new(generation.as_bytes().to_vec())];
-    let after = if let Some(cursor) = &state.native_key {
-        let cursor: Vec<Value> =
-            serde_json::from_str(cursor).map_err(|_| StorageError::ScopeChanged)?;
-        if cursor.len() != kind.keys().len() {
+    let after = if let Some(cursor) = &cursor {
+        if cursor.key.len() != kind.keys().len() {
             return Err(StorageError::ScopeChanged);
         }
-        for value in cursor {
+        for value in &cursor.key {
             if let Some(value) = value.as_i64() {
                 binds.push(Box::new(value));
             } else {
@@ -231,8 +230,9 @@ pub(super) fn capture(
                 ));
             }
         }
+        let comparison = if cursor.pending() { "=" } else { ">" };
         format!(
-            " AND ({keys})>({})",
+            " AND ({keys}){comparison}({})",
             (3..binds.len() + 1)
                 .map(|i| format!("${i}"))
                 .collect::<Vec<_>>()
@@ -267,6 +267,13 @@ pub(super) fn capture(
     let mut bytes = 0usize;
     for row in &sizes {
         let size = usize::try_from(row.get::<_, i64>(0)).map_err(|_| StorageError::ScopeChanged)?;
+        if count == 0 && size > transfer::MAX_PAGE_BYTES {
+            if size > catalog_rows::MAX_CATALOG_ROW_BYTES {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
+            count = 1;
+            break;
+        }
         if bytes
             .checked_add(size)
             .is_none_or(|n| n > transfer::MAX_PAGE_BYTES)
@@ -276,14 +283,17 @@ pub(super) fn capture(
         bytes += size;
         count += 1;
     }
-    if count == 0 && !sizes.is_empty() {
-        return Err(StorageError::Busy);
+    if cursor.as_ref().is_some_and(|cursor| cursor.pending()) && count != 1 {
+        return Err(StorageError::ScopeChanged);
     }
     let rows =
         tx.0.driver
             .query(&format!("SELECT {columns} {suffix} LIMIT {count}"), &refs)
             .map_err(sqlstate::error)?;
     if rows.is_empty() {
+        if cursor.as_ref().is_some_and(|cursor| cursor.pending()) {
+            return Err(StorageError::ScopeChanged);
+        }
         state.native_family += 1;
         state.native_key = None;
     } else {
@@ -313,11 +323,15 @@ pub(super) fn capture(
                 });
             }
             verify_authority(tx, kind, &values)?;
-            records.push(TransferRecord::CatalogRow {
-                generation: generation.clone(),
-                kind,
-                values,
-            });
+            let fragments = catalog_rows::fragments(
+                state.manifest.identity(),
+                catalog_rows::CatalogRowData {
+                    generation: generation.clone(),
+                    kind,
+                    values,
+                },
+            )?;
+            records.extend(catalog_rows::resume_fragments(fragments, cursor.as_ref())?);
         }
         catalog_rows::append(tx, state, records)?;
     }
@@ -325,16 +339,17 @@ pub(super) fn capture(
     Ok(state.progress())
 }
 
-pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(), StorageError> {
-    catalog_rows::validate(record)?;
-    let TransferRecord::CatalogRow {
-        generation,
-        kind,
-        values,
-    } = record
-    else {
-        return Err(StorageError::InvalidArguments);
+pub(super) fn apply(
+    tx: &mut Inbox<'_, '_>,
+    record: &TransferRecord,
+    snapshot: &[u8; 32],
+) -> Result<(), StorageError> {
+    let Some(row) = catalog_rows::apply_fragment(tx, record, snapshot)? else {
+        return Ok(());
     };
+    let generation = &row.generation;
+    let kind = &row.kind;
+    let values = &row.values;
     catalog_rows::bind_imported_generation(tx, generation)?;
     verify_authority(tx, *kind, values)?;
     catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
@@ -833,6 +848,7 @@ mod tests {
         let mut retained_page = false;
         let mut checked_tree_forgery = false;
         let mut checked_missing_backing = false;
+        let mut catalog_inbox = catalog_rows::tests::MemoryInbox::default();
         for sequence in 1..=pages {
             for mut record in source
                 .transfer_inbox()
@@ -840,15 +856,21 @@ mod tests {
                 .unwrap()
                 .records
             {
+                let mut catalog_row = if matches!(record, TransferRecord::CatalogRow { .. }) {
+                    catalog_rows::apply_fragment(&mut catalog_inbox, &record, &manifest.identity())
+                        .unwrap()
+                } else {
+                    None
+                };
                 if let TransferRecord::NativeSource(source) = &record {
                     retained_backing |= source.backing.is_some();
                 }
                 if !checked_missing_backing
-                    && let TransferRecord::CatalogRow {
+                    && let Some(catalog_rows::CatalogRowData {
                         kind: CatalogRowKind::ProofSource,
                         values,
                         ..
-                    } = &record
+                    }) = &catalog_row
                 {
                     assert!(matches!(
                         transaction(&config, &pool, &control, |tx| {
@@ -879,24 +901,33 @@ mod tests {
                     ));
                     checked_tree_forgery = true;
                 }
-                if let TransferRecord::CatalogRow {
+                if let Some(catalog_rows::CatalogRowData {
                     kind: CatalogRowKind::ProofRef,
                     values,
                     ..
-                } = &record
+                }) = &catalog_row
                 {
                     retained_ref |= values[1].as_str() == Some("history");
                 }
                 if !checked_forgery
-                    && let TransferRecord::CatalogRow {
+                    && let Some(catalog_rows::CatalogRowData {
                         kind: CatalogRowKind::ProofGeneration,
                         values,
                         ..
-                    } = &mut record
+                    }) = &mut catalog_row
                 {
                     values[0] = Value::String("0".repeat(64));
+                    let forged = catalog_rows::fragments(
+                        manifest.identity(),
+                        catalog_row.unwrap(),
+                    ).unwrap();
                     assert!(matches!(
-                        transaction(&config, &pool, &control, |tx| super::apply(tx, &record)),
+                        transaction(&config, &pool, &control, |tx| {
+                            for fragment in &forged {
+                                super::apply(tx, fragment, &manifest.identity())?;
+                            }
+                            Ok(())
+                        }),
                         Err(StorageError::ScopeChanged)
                     ));
                     checked_forgery = true;
