@@ -5053,6 +5053,61 @@ mod tests {
             &inputs[0],
             "recipe-immutable",
         );
+        let stale_key = "search-stale-orphan";
+        let retained_key = "search-retained-without-history";
+        let history_orphan_key = "search-history-orphan";
+        {
+            let db = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config)
+                    .unwrap(),
+            )
+            .unwrap()
+            .into_test_connection();
+            let namespace = fixture.config.namespace.as_str();
+            let mut retained = model.prepared().rows[0].clone();
+            retained.key = retained_key.into();
+            db.execute(
+                "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'retained',?3,?4,?5,?6,?7)",
+                rusqlite::params![
+                    namespace,
+                    retained_key,
+                    retained.last.unwrap_or(0),
+                    retained.harness,
+                    retained.repo,
+                    retained.parent,
+                    serde_json::to_string(&retained).unwrap(),
+                ],
+            )
+            .unwrap();
+            let mut history_orphan = model.prepared().rows[0].clone();
+            history_orphan.key = history_orphan_key.into();
+            db.execute(
+                "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
+                rusqlite::params![
+                    namespace,
+                    history_orphan_key,
+                    serde_json::to_string(&history_orphan).unwrap(),
+                ],
+            )
+            .unwrap();
+            for scope in ["current", "retained_history"] {
+                db.execute(
+                    "INSERT INTO main.session_search_documents(namespace,read_scope,session_key,fields,complete) VALUES(?1,?2,?3,'[]',1)",
+                    rusqlite::params![namespace, scope, stale_key],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO main.session_search_counts(namespace,read_scope,gram,members) VALUES(?1,?2,'stalegram',1)",
+                    rusqlite::params![namespace, scope],
+                )
+                .unwrap();
+            }
+            db.execute(
+                "INSERT INTO main.session_search_memberships(namespace,session_key,gram,current_last_ms,history_last_ms) VALUES(?1,?2,'stalegram',1,1)",
+                rusqlite::params![namespace, stale_key],
+            )
+            .unwrap();
+        }
         assert_eq!(
             cache
                 .publish_semantic_catalog(&batch, model.prepared())
@@ -5069,6 +5124,33 @@ mod tests {
         )
         .unwrap()
         .into_test_connection();
+        for table in ["session_search_documents", "session_search_memberships"] {
+            let rows: i64 = db
+                .query_row(
+                    &format!(
+                        "SELECT count(*) FROM main.{table} WHERE namespace=?1 AND session_key IN (?2,?3,?4)"
+                    ),
+                    rusqlite::params![
+                        fixture.config.namespace.as_str(),
+                        stale_key,
+                        retained_key,
+                        history_orphan_key,
+                    ],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(rows, 0, "stale and ineligible {table} rows are removed");
+        }
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM main.session_search_counts WHERE namespace=?1 AND gram='stalegram'",
+                [fixture.config.namespace.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            0,
+            "orphan postings are removed from scoped gram counts"
+        );
         let binding = reader.runtime_binding_at(&db).unwrap();
         let row = &model.prepared().rows[0];
         assert_eq!(

@@ -3013,82 +3013,11 @@ impl SqliteStore {
         let search =
             crate::storage::sqlite::search::SearchWriter::admitted(&transaction, &admitted)
                 .map_err(StoreError::Configured)?;
-        crate::storage::catalog::SearchPublicationStore::begin(&search, &[]).map_err(failure)?;
-        transaction
-            .execute_batch(
-                "DELETE FROM main.session_search_memberships WHERE namespace=semon_namespace(); DELETE FROM main.session_search_counts WHERE namespace=semon_namespace(); DELETE FROM main.session_search_documents WHERE namespace=semon_namespace(); UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace=semon_namespace();",
-            )
-            .map_err(failure)?;
-        let mut after = String::new();
-        loop {
-            let keys = search.key_page(&after).map_err(failure)?;
-            if keys.is_empty() {
-                break;
-            }
-            after = keys.last().expect("nonempty search page").clone();
-            let mut offset = 0;
-            while offset < keys.len() {
-                let selected = search.lookup(&keys[offset..]).map_err(failure)?;
-                if selected.oversized {
-                    return Err(StoreError::Data(
-                        "catalog search metadata exceeds 1 MiB for an eligible row".into(),
-                    ));
-                }
-                if selected.consumed == 0 {
-                    return Err(failure(rusqlite::Error::InvalidQuery));
-                }
-                let roster = &keys[offset..offset + selected.consumed];
-                let rows = selected
-                    .rows
-                    .iter()
-                    .map(|selected| crate::catalog_search::ScopedCatalogRow {
-                        row: &selected.row,
-                        scopes: selected.scopes,
-                    })
-                    .collect::<Vec<_>>();
-                crate::catalog_search::publish_scoped_rows_with_store(
-                    &transaction,
-                    roster,
-                    &rows,
-                    &search,
-                )
-                .map_err(failure)?;
-                offset += selected.consumed;
-            }
-        }
-        transaction
-            .execute(
-                "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
-                [],
-            )
-            .map_err(failure)?;
-        for scope in ["current", "retained_history"] {
-            let incomplete: i64 = transaction
-                .query_row(
-                    "SELECT incomplete FROM main.session_search_coverage WHERE namespace=semon_namespace() AND read_scope=?1",
-                    [scope],
-                    |row| row.get(0),
-                )
-                .map_err(failure)?;
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
-                    params![format!("search_generation_{scope}"), expected_generation],
-                )
-                .map_err(failure)?;
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
-                    params![format!("search_incomplete_{scope}"), incomplete.to_string()],
-                )
-                .map_err(failure)?;
-        }
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('search_version'),'search_version',?1)",
-                [crate::catalog_search::VERSION],
-            )
-            .map_err(failure)?;
+        crate::storage::sqlite::search::rebuild_projection(
+            &transaction,
+            &search,
+            expected_generation,
+        )?;
         transaction
             .commit()
             .map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
