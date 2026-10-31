@@ -7915,7 +7915,7 @@ mod tests {
             FAIL_OBSERVATION_READ.with(|fault| fault.set(None));
             crate::events::store::reprice::drain_for_store_test(&store.owner, table.clone())
                 .unwrap();
-            let fingerprint: String = store.connection.query_row(
+            let fingerprint: String = publisher.query_row(
                 "SELECT pricing_fingerprint FROM session_catalog WHERE namespace=?1 AND session_key=?2",
                 params![config.namespace.as_str(), retained.key], |row| row.get(0),
             ).unwrap();
