@@ -150,6 +150,16 @@ fn configured_semantic_selected57_claude_original_provenance_survives_current_re
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(references, (false, true), "the real successor moves A out of Current");
+    // This first changed revision completes original custody before composite
+    // publication; its original-header marker preserves A despite the same path.
+    let mut retained_row = lease.row().clone();
+    retained_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let original_custody: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.meta m ON m.namespace=h.namespace AND m.key=?3 WHERE h.namespace=?1 AND h.session_key=?2 AND octet_length(h.metadata)<=1048576 AND h.metadata=?4 AND octet_length(m.value)<=65536 AND json_extract(m.value,'$[2]')=?5)",
+        params![config.namespace.as_str(), key, format!("history_original_header:{key}"), serde_json::to_string(&retained_row).unwrap(), host.snapshot.consumed_prefix],
+        |row| row.get(0),
+    ).unwrap();
+    assert!(original_custody, "History retains A's exact original row and consumed-source header");
 
     // Retire only the test's History reference, leaving the active lease as A's
     // sole retention authority. Catalog History metadata and Raw stay intact.
