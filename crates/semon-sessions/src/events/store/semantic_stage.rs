@@ -3628,7 +3628,7 @@ mod tests {
 
     #[test]
     fn current_header_repair_preserves_pending_and_live_ack_observations() {
-        let (root, mut store, mut stage, path, old_epoch) = current_header_repair_store("ack");
+        let (root, store, mut stage, path, old_epoch) = current_header_repair_store("ack");
         let observed = revision(&store.connection).unwrap();
         for _ in 0..3 {
             assert!(!store.qualified_catalog().unwrap());
