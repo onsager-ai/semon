@@ -7941,7 +7941,8 @@ mod tests {
             let (f, b, options, inputs) = model_sources();
             let options = &options[0];
             let input = &inputs[0];
-            for config in [&f.config, &b] {
+            for (config, iteration) in [(&f.config, "source-a"), (&b, "source-b")] {
+                eprintln!("semantic_withdrawal_iteration source={iteration} phase=begin");
                 let mut cache = EventCache::open_semantic(
                     crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
                 )
@@ -7951,7 +7952,9 @@ mod tests {
                     .unwrap();
                 let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
                 publish(&mut cache, &f, &batch, &model);
+                eprintln!("semantic_withdrawal_iteration source={iteration} phase=finish");
                 cache.finish_semantic_stage(batch.epoch).unwrap();
+                eprintln!("semantic_withdrawal_iteration source={iteration} phase=complete");
             }
             let foreign = namespace_state(&f, "source-b");
             let slots:Vec<String>=f.db().prepare("SELECT metadata FROM session_slots WHERE namespace='source-a' AND session_key='model-0' ORDER BY slot").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
