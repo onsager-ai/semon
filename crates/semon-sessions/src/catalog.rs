@@ -749,6 +749,11 @@ pub(crate) fn relative_status(
             }
         }
         if source_state(source) != "cached" {
+            if cfg!(test) || crate::native_timing::enabled() {
+                eprintln!(
+                    "catalog_relative_status_refused stage=source_cached error_class=source_not_cached cached=false"
+                );
+            }
             return unavailable();
         }
     }
