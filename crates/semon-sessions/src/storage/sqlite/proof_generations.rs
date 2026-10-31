@@ -530,7 +530,9 @@ fn observation_row_metadata(
         "SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2"
     };
     let metadata = db
-        .query_row(sql, params![namespace, key], |row| row.get::<_, Option<String>>(0))
+        .query_row(sql, params![namespace, key], |row| {
+            row.get::<_, Option<String>>(0)
+        })
         .optional()
         .ok()?
         .flatten()?;
@@ -545,8 +547,8 @@ fn observation_row_comparison(
     selected.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let mut normalized_actual = actual.clone();
     normalized_actual.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let selected_equal = serde_json::to_string(&selected).ok()?
-        == serde_json::to_string(&normalized_actual).ok()?;
+    let selected_equal =
+        serde_json::to_string(&selected).ok()? == serde_json::to_string(&normalized_actual).ok()?;
     Some(ObservationRowComparison {
         selected_equal,
         fields: ObservationFieldMatches {
