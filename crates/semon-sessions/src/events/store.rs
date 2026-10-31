@@ -11023,7 +11023,7 @@ mod tests {
             .into_test_connection();
             store.write_runs(&[run()], &stamp()).unwrap();
             // Custody is deliberately opaque to version classification.
-            store.connection.execute("INSERT INTO session_history_catalog VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
+            store.connection.execute("INSERT INTO session_history_catalog(namespace,session_key,metadata) VALUES('fixture-source','original','{\"custody\":\"retain exact bytes\"}')", []).unwrap();
             store
                 .connection
                 .execute(
@@ -11172,7 +11172,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO session_history_catalog VALUES('fixture-source','retained','{\"custody\":\"retained custody\"}')",
+                "INSERT INTO session_history_catalog(namespace,session_key,metadata) VALUES('fixture-source','retained','{\"custody\":\"retained custody\"}')",
                 [],
             )
             .unwrap();

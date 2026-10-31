@@ -57,6 +57,25 @@ pub(crate) fn edge_timed(edge: &Value, cutoff: i64) -> bool {
             .is_some_and(|status| matches!(status, "work" | "wait" | "new"))
 }
 
+/// Indexed finite-window eligibility, authored with the immutable History row.
+/// Last-turn links do not admit an expired owner; `history_window` remains the
+/// authority for the exact graph after this projection selects candidates.
+pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Option<i64>, bool) {
+    let Some(query) = &row.query else {
+        return (None, false);
+    };
+    let mut last = query["last"].as_i64();
+    let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
+    for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
+        let edge = &edge["query"];
+        for at in [edge["at"].as_i64(), edge["done"].as_i64()].into_iter().flatten() {
+            last = Some(last.map_or(at, |last| last.max(at)));
+        }
+        active |= matches!(edge["status"].as_str(), Some("work" | "wait" | "new"));
+    }
+    (last, active)
+}
+
 pub(crate) fn turn_kept(turn: &Value, cutoff: i64, timed_edges: &BTreeSet<String>) -> bool {
     turn["last"] == serde_json::json!(true)
         || turn["last"] == serde_json::json!(1)
@@ -246,6 +265,26 @@ mod tests {
             "query":query
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn history_activity_matches_window_eligibility() {
+        let mut row = retained_row(json!({
+            "last":null,"state":"idle",
+            "selected":{"edges":[
+                {"query":{"at":100,"done":950,"status":"done"}},
+                {"query":{"at":null,"status":"new"}}
+            ],"turns":[{"query":{"at":2000,"last":true}}]}
+        }));
+        assert_eq!(history_activity(&row), (Some(950), true));
+        row.query.as_mut().unwrap()["selected"]["edges"][1]["query"]["status"] = json!("done");
+        assert_eq!(history_activity(&row), (Some(950), false), "a recent or last turn does not admit the owner");
+        row.query.as_mut().unwrap()["state"] = json!("wait");
+        assert_eq!(history_activity(&row), (Some(950), true));
+        row.query.as_mut().unwrap()["last"] = json!(1000);
+        assert_eq!(history_activity(&row), (Some(1000), true));
+        row.query = None;
+        assert_eq!(history_activity(&row), (None, false));
     }
 
     #[test]

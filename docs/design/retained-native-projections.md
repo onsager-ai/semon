@@ -142,6 +142,17 @@ states. Current exact-key lookup remains a primary-key operation. Source maps
 carry the same lifecycle and have indexed current native/path lookups. Default
 current lists therefore do not scan unrelated retained history.
 
+Finite Query History candidates use two stored eligibility scalars: the latest
+saved owner/edge timestamp and whether the saved owner or an edge has an active
+state. Both engines derive them from the immutable Query recipe when authoring
+or importing History; PostgreSQL carries them with its generation owner link.
+Separate indexes exclude expired unrelated History before recipe decoding.
+Candidate keys, including duplicate index hits, and loaded metadata consume the
+existing request budget before collection or decoding. Exact saved graph/window
+selection remains authoritative after admission; a last turn alone does not
+admit an expired owner. Stores missing this current column/index contract refuse
+without migration or repair DDL.
+
 A retained recipe keeps its immutable slot generation and supported recipe
 version. Each header also records SHA-256 of the typed source-reference vector;
 this is source/projection agreement, not a complete archive-object hash. Source
