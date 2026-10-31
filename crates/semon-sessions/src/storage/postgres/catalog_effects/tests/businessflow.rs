@@ -3322,6 +3322,82 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         expected_bodies[&appended_key]["body"],
         "PG History-selected body must preserve the original exact prefix"
     );
+    let (history_harness, current_harness) = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &continued_generation,
+        |snapshot| {
+            let history = snapshot
+                .catalog(&appended_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let current = snapshot
+                .catalog(&appended_key, false)?
+                .ok_or(StorageError::ScopeChanged)?;
+            Ok((history.harness, current.harness))
+        },
+    )
+    .expect("successor publication keeps History beside the Current owner");
+    assert_eq!(
+        history_harness, current_harness,
+        "History runtime qualification requires its same-harness Current owner"
+    );
+    // This live PID file adds a native runtime dependency to this Claude owner.
+    let pid = 314;
+    let pid_stat = options.proc_root.join(pid.to_string()).join("stat");
+    let pid_session = options
+        .claude_home
+        .join("sessions")
+        .join(format!("{pid}.json"));
+    assert!(!pid_stat.exists());
+    assert!(!pid_session.exists());
+    fs::create_dir_all(pid_stat.parent().unwrap()).unwrap();
+    fs::create_dir_all(pid_session.parent().unwrap()).unwrap();
+    let mut proc_fields = vec!["0"; 20];
+    proc_fields[19] = "1234";
+    fs::write(
+        &pid_stat,
+        format!("{pid} (claude) {}\n", proc_fields.join(" ")),
+    )
+    .unwrap();
+    fs::write(
+        &pid_session,
+        serde_json::json!({"pid":pid,"sessionId":appended_key.as_str(),"procStart":1234,"status":"busy"})
+            .to_string(),
+    )
+    .unwrap();
+    let history_runtime_drift = restarted_query.call_bound_selected_at(
+        "read_transcript",
+        &serde_json::json!({"id":appended_key.as_str(),"limit":100}),
+        1790812803000,
+        &next_store,
+        &next_host,
+        None,
+    );
+    fs::remove_file(&pid_session).unwrap();
+    fs::remove_file(&pid_stat).unwrap();
+    let error = history_runtime_drift.expect_err(
+        "History-selected read must refuse when its same-harness PID runtime drifts",
+    );
+    assert!(
+        error.code == "unavailable"
+            && error.message == StorageError::ScopeChanged.to_string(),
+        "History runtime drift must refuse with ScopeChanged: {error:?}"
+    );
+    let recovered_history_body = restarted_query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":appended_key.as_str(),"limit":100}),
+            1790812803000,
+            &next_store,
+            &next_host,
+            None,
+        )
+        .expect("restoring same-harness runtime recovers the retained body");
+    assert_eq!(
+        recovered_history_body, expected_bodies[&appended_key]["body"],
+        "restored runtime recovers the original retained source body"
+    );
     let successor_current_body = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
@@ -3354,7 +3430,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 saved,
                 &row.sources,
                 true,
-                expected.as_deref(),
+                Some(expected.as_str()),
             )
             .map_err(|_| StorageError::ScopeChanged)?
             {
