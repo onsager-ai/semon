@@ -104,6 +104,7 @@ pub(in crate::storage::postgres) fn unmentioned(
         after = keys.last().cloned();
     }
     history(tx, generation, previous, mentioned)?;
+    super::history::project_mentioned(tx, generation, mentioned)?;
     Ok(carried)
 }
 
