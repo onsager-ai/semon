@@ -1533,6 +1533,47 @@ impl PageSource for SqlitePage<'_, '_> {
 mod proof_error_tests {
     use super::*;
 
+    struct NoNativeReads;
+
+    impl crate::SessionSourceReader for NoNativeReads {
+        fn read_range(
+            &self,
+            _: &crate::SessionSourceRef,
+            _: Option<&str>,
+            _: u64,
+            _: usize,
+        ) -> io::Result<crate::SessionSourceRange> {
+            unreachable!("a source-less recipe must be refused before native I/O")
+        }
+    }
+
+    impl QueryRecords for NoNativeReads {
+        fn reader(&self) -> &dyn crate::SessionSourceReader {
+            self
+        }
+
+        fn source_ref(&self, _: &std::path::Path) -> Option<&crate::SessionSourceRef> {
+            None
+        }
+
+        fn record_bytes(
+            &self,
+            _: &std::path::Path,
+            _: u64,
+            _: u64,
+        ) -> io::Result<Option<Vec<u8>>> {
+            unreachable!("a source-less recipe must be refused before native I/O")
+        }
+
+        fn prompt(
+            &self,
+            _: &crate::model::SlotFile,
+            _: u64,
+        ) -> Option<(Value, u64)> {
+            None
+        }
+    }
+
     #[test]
     fn unstaged_proof_errors_are_generic_and_staged_errors_keep_the_stage() {
         let untyped = proof_unavailable(&io::Error::other("private sqlite detail"));
@@ -1562,6 +1603,32 @@ mod proof_error_tests {
         assert_eq!(mapped.code, "stale_projection");
         assert_eq!(mapped.local_revision_reason, Some("size_grew"));
         assert_eq!(mapped.stage, None);
+    }
+
+    #[test]
+    fn source_less_handoff_recipe_still_refuses_the_selected_read() {
+        let saved = serde_json::json!({
+            "query": {"id": "edge", "from": "one", "to": "child", "kind": "spawn"},
+            "query_presence": {"brief": true},
+            "query_content": {
+                "brief": {
+                    "path": "/fixture/one.jsonl",
+                    "offset": 0,
+                    "block": 0,
+                    "kind": "prompt"
+                }
+            }
+        });
+        let error = render_edge(
+            "edge",
+            &[],
+            &NoNativeReads,
+            &[saved],
+            &std::cell::RefCell::new(1024),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "io");
+        assert_eq!(error.message, "Handoff source generation unavailable");
     }
 }
 
