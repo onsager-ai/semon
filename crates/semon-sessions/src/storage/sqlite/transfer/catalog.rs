@@ -30,11 +30,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
         ),
         ProofSource => ("storage_proof_sources", "id,session_key,path,ledger", &[]),
         ProofRef => ("storage_proof_refs", "session_key,kind,id", &[]),
-        Current => (
-            "session_catalog",
-            "session_key,metadata,query_recipe",
-            &[],
-        ),
+        Current => ("session_catalog", "session_key,metadata,query_recipe", &[]),
         Recipe => (
             "session_slot_projections",
             "session_key,generation,source_generation,version,total",
