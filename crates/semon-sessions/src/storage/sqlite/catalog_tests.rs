@@ -1992,6 +1992,277 @@ fn exact_model_and_missing_repository_filters_bind_cursor_scope() {
         400
     );
 }
+
+#[test]
+fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
+    use std::io::Write;
+
+    fn catalog_row(db: &Connection, table: &str) -> crate::model::summary::CatalogRow {
+        serde_json::from_str(
+            &db.query_row(
+                &format!("SELECT metadata FROM {table} WHERE session_key=?1"),
+                ["session-00000"],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+    fn slots(db: &Connection, table: &str) -> Vec<(i64, String)> {
+        db.prepare(&format!(
+            "SELECT slot,metadata FROM {table} WHERE session_key=?1 ORDER BY slot"
+        ))
+        .unwrap()
+        .query_map(["session-00000"], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+    }
+
+    let fixture = Fixture::new();
+    let append_model = |id: &str, timestamp: &str, model: &str| {
+        let path = fixture
+            .options
+            .claude_home
+            .join(format!("projects/project/{id}.jsonl"));
+        let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "assistant",
+                "sessionId": id,
+                "uuid": format!("model-{id}-{timestamp}"),
+                "parentUuid": id,
+                "cwd": "/synthetic/project",
+                "timestamp": timestamp,
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type":"text","text":"synthetic response"}],
+                    "model": model
+                }
+            })
+        )
+        .unwrap();
+    };
+    fixture.publish(3);
+
+    let original_identity = session_catalog_identity(
+        &fixture.options,
+        "source",
+        "session-00000",
+    )
+    .unwrap()
+    .unwrap();
+    let original_selected = fixture.body("sid=session-00000").1;
+    let original_transcript = crate::session_transcript_range(
+        &fixture.options,
+        "source",
+        "sid=session-00000&limit=100",
+        None,
+    );
+    assert_eq!(original_transcript.status, 200);
+    let original_transcript: Value =
+        serde_json::from_slice(&original_transcript.body).unwrap();
+    let (original_row, original_slots, original_header) = {
+        let db = fixture.db();
+        let header: (String, u32, Option<String>, i64) = db
+            .query_row(
+                "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE session_key=?1",
+                ["session-00000"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        (catalog_row(&db, "session_catalog"), slots(&db, "session_slots"), header)
+    };
+
+    append_model(
+        "session-00000",
+        "2026-10-01T00:00:30Z",
+        "original-model",
+    );
+    fixture.publish_existing();
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts
+        .repos
+        .insert("/synthetic/project".into(), Some("current-repo".into()));
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    append_model(
+        "session-00000",
+        "2026-10-01T00:02:00Z",
+        "current-model",
+    );
+    append_model(
+        "session-00001",
+        "2026-10-01T00:01:30Z",
+        "middle-current-model",
+    );
+    let session_path = fixture
+        .options
+        .claude_home
+        .join("projects/project/session-00000.jsonl");
+    let appended_bytes = fs::read(&session_path).unwrap();
+    fixture.publish_existing();
+    assert_eq!(fs::read(&session_path).unwrap(), appended_bytes);
+
+    let (current, history, history_slots, original_header_marker) = {
+        let db = fixture.db();
+        let current = catalog_row(&db, "session_catalog");
+        let history = catalog_row(&db, "session_history_catalog");
+        let marker: String = db
+            .query_row(
+                "SELECT value FROM meta WHERE key=?1",
+                ["history_original_header:session-00000"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        (current, history, slots(&db, "session_history_slots"), marker)
+    };
+    assert_eq!(history.key, original_row.key);
+    assert_eq!(history.sources, original_row.sources);
+    assert_eq!(history.last, original_row.last);
+    assert_eq!(history.repo, original_row.repo);
+    assert_eq!(history.model, original_row.model);
+    assert_eq!(history.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+    assert_eq!(history_slots, original_slots);
+    assert_eq!(
+        original_header_marker,
+        serde_json::to_string(&Some(original_header.clone())).unwrap()
+    );
+    assert_ne!(current.last, history.last);
+    assert_ne!(current.repo, history.repo);
+    assert_ne!(current.model, history.model);
+    assert_eq!(current.repo.as_deref(), Some("current-repo"));
+
+    let history_identity = session_catalog_history_identity(
+        &fixture.options,
+        "source",
+        "session-00000",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        history_identity
+            .source_refs
+            .iter()
+            .map(|reference| reference.source.clone())
+            .collect::<Vec<_>>(),
+        original_identity
+            .source_refs
+            .iter()
+            .map(|reference| reference.source.clone())
+            .collect::<Vec<_>>()
+    );
+    let current_identity = session_catalog_identity(
+        &fixture.options,
+        "source",
+        "session-00000",
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(current_identity.read_scope, CatalogReadScope::Current);
+    assert_ne!(current_identity.source_refs, history_identity.source_refs);
+
+    let filtered_query = format!(
+        "scope=retained_history&repo=current-repo&model={}&limit=10",
+        crate::viewer::percent_encode(&current.model)
+    );
+    let (status, filtered) = fixture.body(&filtered_query);
+    assert_eq!(status, 200);
+    assert_eq!(filtered["items"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["items"][0]["key"], "session-00000");
+    assert!(filtered["items"][0].get("details").is_none());
+    assert_eq!(filtered["items"][0]["repo"], "current-repo");
+    assert_eq!(filtered["items"][0]["model"], json!(&current.model));
+    assert_eq!(filtered["items"][0]["tokens"], json!(current.tokens));
+    assert_eq!(filtered["items"][0]["cost"], json!(&current.cost));
+    assert_eq!(
+        filtered["items"][0]["source_refs"][0]["source"]["offset"],
+        history_identity.source_refs[0].source.offset
+    );
+    assert_eq!(
+        filtered["items"][0]["source_refs"][0]["source"]["prefix_sha256"],
+        json!(history_identity.source_refs[0].source.prefix_sha256)
+    );
+    let old_filter = format!(
+        "scope=retained_history&repo=original-repo&model={}&limit=10",
+        crate::viewer::percent_encode(&history.model)
+    );
+    assert_eq!(fixture.body(&old_filter).1["items"], json!([]));
+
+    let mut keys = Vec::new();
+    let mut query = "scope=retained_history&limit=1".to_owned();
+    for _ in 0..4 {
+        let (status, page) = fixture.body(&query);
+        assert_eq!(status, 200);
+        let item = &page["items"][0];
+        keys.push(item["key"].as_str().unwrap().to_owned());
+        if item["key"] == "session-00000" {
+            assert_eq!(item["last"], json!(current.last));
+            assert_eq!(item["repo"], "current-repo");
+            assert_eq!(item["model"], json!(&current.model));
+        }
+        let Some(cursor) = page["next_cursor"].as_str() else {
+            break;
+        };
+        query = format!(
+            "scope=retained_history&limit=1&{}",
+            cursor_query(&json!(cursor))
+        );
+    }
+    assert_eq!(keys, ["session-00000", "session-00001", "session-00002"]);
+
+    let (status, selected) = fixture.body("sid=session-00000&scope=retained_history");
+    assert_eq!(status, 200);
+    assert_eq!(selected["items"][0]["repo"], "original-repo");
+    assert_eq!(selected["items"][0]["model"], json!(&history.model));
+    assert_eq!(selected["items"][0]["last"], json!(history.last));
+    assert_eq!(
+        selected["items"][0]["details"]["content_generation"],
+        original_selected["items"][0]["details"]["content_generation"]
+    );
+    let retained_transcript = crate::session_transcript_range(
+        &fixture.options,
+        "source",
+        "sid=session-00000&scope=retained_history&limit=100",
+        None,
+    );
+    assert_eq!(retained_transcript.status, 200);
+    let retained_transcript: Value =
+        serde_json::from_slice(&retained_transcript.body).unwrap();
+    assert_eq!(
+        retained_transcript["projection"],
+        original_transcript["projection"]
+    );
+    assert_eq!(
+        retained_transcript["entries"].as_array().unwrap().len(),
+        original_transcript["entries"].as_array().unwrap().len()
+    );
+    assert_eq!(
+        retained_transcript["entries"][0]["entry_id"],
+        original_transcript["entries"][0]["entry_id"]
+    );
+    assert_eq!(
+        retained_transcript["entries"][0]["text"],
+        original_transcript["entries"][0]["text"]
+    );
+    let db = fixture.db();
+    db.execute(
+        "UPDATE session_history_projections SET incomplete=1 WHERE session_key=?1",
+        ["session-00000"],
+    )
+    .unwrap();
+    drop(db);
+    let (status, unavailable) = fixture.body("sid=session-00000&scope=retained_history");
+    assert_eq!(status, 503);
+    assert_eq!(unavailable["error"]["code"], "catalog_unavailable");
+}
+
 #[test]
 fn annotation_pages_locate_unloaded_failures_without_reading_native_bodies() {
     let fixture = Fixture::new();
