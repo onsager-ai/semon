@@ -908,7 +908,10 @@ mod tests {
                     .rows(&crate::catalog::Request::parse("limit=60").unwrap())
                     .map_err(|_| StorageError::ScopeChanged)?;
                 assert_eq!(
-                    serde_json::to_value(rows).unwrap(),
+                    serde_json::to_value(
+                        rows.into_iter().map(|selected| selected.row).collect::<Vec<_>>(),
+                    )
+                    .unwrap(),
                     serde_json::to_value(&expected).unwrap()
                 );
                 Ok(())

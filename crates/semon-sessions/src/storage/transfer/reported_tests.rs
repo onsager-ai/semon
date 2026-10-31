@@ -587,11 +587,10 @@ pub(crate) fn finish_catalog(
 
 #[test]
 fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
-    use crate::storage::query::QueryCatalogStore;
     use crate::storage::catalog::CatalogObservationOwner;
+    use crate::storage::query::QueryCatalogStore;
     use crate::storage::sqlite::proof_generations::{
-        observation_binding, observation_binding_with_observations,
-        prepare_repriced_observation,
+        observation_binding, observation_binding_with_observations, prepare_repriced_observation,
     };
     use std::io::Write;
     let root = root();
@@ -656,8 +655,13 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         observation_binding(&db, &binding, original).is_ok(),
         "the actual transfer receipt authorizes the original row"
     );
-    let (imported_binding, imported_observations) =
-        observation_binding_with_observations(&db, &binding, original, crate::storage::catalog::CatalogObservationOwner::Catalog).unwrap();
+    let (imported_binding, imported_observations) = observation_binding_with_observations(
+        &db,
+        &binding,
+        original,
+        crate::storage::catalog::CatalogObservationOwner::Catalog,
+    )
+    .unwrap();
     let current_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     let current_global = imported_binding.witness(&current_runtime).unwrap();
     assert_eq!(
@@ -761,8 +765,13 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
         "the admitted native append advances Index beyond the imported Current row"
     );
     assert!(crate::storage::sqlite::proof_generations::imported_catalog(&db, &binding).unwrap());
-    let (ahead_binding, ahead_observations) =
-        observation_binding_with_observations(&db, &binding, original, crate::storage::catalog::CatalogObservationOwner::Catalog).unwrap();
+    let (ahead_binding, ahead_observations) = observation_binding_with_observations(
+        &db,
+        &binding,
+        original,
+        crate::storage::catalog::CatalogObservationOwner::Catalog,
+    )
+    .unwrap();
     let ahead_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     assert_eq!(ahead_runtime, current_runtime);
     let ahead_global = ahead_binding.witness(&ahead_runtime).unwrap();
