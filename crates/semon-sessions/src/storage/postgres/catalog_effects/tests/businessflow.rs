@@ -1422,8 +1422,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         source_paths(&composite_history_after_withdrawal),
-        std::collections::BTreeSet::from([("claude".into(), composite_b_relative)]),
-        "SQLite History retains only withdrawn Source B"
+        std::collections::BTreeSet::from([
+            ("claude".into(), composite_a_relative.clone()),
+            ("claude".into(), composite_b_relative),
+        ]),
+        "SQLite History metadata composes Current Source A with withdrawn Source B"
+    );
+    assert_eq!(
+        composite_history_after_withdrawal.source_refs,
+        composite_before_withdrawal.source_refs,
+        "SQLite History preserves the exact original composite source identities"
     );
     let parent_history_after_withdrawal = crate::session_catalog_history_identity(
         &withdraw_options,
