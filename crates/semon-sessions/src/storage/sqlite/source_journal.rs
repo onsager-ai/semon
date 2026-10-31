@@ -570,9 +570,7 @@ impl SourceObservationStore for SourceJournal {
             || current.rollback_clock != after.rollback_clock;
         drop(connection);
         if !pending && current == after {
-            self.recovery_witness = Some(RecoveryWitness {
-                stamp: after,
-            });
+            self.recovery_witness = Some(RecoveryWitness { stamp: after });
             Ok(true)
         } else {
             if requalify_schema {
@@ -679,6 +677,7 @@ impl SourceObservationStore for SourceJournal {
             self.validate(&tx)?;
             self.validate_journal_layout(&tx)?;
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+            drop(db);
             self.recovery_witness = None;
             return Ok((receipt, done));
         }
@@ -723,9 +722,7 @@ impl SourceObservationStore for SourceJournal {
         let after = self.stamp(&db)?;
         drop(db);
         if done && !recovery_pending && before.same_external_state(after) {
-            self.recovery_witness = Some(RecoveryWitness {
-                stamp: after,
-            });
+            self.recovery_witness = Some(RecoveryWitness { stamp: after });
         } else {
             self.recovery_witness = None;
         }
@@ -832,9 +829,9 @@ impl SourceObservationStore for SourceJournal {
         let advance_recovery = old_recovery
             .as_ref()
             .is_some_and(|witness| witness.stamp == before);
-        let advance_discovery = old_discovery.as_ref().is_some_and(|witness| {
-            witness.stamp == before && &witness.operation == operation
-        });
+        let advance_discovery = old_discovery
+            .as_ref()
+            .is_some_and(|witness| witness.stamp == before && &witness.operation == operation);
         if advance_recovery || advance_discovery {
             self.validate_journal_layout(&tx)?;
         }
