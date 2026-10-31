@@ -1556,20 +1556,11 @@ mod proof_error_tests {
             None
         }
 
-        fn record_bytes(
-            &self,
-            _: &std::path::Path,
-            _: u64,
-            _: u64,
-        ) -> io::Result<Option<Vec<u8>>> {
+        fn record_bytes(&self, _: &std::path::Path, _: u64, _: u64) -> io::Result<Option<Vec<u8>>> {
             unreachable!("a source-less recipe must be refused before native I/O")
         }
 
-        fn prompt(
-            &self,
-            _: &crate::model::SlotFile,
-            _: u64,
-        ) -> Option<(Value, u64)> {
+        fn prompt(&self, _: &crate::model::SlotFile, _: u64) -> Option<(Value, u64)> {
             None
         }
     }

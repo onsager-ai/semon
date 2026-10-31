@@ -5340,7 +5340,10 @@ impl<'a> Builder<'a> {
             })
         };
         let origin = |turn: &Turn| {
-            turn.start.as_deref().and_then(|start| placed(start, Place::In)).map(|at| recipe(at, "prompt"))
+            turn.start
+                .as_deref()
+                .and_then(|start| placed(start, Place::In))
+                .map(|at| recipe(at, "prompt"))
                 .or_else(|| {
                     tx.slots
                         .iter()

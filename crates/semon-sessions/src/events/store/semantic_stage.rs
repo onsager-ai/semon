@@ -3745,7 +3745,9 @@ mod tests {
             crate::storage::LogicalSourceNamespace::new("semantic-key-current").unwrap();
         // Keep the ordinary on-disk catalog setup, then reopen with the real
         // semantic owner so the fixture writes pass its connection-local guard.
-        drop(super::super::current_search_test_connection(&path, &namespace));
+        drop(super::super::current_search_test_connection(
+            &path, &namespace,
+        ));
         let config = crate::storage::StoreConfig {
             backend: crate::storage::StoreBackend::Sqlite {
                 database: path.clone(),
