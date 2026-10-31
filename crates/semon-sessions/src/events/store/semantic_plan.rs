@@ -21,16 +21,28 @@ pub(crate) trait OwnerClosurePort {
     fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool)>>;
     fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)>;
     fn members(&self, kind: &str, id: &str) -> rusqlite::Result<Vec<String>>;
+    fn native_members(&self, harness: &str, id: &str) -> rusqlite::Result<Vec<String>>;
 }
 
 pub(crate) fn owner_closure_with(
     port: &impl OwnerClosurePort,
     seed: &str,
 ) -> rusqlite::Result<Vec<String>> {
-    if !port
-        .input(seed)?
-        .is_some_and(|(harness, top)| harness == "claude" && top)
-    {
+    let Some((harness, top)) = port.input(seed)? else {
+        return Ok(vec![seed.to_owned()]);
+    };
+    if harness == "codex" && top {
+        let (id, _) = port.links(seed)?;
+        let paths = port
+            .native_members(&harness, &id)?
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        if paths.len() > 64 {
+            return Err(source_budget());
+        }
+        return Ok(paths.into_iter().collect());
+    }
+    if harness != "claude" || !top {
         return Ok(vec![seed.to_owned()]);
     }
     let mut paths = BTreeSet::new();
