@@ -4514,8 +4514,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         options: options.clone(),
     };
     let mut moved_host = body_host(&options, &moved_rows);
-    // The History-selected recipe still names its captured original source.
-    moved_host.0.extend(retained_host.0.iter().cloned());
+    // Retained History can name both exact continued and original captures.
+    moved_host.0.extend(next_host.0.iter().cloned());
     assert_eq!(
         query
             .call_bound_selected_at(
@@ -4685,8 +4685,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .find(|row| row.harness == "claude" && row.native_ids.iter().any(|id| id == "one"))
         .unwrap();
-    let mut pid_host = moved_host.clone();
-    pid_host.0.extend(retained_host.0.iter().cloned());
+    let pid_host = moved_host.clone();
     let assert_pid_ledgers = || {
         super::super::snapshot::with_admitted_snapshot(
             &pool,
