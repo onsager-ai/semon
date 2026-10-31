@@ -6482,7 +6482,9 @@ mod tests {
         if changed != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        transaction.execute_batch(&guard)?;
+        // A scoped reader may have a TEMP meta view. Bind the restored guard
+        // to main; SQLite omits this qualifier from its stored trigger SQL.
+        transaction.execute_batch(&guard.replacen("CREATE TRIGGER ", "CREATE TRIGGER main.", 1))?;
         let restored = transaction.query_row(
             "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
             [name],
