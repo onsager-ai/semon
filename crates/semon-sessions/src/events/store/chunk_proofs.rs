@@ -190,7 +190,11 @@ pub(crate) fn log_header_rejection(
 pub(crate) fn legacy_change_token_for_test(db: &Connection, path: &str, ledger: &Ledger) {
     let key = format!("{}header", prefix(path));
     let encoded: String = db
-        .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+            [&key],
+            |r| r.get(0),
+        )
         .unwrap();
     let mut header: Header = serde_json::from_str(&encoded).unwrap();
     assert_eq!(header.ledger, header_ledger(ledger));
@@ -198,7 +202,7 @@ pub(crate) fn legacy_change_token_for_test(db: &Connection, path: &str, ledger: 
     legacy.stat.changed_ns = None;
     header.ledger = header_ledger(&legacy);
     db.execute(
-        "UPDATE meta SET value=?2 WHERE key=?1",
+        "UPDATE main.meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1",
         params![key, json(&header).unwrap()],
     )
     .unwrap();
@@ -912,7 +916,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    "UPDATE main.meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1",
                     params![key, value.to_string()],
                 )
                 .unwrap();
@@ -944,7 +948,7 @@ mod tests {
             let unexpected_proof_metadata: i64 = store
                 .connection
                 .query_row(
-                    "SELECT count(*) FROM meta WHERE key GLOB 'native_proof_*' AND key NOT GLOB 'native_proof_tree:*'",
+                    "SELECT count(*) FROM main.meta WHERE namespace=semon_namespace() AND key GLOB 'native_proof_*' AND key NOT GLOB 'native_proof_tree:*'",
                     [],
                     |row| row.get(0),
                 )
@@ -957,7 +961,7 @@ mod tests {
 
     fn proof_metadata(connection: &Connection) -> Vec<(String, Option<String>)> {
         connection
-            .prepare("SELECT key,value FROM meta ORDER BY key")
+            .prepare("SELECT key,value FROM main.meta WHERE namespace=semon_namespace() ORDER BY key")
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
@@ -1084,7 +1088,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE meta SET value=json_set(value,'$.hashes[0][0]',0) WHERE key=?1",
+                    "UPDATE main.meta SET value=json_set(value,'$.hashes[0][0]',0) WHERE namespace=semon_meta_scope(?1) AND key=?1",
                     [&key],
                 )
                 .unwrap();
@@ -1100,7 +1104,7 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "UPDATE meta SET value=?2 WHERE key=?1",
+                    "UPDATE main.meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1",
                     params![key, json(&part).unwrap()],
                 )
                 .unwrap();
@@ -1135,7 +1139,7 @@ mod tests {
             .unwrap();
         let metadata = |connection: &Connection| {
             connection
-                .prepare("SELECT key,value FROM meta ORDER BY key")
+                .prepare("SELECT key,value FROM main.meta WHERE namespace=semon_namespace() ORDER BY key")
                 .unwrap()
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1179,15 +1183,23 @@ mod tests {
     }
 
     fn proof_catalog_tables(connection: &Connection) {
-        // Low-level proof tests use an in-memory meta table. Keep the tables
+        // Low-level proof tests use an in-memory metadata database. Keep the tables
         // queried by published::preserve present, as they are after a real
         // Index open/migration, while leaving the reference set empty.
+        connection
+            .execute_batch(crate::events::store::metadata_schema())
+            .unwrap();
         connection
             .execute_batch(super::COMPOSITE_CATALOG_SCHEMA)
             .unwrap();
         connection
             .execute_batch(crate::history_projection::SCHEMA)
             .unwrap();
+        crate::storage::sqlite::catalog_namespace::register(
+            connection,
+            &crate::events::store::fixture_namespace(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1377,7 +1389,7 @@ mod tests {
         let tx = store.connection.transaction().unwrap();
         write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
         let live = format!("{}header", prefix("original"));
-        tx.execute("INSERT INTO meta(namespace,key,value) SELECT semon_meta_scope(?1),?1,json_set(value,'$.parser_version',?2) FROM meta WHERE namespace=semon_namespace() AND key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
+        tx.execute("INSERT INTO main.meta(namespace,key,value) SELECT semon_meta_scope(?1),?1,json_set(value,'$.parser_version',?2) FROM main.meta WHERE namespace=semon_meta_scope(?3) AND key=?3", params![format!("{retained}header"),CACHE_VERSION-1,live]).unwrap();
         tx.commit().unwrap();
         let reader = Focused::open(&path, "original", &ledger).unwrap();
         assert_eq!(reader.prefix, prefix("original"));
@@ -1387,10 +1399,16 @@ mod tests {
     }
 
     fn cleanup_store(root: &Path, name: &str) -> SqliteStore {
-        crate::events::store::current_test_store(
+        let mut store = crate::events::store::current_test_store(
             &root.join(name),
             &crate::events::store::fixture_namespace(),
+        );
+        store.connection = crate::storage::sqlite::source_journal::SourceJournal::owned(
+            store.owner.clone(),
         )
+        .connection()
+        .unwrap();
+        store
     }
 
     fn cleanup_proof(count: usize, byte: u8) -> (Ledger, FileIndex) {
@@ -1482,7 +1500,7 @@ mod tests {
                     .unwrap();
             }
             store.connection.execute_batch(&format!(
-                "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER preserve_header BEFORE DELETE ON meta WHEN OLD.key='{}header' BEGIN SELECT RAISE(ABORT,'chunk-header-exemption'); END;",
+                "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER preserve_header BEFORE DELETE ON main.meta WHEN OLD.namespace=semon_namespace() AND OLD.key='{}header' BEGIN SELECT RAISE(ABORT,'chunk-header-exemption'); END;",
                 prefix(path)
             )).unwrap();
         }
@@ -1502,7 +1520,7 @@ mod tests {
                     store
                         .connection
                         .execute(
-                            "INSERT INTO meta VALUES(?1,'invalid')",
+                        "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'invalid')",
                             [format!("{}{suffix}", prefix(path))],
                         )
                         .unwrap();
@@ -1586,14 +1604,14 @@ mod tests {
             store
                 .connection
                 .execute(
-                    "INSERT INTO meta VALUES(?1,'untouched-malformed')",
+                    "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'untouched-malformed')",
                     [format!("{}bad", prefix(unrelated))],
                 )
                 .unwrap();
             // The real parent has returned the cleanup statement to its cache.
             // Actual main DDL and TEMP triggers now invalidate that warm SQL.
             store.connection.execute_batch(&format!(
-                "CREATE INDEX cleanup_meta_value ON meta(value); CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON meta BEGIN INSERT INTO audit VALUES(OLD.key); END; CREATE TEMP TRIGGER preserve_headers BEFORE DELETE ON meta WHEN OLD.key IN ('{}header','{}header') BEGIN SELECT RAISE(ABORT,'alternating-header-exemption'); END;",
+                "CREATE INDEX cleanup_meta_value ON meta(value); CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON main.meta WHEN OLD.namespace=semon_namespace() BEGIN INSERT INTO audit VALUES(OLD.key); END; CREATE TEMP TRIGGER preserve_headers BEFORE DELETE ON main.meta WHEN OLD.namespace=semon_namespace() AND OLD.key IN ('{}header','{}header') BEGIN SELECT RAISE(ABORT,'alternating-header-exemption'); END;",
                 prefix(paths[0]), prefix(paths[1])
             )).unwrap();
         }
@@ -1624,7 +1642,7 @@ mod tests {
                     store
                         .connection
                         .execute(
-                            "INSERT INTO meta VALUES(?1,'invalid')",
+                            "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'invalid')",
                             [format!("{}{suffix}", prefix(path))],
                         )
                         .unwrap();
@@ -1632,7 +1650,7 @@ mod tests {
                 if step == 3 {
                     // Replace both main and TEMP schema objects after further
                     // reuse; the new trigger must run on the cached statement.
-                    store.connection.execute_batch("DROP INDEX cleanup_meta_value; CREATE INDEX cleanup_meta_key_value ON meta(key,value); DROP TRIGGER temp.cleanup_audit; CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON meta BEGIN INSERT INTO audit VALUES('reprepared:' || OLD.key); END;").unwrap();
+                    store.connection.execute_batch("DROP INDEX cleanup_meta_value; CREATE INDEX cleanup_meta_key_value ON meta(key,value); DROP TRIGGER temp.cleanup_audit; CREATE TEMP TRIGGER cleanup_audit AFTER DELETE ON main.meta WHEN OLD.namespace=semon_namespace() BEGIN INSERT INTO audit VALUES('reprepared:' || OLD.key); END;").unwrap();
                 }
             }
             let (current, index) = cleanup_proof(count, (step + 2) as u8);
@@ -1713,7 +1731,7 @@ mod tests {
                 let untouched: String = store
                     .connection
                     .query_row(
-                        "SELECT value FROM meta WHERE key=?1",
+                        "SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
                         [format!("{}bad", prefix(unrelated))],
                         |row| row.get(0),
                     )
@@ -1762,7 +1780,8 @@ mod tests {
                 )
                 .unwrap();
                 store.connection.execute_batch(&format!(
-                    "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER prior_page AFTER UPDATE ON meta WHEN NEW.key='{p}0000000000' BEGIN INSERT INTO audit VALUES('page-written'); END; CREATE TEMP TRIGGER cleanup_failure BEFORE {event} ON meta WHEN {}.key='{key}' AND EXISTS(SELECT 1 FROM audit) BEGIN SELECT RAISE(ABORT,'{label}'); END;",
+                    "CREATE TEMP TABLE audit(value TEXT); CREATE TEMP TRIGGER prior_page AFTER UPDATE ON main.meta WHEN NEW.namespace=semon_namespace() AND NEW.key='{p}0000000000' BEGIN INSERT INTO audit VALUES('page-written'); END; CREATE TEMP TRIGGER cleanup_failure BEFORE {event} ON main.meta WHEN {}.namespace=semon_namespace() AND {}.key='{key}' AND EXISTS(SELECT 1 FROM audit) BEGIN SELECT RAISE(ABORT,'{label}'); END;",
+                    if event == "DELETE" { "OLD" } else { "NEW" },
                     if event == "DELETE" { "OLD" } else { "NEW" }
                 )).unwrap();
                 // Reuse after ABORT must reset the cached statement without
@@ -1804,9 +1823,6 @@ mod tests {
     #[test]
     fn paged_proofs_round_trip_and_refuse_corruption_or_a_different_ledger() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-            .unwrap();
         proof_catalog_tables(&connection);
         let path = "/fixture/parent[1]*.jsonl";
         let chunks = Chunks {
@@ -1835,7 +1851,7 @@ mod tests {
         );
         let max: i64 = connection
             .query_row(
-                "SELECT max(length(CAST(value AS BLOB))) FROM meta",
+                "SELECT max(length(CAST(value AS BLOB))) FROM main.meta WHERE namespace=semon_namespace()",
                 [],
                 |row| row.get(0),
             )
@@ -1846,7 +1862,7 @@ mod tests {
         assert!(read(&connection, path, &changed).unwrap().is_none());
         let key = format!("{}0000000000", prefix(path));
         let encoded: String = connection
-            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
+            .query_row("SELECT value FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1", [&key], |row| {
                 row.get(0)
             })
             .unwrap();
@@ -1854,7 +1870,7 @@ mod tests {
         page.hashes[0][0] ^= 1;
         connection
             .execute(
-                "UPDATE meta SET value=?2 WHERE key=?1",
+                "UPDATE main.meta SET value=?2 WHERE namespace=semon_meta_scope(?1) AND key=?1",
                 params![&key, json(&page).unwrap()],
             )
             .unwrap();
@@ -1865,7 +1881,7 @@ mod tests {
         assert!(read(&connection, path, &ledger).unwrap().is_some());
         connection
             .execute(
-                "DELETE FROM meta WHERE key=?1",
+                "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
                 [format!("{}0000000001", prefix(path))],
             )
             .unwrap();
@@ -1875,12 +1891,12 @@ mod tests {
     #[test]
     fn shrinking_or_removing_a_proof_cleans_only_its_exact_namespace() {
         let mut connection = Connection::open_in_memory().unwrap();
-        connection
-            .execute_batch("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-            .unwrap();
         proof_catalog_tables(&connection);
         connection
-            .execute("INSERT INTO meta VALUES ('reported_runs','retained')", [])
+            .execute(
+                "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('reported_runs'),'reported_runs','retained')",
+                [],
+            )
             .unwrap();
         let chunks = Chunks {
             offset: crate::source_chunks::SIZE as u64 * 1025,
@@ -1913,7 +1929,7 @@ mod tests {
         ] {
             connection
                 .execute(
-                    "INSERT INTO meta VALUES (?1,'invalid')",
+                    "INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'invalid')",
                     [format!("{}{suffix}", prefix("one[?]"))],
                 )
                 .unwrap();
@@ -1941,7 +1957,7 @@ mod tests {
         transaction.commit().unwrap();
         assert!(read(&connection, "one[?]", &ledger).unwrap().is_none());
         let count: i64 = connection
-            .query_row("SELECT count(*) FROM meta", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM main.meta", [], |row| row.get(0))
             .unwrap();
         assert_eq!(
             count, 7,
