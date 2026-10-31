@@ -80,6 +80,16 @@ fn load_epoch(
 
 fn save(tx: &mut PgTxn<'_>, stage: &Stage, insert: bool) -> Result<(), StorageError> {
     let bytes = serde_json::to_vec(stage).map_err(|_| StorageError::Unavailable)?;
+    #[cfg(test)]
+    if stage.paths.len() == 17 {
+        eprintln!(
+            "selected_large_fixture pg_stage phase={:?} stage_bytes={} context_bytes={} model_string_bytes={}",
+            stage.phase,
+            bytes.len(),
+            serde_json::to_vec(&stage.context).unwrap().len(),
+            stage.model.as_ref().map_or(0, String::len),
+        );
+    }
     if bytes.len() > MAX || stage.paths.len() > 64 || stage.context.endpoints.len() > 64 {
         return Err(StorageError::Busy);
     }

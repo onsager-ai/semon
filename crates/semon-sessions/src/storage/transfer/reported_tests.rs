@@ -2,6 +2,8 @@ use crate::facts::ReportedRunSnapshot;
 use crate::storage::native_events::NativeEventStore;
 
 use super::*;
+#[path = "large_catalog_fixture.rs"]
+pub(crate) mod large_catalog;
 use std::{
     collections::BTreeSet,
     path::{Path, PathBuf},

@@ -6,6 +6,24 @@ use crate::storage::{
     query::{QueryRecipeLoadError as Error, QueryRecipeResidence},
 };
 
+#[test]
+fn pg_selected_recipe_large_fixture_measurement() {
+    let (pool, _) = fixture(|_| {});
+    let config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Postgres {
+            pool,
+            control: PgCancellation::default(),
+        },
+        namespace: ns("selected-large-fixture"),
+        expected_stream_epoch: Some("a".repeat(64)),
+    };
+    config.create_native_store().unwrap();
+    crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+    let root = crate::storage::transfer::reported::tests::root();
+    crate::storage::transfer::reported::tests::large_catalog::measure(&config, &root);
+    fs::remove_dir_all(root).unwrap();
+}
+
 // A completed semantic publication schedules bounded cleanup. A Written
 // begin may only advance that cleanup; establish an actual stage before the
 // shared publication fixture starts consuming batches.
