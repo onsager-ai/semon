@@ -1498,6 +1498,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite prefix oracle owns the appended Claude source")
         .key
         .clone();
+    let related_key = oracle
+        .rows
+        .iter()
+        .find(|row| {
+            row.key == "related154" || row.native_ids.iter().any(|id| id == "related154")
+        })
+        .expect("fixture publishes the related Claude subagent")
+        .key
+        .clone();
     let append_oracle_root = oracle.root.join("oracle-same-append");
     let mut append_oracle_options = options.clone();
     append_oracle_options.claude_home = append_oracle_root.join("claude");
@@ -1725,6 +1734,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .expect("SQLite same-append successor Catalog publication")
         .expect("SQLite successor Catalog generation");
     assert_ne!(append_successor_generation, append_prefix_generation);
+    let mut append_successor_query =
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(recent_machine.into(), append_oracle_options.clone())],
+        )));
+    append_successor_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812803000)
+        .expect("SQLite same-append successor Query");
+    let append_successor_related_body = append_successor_query
+        .call_at(
+            "read_transcript",
+            &serde_json::json!({"id":related_key,"limit":100}),
+            1790812803000,
+        )
+        .expect("SQLite current related-session body after append");
+    let append_successor_related_fields = append_successor_query
+        .call_at(
+            "get_session",
+            &serde_json::json!({"id":related_key}),
+            1790812803000,
+        )
+        .expect("SQLite current related-session fields after append");
     let append_current_identity =
         crate::session_catalog_identity(&append_oracle_options, recent_machine, &appended_key)
             .unwrap()
@@ -1795,6 +1825,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         append_history_after["entries"], append_history_prefix["entries"],
         "SQLite History keeps the original exact source prefix after append"
     );
+    drop(append_successor_query);
     drop(append_oracle_query);
     drop(append_oracle_cache);
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
@@ -3566,6 +3597,112 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         next_bodies[&appended_key]["body"], expected_bodies[&appended_key]["body"],
         "PG History-selected body must preserve the original exact prefix"
     );
+    assert_eq!(
+        next_bodies[&appended_key]["fields"], expected_bodies[&appended_key]["fields"],
+        "PG History-selected fields must preserve the original exact oracle"
+    );
+    let successor_related_body = restarted_query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":related_key.as_str(),"limit":100}),
+            1790812803000,
+            &next_store,
+            &next_host,
+            None,
+        )
+        .expect("PG Current related-session body after append");
+    assert_eq!(
+        successor_related_body, append_successor_related_body,
+        "PG Current related-session body must match the SQLite successor"
+    );
+    let successor_related_fields = restarted_query
+        .call_bound_selected_at(
+            "get_session",
+            &serde_json::json!({"id":related_key.as_str()}),
+            1790812803000,
+            &next_store,
+            &next_host,
+            None,
+        )
+        .expect("PG Current related-session fields after append");
+    assert_eq!(
+        successor_related_fields, append_successor_related_fields,
+        "PG Current related-session fields must match the SQLite successor"
+    );
+    let (related_harness, selected_parent_sources) =
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &continued_generation,
+            |snapshot| {
+                let row = snapshot
+                    .catalog(&related_key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let edges = row
+                    .query
+                    .as_ref()
+                    .ok_or(StorageError::ScopeChanged)?["selected"]["edges"]
+                    .as_array()
+                    .ok_or(StorageError::ScopeChanged)?;
+                let sources = edges
+                    .iter()
+                    .flat_map(|edge| {
+                        edge["query_content"]
+                            .as_object()
+                            .into_iter()
+                            .flat_map(|recipes| recipes.values())
+                    })
+                    .filter(|recipe| recipe["path"].as_str() == Some(append_relative_path))
+                    .map(|recipe| recipe["source"].clone())
+                    .collect::<Vec<_>>();
+                Ok((row.harness, sources))
+            },
+        )
+        .expect("successor related-session Catalog retains its exact parent edge recipe");
+    assert!(
+        !selected_parent_sources.is_empty(),
+        "selected related-session edge must reference the appended parent source"
+    );
+    let current_parent_ref = append_current_identity
+        .source_refs
+        .iter()
+        .find(|reference| {
+            reference.source.root == "claude" && reference.source.path == append_relative_path
+        })
+        .expect("SQLite successor identity references the appended parent")
+        .source
+        .clone();
+    let retained_parent_ref = append_history_identity
+        .source_refs
+        .iter()
+        .find(|reference| {
+            reference.source.root == "claude" && reference.source.path == append_relative_path
+        })
+        .expect("SQLite retained identity references the original parent prefix")
+        .source
+        .clone();
+    for selected_source in selected_parent_sources {
+        let selected_source: crate::model::summary::CatalogSource =
+            serde_json::from_value(selected_source).expect("Catalog edge source is valid");
+        let selected_parent_ref = crate::SessionSourceRef {
+            root: related_harness.clone(),
+            path: crate::catalog::source_relative(&options, &related_harness, &selected_source)
+                .expect("selected edge source remains under its root"),
+            native_id: selected_source.native_id.clone(),
+            offset: selected_source.offset,
+            prefix_sha256: selected_source.prefix_sha256,
+            tail_sha256: selected_source.tail_sha256,
+        };
+        assert_eq!(
+            selected_parent_ref, current_parent_ref,
+            "selected edge recipe must use the parent's Current source ref"
+        );
+        assert_ne!(
+            selected_parent_ref, retained_parent_ref,
+            "selected edge recipe must not use the parent's retained History ref"
+        );
+    }
     let (history_harness, current_harness) = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
