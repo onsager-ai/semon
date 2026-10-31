@@ -2959,6 +2959,7 @@ impl SqliteStore {
             preserve_complete,
             semantic.map(CatalogStage::Semantic),
             writer,
+            None,
         )
     }
 
@@ -2970,6 +2971,7 @@ impl SqliteStore {
         preserve_complete: bool,
         selected_stage: Option<CatalogStage<'_>>,
         writer: CatalogWriter,
+        origin_model_witness: Option<&str>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let (semantic, origin) = match selected_stage {
             Some(CatalogStage::Semantic(batch)) => (Some(batch), None),
@@ -3055,13 +3057,15 @@ impl SqliteStore {
                 return Ok(Outcome::Stale);
             }
             if let Some(token) = origin {
-                if expected_generation.is_some() || claims.is_none() || preserve_complete {
+                if claims.is_none() || preserve_complete {
                     return Ok(Outcome::Conflict);
                 }
                 if let Some(generation) = crate::storage::sqlite::semantic::origin::replay(
                     &transaction,
                     owner,
                     token,
+                    expected_generation,
+                    origin_model_witness.unwrap_or(""),
                     publication,
                     claims.unwrap_or_default(),
                 )
@@ -3069,6 +3073,13 @@ impl SqliteStore {
                 {
                     published = Some(generation);
                     return Ok(Outcome::Written);
+                }
+                // The SQLite checkpoint records the first ordinary group.
+                // Later groups stay closed until their durable owner/context
+                // queues and finish witness are implemented. Exact receipts
+                // above still replay before this held-head check.
+                if expected_generation.is_some() {
+                    return Ok(Outcome::Conflict);
                 }
             }
             use crate::storage::catalog::CatalogPublicationHead;
@@ -3101,6 +3112,9 @@ impl SqliteStore {
                     &transaction,
                     owner,
                     token,
+                    expected_generation,
+                    origin_model_witness.unwrap_or(""),
+                    publication,
                     claims.unwrap_or_default(),
                 )
                 .map_err(StoreError::Configured)?;
@@ -3642,6 +3656,50 @@ impl SqliteStore {
                     [crate::catalog_search::VERSION],
                 )
                 .map_err(failure)?;
+            let stream = owner
+                .config()
+                .expected_stream_epoch
+                .as_deref()
+                .ok_or(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ))?;
+            let mut grant_owners = std::collections::BTreeSet::new();
+            grant_owners.extend(rows.iter().map(|row| row.key.clone()));
+            grant_owners.extend(affected.iter().cloned());
+            grant_owners.extend(withdrawn.iter().map(|row| row.key.clone()));
+            if let Some(token) = origin {
+                crate::storage::sqlite::semantic::origin::invalidate_comparisons(
+                    &transaction,
+                    owner,
+                    token,
+                    &grant_owners,
+                    claims.unwrap_or_default(),
+                )
+                .map_err(StoreError::Configured)?;
+            }
+            // Reconcile native identity grants before consuming any JSON
+            // invalidation claim. The transaction rolls both back together.
+            for key in &grant_owners {
+                crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    key,
+                    owner.admission(),
+                    stream,
+                )
+                .map_err(StoreError::Configured)?;
+            }
+            for (row, output) in rows.iter().zip(&metadata) {
+                crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    &row.key,
+                    owner.admission(),
+                    stream,
+                    output,
+                )
+                .map_err(StoreError::Configured)?;
+            }
             // A complete publication validated every committed ledger and
             // source membership while holding the write transaction. Only now
             // can outstanding source observations be acknowledged atomically.
@@ -3650,6 +3708,8 @@ impl SqliteStore {
                     &transaction,
                     owner,
                     token,
+                    expected_generation,
+                    origin_model_witness.unwrap_or(""),
                     publication,
                     claims.unwrap_or_default(),
                     &generation,
@@ -3669,8 +3729,10 @@ impl SqliteStore {
                         .map_err(failure)?;
                 }
                 if let Some(claims) = claims {
-                    for (path, _) in claims {
-                        relocation::acknowledge(&transaction, path).map_err(failure)?;
+                    for (path, revision) in claims {
+                        if revision.is_some() {
+                            relocation::acknowledge(&transaction, path).map_err(failure)?;
+                        }
                     }
                 }
             }
@@ -3688,39 +3750,6 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let stream =
-                owner
-                    .config()
-                    .expected_stream_epoch
-                    .as_deref()
-                    .ok_or(StoreError::Configured(
-                        crate::storage::StorageError::ScopeChanged,
-                    ))?;
-            let mut grant_owners = std::collections::BTreeSet::new();
-            grant_owners.extend(rows.iter().map(|row| row.key.clone()));
-            grant_owners.extend(affected.iter().cloned());
-            grant_owners.extend(withdrawn.iter().map(|row| row.key.clone()));
-            for key in grant_owners {
-                crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    &key,
-                    owner.admission(),
-                    stream,
-                )
-                .map_err(StoreError::Configured)?;
-            }
-            for (row, output) in rows.iter().zip(&metadata) {
-                crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    &row.key,
-                    owner.admission(),
-                    stream,
-                    output,
-                )
-                .map_err(StoreError::Configured)?;
-            }
             transaction
                 .execute(
                     "INSERT INTO main.meta(namespace,key,value) VALUES(?1,'catalog_native_publication',?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",

@@ -257,12 +257,31 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        let model_witness = || -> std::io::Result<String> { Ok(String::new()) };
+        self.publish_partial_catalog_with_model_witness(
+            publication,
+            expected_generation,
+            claims,
+            &model_witness,
+        )
+    }
+    fn publish_partial_catalog_with_model_witness(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+        model_witness: &dyn Fn() -> std::io::Result<String>,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
         let origin = self
             .semantic
             .as_ref()
             .map(|stage| stage.origin_publication())
             .transpose()?
             .flatten();
+        let model_witness = origin
+            .as_ref()
+            .map(|_| model_witness().map_err(|error| StoreError::Data(error.to_string())))
+            .transpose()?;
         let result = self
             .native
             .publish_catalog_with_origin(
@@ -271,6 +290,7 @@ impl IndexStore for ConfiguredIndex {
                 Some(claims),
                 false,
                 origin.as_ref(),
+                model_witness.as_deref(),
             )
             .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
         if let (Some(token), (Outcome::Written, Some(generation)), Some(stage)) =

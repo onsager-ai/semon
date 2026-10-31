@@ -1141,6 +1141,15 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<(Outcome, Option<String>), StoreError>;
+    fn publish_partial_catalog_with_model_witness(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: &[(String, Option<i64>)],
+        _model_witness: &dyn Fn() -> io::Result<String>,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.publish_partial_catalog(publication, expected_generation, claims)
+    }
     fn semantic_origin_pending(&self) -> Result<bool, StoreError> {
         Ok(false)
     }
@@ -2652,10 +2661,11 @@ impl EventCache {
         if let Some(hook) = BEFORE_CATALOG_PUBLICATION.with(|hook| hook.borrow_mut().take()) {
             hook();
         }
+        let model_witness = || prepared.staged_model_witness();
         self.store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_partial_catalog(
+            .publish_partial_catalog_with_model_witness(
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
@@ -2663,6 +2673,7 @@ impl EventCache {
                 },
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
+                &model_witness,
             )
             .map_err(|error| io::Error::other(error.to_string()))
     }

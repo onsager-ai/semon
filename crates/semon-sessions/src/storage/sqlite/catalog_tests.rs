@@ -8612,6 +8612,16 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
     );
     assert_eq!(
         db.query_row(
+            "SELECT count(*) FROM catalog_semantic_sources WHERE origin_member=1 AND ack_done=1 AND publication_done=0",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        64,
+        "the initial ordinary projection ACKs only its exact paths and leaves semantic owner publication queued"
+    );
+    assert_eq!(
+        db.query_row(
             "SELECT count(*) FROM session_catalog_invalidations",
             [],
             |row| row.get::<_, i64>(0)
@@ -8662,6 +8672,311 @@ fn cold_origin_first_publication_binds_inventory_and_selected_ack() {
     );
     drop(work);
     evidence.retire();
+}
+
+#[test]
+fn cold_origin_group_receipts_are_selection_qualified_and_transactional() {
+    let fixture = Fixture::new();
+    let inputs = (0..3)
+        .map(|n| {
+            let id = format!("origin-group-{n:03}");
+            fixture.source(&id);
+            crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/{id}.jsonl"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    evidence
+        .prepare_events(&mut work, crate::model::now_ms())
+        .unwrap();
+    let mut cache = work.events.take().unwrap();
+    drop(work);
+    evidence.retire();
+    cache
+        .discover_catalog_sources(&fixture.options, &inputs, true)
+        .unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut db = fixture.db();
+    let null_claim_path = inputs[0]
+        .full_path(&fixture.options)
+        .to_string_lossy()
+        .into_owned();
+    db.execute(
+        "DELETE FROM session_catalog_invalidations WHERE source_path=?1",
+        [&null_claim_path],
+    )
+    .unwrap();
+    let (root, held, key_epoch): (i64, i64, i64) = db
+        .query_row(
+            "SELECT origin_epoch,epoch,key_epoch FROM catalog_semantic_stage WHERE origin_phase='sealed'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let token = crate::model::relation_stage::OriginPublication {
+        origin: crate::model::relation_stage::OriginId(root),
+        held_epoch: held,
+        key_epoch,
+    };
+
+    let first = crate::model::prepare_sources(
+        &fixture.options,
+        &mut cache,
+        &inputs[..1],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let (outcome, first_generation) = cache.publish_partial_catalog_fenced(&first).unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    let first_generation = first_generation.unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT acknowledged=1 AND accepted_claim IS NULL FROM catalog_semantic_origin_sources WHERE origin_epoch=?1 AND source_path=?2",
+            rusqlite::params![root, null_claim_path],
+            |row| row.get::<_, bool>(0)
+        )
+        .unwrap(),
+        true,
+        "an accepted null claim has an explicit source witness"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2,
+        "the selected null claim does not ACK unrelated non-null revisions"
+    );
+
+    let second = crate::model::prepare_sources(
+        &fixture.options,
+        &mut cache,
+        &inputs[1..2],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    assert_eq!(second.base_generation.as_deref(), Some(first_generation.as_str()));
+    let second_publication = crate::slot_projection::Publication {
+        rows: &second.rows,
+        transcripts: Some(&second.transcripts),
+        observations: second.presentation_observations(),
+    };
+    let second_model_witness = second.staged_model_witness().unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+    let transaction = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let second_generation = "second-group-generation";
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE catalog_semantic_stage SET generation=?1 WHERE namespace=?2 AND origin_epoch=?3 AND epoch=?4 AND key_epoch=?5 AND origin_phase='draining' AND generation=?6",
+                rusqlite::params![second_generation, config.namespace.as_str(), root, held, key_epoch, first_generation],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_generation' AND value=?3",
+                rusqlite::params![second_generation, config.namespace.as_str(), first_generation],
+            )
+            .unwrap(),
+        1
+    );
+    crate::storage::sqlite::semantic::origin::record_receipt(
+        &transaction,
+        &owner,
+        &token,
+        second.base_generation.as_deref(),
+        &second_model_witness,
+        &second_publication,
+        &second.claims,
+        second_generation,
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_publications WHERE origin_epoch=?1 AND held_epoch=?2 AND key_epoch=?3",
+            rusqlite::params![root, held, key_epoch],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2,
+        "distinct owner/source selections share a holder and derived-key epoch"
+    );
+    let guarded = [
+        "catalog_semantic_stage",
+        "catalog_semantic_sources",
+        "catalog_semantic_origin_owners",
+        "catalog_semantic_origin_sources",
+        "catalog_semantic_origin_publications",
+        "session_catalog_invalidations",
+        "session_catalog",
+        "session_catalog_sources",
+        "storage_catalog_native_observation_grants",
+        "files",
+        "meta",
+    ];
+    for table in guarded {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            db.execute_batch(&format!("CREATE TRIGGER origin_group_replay_no_write_{table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'group receipt replay must not write'); END;"))
+                .unwrap();
+        }
+    }
+    assert_eq!(
+        cache.publish_partial_catalog_fenced(&second).unwrap(),
+        (
+            crate::events::Outcome::Written,
+            Some(second_generation.to_owned())
+        ),
+        "the exact second group replays before observing the advanced live head"
+    );
+    for table in guarded {
+        for operation in ["INSERT", "UPDATE", "DELETE"] {
+            db.execute_batch(&format!("DROP TRIGGER origin_group_replay_no_write_{table}_{operation}")).unwrap();
+        }
+    }
+    assert_eq!(
+        crate::storage::sqlite::semantic::origin::replay(
+            &db,
+            &owner,
+            &token,
+            second.base_generation.as_deref(),
+            &second_model_witness,
+            &second_publication,
+            &second.claims,
+        )
+        .unwrap()
+        .as_deref(),
+        Some(second_generation)
+    );
+
+    let mut changed_transcripts = second.transcripts.clone();
+    changed_transcripts[0].repair = !changed_transcripts[0].repair;
+    let changed_publication = crate::slot_projection::Publication {
+        rows: &second.rows,
+        transcripts: Some(&changed_transcripts),
+        observations: second.presentation_observations(),
+    };
+    assert!(crate::storage::sqlite::semantic::origin::replay(
+        &db,
+        &owner,
+        &token,
+        second.base_generation.as_deref(),
+        &second_model_witness,
+        &changed_publication,
+        &second.claims,
+    )
+    .is_err());
+    assert!(crate::storage::sqlite::semantic::origin::replay(
+        &db,
+        &owner,
+        &token,
+        second.base_generation.as_deref(),
+        &(second_model_witness.clone() + "changed"),
+        &second_publication,
+        &second.claims,
+    )
+    .is_err());
+
+    let third = crate::model::prepare_sources(
+        &fixture.options,
+        &mut cache,
+        &inputs[2..],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let third_publication = crate::slot_projection::Publication {
+        rows: &third.rows,
+        transcripts: Some(&third.transcripts),
+        observations: third.presentation_observations(),
+    };
+    let third_model_witness = third.staged_model_witness().unwrap();
+    db.execute_batch("CREATE TRIGGER origin_group_receipt_fault BEFORE INSERT ON catalog_semantic_origin_publications BEGIN SELECT RAISE(ABORT,'group receipt fault'); END;")
+        .unwrap();
+    let transaction = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    let third_generation = "rolled-back-group-generation";
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE catalog_semantic_stage SET generation=?1 WHERE namespace=?2 AND origin_epoch=?3 AND epoch=?4 AND key_epoch=?5 AND origin_phase='draining' AND generation=?6",
+                rusqlite::params![third_generation, config.namespace.as_str(), root, held, key_epoch, second_generation],
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_generation' AND value=?3",
+                rusqlite::params![third_generation, config.namespace.as_str(), second_generation],
+            )
+            .unwrap(),
+        1
+    );
+    assert!(crate::storage::sqlite::semantic::origin::record_receipt(
+        &transaction,
+        &owner,
+        &token,
+        Some(second_generation),
+        &third_model_witness,
+        &third_publication,
+        &third.claims,
+        third_generation,
+    )
+    .is_err());
+    transaction.rollback().unwrap();
+    db.execute_batch("DROP TRIGGER origin_group_receipt_fault")
+        .unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT generation FROM catalog_semantic_stage WHERE namespace=?1 AND origin_epoch=?2",
+            rusqlite::params![config.namespace.as_str(), root],
+            |row| row.get::<_, Option<String>>(0)
+        )
+        .unwrap()
+        .as_deref(),
+        Some(second_generation)
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+            [config.namespace.as_str()],
+            |row| row.get::<_, String>(0)
+        )
+        .unwrap(),
+        second_generation
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_origin_publications WHERE origin_epoch=?1 AND held_epoch=?2 AND key_epoch=?3",
+            rusqlite::params![root, held, key_epoch],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        2,
+        "a failed group receipt leaves no durable selection or progress"
+    );
+    drop(cache);
 }
 
 #[test]
@@ -8867,6 +9182,26 @@ fn cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin() {
         .unwrap(),
         0
     );
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM catalog_semantic_sources WHERE ack_done=1",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0,
+        "receipt failure must roll back exact source ACK state"
+    );
+    assert_eq!(
+        db.query_row(
+            "SELECT (SELECT count(*) FROM catalog_semantic_origin_owners)+(SELECT count(*) FROM catalog_semantic_origin_sources)",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0,
+        "receipt failure must roll back both origin comparison witnesses"
+    );
     let (origin, held): (i64, i64) = db.query_row("SELECT origin_epoch,epoch FROM catalog_semantic_stage WHERE origin_phase='sealed' AND generation IS NULL", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
     db.execute_batch("DROP TRIGGER origin_receipt_fault")
         .unwrap();
@@ -8899,11 +9234,21 @@ fn cold_origin_receipt_failure_rolls_back_and_restart_keeps_origin() {
     );
     assert!(stale.origin_publication().unwrap().is_none());
     let owner = crate::events::store::configured::NativeOwnership::restore(&config).unwrap();
+    let empty_rows: Vec<crate::model::summary::CatalogRow> = Vec::new();
+    let empty_transcripts: Vec<crate::slot_projection::Projection> = Vec::new();
+    let empty_publication = crate::slot_projection::Publication {
+        rows: &empty_rows,
+        transcripts: Some(&empty_transcripts),
+        observations: None,
+    };
     assert!(
         crate::storage::sqlite::semantic::origin::validate_publication(
             &db,
             &owner,
             &old_token,
+            None,
+            "",
+            &empty_publication,
             &[]
         )
         .is_err()
