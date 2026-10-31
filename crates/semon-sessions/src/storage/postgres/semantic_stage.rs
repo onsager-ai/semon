@@ -73,6 +73,8 @@ fn load_epoch(
         .map_err(|_| StorageError::ScopeChanged)?
         != stage.binding
     {
+        #[cfg(test)]
+        eprintln!("selected_large_fixture pg_record_refusal=stage_binding");
         return Err(StorageError::Conflict);
     }
     Ok(Some(stage))
@@ -262,6 +264,16 @@ fn checked(tx: &mut PgTxn<'_>, batch: &Batch) -> Result<Stage, StorageError> {
             != serde_json::to_vec(&batch.context).map_err(|_| StorageError::ScopeChanged)?
         || model_cache::generation(tx)? != stage.generation
     {
+        #[cfg(test)]
+        eprintln!(
+            "selected_large_fixture pg_record_refusal=checked epoch={} phase={} paths={} runtime={} generation={} revision={}",
+            stage.epoch == batch.epoch,
+            stage.phase == batch.phase,
+            stage.paths == batch.paths,
+            stage.runtime == batch.runtime,
+            stage.generation == batch.base_generation,
+            stage.revision == batch.source_revision,
+        );
         return Err(StorageError::Conflict);
     }
     Ok(stage)
@@ -281,6 +293,8 @@ fn claims(
             .collect::<std::collections::BTreeSet<_>>()
             != batch.paths.iter().collect()
     {
+        #[cfg(test)]
+        eprintln!("selected_large_fixture pg_record_refusal=claim_membership");
         return Err(StorageError::Conflict);
     }
     withdrawals(tx, batch, prepared)?;
@@ -298,6 +312,8 @@ fn claims(
     for (path, expected) in &prepared.claims {
         let rows = tx.driver.query("SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?;
         if rows.first().map(|row| row.get::<_, i64>(0)) != *expected {
+            #[cfg(test)]
+            eprintln!("selected_large_fixture pg_record_refusal=claim_revision");
             return Err(StorageError::Conflict);
         }
     }
@@ -350,9 +366,13 @@ fn absent(
         return Ok(true);
     }
     if !prepared.removed_sources.contains(path) {
+        #[cfg(test)]
+        eprintln!("selected_large_fixture pg_record_refusal=physical_absence_unobserved");
         return Ok(false);
     }
     let removed: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed')", &[&tx.namespace.as_str().as_bytes(), &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
+    #[cfg(test)]
+    eprintln!("selected_large_fixture pg_absence durable_removed_claim={removed}");
     Ok(removed
         && (super::native_keys::read_meta(tx, format!("source-retired:{path}").as_bytes(), 16384)?
             .is_some()
