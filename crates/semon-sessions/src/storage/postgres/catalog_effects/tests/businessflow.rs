@@ -1579,31 +1579,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .unwrap();
             let source_proof = |source: &crate::model::summary::CatalogSource| {
-                let identity = format!(
-                    "{:x}",
-                    sha2::Sha256::digest(serde_json::to_vec(source).unwrap())
-                );
-                let prefix = source
-                    .prefix_sha256
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
-                let tail = source
-                    .tail_sha256
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
                 serde_json::json!({
-                    "identity_sha256": identity,
-                    "native_id": source.native_id,
-                    "size": source.size,
+                    "identity_sha256": format!(
+                        "{:x}",
+                        sha2::Sha256::digest(serde_json::to_vec(source).unwrap())
+                    ),
                     "offset": source.offset,
-                    "prefix_sha256": prefix,
-                    "tail_sha256": tail,
                 })
             };
             let target = context.iter().find(|candidate| candidate.key == key).unwrap();
             let retained_parent_source = parent_source(&parent_history_after_withdrawal);
+            let mut recipe_count = 0;
             for edge in target
                 .query
                 .as_ref()
@@ -1622,59 +1608,43 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     else {
                         continue;
                     };
+                    recipe_count += 1;
                     let exact_match = context
                         .iter()
                         .flat_map(|candidate| &candidate.sources)
                         .any(|source| source == &expected);
-                    let expected_owner = if expected == continued_parent_source {
-                        "Catalog"
+                    let fixture_revision = if expected == continued_parent_source {
+                        "continued_parent"
                     } else if expected == retained_parent_source {
-                        "History"
-                    } else if let Some(candidate) = context
-                        .iter()
-                        .find(|candidate| candidate.sources.contains(&expected))
-                    {
-                        if crate::history_projection::catalog(&diagnostic_tx, &candidate.key)
-                            .unwrap()
-                            .is_some()
-                        {
-                            "History"
-                        } else {
-                            "Catalog"
-                        }
-                    } else if withdrawal_prepared
-                        .rows
-                        .iter()
-                        .any(|candidate| candidate.sources.contains(&expected))
-                    {
-                        "Catalog"
+                        "original_parent"
                     } else {
-                        "unresolved"
+                        "other"
                     };
-                    let qualified_context = context
+                    let query_context_sources = context
                         .iter()
-                        .flat_map(|candidate| {
-                            candidate.sources.iter().map(|source| {
-                                serde_json::json!({
-                                    "owner_key": candidate.key,
-                                    "owner_harness": candidate.harness,
-                                    "lifecycle": candidate.lifecycle.as_str(),
-                                    "source": source_proof(source),
-                                })
+                        .map(|candidate| {
+                            serde_json::json!({
+                                "owner_key": candidate.key,
+                                "owner_harness": candidate.harness,
+                                "sources": candidate.sources.iter().map(source_proof).collect::<Vec<_>>(),
                             })
                         })
                         .collect::<Vec<_>>();
                     eprintln!(
-                        "retained_handoff_source key={key} edge={} from={} to={} field={field} recipe_offset={} expected_owner={expected_owner} exact_match={exact_match} recipe_source={} qualified_context={}",
+                        "retained_handoff_source key={key} edge={} from={} to={} field={field} recipe_offset={} fixture_revision={fixture_revision} exact_match={exact_match} recipe_source={} query_context={}",
                         edge["id"].as_str().unwrap_or(""),
                         edge["query"]["from"].as_str().unwrap_or(""),
                         edge["query"]["to"].as_str().unwrap_or(""),
                         recipe["offset"].as_u64().unwrap_or_default(),
                         source_proof(&expected),
-                        serde_json::Value::Array(qualified_context),
+                        serde_json::Value::Array(query_context_sources),
                     );
                 }
             }
+            assert!(
+                recipe_count > 0,
+                "retained fixture {key} has no handoff source recipes to diagnose"
+            );
             diagnostic_tx.commit().unwrap();
             let fields = retained_query
                 .call_selected_at(
