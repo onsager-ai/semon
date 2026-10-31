@@ -433,8 +433,15 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     // History, preserving its existing producer proof and detached payload.
     snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
         let selected = held.catalog(&row.key, false)?.unwrap();
-        let next =
-            super::native_history::advance(&pg_options, &selected, "query-recipe-import-next");
+        let continued =
+            crate::storage::transfer::reported::tests::advance_catalog(&config, &pg_options);
+        assert_eq!(continued.len(), 1);
+        assert_eq!(continued[0].key, selected.key);
+        assert_ne!(continued[0].sources, selected.sources);
+        let next = crate::events::EventCache::open_configured(&config)
+            .unwrap()
+            .session_catalog_generation()
+            .unwrap();
         assert_eq!(
             held.load_query_recipe(&token).unwrap().as_ref(),
             Some(expected)
