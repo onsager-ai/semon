@@ -8192,7 +8192,14 @@ mod tests {
                                         == Some(&rusqlite::types::Value::Text(
                                             namespace.to_owned(),
                                         ))
-                                        && row.get(1).and_then(rusqlite::types::Value::as_str)
+                                        && row
+                                            .get(1)
+                                            .and_then(|value| match value {
+                                                rusqlite::types::Value::Text(text) => {
+                                                    Some(text.as_str())
+                                                }
+                                                _ => None,
+                                            })
                                             .is_some_and(|saved| {
                                                 saved == format!("history_transfer:{key}")
                                                     || saved
@@ -8225,13 +8232,14 @@ mod tests {
                 let old = before["session_catalog"]
                     .iter()
                     .find(|row| {
-                        row.first()
-                            == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
-                            && row.get(1)
-                                == Some(&rusqlite::types::Value::Text(key.to_owned()))
+                        row.first() == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
+                            && row.get(1) == Some(&rusqlite::types::Value::Text(key.to_owned()))
                     })
                     .and_then(|row| row.get(2))
-                    .and_then(rusqlite::types::Value::as_str)
+                    .and_then(|value| match value {
+                        rusqlite::types::Value::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
                     .expect("deferred owner was previously Current");
                 let mut old_row: crate::model::summary::CatalogRow =
                     serde_json::from_str(old).unwrap();
@@ -8276,14 +8284,10 @@ mod tests {
                     )
                     .optional()
                     .unwrap();
-                let original_header = original_header.map(|(generation, version, source, total)| {
-                    (
-                        generation,
-                        u32::try_from(version).unwrap(),
-                        source,
-                        total,
-                    )
-                });
+                let original_header =
+                    original_header.map(|(generation, version, source, total)| {
+                        (generation, u32::try_from(version).unwrap(), source, total)
+                    });
                 let expected_header = serde_json::to_string(&original_header).unwrap();
                 let saved_header: String = db
                     .query_row(
@@ -8292,14 +8296,19 @@ mod tests {
                         |row| row.get(0),
                     )
                     .unwrap();
-                assert_eq!(saved_header, expected_header, "original recipe header stays exact");
-                assert!(db
-                    .query_row(
+                assert_eq!(
+                    saved_header, expected_header,
+                    "original recipe header stays exact"
+                );
+                assert!(
+                    db.query_row(
                         "SELECT NOT EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key=?2)",
                         rusqlite::params![namespace, format!("history_transfer:{key}")],
                         |row| row.get::<_, bool>(0),
                     )
-                    .unwrap(), "small fixture custody completed without a transfer cursor");
+                    .unwrap(),
+                    "small fixture custody completed without a transfer cursor"
+                );
             }
 
             let namespace = cache
@@ -8332,13 +8341,7 @@ mod tests {
                                 panic!("unexpected Deferred custody before {point}");
                             };
                             let after = shared_state(f);
-                            assert_deferred_original_custody(
-                                f,
-                                &namespace,
-                                owner,
-                                &before,
-                                &after,
-                            );
+                            assert_deferred_original_custody(f, &namespace, owner, &before, &after);
                             deferred_owners.remove(0);
                         }
                         Err(error) => {
@@ -8547,11 +8550,8 @@ mod tests {
             let foreign = namespace_state(&f, "source-b");
             let original_slots = rows(&f, "session_slots", "parent");
             let original_slot_header = rows(&f, "session_slot_projections", "parent");
-            let retained_trace = [
-                "session_trace_headers",
-                "session_trace_edges",
-            ]
-            .map(|table| (table, rows(&f, table, "parent")));
+            let retained_trace = ["session_trace_headers", "session_trace_edges"]
+                .map(|table| (table, rows(&f, table, "parent")));
             let old: String = f.db().query_row("SELECT metadata FROM session_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get(0)).unwrap();
             let mut expected_retained: crate::model::summary::CatalogRow =
                 serde_json::from_str(&old).unwrap();
@@ -8610,7 +8610,10 @@ mod tests {
             assert_eq!(db.query_row("SELECT metadata FROM session_history_catalog WHERE namespace='source-a' AND session_key='parent'",[],|r|r.get::<_,String>(0)).unwrap(),expected_retained);
             assert_eq!(db.query_row("SELECT parent_key FROM session_catalog WHERE namespace='source-a' AND session_key='child'",[],|r|r.get::<_,String>(0)).unwrap(),"successor");
             assert_eq!(rows(&f, "session_slots", "parent"), original_slots);
-            assert_eq!(rows(&f, "session_slot_projections", "parent"), original_slot_header);
+            assert_eq!(
+                rows(&f, "session_slot_projections", "parent"),
+                original_slot_header
+            );
             assert_eq!(rows(&f, "session_history_slots", "parent"), original_slots);
             let history_header: Option<(String, String, i64, i64, bool)> = db
                 .query_row(
@@ -8620,14 +8623,16 @@ mod tests {
                 )
                 .optional()
                 .unwrap();
-            assert!(history_header.is_some_and(|(generation, source, version, total, incomplete)| {
-                let original = &original_slot_header[0];
-                generation == original[2].as_str().unwrap()
-                    && source == original[3].as_str().unwrap_or_default()
-                    && version == original[4].as_i64().unwrap()
-                    && total == original[5].as_i64().unwrap()
-                    && !incomplete
-            }));
+            assert!(history_header.is_some_and(
+                |(generation, source, version, total, incomplete)| {
+                    let original = &original_slot_header[0];
+                    rusqlite::types::Value::Text(generation) == original[2]
+                        && rusqlite::types::Value::Text(source) == original[3]
+                        && rusqlite::types::Value::Integer(version) == original[4]
+                        && rusqlite::types::Value::Integer(total) == original[5]
+                        && !incomplete
+                }
+            ));
             let original_header: Option<(String, i64, Option<String>, i64)> = db
                 .query_row(
                     "SELECT generation,version,source_generation,total FROM session_slot_projections WHERE namespace='source-a' AND session_key='parent'",
@@ -9183,7 +9188,10 @@ mod tests {
                 .unwrap()
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()
                 .unwrap();
-            assert_eq!(current, expected_current, "Current metadata matches the restarted cohort");
+            assert_eq!(
+                current, expected_current,
+                "Current metadata matches the restarted cohort"
+            );
             let history = db
                 .prepare(
                     "SELECT session_key,metadata FROM session_history_catalog WHERE namespace='source-a' ORDER BY session_key",
@@ -9193,10 +9201,21 @@ mod tests {
                 .unwrap()
                 .collect::<rusqlite::Result<BTreeMap<_, _>>>()
                 .unwrap();
-            assert_eq!(history, prior_history, "unchanged source revisions add no History");
+            assert_eq!(
+                history, prior_history,
+                "unchanged source revisions add no History"
+            );
             for (key, (header, slots)) in prior_recipes {
-                assert_eq!(rows(&f, "session_slot_projections", &key), header, "Current recipe header for {key}");
-                assert_eq!(rows(&f, "session_slots", &key), slots, "Current recipe for {key}");
+                assert_eq!(
+                    rows(&f, "session_slot_projections", &key),
+                    header,
+                    "Current recipe header for {key}"
+                );
+                assert_eq!(
+                    rows(&f, "session_slots", &key),
+                    slots,
+                    "Current recipe for {key}"
+                );
             }
             for projection in &model.prepared().transcripts {
                 let stored: Vec<String> = db
