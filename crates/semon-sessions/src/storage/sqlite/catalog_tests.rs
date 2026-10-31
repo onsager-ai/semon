@@ -4380,9 +4380,8 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         let original_source = original.sources.first().unwrap().clone();
         let original_source_generation =
             crate::retention::source_generation(&original.sources).unwrap();
-        let original_source_ledger = crate::source_carrier::ledger_digest(
-            &crate::source_carrier::ledger(&original_source),
-        );
+        let original_source_ledger =
+            crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&original_source));
         let original_projection: (String, String, i64, i64) = db
             .query_row(
                 "SELECT generation,source_generation,version,total FROM main.session_slot_projections WHERE session_key='live-history'",
@@ -4470,9 +4469,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         original_source_generation
     );
     assert_eq!(
-        crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
-            &history.sources[0],
-        )),
+        crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(&history.sources[0],)),
         original_source_ledger
     );
     let history_projection: (String, String, i64, i64) = db
@@ -4563,8 +4560,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
         .unwrap()
         .expect("exact History recipe must qualify through its original source prefix");
     assert_eq!(
-        history_transcript["entries"],
-        original_transcript["entries"],
+        history_transcript["entries"], original_transcript["entries"],
         "History must read the original transcript from its retained prefix"
     );
     let current_entries = current_transcript["entries"].to_string();
@@ -4572,8 +4568,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     assert!(current_entries.contains("Checking the available choices."));
     assert!(!history_entries.contains("Checking the available choices."));
     assert_ne!(
-        current_transcript["entries"],
-        history_transcript["entries"],
+        current_transcript["entries"], history_transcript["entries"],
         "Current includes appended progress while History remains original"
     );
     let facts_path = fixture.options.facts.as_ref().unwrap();
