@@ -4716,6 +4716,7 @@ mod tests {
     #[test]
     fn configured_semantic_reprice_preserves_stage_only_authority() {
         use crate::storage::native_events::NativeEventStore;
+        use std::io::Write;
         use crate::storage::sqlite::proof_generations::{
             CatalogObservationOwner, observation_binding, prepare_repriced_observation,
         };
@@ -4733,7 +4734,17 @@ mod tests {
         let (batch, model) = model_ready(&a, &mut cache, &options[1], &inputs[1], "stage-reprice");
         assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
         cache.finish_semantic_stage(batch.epoch).unwrap();
+        let mut retained = model.prepared().rows[0].clone();
+        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"model-1","uuid":"reprice-successor","parentUuid":"answer","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"retained price cohort"}})).unwrap();
+        drop(raw);
+        cache.ingest(&"b".repeat(64), &path, "claude").unwrap();
+        let (batch, model) = model_ready(&a, &mut cache, &options[1], &inputs[1], "stage-reprice-successor");
+        assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);
+        cache.finish_semantic_stage(batch.epoch).unwrap();
         let original = model.prepared().rows[0].clone();
+        assert_ne!(retained.sources, original.sources, "actual append publishes a divergent source cohort");
         let binding = cache.query_runtime_binding().unwrap().unwrap();
         let owner = NativeOwnership::restore(&b).unwrap();
         let mut db = crate::storage::sqlite::semantic::pricing_connection(&owner).unwrap();
@@ -4742,6 +4753,12 @@ mod tests {
             [b.namespace.as_str()], |r| r.get::<_, i64>(0),
         ).unwrap(), 0, "semantic publication starts with immutable Stage authority only");
         assert!(observation_binding(&db, &binding, &original).is_ok());
+        assert!(observation_binding(&db, &binding, &retained).is_ok());
+        let history_before: String = db.query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![b.namespace.as_str(), retained.key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(history_before, serde_json::to_string(&retained).unwrap());
         let proofs = shared_state(&a).into_iter().filter(|(table, _)| {
             table.starts_with("storage_proof_") || table == "storage_semantic_publications"
         }).collect::<BTreeMap<_, _>>();
@@ -4768,6 +4785,12 @@ mod tests {
         assert_ne!(repriced.cost.usd, original.cost.usd);
         assert_eq!(repriced.cost.pricing_fingerprint, table.fingerprint);
         assert!(observation_binding(&db, &binding, &repriced).is_ok());
+        let history_after: String = db.query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![b.namespace.as_str(), retained.key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(history_after, history_before, "divergent original History remains byte-for-byte unchanged");
+        assert!(observation_binding(&db, &binding, &retained).is_ok());
         assert_eq!(shared_state(&a).into_iter().filter(|(table, _)| {
             table.starts_with("storage_proof_") || table == "storage_semantic_publications"
         }).collect::<BTreeMap<_, _>>(), proofs, "original Stage receipts, proof rows and references are immutable");
