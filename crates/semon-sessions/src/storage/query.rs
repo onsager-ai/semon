@@ -367,13 +367,13 @@ pub(crate) trait QueryCatalogStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::{
         fs,
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
         time::Duration,
     };
-    use serde_json::json;
 
     static NEXT_PRODUCER_HOME: AtomicU64 = AtomicU64::new(0);
 
@@ -514,10 +514,7 @@ mod tests {
         const NOW: i64 = BASE + 86_400_000;
 
         let home = ProducerHome::new();
-        let mut records = vec![producer_human(
-            producer_timestamp(0, 0),
-            "fixed prompt",
-        )];
+        let mut records = vec![producer_human(producer_timestamp(0, 0), "fixed prompt")];
         for index in 0..PREFIX {
             let minute = (index + 1) * 10;
             let time = producer_timestamp((minute / 60) as i64, (minute % 60) as i64);
@@ -527,11 +524,9 @@ mod tests {
         records.push(producer_assistant(producer_timestamp(23, 59), "fixed tail"));
         home.top(&records);
 
-        let mut cache = crate::events::EventCache::open_scoped(
-            &home.options.cache,
-            &home.options.source,
-        )
-        .unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
         crate::model::capture_observed_catalog_rows();
         crate::model::observe_catalog(
             &home.options,
@@ -560,15 +555,11 @@ mod tests {
             serde_json::to_value(&recipe).unwrap()
         );
 
-        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
-            .unwrap();
-        let persisted: String = db
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key='lead'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        let persisted = crate::storage::sqlite::query::test_persisted_catalog_metadata(
+            &home.options,
+            "lead",
+        )
+        .unwrap();
         assert!(
             persisted.len() > 8192,
             "growing producer Catalog metadata should exceed the cell bound: {} bytes",
@@ -583,9 +574,7 @@ mod tests {
         let prepared = crate::query_projection::SelectedRecipe::prepare(&producer_row).unwrap();
         assert!(prepared.metadata.len() < 8192);
         let payload = prepared.query_recipe.as_deref().unwrap();
-        assert!(
-            prepared.metadata.len() + payload.len() <= super::super::proof_codec::METADATA_MAX
-        );
+        assert!(prepared.metadata.len() + payload.len() <= super::super::proof_codec::METADATA_MAX);
 
         let compact: crate::model::summary::CatalogRow =
             serde_json::from_str(&prepared.metadata).unwrap();
@@ -593,8 +582,8 @@ mod tests {
         assert_eq!(compact.harness, producer_row.harness);
         assert_eq!(compact.sources, producer_row.sources);
         let mut expected_query = producer_row.query.clone().unwrap();
-        expected_query["selected"] = serde_json::to_value(recipe.reference(&producer_row).unwrap())
-            .unwrap();
+        expected_query["selected"] =
+            serde_json::to_value(recipe.reference(&producer_row).unwrap()).unwrap();
         // The selected reference changes; every producer-owned Query observation remains exact.
         assert_eq!(compact.query.as_ref(), Some(&expected_query));
 
