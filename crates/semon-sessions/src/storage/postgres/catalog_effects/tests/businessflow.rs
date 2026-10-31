@@ -1316,6 +1316,100 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    // Both withdrawn Claude runs lack a native hand-back. Their historical
+    // unfinished spawns keep them in an output window even after its cutoff
+    // passes every timestamp. Capture full public responses for each context,
+    // including the Query's window_start envelope, before the SQLite guard.
+    let expired_window_at = 1790812802000 + 86_400_000;
+    let retained_window_contexts = [
+        (true, Duration::from_secs(86400 * 365 * 100), 1790812802000),
+        (false, Duration::from_secs(86400 * 365 * 100), 1790812802000),
+        (false, Duration::from_secs(1), expired_window_at),
+    ];
+    assert_eq!(
+        oracle_withdrawn
+            .iter()
+            .map(|row| row["key"].as_str().unwrap())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["related154", "related191"])
+    );
+    let mut oracle_retained_windows = std::collections::BTreeMap::new();
+    for &(all, since, at) in &retained_window_contexts {
+        let mut window_options = withdraw_options.clone();
+        window_options.all = all;
+        window_options.scan_window = false;
+        window_options.since = since;
+        let mut window_query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), window_options)]),
+        ));
+        for row in &oracle_withdrawn {
+            let key = row["key"].as_str().unwrap();
+            let body = window_query
+                .call_selected_at(
+                    recent_machine,
+                    key,
+                    "read_transcript",
+                    &serde_json::json!({"id":key,"limit":100}),
+                    Some(&sqlite_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    at,
+                )
+                .expect("SQLite unfinished retained body in its output window");
+            let fields = window_query
+                .call_selected_at(
+                    recent_machine,
+                    key,
+                    "get_session",
+                    &serde_json::json!({"id":key}),
+                    Some(&sqlite_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    at,
+                )
+                .expect("SQLite unfinished retained fields in their output window");
+            assert!(
+                fields["session"]["handoffs"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|handoff| handoff["kind"] == "spawn" && handoff["status"] == "work")
+            );
+            let window_start = (!all).then(|| at - i64::try_from(since.as_millis()).unwrap());
+            assert_eq!(body["window_start"], serde_json::json!(window_start));
+            assert_eq!(fields["window_start"], serde_json::json!(window_start));
+            oracle_retained_windows.insert(
+                (all, since.as_secs(), at, key.to_owned()),
+                serde_json::json!({"body":body,"fields":fields}),
+            );
+        }
+    }
+    // Codex accepts this child's final assistant reply as its native result;
+    // it has no live writer lock or unfinished handoff. An old last turn alone
+    // must not retain its membership after the output cutoff.
+    let mut expired_options = withdraw_options.clone();
+    expired_options.all = false;
+    expired_options.scan_window = false;
+    expired_options.since = Duration::from_secs(1);
+    let mut expired_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(recent_machine.into(), expired_options)]),
+    ));
+    let oracle_expired_reads = ["get_session", "read_transcript"]
+        .into_iter()
+        .map(|tool| {
+            let error = expired_query
+                .call_selected_at(
+                    recent_machine,
+                    child_id,
+                    tool,
+                    &serde_json::json!({"id":child_id}),
+                    Some(&sqlite_host),
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    expired_window_at,
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "unknown_session");
+            (tool, error)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
     let oracle_retained_search = oracle_withdrawn
         .iter()
         .map(|row| {
@@ -5432,12 +5526,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         b"changed current Facts after retained publication",
     )
     .unwrap();
-    let retained_key = removed.iter().next().unwrap();
-    for all in [true, false] {
+    for &(all, since, at) in &retained_window_contexts {
         let mut retained_options = facts_options.clone();
         retained_options.all = all;
         retained_options.scan_window = false;
-        retained_options.since = Duration::from_secs(86400 * 365 * 100);
+        retained_options.since = since;
+        let mut retained_query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(
+                namespace.as_str().into(),
+                retained_options.clone(),
+            )]),
+        ));
         let retained_runtime_store = super::super::snapshot::query::QueryCatalog {
             captured: false,
             pool: pool.clone(),
@@ -5446,62 +5545,92 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             generation: caught.clone(),
             options: retained_options,
         };
-        let retained_fields = query
-            .call_bound_selected_at(
-                "get_session",
-                &serde_json::json!({"id":retained_key}),
-                1790812802000,
-                &retained_runtime_store,
-                &withdrawal_host,
-                None,
-            )
-            .unwrap();
-        assert!(retained_fields["session"].is_object());
-        assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
-        assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
-        assert_eq!(
-            retained_fields["session"]["open_question"],
-            serde_json::Value::Null
-        );
-        let body = query
-            .call_bound_selected_at(
-                "read_transcript",
-                &serde_json::json!({"id":retained_key,"limit":100}),
-                1790812802000,
-                &retained_runtime_store,
-                &retained_host,
-                None,
-            )
-            .unwrap();
-        assert_eq!(body["sid"], *retained_key);
-        assert!(body.to_string().contains("sanitized agent answer"));
+        for retained_key in &removed {
+            let retained_fields = retained_query
+                .call_bound_selected_at(
+                    "get_session",
+                    &serde_json::json!({"id":retained_key}),
+                    at,
+                    &retained_runtime_store,
+                    &withdrawal_host,
+                    None,
+                )
+                .unwrap();
+            assert!(retained_fields["session"].is_object());
+            assert_eq!(retained_fields["session"]["alive"], serde_json::Value::Null);
+            assert_eq!(retained_fields["session"]["run"], serde_json::Value::Null);
+            assert_eq!(
+                retained_fields["session"]["open_question"],
+                serde_json::Value::Null
+            );
+            let body = retained_query
+                .call_bound_selected_at(
+                    "read_transcript",
+                    &serde_json::json!({"id":retained_key,"limit":100}),
+                    at,
+                    &retained_runtime_store,
+                    &retained_host,
+                    None,
+                )
+                .unwrap();
+            assert_eq!(body["sid"], *retained_key);
+            assert!(body.to_string().contains("sanitized agent answer"));
+            assert_eq!(
+                serde_json::json!({"body":body,"fields":retained_fields}),
+                oracle_retained_windows[&(all, since.as_secs(), at, retained_key.clone())],
+                "SQLite retained output-window parity all={all} since={since:?} at={at} {retained_key}"
+            );
+        }
     }
-    // The same genuine retained owner falls outside a later cutoff. Its last
-    // turn must not bring old completed handoffs back into the window.
+    // The zero-row publication retained the completed Codex child. Its old
+    // last turn must not revive it after the output cutoff, unlike the
+    // unfinished Claude spawns above.
+    super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &retired,
+        |snapshot| {
+            assert!(snapshot.catalog(child_id, false)?.is_none());
+            assert!(snapshot.owner(child_id)?.is_some());
+            Ok(())
+        },
+    )
+    .unwrap();
     let mut expired_options = facts_options.clone();
     expired_options.all = false;
     expired_options.scan_window = false;
     expired_options.since = Duration::from_secs(1);
+    let mut expired_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(
+            namespace.as_str().into(),
+            expired_options.clone(),
+        )]),
+    ));
     let expired_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
         control: control.clone(),
-        generation: caught.clone(),
+        generation: retired.clone(),
         options: expired_options,
     };
     for tool in ["get_session", "read_transcript"] {
-        let error = query
+        let error = expired_query
             .call_bound_selected_at(
                 tool,
-                &serde_json::json!({"id":retained_key}),
-                1790812802000 + 86_400_000,
+                &serde_json::json!({"id":child_id}),
+                expired_window_at,
                 &expired_store,
                 &withdrawal_host,
                 None,
             )
             .unwrap_err();
         assert_eq!(error.code, "unknown_session");
+        assert_eq!(
+            error, oracle_expired_reads[tool],
+            "SQLite expired {tool} parity"
+        );
     }
     // Live Current reads refuse after the canonical Facts bytes change.
     // Explicit captured reads of that same immutable generation retain their
