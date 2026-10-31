@@ -4850,25 +4850,40 @@ mod tests {
         use crate::storage::sqlite::proof_generations::{
             CatalogObservationOwner, load_query_recipe, query_recipe_observation,
         };
-        let (fixture, _, options, inputs) = model_sources();
-        let path = inputs[0].full_path(&options[0]);
-        // The native CWD fits the trace header limit, but escaping its JSON
-        // again inside the captured presentation exceeds the Catalog limit.
-        let cwd = serde_json::to_string(&format!("/{}", "\"".repeat(300_000))).unwrap();
-        let raw = fs::read_to_string(&path)
-            .unwrap()
-            .replace("\"/sanitized\"", &cwd);
-        fs::write(&path, raw).unwrap();
+        let (fixture, _, options, _) = model_sources();
+        let input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/sanitized/large-presentation.jsonl".into(),
+        };
+        let path = input.full_path(&options[0]);
+        // A top-level Claude role stores the project slug, not the native CWD.
+        // One prompt keeps its slot and trace header below 1 MiB; escaping the
+        // details JSON again inside the presentation exceeds that limit.
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "user",
+                    "sessionId": "large-presentation",
+                    "uuid": "first",
+                    "timestamp": "2026-10-01T00:00:00Z",
+                    "cwd": format!("/{}", "\"".repeat(300_000)),
+                    "message": {"role": "user", "content": "bounded presentation fixture"}
+                })
+            ),
+        )
+        .unwrap();
         let mut cache = EventCache::open_semantic(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap(),
         )
         .unwrap();
-        cache.ingest(&"a".repeat(64), &path, "codex").unwrap();
+        cache.ingest(&"a".repeat(64), &path, "claude").unwrap();
         let (batch, model) = model_ready(
             &fixture,
             &mut cache,
             &options[0],
-            &inputs[0],
+            &input,
             "recipe-immutable",
         );
         assert_eq!(
