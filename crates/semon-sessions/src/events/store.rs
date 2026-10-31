@@ -254,7 +254,7 @@ fn emit_catalog_publish_attempt(
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: namespace-owned state includes the NOCASE scheduling indexes.
 // Unsupported stores refuse without reset; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 34;
+pub(crate) const SCHEMA_VERSION: i64 = 35;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
