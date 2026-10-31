@@ -1019,7 +1019,11 @@ pub(crate) fn read_page_snapshot_with_search(
             }
         }
     }
-    measurements.record("catalog_history_qualification", history_started, selected.len());
+    measurements.record(
+        "catalog_history_qualification",
+        history_started,
+        selected.len(),
+    );
     if request.sid.is_some() && selected.is_empty() {
         return Ok(error(
             404,
@@ -1327,7 +1331,11 @@ pub(crate) fn read_page_snapshot_with_search(
         }
         items.push(item);
     }
-    measurements.record("catalog_item_loop_inclusive", item_loop_started, items.len());
+    measurements.record(
+        "catalog_item_loop_inclusive",
+        item_loop_started,
+        items.len(),
+    );
     let runtime_recheck_started = runtime.as_ref().and_then(|_| measurements.start());
     let runtime_changed = runtime.as_ref().is_some_and(|before| {
         transaction.runtime_generation(options).ok().as_ref() != Some(before)
@@ -1391,7 +1399,7 @@ pub(crate) fn read_page_snapshot_with_search(
     measurements.record("catalog_page_total", total_started, 1);
     if timing_enabled {
         measurements.emit(
-            &crate::native_timing::id(&crate::events::EventCache::path(&options.cache)),
+            &crate::native_timing::id(&options.cache),
             "catalog_page_read",
         );
     }
