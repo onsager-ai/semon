@@ -47,7 +47,9 @@ struct EdgeSourceNeed {
     owners: BTreeSet<String>,
 }
 
-fn edge_source_needs(row: &CatalogRow) -> Result<Vec<EdgeSourceNeed>, StorageError> {
+fn edge_source_needs(
+    row: &CatalogRow,
+) -> Result<(Vec<EdgeSourceNeed>, BTreeSet<String>), StorageError> {
     let edges = row
         .query
         .as_ref()
@@ -98,7 +100,30 @@ fn edge_source_needs(row: &CatalogRow) -> Result<Vec<EdgeSourceNeed>, StorageErr
     if endpoint_owners.len() > 64 {
         return Err(StorageError::Busy);
     }
-    Ok(needs)
+    if let Some(summary) = row
+        .query
+        .as_ref()
+        .and_then(|query| query["rows"].get(&row.key))
+        .and_then(|owner| owner["summary"].as_object())
+    {
+        if let Some(parent) = summary.get("parent").and_then(Value::as_str) {
+            endpoint_owners.insert(parent.to_owned());
+        }
+        if let Some(children) = summary.get("children").and_then(Value::as_array) {
+            for child in children {
+                endpoint_owners.insert(
+                    child
+                        .as_str()
+                        .ok_or(StorageError::ScopeChanged)?
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    if endpoint_owners.len() > 64 {
+        return Err(StorageError::Busy);
+    }
+    Ok((needs, endpoint_owners))
 }
 
 /// Resolve saved field dependencies by their exact publication source, rather
@@ -111,7 +136,7 @@ pub(crate) fn selected_edge_context(
     mut candidate: impl FnMut(&str, bool) -> Result<Option<CatalogRow>, StorageError>,
     mut qualify: impl FnMut(&CatalogRow, bool) -> Result<(), StorageError>,
 ) -> Result<Vec<(CatalogRow, bool)>, StorageError> {
-    let needs = edge_source_needs(row)?;
+    let (needs, endpoint_owners) = edge_source_needs(row)?;
     let mut context = vec![(row.clone(), history)];
     let mut sources = BTreeMap::new();
     for source in &row.sources {
@@ -176,6 +201,63 @@ pub(crate) fn selected_edge_context(
         }
         if !matched {
             return Err(StorageError::ScopeChanged);
+        }
+    }
+
+    // Recipe sources above establish exact body ownership first. Endpoint
+    // metadata is then added for saved parent/child fields and edge labels that
+    // are not already represented by one of those owners.
+    for owner in endpoint_owners {
+        if owner == "you" || context.iter().any(|(row, _)| row.key == owner) {
+            continue;
+        }
+
+        let attempts = if history { 2 } else { 1 };
+        let mut selected = None;
+        for candidate_history in [history, false].into_iter().take(attempts) {
+            let key = (owner.clone(), candidate_history);
+            if !candidates.contains_key(&key) {
+                candidates.insert(key.clone(), candidate(&owner, candidate_history)?);
+            }
+            if let Some(row) = candidates.get(&key).cloned().flatten() {
+                selected = Some((row, candidate_history));
+                break;
+            }
+        }
+        let Some((row, candidate_history)) = selected else {
+            continue;
+        };
+        if row.key != owner {
+            return Err(StorageError::ScopeChanged);
+        }
+        // A source-less native stub has no independent Query observation for
+        // finite-window child membership. The saved parent result will filter
+        // it as before.
+        if row.query.is_none() {
+            continue;
+        }
+
+        let mut additions = Vec::new();
+        for source in &row.sources {
+            if let Some(prior) = sources.get(&source.path) {
+                if prior != source {
+                    return Err(StorageError::ScopeChanged);
+                }
+            } else {
+                additions.push(source.clone());
+            }
+        }
+        if sources.len() + additions.len() > 64 || context.len() >= 64 {
+            return Err(StorageError::Busy);
+        }
+
+        let key = (owner, candidate_history);
+        if qualified.insert(key) {
+            qualify(&row, candidate_history)?;
+        }
+        context.push((row, candidate_history));
+        for source in additions {
+            sources.insert(source.path.clone(), source);
         }
     }
     Ok(context)

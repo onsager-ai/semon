@@ -85,6 +85,50 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         let db = home.semantic_publisher_connection();
         let tx = db.unchecked_transaction().unwrap();
         let current = binding.runtime_binding_at(&tx).unwrap();
+        let query_observation_matches = candidate.query.as_ref().is_some_and(|saved| {
+            crate::model::summary::query_observation_matches(
+                saved,
+                &candidate.sources,
+                false,
+                None,
+            )
+            .unwrap_or(false)
+        });
+        assert!(
+            query_observation_matches,
+            "retained context Query observation must match its source generation"
+        );
+        let sources_are_allowlisted = !candidate.sources.is_empty()
+            && candidate.sources.len() <= 64
+            && candidate.sources.iter().all(|source| {
+                crate::catalog::source_relative(&home.options, &candidate.harness, source)
+                    .is_some()
+            });
+        assert!(
+            sources_are_allowlisted,
+            "retained context sources must stay within the candidate harness allowlist"
+        );
+        let owner = if history {
+            crate::storage::catalog::CatalogObservationOwner::History
+        } else {
+            crate::storage::catalog::CatalogObservationOwner::Catalog
+        };
+        let physical_owner_is_bound =
+            crate::storage::sqlite::proof_generations::observation_binding_for_physical_owner(
+                &tx, &current, candidate, owner,
+            )
+            .is_ok();
+        assert!(
+            physical_owner_is_bound,
+            "retained context must bind the candidate's physical Catalog or History owner"
+        );
+        let history_header_is_qualified = !history
+            || crate::history_projection::qualified(&tx, candidate)
+                .is_ok_and(|qualified| qualified);
+        assert!(
+            history_header_is_qualified,
+            "retained context History candidate must have a qualified History header"
+        );
         crate::storage::sqlite::query::qualify_context_candidate(
             &tx,
             &current,
