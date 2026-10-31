@@ -268,7 +268,8 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     ) -> rusqlite::Result<()> {
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let changed=self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
-        let row: CatalogRow = serde_json::from_str(metadata).map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
+        let row: CatalogRow = serde_json::from_str(metadata)
+            .map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
         self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
         if changed > 0 {

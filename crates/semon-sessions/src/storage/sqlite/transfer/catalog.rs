@@ -368,7 +368,12 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         let (activity, active) = crate::storage::query::history_activity(&row);
         (
             "session_key,metadata,query_activity,query_active",
-            vec![values[0].clone(), values[1].clone(), activity.into(), active.into()],
+            vec![
+                values[0].clone(),
+                values[1].clone(),
+                activity.into(),
+                active.into(),
+            ],
         )
     } else {
         (columns, values.clone())

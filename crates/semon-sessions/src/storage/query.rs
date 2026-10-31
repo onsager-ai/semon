@@ -68,7 +68,10 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
     for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
         let edge = &edge["query"];
-        for at in [edge["at"].as_i64(), edge["done"].as_i64()].into_iter().flatten() {
+        for at in [edge["at"].as_i64(), edge["done"].as_i64()]
+            .into_iter()
+            .flatten()
+        {
             last = Some(last.map_or(at, |last| last.max(at)));
         }
         active |= matches!(edge["status"].as_str(), Some("work" | "wait" | "new"));
@@ -113,7 +116,9 @@ pub(crate) fn history_window(
     let mut edge_ids = BTreeMap::new();
     let mut timed_edges = BTreeSet::new();
     for recipe in edges {
-        let id = recipe["id"].as_str().ok_or("retained_query_edge_id_missing")?;
+        let id = recipe["id"]
+            .as_str()
+            .ok_or("retained_query_edge_id_missing")?;
         let query = recipe
             .get("query")
             .and_then(Value::as_object)
@@ -177,7 +182,9 @@ pub(crate) fn history_window(
     let mut rows = BTreeMap::from([(row.key.clone(), owner)]);
     let mut context = BTreeSet::new();
     for id in &kept_edges {
-        let recipe = edge_ids.get(id.as_str()).ok_or("retained_query_link_missing")?;
+        let recipe = edge_ids
+            .get(id.as_str())
+            .ok_or("retained_query_link_missing")?;
         let query = recipe
             .get("query")
             .and_then(Value::as_object)
@@ -188,7 +195,8 @@ pub(crate) fn history_window(
             .filter(|endpoint| *endpoint != "you")
         {
             if let Some(summary) = summaries.get(endpoint) {
-                rows.entry(endpoint.to_owned()).or_insert_with(|| summary.clone());
+                rows.entry(endpoint.to_owned())
+                    .or_insert_with(|| summary.clone());
             } else {
                 context.insert(endpoint.to_owned());
             }
@@ -278,7 +286,11 @@ mod tests {
         }));
         assert_eq!(history_activity(&row), (Some(950), true));
         row.query.as_mut().unwrap()["selected"]["edges"][1]["query"]["status"] = json!("done");
-        assert_eq!(history_activity(&row), (Some(950), false), "a recent or last turn does not admit the owner");
+        assert_eq!(
+            history_activity(&row),
+            (Some(950), false),
+            "a recent or last turn does not admit the owner"
+        );
         row.query.as_mut().unwrap()["state"] = json!("wait");
         assert_eq!(history_activity(&row), (Some(950), true));
         row.query.as_mut().unwrap()["last"] = json!(1000);
@@ -315,7 +327,10 @@ mod tests {
         }));
 
         let window = history_window(&row, Some(900)).unwrap();
-        assert!(window.member, "a recent saved edge admits an old History owner");
+        assert!(
+            window.member,
+            "a recent saved edge admits an old History owner"
+        );
         assert_eq!(
             window.edges,
             BTreeSet::from([

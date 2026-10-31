@@ -110,16 +110,10 @@ fn descendants_with_budget(
     .with_limits(131_072, bytes);
     selected
         .scope(|| {
-            super::super::with_generation(
-                pool,
-                namespace,
-                &cancellation,
-                generation,
-                |snapshot| {
-                    crate::storage::selected::ContextLookup::descendants(snapshot, key)
-                        .map_err(|_| StorageError::Busy)
-                },
-            )
+            super::super::with_generation(pool, namespace, &cancellation, generation, |snapshot| {
+                crate::storage::selected::ContextLookup::descendants(snapshot, key)
+                    .map_err(|_| StorageError::Busy)
+            })
             .map_err(std::io::Error::other)
         })
         .map_err(|_| StorageError::Busy)
@@ -153,13 +147,7 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
         }
         for index in 0..105 {
             let child = format!("fanout-child-{index:03}");
-            insert(
-                tx,
-                ns,
-                &generation,
-                &row(&child, Some("fanout-root")),
-                None,
-            )?;
+            insert(tx, ns, &generation, &row(&child, Some("fanout-root")), None)?;
         }
         let corrupt = row("collision-child", Some("collision-root"));
         insert(
@@ -190,19 +178,16 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
     })
     .unwrap();
 
-    let family = super::super::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
-            selected_family(snapshot, "family-root", &mut |_| {
-                serde_json::json!({"state":"current"})
-            })
+    let family =
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            selected_family(
+                snapshot,
+                "family-root",
+                &mut |_| serde_json::json!({"state":"current"}),
+            )
             .map_err(|_| StorageError::Busy)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert_eq!(family["state"], "complete");
     let family_keys = family["runs"]
         .as_array()
@@ -212,19 +197,16 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
         .collect::<Vec<_>>();
     assert_eq!(family_keys, vec!["family-child", "family-leaf"]);
 
-    let fanout = super::super::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
-            selected_family(snapshot, "fanout-root", &mut |_| {
-                serde_json::json!({"state":"current"})
-            })
+    let fanout =
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            selected_family(
+                snapshot,
+                "fanout-root",
+                &mut |_| serde_json::json!({"state":"current"}),
+            )
             .map_err(|_| StorageError::Busy)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert_eq!(fanout["state"], "incomplete");
     assert_eq!(fanout["runs"].as_array().unwrap().len(), 99);
     let fanout_keys = fanout["runs"]
@@ -235,32 +217,24 @@ fn pg_selected_family_is_scoped_and_bounded_by_its_parent_index() {
         .collect::<Vec<_>>();
     assert!(fanout_keys.windows(2).all(|pair| pair[0] < pair[1]));
 
-    let cycle = super::super::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
-            selected_family(snapshot, "cycle-a", &mut |_| {
-                serde_json::json!({"state":"current"})
-            })
+    let cycle =
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+            selected_family(
+                snapshot,
+                "cycle-a",
+                &mut |_| serde_json::json!({"state":"current"}),
+            )
             .map_err(|_| StorageError::Busy)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     assert_eq!(cycle["state"], "incomplete");
     assert!(cycle["runs"].as_array().unwrap().is_empty());
 
-    let collision = super::super::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
+    let collision =
+        super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
             crate::storage::selected::ContextLookup::descendants(snapshot, "collision-root")
                 .map_err(|_| StorageError::ScopeChanged)
-        },
-    );
+        });
     assert_eq!(collision, Err(StorageError::ScopeChanged));
 }
 

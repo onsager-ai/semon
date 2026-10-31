@@ -251,14 +251,9 @@ pub(crate) fn max_dynamic_bytes(fixed_per_row: usize, max_rows: usize) -> io::Re
     Ok(ACTIVE.with(|active| {
         let active = active.borrow();
         let available = active.as_ref().map_or(DEFAULT_BYTES, |budget| {
-            budget
-                .control
-                .bytes
-                .saturating_sub(budget.bytes.get())
+            budget.control.bytes.saturating_sub(budget.bytes.get())
         });
-        available
-            .saturating_sub(fixed_per_row.saturating_mul(max_rows))
-            / DYNAMIC_MULTIPLIER
+        available.saturating_sub(fixed_per_row.saturating_mul(max_rows)) / DYNAMIC_MULTIPLIER
     }))
 }
 

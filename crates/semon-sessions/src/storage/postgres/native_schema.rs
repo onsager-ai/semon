@@ -916,9 +916,18 @@ mod tests {
     #[test]
     fn pg_native_shape_drift_refuses_warm_admission_before_effects() {
         for (change, controlled) in [
-            ("ALTER TABLE semon_pg_native_catalog_history_headers DROP COLUMN query_active", true),
-            ("DROP INDEX semon_pg_native_catalog_history_query_activity", true),
-            ("DROP INDEX semon_pg_native_catalog_history_query_active", true),
+            (
+                "ALTER TABLE semon_pg_native_catalog_history_headers DROP COLUMN query_active",
+                true,
+            ),
+            (
+                "DROP INDEX semon_pg_native_catalog_history_query_activity",
+                true,
+            ),
+            (
+                "DROP INDEX semon_pg_native_catalog_history_query_active",
+                true,
+            ),
             ("ALTER TABLE semon_pg_native_files DROP COLUMN title", true),
             ("DROP INDEX semon_pg_native_files_cwd", true),
             (

@@ -761,9 +761,8 @@ impl NativeEvidence {
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
-            let discovery_started = crate::native_timing::ColdDiscoveryProgress::start(
-                crate::native_timing::enabled(),
-            );
+            let discovery_started =
+                crate::native_timing::ColdDiscoveryProgress::start(crate::native_timing::enabled());
             let recovery_complete = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "recovery_discovery");
