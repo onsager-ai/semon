@@ -19,7 +19,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
         ),
         ProofGeneration => (
             "semon_pg_native_selected_generations",
-            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+            "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
         ),
         Presentation => (
             "semon_pg_native_selected_presentations",
@@ -39,7 +39,10 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
             "session_key,version,inputs,metadata",
         ),
         HistoryProgress => (HISTORY_PROGRESS, "session_key,metadata"),
-        Current => ("semon_pg_native_catalog_rows", "session_key,metadata"),
+        Current => (
+            "semon_pg_native_catalog_rows",
+            "session_key,metadata,query_recipe",
+        ),
         Recipe => (
             "semon_pg_native_catalog_recipe_headers",
             "session_key,recipe_generation,source_generation,version,total",
@@ -48,7 +51,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
             "semon_pg_native_catalog_recipe_rows",
             "session_key,slot,metadata",
         ),
-        History => (HISTORY, "session_key,metadata"),
+        History => (HISTORY, "session_key,metadata,query_recipe"),
         HistoryRecipe => (
             HISTORY,
             "session_key,recipe_generation,source_generation,version,total,incomplete",
@@ -81,7 +84,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
         ),
     }
 }
-const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.metadata,h.recipe_generation,coalesce(h.source_generation,''::bytea) AS source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key) AS history";
+const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.metadata,h.query_recipe,h.recipe_generation,coalesce(h.source_generation,''::bytea) AS source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key) AS history";
 const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,s.session_key,s.slot,s.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_slots s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key) AS history_slots";
 const HISTORY_PROGRESS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,p.session_key,p.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_progress p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.owner_generation AND p.key_digest=o.key_digest AND p.session_key=o.session_key) AS history_progress";
 const HISTORY_ORIGINAL: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.original_header FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE h.original_header IS NOT NULL) AS history_original";
@@ -356,7 +359,10 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             .as_deref()
             .map(|parent| parent.as_bytes().to_vec());
         if *kind == Current {
-            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9)", &[&ns,&generation.as_bytes(),&key,&parent_key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
+            let query_recipe = values[2]
+                .as_str()
+                .map(|recipe| recipe.as_bytes().to_vec());
+            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,query_recipe,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&parent_key,&metadata.as_bytes(),&query_recipe,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes()]).map_err(sqlstate::error)?;
             // Rebuild the producer's physical incident index from the exact
             // transferred metadata; this is content, never publication authority.
             let edges = row
@@ -378,7 +384,10 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             }
         } else {
             let (activity, active) = crate::storage::query::history_activity(&row);
-            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,NULL,$5,$6,$7,$8,$9,$10,$11)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
+            let query_recipe = values[2]
+                .as_str()
+                .map(|recipe| recipe.as_bytes().to_vec());
+            tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_headers(namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,query_recipe,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,'',NULL,0,0,true,$4,$5,NULL,$6,$7,$8,$9,$10,$11,$12)", &[&ns,&generation.as_bytes(),&key,&metadata.as_bytes(),&query_recipe,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
             tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) VALUES($1,$2,sha256($3::bytea),$3,$2,false,$4,$5,$6,$7,$8,$9,$10)", &[&ns,&generation.as_bytes(),&key,&row.last.unwrap_or(0),&row.harness.as_bytes(),&row.repo.as_deref().unwrap_or("").as_bytes(),&row.model.as_bytes(),&activity,&active,&parent_key]).map_err(sqlstate::error)?;
         }
         let table = if *kind == Current {
@@ -427,7 +436,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         PresentationRoot => ("selected_roots", "publication,base,manifest,digest"),
         ProofGeneration => (
             "selected_generations",
-            "id,session_key,publication,proof,admission,stream,metadata,slots,prefix",
+            "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
         ),
         Presentation => ("selected_presentations", "id,session_key,metadata"),
         ProofSource => ("selected_sources", "id,session_key,path,ledger"),
@@ -603,6 +612,64 @@ mod tests {
     };
     use crate::storage::transfer::reported::tests::{apply, root, seed_catalog, sqlite, stage};
 
+    fn seed_recipe_cells(
+        source: &StoreConfig,
+        current_key: &str,
+        history_key: &str,
+    ) -> (String, String, String, String) {
+        let current_recipe = "{ \"recipe\" : \"current-é\" }\n".to_owned();
+        let history_recipe = "{\n  \"recipe\": \"history-漢字\"\n}\t".to_owned();
+        let current_proof_recipe = "{ \"proof\": \"current-é\" }".to_owned();
+        let history_proof_recipe = "{\"proof\" : \"history-漢字\"}".to_owned();
+        let db = rusqlite::Connection::open(source.backend.sqlite_database().unwrap()).unwrap();
+        let namespace = source.namespace.as_str();
+        db.execute(
+            "UPDATE session_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3",
+            rusqlite::params![&current_recipe, namespace, current_key],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE session_history_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3",
+            rusqlite::params![&history_recipe, namespace, history_key],
+        )
+        .unwrap();
+        let current_proof_id: String = db
+            .query_row(
+                "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' ORDER BY id LIMIT 1",
+                rusqlite::params![namespace, current_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history_proof_id: String = db
+            .query_row(
+                "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id LIMIT 1",
+                rusqlite::params![namespace, history_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable")
+            .unwrap();
+        db.execute(
+            "UPDATE storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
+            rusqlite::params![&current_proof_recipe, namespace, current_proof_id, current_key],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE storage_proof_generations SET query_recipe=?1 WHERE namespace=?2 AND id=?3 AND session_key=?4",
+            rusqlite::params![&history_proof_recipe, namespace, history_proof_id, history_key],
+        )
+        .unwrap();
+        db.execute_batch("CREATE TRIGGER storage_proof_generation_immutable BEFORE UPDATE ON storage_proof_generations BEGIN SELECT RAISE(ABORT,'immutable proof generation'); END;")
+            .unwrap();
+        drop(db);
+        (
+            current_recipe,
+            history_recipe,
+            current_proof_recipe,
+            history_proof_recipe,
+        )
+    }
+
     #[test]
     fn pg_current_transfer225_occupied_description_refused_before_native_commit() {
         let root = root();
@@ -687,6 +754,12 @@ mod tests {
             .unwrap();
         let expected =
             crate::storage::transfer::reported::tests::advance_catalog(&source, &options);
+        let (
+            current_recipe,
+            history_recipe,
+            current_proof_recipe,
+            history_proof_recipe,
+        ) = seed_recipe_cells(&source, &expected[0].key, &initial[0].key);
         // The supported SQLite proof contract predates the optional physical
         // source-ID hint. Its original ledger/header/root remain authoritative.
         originals(&source, &options, &mut host);
@@ -877,6 +950,14 @@ mod tests {
             assert!(super::super::super::model_cache::generation(tx)?.is_none(),"content transfer must not fabricate a publication ACK");
             let native_grants:i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND convert_from(key,'UTF8') LIKE 'catalog-native-observation:%'", &[&ns]).map_err(sqlstate::error)?.get(0);
             assert_eq!(native_grants, 0, "transport must not mint local publisher authority");
+            let current_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(current_recipe_pg.as_deref(), Some(current_recipe.as_bytes()));
+            let history_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&initial[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(history_recipe_pg.as_deref(), Some(history_recipe.as_bytes()));
+            let current_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&expected[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(current_proof_recipe_pg.as_deref(), Some(current_proof_recipe.as_bytes()));
+            let history_proof_recipe_pg: Option<Vec<u8>> = tx.driver.query_one("SELECT query_recipe FROM semon_pg_native_selected_generations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND session_key=$2 AND query_recipe IS NOT NULL LIMIT 1", &[&ns,&initial[0].key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            assert_eq!(history_proof_recipe_pg.as_deref(), Some(history_proof_recipe.as_bytes()));
             Ok(())
         }).unwrap();
         let admitted = config
@@ -1202,6 +1283,48 @@ mod tests {
             );
         }
         apply(&reverse, &backwards);
+        let reverse_db = crate::storage::NativeReaderBinding::Admitted(reverse.clone())
+            .connection()
+            .unwrap();
+        let current_recipe_reversed: Option<String> = reverse_db
+            .query_row(
+                "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                rusqlite::params![reverse.namespace.as_str(), expected[0].key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history_recipe_reversed: Option<String> = reverse_db
+            .query_row(
+                "SELECT query_recipe FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+                rusqlite::params![reverse.namespace.as_str(), initial[0].key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_recipe_reversed.as_deref(), Some(current_recipe.as_str()));
+        assert_eq!(history_recipe_reversed.as_deref(), Some(history_recipe.as_str()));
+        let current_proof_recipe_reversed: Option<String> = reverse_db
+            .query_row(
+                "SELECT query_recipe FROM storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND query_recipe IS NOT NULL LIMIT 1",
+                rusqlite::params![reverse.namespace.as_str(), expected[0].key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history_proof_recipe_reversed: Option<String> = reverse_db
+            .query_row(
+                "SELECT query_recipe FROM storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND query_recipe IS NOT NULL LIMIT 1",
+                rusqlite::params![reverse.namespace.as_str(), initial[0].key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            current_proof_recipe_reversed.as_deref(),
+            Some(current_proof_recipe.as_str())
+        );
+        assert_eq!(
+            history_proof_recipe_reversed.as_deref(),
+            Some(history_proof_recipe.as_str())
+        );
+        drop(reverse_db);
         let mut wrong_epoch = reverse.clone();
         wrong_epoch.expected_stream_epoch = Some("b".repeat(64));
         assert!(
