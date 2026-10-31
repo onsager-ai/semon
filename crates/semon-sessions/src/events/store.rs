@@ -6270,22 +6270,23 @@ mod tests {
                     .unwrap(),
                 Outcome::Written
             );
-            // Warm the actual connection's version/ledger statements before a
-            // separate owner changes authority. SQL reuse must not reuse results.
+            // Warm this connection's version/ledger statements before a second
+            // admitted Event writer changes authority. SQL reuse must not reuse results.
             assert!(current(&store.connection).unwrap());
             assert_eq!(store.ledger("a.jsonl").unwrap(), Some(original.clone()));
-            let external = Connection::open(&path).unwrap();
+            let external = configured::connection(store.owner.config()).unwrap();
             if schema {
                 external
                     .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
                     .unwrap();
             } else {
-                external
+                let changed = external
                     .execute(
-                        "UPDATE meta SET value=?1 WHERE key='cache_version'",
+                        "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
                         [(CACHE_VERSION + 1).to_string()],
                     )
                     .unwrap();
+                assert_eq!(changed, 1, "only the global parser version is updated");
             }
             assert_eq!(
                 store
