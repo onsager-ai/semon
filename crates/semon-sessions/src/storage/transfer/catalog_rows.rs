@@ -775,7 +775,7 @@ pub(crate) fn append(
 }
 
 #[cfg(test)]
-mod tests {
+mod row_validation_tests {
     use super::*;
 
     fn metadata(name: String) -> String {
@@ -806,8 +806,8 @@ mod tests {
         serde_json::to_string(&row).unwrap()
     }
 
-    fn row_record(kind: CatalogRowKind, metadata: String, recipe: Option<&str>) -> TransferRecord {
-        TransferRecord::CatalogRow {
+    fn row_record(kind: CatalogRowKind, metadata: String, recipe: Option<&str>) -> CatalogRowData {
+        CatalogRowData {
             generation: "a".repeat(64),
             kind,
             values: vec![
@@ -818,8 +818,8 @@ mod tests {
         }
     }
 
-    fn proof_generation_record(metadata: String, recipe: Option<&str>) -> TransferRecord {
-        TransferRecord::CatalogRow {
+    fn proof_generation_record(metadata: String, recipe: Option<&str>) -> CatalogRowData {
+        CatalogRowData {
             generation: "a".repeat(64),
             kind: CatalogRowKind::ProofGeneration,
             values: vec![
@@ -838,24 +838,20 @@ mod tests {
     }
 
     #[test]
-    fn recipe_cells_preserve_nullable_bytes_and_combined_bound() {
+    fn current_transfer225_recipe_cells_preserve_nullable_bytes_and_combined_bound() {
         let recipe = " \t{\"opaque\":\"漢字\"}\0\n ";
         for kind in [CatalogRowKind::Current, CatalogRowKind::History] {
             let record = row_record(kind, metadata(String::new()), Some(recipe));
-            validate(&record).unwrap();
+            validate_row(&record).unwrap();
             let encoded = serde_json::to_vec(&record).unwrap();
-            let decoded: TransferRecord = serde_json::from_slice(&encoded).unwrap();
-            validate(&decoded).unwrap();
-            let TransferRecord::CatalogRow { values, .. } = decoded else {
-                unreachable!()
-            };
+            let decoded: CatalogRowData = serde_json::from_slice(&encoded).unwrap();
+            validate_row(&decoded).unwrap();
+            let CatalogRowData { values, .. } = decoded;
             assert_eq!(values[2], serde_json::json!(recipe));
 
             let null = row_record(kind, metadata(String::new()), None);
-            validate(&null).unwrap();
-            let TransferRecord::CatalogRow { values, .. } = null else {
-                unreachable!()
-            };
+            validate_row(&null).unwrap();
+            let CatalogRowData { values, .. } = null;
             assert_eq!(values[2], serde_json::Value::Null);
         }
 
@@ -868,24 +864,51 @@ mod tests {
             metadata("x".repeat(exact_name_len)),
             Some("q"),
         );
-        validate(&exact).unwrap();
+        validate_row(&exact).unwrap();
+        let expected = exact.values.clone();
+        let parts = fragments([11; 32], exact).unwrap();
+        assert!(parts.len() > 1);
+        let mut inbox = tests::MemoryInbox::default();
+        let mut result = None;
+        for part in parts {
+            validate(&part).unwrap();
+            result = apply_fragment(&mut inbox, &part, &[11; 32]).unwrap();
+        }
+        assert_eq!(result.unwrap().values, expected);
 
         let over = row_record(
             CatalogRowKind::Current,
             metadata("x".repeat(exact_name_len + 1)),
             Some("q"),
         );
-        assert!(validate(&over).is_err());
+        assert!(validate_row(&over).is_err());
 
         let proof_recipe = " {\"proof\": \"exact 汉字\"}\n";
         let proof = proof_generation_record(metadata(String::new()), Some(proof_recipe));
-        validate(&proof).unwrap();
-        let decoded: TransferRecord =
+        validate_row(&proof).unwrap();
+        let decoded: CatalogRowData =
             serde_json::from_slice(&serde_json::to_vec(&proof).unwrap()).unwrap();
-        let TransferRecord::CatalogRow { values, .. } = decoded else {
-            unreachable!()
-        };
+        let CatalogRowData { values, .. } = decoded;
         assert_eq!(values[7], serde_json::json!(proof_recipe));
-        validate(&proof_generation_record(metadata(String::new()), None)).unwrap();
+        validate_row(&proof_generation_record(metadata(String::new()), None)).unwrap();
+    }
+
+    #[test]
+    fn current_transfer225_proof_metadata_and_slots_exact_independent_bounds() {
+        let mut metadata = metadata(String::new());
+        metadata.push_str(&" ".repeat(MAX_PAGE_BYTES - metadata.len()));
+        let slots = format!("[]{}", " ".repeat(MAX_PAGE_BYTES - 2));
+        let mut row = proof_generation_record(metadata, None);
+        row.values[8] = slots.clone().into();
+        let expected = row.values.clone();
+        let parts = fragments([12; 32], row).unwrap();
+        assert!(parts.len() > 1);
+        let mut inbox = tests::MemoryInbox::default();
+        let mut result = None;
+        for part in parts {
+            validate(&part).unwrap();
+            result = apply_fragment(&mut inbox, &part, &[12; 32]).unwrap();
+        }
+        assert_eq!(result.unwrap().values, expected);
     }
 }
