@@ -7,6 +7,120 @@ use crate::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Exact residence selected by an admitted store snapshot. This is separate
+/// from Catalog lifecycle: a retained display row can still reside in Current,
+/// and imported originals retain their immutable producer generation.
+#[derive(Clone, Debug)]
+pub(crate) enum QueryRecipeResidence {
+    NativeCatalog {
+        metadata_digest: String,
+    },
+    NativeHistory {
+        metadata_digest: String,
+    },
+    Immutable {
+        owner: QueryRecipeOwner,
+        generation: super::proof_lifetime::ProofGenerationId,
+        publication: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum QueryRecipeOwner {
+    Catalog,
+    History,
+}
+
+/// Store-issued recipe lookup authority. Callers cannot manufacture a History
+/// selection from a lifecycle tag or pass a guessed history boolean to lookup.
+#[derive(Clone, Debug)]
+pub(crate) struct QueryRecipeObservation {
+    pub(in crate::storage) residence: QueryRecipeResidence,
+    pub(in crate::storage) metadata: String,
+    pub(in crate::storage) original: super::QueryRuntimeBinding,
+    pub(in crate::storage) destination: super::QueryRuntimeBinding,
+    row: crate::model::summary::CatalogRow,
+}
+
+impl QueryRecipeObservation {
+    /// The owning adapter must first authenticate this exact metadata and its
+    /// original binding using the selected residence's existing grant/receipt.
+    pub(in crate::storage) fn qualified(
+        residence: QueryRecipeResidence,
+        metadata: String,
+        original: super::QueryRuntimeBinding,
+        destination: super::QueryRuntimeBinding,
+    ) -> Result<Self, super::StorageError> {
+        if original.namespace != destination.namespace
+            || original.stream_epoch != destination.stream_epoch
+            || original.admission == 0
+            || destination.admission == 0
+            || metadata.len() > super::proof_codec::METADATA_MAX
+        {
+            return Err(super::StorageError::ScopeChanged);
+        }
+        let row = serde_json::from_str(&metadata).map_err(|_| super::StorageError::Unavailable)?;
+        Ok(Self {
+            residence,
+            metadata,
+            original,
+            destination,
+            row,
+        })
+    }
+
+    pub(crate) fn row(&self) -> &crate::model::summary::CatalogRow {
+        &self.row
+    }
+
+    /// Decoding cannot substitute a payload from a different observation. The
+    /// adapter additionally checks the stored residence and original binding.
+    pub(in crate::storage) fn decode(
+        &self,
+        payload: &str,
+    ) -> std::io::Result<crate::query_projection::SelectedRecipe> {
+        if self.metadata.len().saturating_add(payload.len()) > super::proof_codec::METADATA_MAX {
+            return Err(std::io::Error::other(
+                "Selected Query metadata budget exceeded",
+            ));
+        }
+        crate::query_projection::SelectedRecipe::decode(&self.row, payload)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum QueryRecipeLoadError {
+    Storage(super::StorageError),
+    ObservationChanged,
+    MissingPayload,
+    CorruptPayload,
+}
+
+impl From<super::StorageError> for QueryRecipeLoadError {
+    fn from(error: super::StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl std::fmt::Display for QueryRecipeLoadError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Storage(error) => std::fmt::Display::fmt(error, formatter),
+            Self::ObservationChanged => {
+                formatter.write_str("Selected Query observation residence or authority changed.")
+            }
+            Self::MissingPayload => {
+                formatter.write_str("Selected Query recipe payload is unavailable.")
+            }
+            Self::CorruptPayload => {
+                formatter.write_str("Selected Query recipe payload is corrupt.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for QueryRecipeLoadError {}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Work {
@@ -434,6 +548,14 @@ pub(crate) fn history_window(
 }
 
 pub(crate) trait QueryCatalogStore {
+    /// Load only the exact store-issued observation; this grants no source access.
+    fn selected_recipe(
+        &self,
+        _observation: &QueryRecipeObservation,
+    ) -> Result<Option<crate::query_projection::SelectedRecipe>, QueryRecipeLoadError> {
+        Err(super::StorageError::Unavailable.into())
+    }
+
     fn selected_body(
         &self,
         _namespace: &LogicalSourceNamespace,
@@ -467,6 +589,92 @@ pub(crate) trait QueryCatalogStore {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
+    };
+
+    static NEXT_PRODUCER_HOME: AtomicU64 = AtomicU64::new(0);
+
+    struct ProducerHome {
+        root: PathBuf,
+        options: crate::Options,
+    }
+
+    impl ProducerHome {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "semon-storage-query-producer-{}-{}",
+                std::process::id(),
+                NEXT_PRODUCER_HOME.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let defaults = crate::Options::default();
+            let home = Self {
+                options: crate::Options {
+                    source: defaults.source,
+                    claude_home: root.join("claude"),
+                    claude_json: root.join(".claude.json"),
+                    codex_home: root.join("codex"),
+                    copilot_home: root.join("copilot"),
+                    proc_root: root.join("proc"),
+                    cache: root.join("index.json"),
+                    all: true,
+                    since: Duration::from_secs(86_400),
+                    session: None,
+                    facts: None,
+                    scan_window: false,
+                },
+                root,
+            };
+            home.write("proc/locks", "");
+            home.write("proc/sys/kernel/hostname", "recipe-producer\n");
+            home
+        }
+
+        fn write(&self, relative: &str, content: &str) -> PathBuf {
+            let path = self.root.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, content).unwrap();
+            path
+        }
+
+        fn top(&self, records: &[serde_json::Value]) {
+            let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+            self.write("claude/projects/-work-proj/lead.jsonl", &text);
+        }
+    }
+
+    impl Drop for ProducerHome {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn producer_timestamp(hour: i64, minute: i64) -> String {
+        format!("2026-09-24T{hour:02}:{minute:02}:00.000Z")
+    }
+
+    fn producer_human(time: String, text: &str) -> serde_json::Value {
+        json!({
+            "type":"user", "timestamp":time, "sessionId":"lead", "cwd":"/work/proj",
+            "origin":{"kind":"human"}, "message":{"role":"user", "content":text}
+        })
+    }
+
+    fn producer_assistant(time: String, text: &str) -> serde_json::Value {
+        json!({
+            "type":"assistant", "timestamp":time.clone(), "sessionId":"lead", "cwd":"/work/proj",
+            "message":{
+                "id":format!("m-lead-{time}"), "model":"claude-opus-5-5", "role":"assistant",
+                "content":[{"type":"text","text":text}],
+                "usage":{"input_tokens":1000,"cache_creation_input_tokens":0,
+                    "cache_read_input_tokens":2000,"output_tokens":500}
+            }
+        })
+    }
 
     fn summary(id: &str) -> Value {
         json!({"summary":{"id":id}})
@@ -494,6 +702,122 @@ mod tests {
             "query":query
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn prepared_recipe_charges_compact_metadata_and_payload_without_changing_active_row() {
+        let recipe = crate::query_projection::SelectedRecipe {
+            session: json!({"busy":"x".repeat(super::super::proof_codec::METADATA_MAX * 3 / 4)}),
+            turns: Vec::new(),
+            edges: Vec::new(),
+        };
+        let mut row = retained_row(json!({"version":1,"selected":recipe}));
+        row.query_recipe = Some(recipe.clone());
+        let active = serde_json::to_string(&row).unwrap();
+        let prepared = crate::query_projection::SelectedRecipe::prepare(&row).unwrap();
+        let payload = prepared.query_recipe.unwrap();
+        assert!(active.len() + payload.len() > super::super::proof_codec::METADATA_MAX);
+        assert!(prepared.metadata.len() + payload.len() < super::super::proof_codec::METADATA_MAX);
+        assert_eq!(serde_json::to_string(&row).unwrap(), active);
+        let compact = serde_json::from_str(&prepared.metadata).unwrap();
+        assert_eq!(
+            crate::query_projection::SelectedRecipe::decode(&compact, &payload).unwrap(),
+            recipe
+        );
+        row.query_recipe = None;
+        assert!(crate::query_projection::SelectedRecipe::prepare(&row).is_err());
+    }
+
+    #[test]
+    fn observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget() {
+        const PREFIX: usize = 128;
+        const BASE: i64 = 1_790_208_000_000;
+        const NOW: i64 = BASE + 86_400_000;
+
+        let home = ProducerHome::new();
+        let mut records = vec![producer_human(producer_timestamp(0, 0), "fixed prompt")];
+        for index in 0..PREFIX {
+            let minute = (index + 1) * 10;
+            let time = producer_timestamp((minute / 60) as i64, (minute % 60) as i64);
+            records.push(producer_human(time.clone(), "next prompt"));
+            records.push(producer_assistant(time, "reply"));
+        }
+        records.push(producer_assistant(producer_timestamp(23, 59), "fixed tail"));
+        home.top(&records);
+
+        let mut cache =
+            crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+                .unwrap();
+        crate::model::capture_observed_catalog_rows();
+        crate::model::observe_catalog(
+            &home.options,
+            &mut cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            NOW,
+        )
+        .unwrap();
+        drop(cache);
+        let rows = crate::model::take_observed_catalog_rows().unwrap();
+        assert_eq!(rows.len(), 1);
+        let producer_row = rows
+            .into_iter()
+            .find(|row| row.key == "lead")
+            .expect("ordinary producer row");
+        let recipe = producer_row
+            .query_recipe
+            .as_ref()
+            .expect("ordinary producer selected recipe")
+            .clone();
+        assert!(recipe.session["busy"].as_array().unwrap().len() >= PREFIX);
+        assert!(recipe.turns.len() >= PREFIX);
+        assert_eq!(
+            producer_row.query.as_ref().unwrap()["selected"],
+            serde_json::to_value(&recipe).unwrap()
+        );
+
+        let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
+        let observation = crate::storage::navigation_store(binding)
+            .native_resolution("claude", "lead", crate::CatalogReadScope::Current, None)
+            .unwrap();
+        assert!(observation.qualified_head().is_some());
+        assert_eq!(observation.keys, vec!["lead".to_owned()]);
+        let persisted = observation
+            .metadata
+            .expect("admitted persisted Catalog metadata");
+        assert!(
+            persisted.len() > 8192,
+            "growing producer Catalog metadata should exceed the cell bound: {} bytes",
+            persisted.len()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&persisted).unwrap(),
+            serde_json::to_value(&producer_row).unwrap(),
+            "the captured in-memory row must be the exact persisted producer row"
+        );
+
+        let prepared = crate::query_projection::SelectedRecipe::prepare(&producer_row).unwrap();
+        assert!(prepared.metadata.len() < 8192);
+        let payload = prepared.query_recipe.as_deref().unwrap();
+        assert!(prepared.metadata.len() + payload.len() <= super::super::proof_codec::METADATA_MAX);
+
+        let compact: crate::model::summary::CatalogRow =
+            serde_json::from_str(&prepared.metadata).unwrap();
+        assert_eq!(compact.key, producer_row.key);
+        assert_eq!(compact.harness, producer_row.harness);
+        assert_eq!(compact.sources, producer_row.sources);
+        let mut expected_query = producer_row.query.clone().unwrap();
+        expected_query["selected"] =
+            serde_json::to_value(recipe.reference(&producer_row).unwrap()).unwrap();
+        // The selected reference changes; every producer-owned Query observation remains exact.
+        assert_eq!(compact.query.as_ref(), Some(&expected_query));
+
+        let decoded = crate::query_projection::SelectedRecipe::decode(&compact, payload).unwrap();
+        assert_eq!(decoded, recipe);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            producer_row.query.unwrap()["selected"]
+        );
     }
 
     #[test]

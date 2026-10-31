@@ -15,7 +15,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 const DIRECT_CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentation_roots(namespace TEXT NOT NULL,publication TEXT NOT NULL,base TEXT NOT NULL,manifest TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(namespace,digest)) STRICT, WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;
@@ -131,7 +131,7 @@ pub(super) fn publish(
         // These values came directly from the prepared model in this owner
         // transaction. Decode only persisted input, not this freshly encoded row.
         tx.execute(
-            "INSERT INTO storage_proof_generations VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
             params![
                 namespace,
                 record.id.0,
@@ -1058,6 +1058,25 @@ fn observation_binding_for_owner(
     physical_owner: Option<CatalogObservationOwner>,
     local_only: bool,
 ) -> Result<crate::storage::QueryRuntimeBinding, ObservationPreparationError> {
+    observation_authority_for_owner(db, current, selected, local_owner, local_owner.is_some())
+        .map(|(binding, _)| binding)
+}
+
+/// Preserve the actual authority selected by the existing verifier so a later
+/// recipe read cannot re-resolve its owner from a lifecycle display tag.
+fn observation_authority_for_owner(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    local_owner: Option<CatalogObservationOwner>,
+    local_only: bool,
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::query::QueryRecipeResidence,
+    ),
+    ObservationPreparationError,
+> {
     let ns = current.namespace.as_str();
     let owner_kind = physical_owner.map(CatalogObservationOwner::kind);
     let proof_kind = physical_owner.map(|owner| match owner {
@@ -1085,9 +1104,9 @@ fn observation_binding_for_owner(
         {
             continue;
         }
-        let native: bool = db
+        let native: Option<String> = db
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6))",
+                "SELECT owner_kind FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1",
                 params![
                     ns,
                     selected.key,
@@ -1098,8 +1117,9 @@ fn observation_binding_for_owner(
                 ],
                 |row| row.get(0),
             )
+            .optional()
             .map_err(ObservationPreparationError::Sql)?;
-        if native {
+        if let Some(native) = native {
             let reference_kind = proof_kind.unwrap_or(match selected.lifecycle {
                 crate::model::summary::CatalogLifecycle::Current => "current",
                 crate::model::summary::CatalogLifecycle::Retained => "history",
@@ -1124,7 +1144,17 @@ fn observation_binding_for_owner(
                     local_only,
                 )?;
             }
-            return Ok(current.clone());
+            let metadata_digest = proof_codec::digest(original.as_bytes());
+            let residence = match native.as_str() {
+                "catalog" => {
+                    crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest }
+                }
+                "history" => {
+                    crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest }
+                }
+                _ => return Err(StorageError::ScopeChanged.into()),
+            };
+            return Ok((current.clone(), residence));
         }
     }
     let current_digest = proof_codec::digest(current_metadata.as_bytes());
@@ -1198,7 +1228,7 @@ fn observation_binding_for_owner(
                 CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,
                 g.prefix,r.base,
                 CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
-                CASE WHEN octet_length(v.metadata)<=1048576 THEN v.metadata END,
+                CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,
                 ((NOT ?11 AND EXISTS(
                     SELECT 1 FROM main.meta m JOIN main.meta a
                       ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
@@ -1212,7 +1242,7 @@ fn observation_binding_for_owner(
                           AND m.key='catalog_native_observation:'||(CASE WHEN g.metadata=?4 THEN ?6 ELSE ?7 END)
                           AND m.value=?3
                     ))
-                )
+                ),f.kind
              FROM storage_proof_refs f
              JOIN storage_proof_generations g
                ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key
@@ -1268,13 +1298,14 @@ fn observation_binding_for_owner(
                     r.get::<_, String>(9)?,
                     r.get::<_, String>(10)?,
                     r.get::<_, bool>(11)?,
+                    r.get::<_, String>(12)?,
                 ))
             },
         )
         .map_err(ObservationPreparationError::Sql)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(ObservationPreparationError::Sql)?;
-    let (record, base, manifest, presentation, granted) = values
+    let (record, base, manifest, presentation, granted, reference_kind) = values
         .into_iter()
         .next()
         .ok_or(StorageError::ScopeChanged)
@@ -1317,13 +1348,251 @@ fn observation_binding_for_owner(
             );
         }
     })?;
+    let residence = crate::storage::query::QueryRecipeResidence::Immutable {
+        owner: match reference_kind.as_str() {
+            "current" => crate::storage::query::QueryRecipeOwner::Catalog,
+            "history" => crate::storage::query::QueryRecipeOwner::History,
+            _ => return Err(StorageError::ScopeChanged.into()),
+        },
+        generation: record.id.clone(),
+        publication: record.publication.clone(),
+    };
     proof_codec::observation_binding(record, current, selected)
         .inspect_err(|_| {
             if crate::native_timing::enabled() {
                 eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
             }
         })
+        .map(|binding| (binding, residence))
         .map_err(ObservationPreparationError::Evidence)
+}
+
+/// Issue a token only after the selected physical row and its existing grant or
+/// imported original receipt qualify together in this snapshot. `owner` comes
+/// from the selection's actual Catalog/History read, never its display lifecycle.
+pub(crate) fn query_recipe_observation(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    owner: CatalogObservationOwner,
+    selected: &CatalogRow,
+) -> Result<crate::storage::query::QueryRecipeObservation, StorageError> {
+    let metadata: String = db.query_row(
+        &format!("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.{} WHERE namespace=?1 AND session_key=?2", owner.table()),
+        params![current.namespace.as_str(), selected.key],
+        |row| row.get(0),
+    ).map_err(failed)?;
+    let stored: CatalogRow =
+        serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
+    if serde_json::to_value(&stored).map_err(|_| StorageError::Unavailable)?
+        != serde_json::to_value(selected).map_err(|_| StorageError::Unavailable)?
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let (original, residence) =
+        observation_authority_for_owner(db, current, &stored, Some(owner), false)
+            .map_err(ObservationPreparationError::into_storage)?;
+    crate::storage::query::QueryRecipeObservation::qualified(
+        residence,
+        metadata,
+        original,
+        current.clone(),
+    )
+}
+
+/// The reader owns the admitted snapshot. A token never reselects another
+/// residence when its original owner, generation or grant no longer qualifies.
+pub(crate) fn load_query_recipe(
+    db: &Connection,
+    reader: &NativeReaderBinding,
+    observation: &crate::storage::query::QueryRecipeObservation,
+) -> Result<
+    Option<crate::query_projection::SelectedRecipe>,
+    crate::storage::query::QueryRecipeLoadError,
+> {
+    use crate::storage::query::{
+        QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
+    };
+    let current = reader.runtime_binding_at(db)?;
+    if current != observation.destination {
+        return Err(Error::ObservationChanged);
+    }
+    let selected = observation.row();
+    let namespace = current.namespace.as_str();
+    let current_admission =
+        i64::try_from(current.admission).map_err(|_| Error::ObservationChanged)?;
+    let payload = match &observation.residence {
+        QueryRecipeResidence::NativeCatalog { metadata_digest }
+        | QueryRecipeResidence::NativeHistory { metadata_digest } => {
+            let (owner, kind) = match &observation.residence {
+                QueryRecipeResidence::NativeCatalog { .. } => {
+                    (CatalogObservationOwner::Catalog, "current")
+                }
+                _ => (CatalogObservationOwner::History, "history"),
+            };
+            let cells: Option<(Option<String>, Option<String>, bool)> = db.query_row(
+                &format!("SELECT CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END,octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 FROM main.{} WHERE namespace=?1 AND session_key=?2", owner.table()),
+                params![namespace, selected.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional().map_err(failed)?;
+            let (metadata, payload, within) = cells.ok_or(Error::ObservationChanged)?;
+            if !within {
+                return Err(StorageError::HistoryRetentionBounds.into());
+            }
+            let metadata = metadata.ok_or(Error::CorruptPayload)?;
+            crate::selected_read::charge(
+                1,
+                metadata.len() + payload.as_ref().map_or(0, String::len),
+            )
+            .map_err(|_| StorageError::Busy)?;
+            if metadata != observation.metadata || observation.original != current {
+                return Err(Error::ObservationChanged);
+            }
+            let mut normalized = selected.clone();
+            normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            let normalized =
+                serde_json::to_string(&normalized).map_err(|_| Error::CorruptPayload)?;
+            if proof_codec::digest(normalized.as_bytes()) != *metadata_digest {
+                return Err(Error::ObservationChanged);
+            }
+            let prefix = crate::retention::source_generation(&selected.sources)
+                .map_err(|_| Error::CorruptPayload)?;
+            // Preserve immutable-corruption refusal ahead of mutable authority.
+            if immutable_observation_candidate(
+                db,
+                namespace,
+                &selected.key,
+                kind,
+                &prefix,
+                &current.stream_epoch,
+                &normalized,
+            )
+            .map_err(ObservationPreparationError::into_storage)?
+            {
+                verify_immutable_observation(db, &current, selected, kind, &prefix, false)
+                    .map_err(ObservationPreparationError::into_storage)?;
+            }
+            let granted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
+                params![namespace, selected.key, owner.kind(), metadata_digest, current_admission, current.stream_epoch],
+                |row| row.get(0),
+            ).map_err(failed)?;
+            if !granted {
+                return Err(Error::ObservationChanged);
+            }
+            payload
+        }
+        QueryRecipeResidence::Immutable {
+            owner,
+            generation,
+            publication,
+        } => {
+            let original_admission = i64::try_from(observation.original.admission)
+                .map_err(|_| Error::ObservationChanged)?;
+            let kind = match owner {
+                QueryRecipeOwner::Catalog => "current",
+                QueryRecipeOwner::History => "history",
+            };
+            let cells = db.query_row(
+                "SELECT g.proof,g.admission,g.stream,
+                    CASE WHEN octet_length(g.metadata)+coalesce(octet_length(g.query_recipe),0)<=1048576 THEN g.metadata END,
+                    CASE WHEN octet_length(g.metadata)+coalesce(octet_length(g.query_recipe),0)<=1048576 THEN g.query_recipe END,
+                    CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,
+                    CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
+                    CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,
+                    octet_length(g.metadata)+coalesce(octet_length(g.query_recipe),0)<=1048576
+                 FROM storage_proof_refs f
+                 JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key
+                 JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission
+                 JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest
+                 JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key
+                 WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.id=?4 AND g.publication=?5 AND g.admission=?6 AND g.stream=?7",
+                params![namespace, selected.key, kind, generation.0, publication, original_admission, observation.original.stream_epoch],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, Option<String>>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, Option<String>>(8)?, row.get::<_, Option<String>>(9)?, row.get::<_, bool>(10)?)),
+            ).optional().map_err(failed)?.ok_or(Error::ObservationChanged)?;
+            let (
+                proof,
+                admission,
+                stream,
+                metadata,
+                payload,
+                slots,
+                prefix,
+                base,
+                manifest,
+                presentation,
+                within,
+            ) = cells;
+            if !within {
+                return Err(StorageError::HistoryRetentionBounds.into());
+            }
+            let metadata = metadata.ok_or(Error::CorruptPayload)?;
+            let slots = slots.ok_or(StorageError::HistoryRetentionBounds)?;
+            let manifest = manifest.ok_or(StorageError::HistoryRetentionBounds)?;
+            // Presentation observations retain their independent 8 MiB bound.
+            let presentation = presentation.ok_or(StorageError::HistoryRetentionBounds)?;
+            crate::selected_read::charge(
+                64,
+                metadata.len()
+                    + payload.as_ref().map_or(0, String::len)
+                    + slots.len()
+                    + manifest.len()
+                    + presentation.len(),
+            )
+            .map_err(|_| StorageError::Busy)?;
+            let grant = format!("{}:{}", current.admission, current.stream_epoch);
+            let digest = proof_codec::digest(metadata.as_bytes());
+            let granted: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3) OR (?4=?5 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='catalog_native_observation:'||?6 AND value=?3))",
+                params![namespace, publication, grant, admission, current_admission, digest],
+                |row| row.get(0),
+            ).map_err(failed)?;
+            if !granted {
+                return Err(Error::ObservationChanged);
+            }
+            proof_codec::verify_presentation_digest(&base, &manifest, &proof)?;
+            proof_codec::verify_presentation_entry(
+                &selected.key,
+                &metadata,
+                &slots,
+                &presentation,
+                &manifest,
+            )?;
+            let original: CatalogRow =
+                serde_json::from_str(&metadata).map_err(|_| Error::CorruptPayload)?;
+            if original.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+                return Err(Error::ObservationChanged);
+            }
+            let record = proof_codec::GenerationRecord {
+                namespace: namespace.to_owned(),
+                id: generation.clone(),
+                session_key: selected.key.clone(),
+                publication: publication.clone(),
+                proof,
+                admission: u64::try_from(admission).map_err(|_| Error::ObservationChanged)?,
+                stream,
+                metadata,
+                slots,
+                prefix,
+            };
+            if proof_codec::observation_binding(record, &current, selected)? != observation.original
+            {
+                return Err(Error::ObservationChanged);
+            }
+            payload
+        }
+    };
+    if selected.query.is_none() {
+        return if payload.is_none() {
+            Ok(None)
+        } else {
+            Err(Error::CorruptPayload)
+        };
+    }
+    let payload = payload.ok_or(crate::storage::query::QueryRecipeLoadError::MissingPayload)?;
+    observation
+        .decode(&payload)
+        .map(Some)
+        .map_err(|_| crate::storage::query::QueryRecipeLoadError::CorruptPayload)
 }
 
 /// Semantic Stage retains exact-row meta grants beside its immutable

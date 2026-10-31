@@ -213,6 +213,7 @@ mod tests {
         let row = CatalogRow {
             overview: None,
             trace: None,
+            query_recipe: None,
             query: None,
             lifecycle: Default::default(),
             key: "key".into(),
