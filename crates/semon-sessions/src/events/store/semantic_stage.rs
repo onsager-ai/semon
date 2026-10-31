@@ -3623,15 +3623,20 @@ mod tests {
         // Ordinary source observations remain independent of projection repair.
         header_repair_invalidate(&store, &path, "changed");
         assert_eq!(header_repair_claim(&store, &path), Some(observed + 1));
-        assert_eq!(
-            stage
-                .begin_semantic_stage(std::slice::from_ref(&path), "runtime", false)
-                .unwrap(),
-            Outcome::Written
-        );
+        // Written may advance private GC without creating a successor stage.
+        let replay = (0..512)
+            .find_map(|_| {
+                assert_eq!(
+                    stage
+                        .begin_semantic_stage(std::slice::from_ref(&path), "runtime", false)
+                        .unwrap(),
+                    Outcome::Written
+                );
+                stage.semantic_batch(64).unwrap()
+            })
+            .expect("bounded private GC failed to yield a successor batch");
         assert!(!store.qualified_catalog().unwrap());
         assert_eq!(revision(&store.connection).unwrap(), observed + 1);
-        let replay = stage.semantic_batch(64).unwrap().unwrap();
         assert!(
             replay.epoch > old_epoch,
             "fresh observation did not start a new stage"

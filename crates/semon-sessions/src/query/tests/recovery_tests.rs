@@ -171,9 +171,11 @@ fn publish_semantic_stage(home: &Home, input: &crate::Input) {
             .into_owned(),
     ];
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    assert_eq!(
-        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
-        crate::events::Outcome::Written
+    crate::storage::transfer::reported::tests::begin_active_catalog(
+        &mut cache,
+        &paths,
+        &runtime,
+        false,
     );
     let mut published = false;
     for _ in 0..128 {

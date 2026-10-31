@@ -1271,7 +1271,9 @@ mod tests {
     #[test]
     fn published_proofs_follow_catalog_references_and_survive_gc_until_last_reader_drop() {
         use crate::storage::native_events::NativeEventStore;
-        use crate::storage::transfer::reported::tests::{cache, finish_catalog, seed_catalog};
+        use crate::storage::transfer::reported::tests::{
+            begin_active_catalog, cache, finish_catalog, seed_catalog,
+        };
         use std::io::Write;
 
         let root = cleanup_root();
@@ -1295,15 +1297,11 @@ mod tests {
             .unwrap();
         let mut producer = cache(&config);
         let publish = |producer: &mut crate::events::EventCache| {
-            assert_eq!(
-                producer
-                    .begin_semantic_stage_with_journal(
-                        &[source.to_owned()],
-                        "published-proof-fixture",
-                        true,
-                    )
-                    .unwrap(),
-                crate::events::Outcome::Written
+            begin_active_catalog(
+                producer,
+                &[source.to_owned()],
+                "published-proof-fixture",
+                true,
             );
             finish_catalog(producer, &options, std::slice::from_ref(&input))
         };
