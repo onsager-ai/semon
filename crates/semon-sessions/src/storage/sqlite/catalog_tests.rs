@@ -126,6 +126,8 @@ impl Drop for Fixture {
 
 #[cfg(test)]
 fn family_owner_phase_diagnostic(fixture: &Fixture, phase: &'static str, key: &str) {
+    use crate::storage::catalog::CatalogSnapshot;
+
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let mut db = fixture.db();
     let tx = db.transaction().unwrap();
