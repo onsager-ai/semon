@@ -4060,7 +4060,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "selected edge recipe must not use the parent's retained History ref"
         );
     }
-    let (history_harness, current_harness) = super::super::snapshot::with_admitted_snapshot(
+    let (
+        history_harness,
+        current_harness,
+        history_owner_generation,
+        history_qualified,
+        history_source_generation,
+    ) = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
         &control,
@@ -4072,7 +4078,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let current = snapshot
                 .catalog(&appended_key, false)?
                 .ok_or(StorageError::ScopeChanged)?;
-            Ok((history.harness, current.harness))
+            let owner_generation = snapshot
+                .owner(&appended_key)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let qualified = snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let source_generation = crate::retention::source_generation(&history.sources)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            Ok((
+                history.harness,
+                current.harness,
+                owner_generation,
+                qualified,
+                source_generation,
+            ))
         },
     )
     .expect("successor publication keeps History beside the Current owner");
@@ -4080,6 +4100,116 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         history_harness, current_harness,
         "History runtime qualification requires its same-harness Current owner"
     );
+    assert!(
+        history_qualified,
+        "the exact admitted History owner and complete header qualify"
+    );
+    assert_eq!(history_owner_generation.len(), 64);
+    assert!(
+        history_owner_generation
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    let history_version = crate::slot_projection::VERSION as i64;
+    let history_source_generation = history_source_generation.into_bytes();
+    assert_eq!(history_source_generation.len(), 64);
+    let history_incomplete = false;
+
+    let update_history_header = |version: i64,
+                                 source_generation: Option<Vec<u8>>,
+                                 incomplete: bool| {
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let changed = tx
+                .driver
+                .execute(
+                    "UPDATE semon_pg_native_catalog_history_headers SET version=$4,source_generation=$5,incomplete=$6 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &history_owner_generation.as_bytes(),
+                        &appended_key.as_bytes(),
+                        &version,
+                        &source_generation,
+                        &incomplete,
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            if changed != 1 {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(())
+        })
+    };
+    let assert_history_header_refused = |version: i64,
+                                        source_generation: Option<Vec<u8>>,
+                                        incomplete: bool,
+                                        reason: &str| {
+        update_history_header(version, source_generation, incomplete)
+            .expect("install exact History header corruption");
+        let qualified = super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
+            &continued_generation,
+            |snapshot| {
+                let history = snapshot
+                    .catalog(&appended_key, true)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                snapshot
+                    .history_qualified(&history)
+                    .map_err(|_| StorageError::ScopeChanged)
+            },
+        );
+        update_history_header(
+            history_version,
+            Some(history_source_generation.clone()),
+            history_incomplete,
+        )
+        .expect("restore exact admitted History header");
+        assert!(
+            !qualified.expect("corrupt History header is read through admitted snapshot"),
+            "{reason}"
+        );
+    };
+    assert_history_header_refused(
+        history_version + 1,
+        Some(history_source_generation.clone()),
+        history_incomplete,
+        "a mismatched History version refuses qualification",
+    );
+    let mut mismatched_source_generation = history_source_generation.clone();
+    mismatched_source_generation[0] = if mismatched_source_generation[0] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    assert_history_header_refused(
+        history_version,
+        Some(mismatched_source_generation),
+        history_incomplete,
+        "a same length mismatched History source generation refuses qualification",
+    );
+    assert_history_header_refused(
+        history_version,
+        Some(history_source_generation.clone()),
+        true,
+        "an incomplete History header refuses qualification",
+    );
+    let restored_history_qualified = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &continued_generation,
+        |snapshot| {
+            let history = snapshot
+                .catalog(&appended_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .expect("restored admitted History header");
+    assert!(restored_history_qualified);
     // This live PID file adds a native runtime dependency to this Claude owner.
     let pid = 314;
     let pid_stat = options.proc_root.join(pid.to_string()).join("stat");
