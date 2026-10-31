@@ -175,7 +175,23 @@ pub(crate) fn read_page(
         &admitted_snapshot(binding, &transaction)?,
         admit_search,
         admission,
-    )?;
+    )
+    .inspect_err(|cause| {
+        if crate::native_timing::enabled() {
+            let sqlite_error = cause.downcast_ref::<rusqlite::Error>().or_else(|| {
+                cause
+                    .downcast_ref::<io::Error>()?
+                    .get_ref()?
+                    .downcast_ref::<rusqlite::Error>()
+            });
+            let details = sqlite_error.map(super::error_class);
+            let kind = details.map(|(kind, _)| kind);
+            let extended_code = details.and_then(|(_, code)| code);
+            eprintln!(
+                "semon sessions native: catalog_page_sqlite_refused kind={kind:?} extended_code={extended_code:?}"
+            );
+        }
+    })?;
     transaction.commit()?;
     Ok(reply)
 }

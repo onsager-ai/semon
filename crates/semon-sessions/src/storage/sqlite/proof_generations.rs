@@ -581,7 +581,9 @@ pub(crate) fn observation_binding(
                     let digest_match = slot.is_some_and(|slot| slot.1);
                     let admission_match = slot.is_some_and(|slot| slot.2);
                     let stream_match = slot.is_some_and(|slot| slot.3);
-                    eprintln!("semon sessions native: observation_direct_grant_miss owner={owner} present={present} digest_match={digest_match} admission_match={admission_match} stream_match={stream_match}");
+                    eprintln!(
+                        "semon sessions native: observation_direct_grant_miss owner={owner} present={present} digest_match={digest_match} admission_match={admission_match} stream_match={stream_match}"
+                    );
                 }
             }
             Err(_) => {
@@ -677,7 +679,9 @@ pub(crate) fn observation_binding(
         .ok_or(StorageError::ScopeChanged)
         .inspect_err(|_| {
             if crate::native_timing::enabled() {
-                eprintln!("semon sessions native: observation_stage_refused boundary=candidate_absent");
+                eprintln!(
+                    "semon sessions native: observation_stage_refused boundary=candidate_absent"
+                );
             }
         })?;
     if !granted {

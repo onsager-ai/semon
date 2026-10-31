@@ -28,7 +28,7 @@ use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::time::Duration;
 
-pub(crate) fn error_class(error: &rusqlite::Error) -> (&'static str, Option<i32>) {
+fn error_class(error: &rusqlite::Error) -> (&'static str, Option<i32>) {
     let kind = match error {
         rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
         rusqlite::Error::QueryReturnedNoRows => "no_rows",
