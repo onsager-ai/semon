@@ -4650,10 +4650,10 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
     let refused =
         read().expect_err("history selection must not bypass a live Current runtime refusal");
-    assert_eq!(refused.code, "io");
+    assert_eq!(refused.code, "unavailable");
     assert_eq!(
         refused.message,
-        crate::storage::StorageError::ScopeChanged.to_string()
+        "Native Query runtime observations changed during the query"
     );
 
     fs::remove_file(
@@ -4945,6 +4945,17 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
             assert_eq!(reply.status, 200);
             serde_json::from_slice::<Value>(&reply.body).unwrap()
         };
+        let read_pinned = |query| {
+            let reply = crate::session_transcript_range_with_mode(
+                &fixture.options,
+                "local",
+                query,
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            );
+            assert_eq!(reply.status, 200);
+            serde_json::from_slice::<Value>(&reply.body).unwrap()
+        };
         let page = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
         let entry = page["entries"].as_array().unwrap().last().unwrap();
         assert_eq!(entry["k"], "think");
@@ -5008,7 +5019,13 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
         assert_eq!(selected_history.sources, history_row.sources);
         assert!(snapshot.history_qualified(&selected_history).unwrap());
         tx.rollback().unwrap();
-        let history = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
+        let history_query = "sid=thinking-session&scope=retained_history&after=0&limit=100";
+        assert_eq!(
+            crate::session_transcript_range(&fixture.options, "local", history_query, None).status,
+            409,
+            "ProviderOnly must refuse the changed local carrier"
+        );
+        let history = read_pinned(history_query);
         let historical_thinking = history["entries"]
             .as_array()
             .unwrap()
@@ -5019,7 +5036,7 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
 
         let db = fixture.db();
         db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='thinking-session'", []).unwrap();
-        let retired = read("sid=thinking-session&scope=retained_history&after=0&limit=100");
+        let retired = read_pinned(history_query);
         assert!(
             retired["entries"]
                 .as_array()
