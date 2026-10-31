@@ -107,6 +107,40 @@ source authorization, generation and read-cohort fences.
 
 ## Progressive initial ingestion and recovery
 
+The following origin extension is proposed and is not implemented or qualified.
+The scoped oversized-component implementation must retain the initial producer
+origin before its first partial Current publication. A stage created only after
+the newest cohort has published cannot distinguish that cohort from an existing
+Current family. This distinction is required: an existing 64-owner family plus a
+new physical source still refuses with `semantic_affected_owner_source_budget`.
+An initial 81-owner family may progress through bounded source and owner pages.
+
+The initial origin belongs to the existing semantic stage. Initial discovery
+enrolls each admitted page and its exact claims in that stage in the discovery
+transaction; no whole-inventory copy or in-memory inventory is permitted. The
+stage seals discovery before the ordinary newest-cohort publication. That
+publication must present the held stage epoch and capture its accepted owners,
+physical source cohorts, claims and ledgers before acknowledging them, together
+with the resulting live head, in the publication transaction. A backfill marker
+or a matching pathname is not an origin witness.
+
+Only Current owners that still match those accepted origin observations may be
+excluded from the pre-origin affected-owner baseline. Source availability, native
+identity, aliases, collisions, relationship reduction and complete owner capture
+still qualify through their existing ports. Derived reset may preserve origin
+provenance but cannot preserve an exception whose admission, runtime, source or
+publication witness has changed. Competing publications cannot advance the held
+stage's live generation. Discovery recovery must fence the origin before changing
+its admitted membership. The collection remains partial until every durable queue
+and final witness qualifies.
+
+Physical source batches, individual owner closures, prior owners outside the
+origin, context payloads and witness pages retain their existing limits. The
+cumulative durable stage may span more than one page. PostgreSQL stores such
+pages in the existing stage-item family; its stage header and each metadata page
+retain their existing payload limits. This origin extension and its first-page
+cost remain unqualified until the exact final Source/Hub checks pass.
+
 A new machine discovers source metadata in bounded pages. Discovered paths and
 backfill state are persisted in SQLite, and committed source offsets survive
 restart. Filesystem enumeration itself restarts after process loss; discovered
