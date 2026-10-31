@@ -6684,7 +6684,7 @@ mod tests {
         store
             .connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES('discovery-local-change','1')",
+                "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','1')",
                 [],
             )
             .unwrap();
@@ -6699,7 +6699,7 @@ mod tests {
             0
         );
         peer.execute(
-            "INSERT INTO meta(key,value) VALUES('discovery-peer-change','1')",
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope('catalog_observed_at'),'catalog_observed_at','2')",
             [],
         )
         .unwrap();
