@@ -258,7 +258,9 @@ pub(crate) fn seed_large_presentation(
     root: &std::path::Path,
 ) -> (crate::Options, String, String) {
     use crate::storage::native_events::NativeEventStore;
-    use crate::storage::transfer::reported::tests::{cache, finish_catalog, seed_catalog};
+    use crate::storage::transfer::reported::tests::{
+        begin_active_catalog, cache, finish_catalog, seed_catalog,
+    };
     let (options, _) = seed_catalog(source, root);
     let input = crate::Input {
         root: crate::InputRoot::Claude,
@@ -290,15 +292,11 @@ pub(crate) fn seed_large_presentation(
     let mut cache = cache(source);
     cache.ingest(&"9".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
-    assert_eq!(
-        cache
-            .begin_semantic_stage_with_journal(
-                &[path.to_str().unwrap().to_owned()],
-                "transfer-large-real-model",
-                true,
-            )
-            .unwrap(),
-        crate::events::Outcome::Written
+    begin_active_catalog(
+        &mut cache,
+        &[path.to_str().unwrap().to_owned()],
+        "transfer-large-real-model",
+        true,
     );
     let rows = finish_catalog(&mut cache, &options, std::slice::from_ref(&input));
     assert_eq!(rows.len(), 1);
