@@ -1688,38 +1688,23 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     );
     publish(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
-    let before_semantic_batch = crate::storage::sqlite::semantic::Stage::open(
+    let before_refresh = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
     )
     .unwrap()
     .into_test_connection();
-    let direct_before_semantic_batch: Option<String> = before_semantic_batch
+    let direct_before_refresh: Option<String> = before_refresh
         .query_row(
             "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(direct_before_semantic_batch.is_some());
-    drop(before_semantic_batch);
+    assert!(direct_before_refresh.is_some());
+    drop(before_refresh);
+    // The ordinary refresh may publish a closed component directly. Drive
+    // the real Stage explicitly before asserting immutable proof ownership.
     publish_semantic(&home);
-    let direct_before_stage = crate::storage::sqlite::semantic::Stage::open(
-        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-    )
-    .unwrap()
-    .into_test_connection();
-    let direct_capture_before_stage: Option<String> = direct_before_stage
-        .query_row(
-            "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        direct_capture_before_stage.is_none(),
-        "generic semantic-batch publication clears the ordinary direct capture"
-    );
-    drop(direct_before_stage);
     publish_semantic_stage(
         &home,
         &crate::Input {
@@ -1956,6 +1941,215 @@ fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
         "a damaged exact semantic owner blocks fallback to a valid direct capture"
     );
     fs::write(&hostname, original_hostname).unwrap();
+}
+
+#[test]
+fn recovery_immutable_corruption_blocks_selected_bytes_and_preimage_publication() {
+    use crate::storage::sqlite::proof_generations::{
+        CatalogObservationOwner, ObservationPreparationError, prepare_repriced_observation,
+    };
+
+    for corruption in ["root", "entry", "generation"] {
+        let home = Home::new("recovery-immutable-preimage");
+        home.top(
+            "first",
+            &[
+                human("first", ts(1, 0), "immutable owner prompt"),
+                assistant("first", ts(1, 1), vec![text("immutable owner answer")]),
+            ],
+        );
+        publish(&home);
+        publish_semantic_stage(
+            &home,
+            &crate::Input {
+                root: crate::InputRoot::Claude,
+                path: "projects/-work-proj/first.jsonl".into(),
+            },
+        );
+        publish(&home);
+        let config = home.options.source.config(&home.options.cache).unwrap();
+        let mut db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let row = recovery_catalog_row(&db, "session_catalog", "first");
+        assert!(recovery_observation_grant(&db, "first", "catalog").is_some());
+        let archive = SelectedArchive {
+            source: crate::SessionSourceRef {
+                root: "claude".into(),
+                path: "projects/-work-proj/first.jsonl".into(),
+                native_id: row.sources[0].native_id.clone(),
+                offset: row.sources[0].offset,
+                prefix_sha256: row.sources[0].prefix_sha256,
+                tail_sha256: row.sources[0].tail_sha256,
+            },
+            bytes: Arc::from(fs::read(&row.sources[0].path).unwrap()),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            read_bytes: AtomicU64::new(0),
+            fault: 0,
+        };
+        let selected = || {
+            crate::session_transcript_range_with_mode(
+                &home.options,
+                "local",
+                "sid=first&after=0&limit=1",
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+        };
+        assert_eq!(selected().status, 200);
+        assert!(archive.calls.load(Ordering::Relaxed) > 0);
+        archive.calls.store(0, Ordering::Relaxed);
+        let proof = recovery_proof_snapshot(&db, "first")
+            .into_iter()
+            .find(|proof| proof.0 == "current")
+            .unwrap();
+        match corruption {
+            "root" => {
+                let (base, manifest): (String, String) = db
+                    .query_row(
+                        "SELECT base,manifest FROM storage_proof_presentation_roots WHERE namespace=semon_namespace() AND digest=?1",
+                        [&proof.3],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .unwrap();
+                db.execute(
+                    "DELETE FROM storage_proof_presentation_roots WHERE namespace=semon_namespace() AND digest=?1",
+                    [&proof.3],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO storage_proof_presentation_roots VALUES(semon_namespace(),?1,?2,?3,?4)",
+                    rusqlite::params![proof.2, format!("{base}-damaged"), manifest, proof.3],
+                )
+                .unwrap();
+            }
+            "entry" => {
+                db.execute(
+                    "DELETE FROM storage_proof_presentations WHERE namespace=semon_namespace() AND id=?1 AND session_key='first'",
+                    [&proof.1],
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO storage_proof_presentations VALUES(semon_namespace(),?1,'first','null')",
+                    [&proof.1],
+                )
+                .unwrap();
+            }
+            "generation" => {
+                db.execute(
+                    "DELETE FROM storage_proof_generations WHERE namespace=semon_namespace() AND id=?1 AND session_key='first'",
+                    [&proof.1],
+                )
+                .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let authority_snapshot = |db: &rusqlite::Connection| {
+            db.prepare(
+                "SELECT 'grant',json_array(owner_kind,metadata_digest,admission,stream,direct_capture) FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first'
+                 UNION ALL SELECT 'reference',json_array(kind,id) FROM storage_proof_refs WHERE namespace=semon_namespace() AND session_key='first'
+                 UNION ALL SELECT 'generation',json_array(id,publication,proof,admission,stream,metadata,slots,prefix) FROM storage_proof_generations WHERE namespace=semon_namespace() AND session_key='first'
+                 UNION ALL SELECT 'presentation',json_array(id,metadata) FROM storage_proof_presentations WHERE namespace=semon_namespace() AND session_key='first'
+                 UNION ALL SELECT 'root',json_array(publication,base,manifest,digest) FROM storage_proof_presentation_roots WHERE namespace=semon_namespace()
+                 UNION ALL SELECT 'source',json_array(id,path,ledger) FROM storage_proof_sources WHERE namespace=semon_namespace() AND session_key='first'
+                 ORDER BY 1,2",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+        };
+        let authority_before = authority_snapshot(&db);
+        assert_eq!(selected().status, 503, "{corruption}");
+        assert_eq!(archive.calls.load(Ordering::Relaxed), 0, "{corruption}");
+        assert_eq!(authority_snapshot(&db), authority_before, "{corruption}");
+
+        // Force genuine selected preparation, rather than the ready/no-op path.
+        db.execute(
+            "UPDATE main.session_slot_projections SET version=5 WHERE namespace=semon_namespace() AND session_key='first'",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_namespace(),'overview_needed:first','1')",
+            [],
+        )
+        .unwrap();
+        let metadata_before = recovery_catalog_metadata(&db, "session_catalog", "first");
+        let publication_before = recovery_publication_snapshot(&db, "first");
+        let stage_grants_before = recovery_stage_observation_grants(&db);
+        let generation_before = catalog_generation(&home);
+        let reads_before = (
+            crate::events::FILE_READS.with(std::cell::Cell::get),
+            crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get),
+            crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get),
+        );
+        assert!(
+            crate::repair_session_overview(
+                &home.options,
+                "local",
+                "first",
+                Some(&archive),
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+            .is_err(),
+            "{corruption}"
+        );
+        let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
+        let tx = db.transaction().unwrap();
+        let current = binding.runtime_binding_at(&tx).unwrap();
+        let mut cost = row.cost.clone();
+        cost.usd = Some(cost.usd.unwrap_or_default() + 1.0);
+        assert!(matches!(
+            prepare_repriced_observation(
+                &tx,
+                &current,
+                CatalogObservationOwner::Catalog,
+                &row,
+                &cost,
+                row.query.as_ref(),
+            ),
+            Err(ObservationPreparationError::Evidence(
+                crate::storage::StorageError::ScopeChanged
+            ))
+        ));
+        tx.commit().unwrap();
+        assert_eq!(archive.calls.load(Ordering::Relaxed), 0, "{corruption}");
+        assert_eq!(
+            (
+                crate::events::FILE_READS.with(std::cell::Cell::get),
+                crate::events::SOURCE_READ_BYTES.with(std::cell::Cell::get),
+                crate::model::DIRECT_SOURCE_READS.with(std::cell::Cell::get),
+            ),
+            reads_before,
+            "{corruption}"
+        );
+        assert_eq!(authority_snapshot(&db), authority_before, "{corruption}");
+        assert_eq!(
+            recovery_catalog_metadata(&db, "session_catalog", "first"),
+            metadata_before
+        );
+        assert_eq!(recovery_publication_snapshot(&db, "first"), publication_before);
+        assert_eq!(recovery_stage_observation_grants(&db), stage_grants_before);
+        assert_eq!(catalog_generation(&home), generation_before);
+        assert!(db
+            .query_row(
+                "SELECT version=5 FROM main.session_slot_projections WHERE namespace=semon_namespace() AND session_key='first'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap());
+        assert!(db
+            .query_row(
+                "SELECT value='1' FROM main.meta WHERE namespace=semon_namespace() AND key='overview_needed:first'",
+                [],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap());
+    }
 }
 
 #[test]
