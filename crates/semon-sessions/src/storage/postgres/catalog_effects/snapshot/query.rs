@@ -5,7 +5,7 @@ use crate::{
     Options, QueryError,
     storage::{
         catalog::CatalogSnapshot,
-        query::{Part, QueryCatalogStore, edge_timed, history_window, turn_kept},
+        query::{Part, QueryCatalogStore, edge_timed, history_window, select_history, turn_kept},
     },
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -488,6 +488,8 @@ impl QueryCatalogStore for QueryCatalog {
         with_admitted_snapshot(&self.pool, namespace, &self.control, &self.generation, |snapshot| {
             let mut rows = BTreeMap::new();
             let mut owners = BTreeMap::new();
+            let mut saved_rows = BTreeMap::new();
+            let mut current_rows = BTreeMap::new();
             let mut witnesses = Vec::new();
             let mut content = BTreeMap::new();
             let mut emit = |row: crate::model::summary::CatalogRow, current: bool, selected_history: bool, keep: Option<&BTreeSet<String>>, bytes_left: &mut usize| -> Result<(), StorageError> {
@@ -509,7 +511,9 @@ impl QueryCatalogStore for QueryCatalog {
                 let summaries = saved["rows"].as_object().ok_or_else(|| cohort_scope_changed("query_summaries_missing"))?;
                 if !summaries.contains_key(&row.key) { return Err(cohort_scope_changed("query_owner_summary_missing")); }
                 for (id, value) in summaries.iter().filter(|(id, _)| keep.is_none_or(|keep| keep.contains(*id))) {
-                    if value["summary"]["id"] != *id || rows.get(id).is_some_and(|prior| prior != value) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
+                    if value["summary"]["id"] != *id { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
+                    let observed = value.clone();
+                    if saved_rows.get(id).is_some_and(|prior| prior != &observed) { return Err(cohort_scope_changed("query_relationship_summary_mismatch")); }
                     let mut value = value.clone();
                     if !current {
                         value["summary"]["alive"] = serde_json::Value::Null;
@@ -519,8 +523,18 @@ impl QueryCatalogStore for QueryCatalog {
                             value["summary"]["state"] = serde_json::json!("unknown");
                         }
                     }
-                    rows.insert(id.clone(), value);
-                    owners.entry(id.clone()).or_insert_with(|| row.key.clone());
+                    if saved_rows.contains_key(id) {
+                        if current && !current_rows.get(id).copied().unwrap_or(false) {
+                            current_rows.insert(id.clone(), true);
+                            rows.insert(id.clone(), value);
+                            owners.insert(id.clone(), row.key.clone());
+                        }
+                    } else {
+                        saved_rows.insert(id.clone(), observed);
+                        current_rows.insert(id.clone(), current);
+                        rows.insert(id.clone(), value);
+                        owners.insert(id.clone(), row.key.clone());
+                    }
                 }
                 witnesses.push((row.key.clone(), witness, selected_history));
                 // The preview header is a Current trace witness. History has
@@ -569,7 +583,9 @@ impl QueryCatalogStore for QueryCatalog {
                         loaded.insert(row.key.clone(), (row,true,false));
                     } else {
                         let (history, selected_history) = if catalog_member { chosen(row)? } else { (row,true) };
-                        if selected_history && history_window(&history, Some(c)).map_err(cohort_scope_changed)?.member {
+                        let member = selected_history
+                            && history_window(&history, Some(c)).map_err(cohort_scope_changed)?.member;
+                        if select_history(Some(c), current_recent, selected_history, member) {
                             loaded.insert(history.key.clone(), (history,false,true));
                         }
                     }
@@ -592,18 +608,18 @@ impl QueryCatalogStore for QueryCatalog {
                 history_required_owners.extend(window.context);
             }
             for key in &history_required_owners {
-                if cutoff.is_some()
-                    && loaded.get(key).is_some_and(|(_, current, history)| *current && !*history)
-                {
-                    return Err(cohort_scope_changed("current_history_context_source_conflict"));
-                }
                 if let Some(text) = snapshot.history_catalog(key).map_err(|_| StorageError::Unavailable)? {
                     let row: crate::model::summary::CatalogRow = serde_json::from_str(&text)
                         .map_err(|_| cohort_scope_changed("history_context_metadata_invalid"))?;
                     if row.key != *key { return Err(cohort_scope_changed("history_context_identity_mismatch")); }
-                    loaded.insert(key.clone(), (row, false, true));
-                } else {
-                    loaded.remove(key);
+                    if !loaded.get(key).is_some_and(|(_, current, _)| *current) {
+                        loaded.insert(key.clone(), (row, false, true));
+                    }
+                } else if !loaded.contains_key(key) {
+                    if let Some(row) = snapshot.catalog(key, false).map_err(|_| StorageError::Unavailable)? {
+                        let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
+                        loaded.insert(key.clone(), (row, current, false));
+                    }
                 }
             }
             let Some(c) = cutoff else {
@@ -653,9 +669,6 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                     (sets.remove(0), sets.remove(0))
                 };
-                if current_context.iter().any(|key| history_context.contains(key) || loaded.get(key).is_some_and(|(_, _, history)| *history)) {
-                    return Err(cohort_scope_changed("relationship_context_source_conflict"));
-                }
                 current_edges.extend(history_edges);
                 current_turns.extend(history_turns);
                 for (row,current,selected_history) in loaded.into_values() { emit(row, current, selected_history, Some(&keep), bytes_left)?; }
@@ -750,9 +763,6 @@ impl QueryCatalogStore for QueryCatalog {
                     }
                 }
             }
-            if current_context.iter().any(|key| history_context.contains(key)) {
-                return Err(cohort_scope_changed("relationship_context_source_conflict"));
-            }
             if cutoff.is_some() {
                 for key in &current_context {
                     if loaded.get(key).is_some_and(|(_, _, history)| *history) {
@@ -762,14 +772,18 @@ impl QueryCatalogStore for QueryCatalog {
                         })? {
                             Some(row) => {
                                 let current = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
-                                loaded.insert(key.clone(), (row, current, false));
+                                let eligible = current
+                                    && (row.last.is_some_and(|last| last >= c)
+                                        || query_last(&row).is_some_and(|last| last >= c)
+                                        || row.query.as_ref().and_then(|query| query["state"].as_str()).is_some_and(|state| matches!(state, "work" | "wait")));
+                                if eligible {
+                                    loaded.insert(key.clone(), (row, true, false));
+                                }
                             }
-                            None => { loaded.remove(key); }
+                            None => {}
                         }
                     }
                 }
-            } else if current_context.iter().any(|key| loaded.get(key).is_some_and(|(_, _, history)| *history)) {
-                return Err(cohort_scope_changed("relationship_context_source_conflict"));
             }
             needed.extend(current_context.iter().cloned());
             edges.extend(history_edges);
