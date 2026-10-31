@@ -4481,7 +4481,11 @@ mod tests {
                 witness[0]
             );
         }
-        assert_eq!(part.rows.len(), 1, "foreign Source excluded");
+        assert_eq!(
+            part.rows.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+            prepared.rows.iter().map(|row| row.key.as_str()).collect::<std::collections::BTreeSet<_>>(),
+            "the complete published Source cohort is present and foreign Sources are excluded"
+        );
         port.validate(&config.namespace, &part).unwrap();
         let sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
             config.namespace.as_str().into(),
@@ -4496,11 +4500,15 @@ mod tests {
                 &port,
             )
             .unwrap();
-        assert_eq!(reply["total"], 1);
-        assert_eq!(
-            reply["sessions"][0], expected["summary"],
-            "existing Query filters/rendering consume persisted facts"
-        );
+        assert_eq!(reply["total"], part.rows.len());
+        let summaries = reply["sessions"].as_array().unwrap();
+        assert_eq!(summaries.len(), part.rows.len());
+        for row in part.rows.values() {
+            assert!(
+                summaries.contains(&row["summary"]),
+                "existing Query filters/rendering consume every persisted summary"
+            );
+        }
         assert_eq!(
             db.query_row(
                 "SELECT count(*) FROM storage_namespaces WHERE writer_qualification<>0",
