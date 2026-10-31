@@ -619,6 +619,76 @@ impl PresentationObservations {
             .get(&dependency)
             .cloned()
     }
+    /// Keep only this row's typed runtime witness for the direct Catalog owner
+    /// slot. The slot already binds the normalized row metadata, admission and
+    /// stream, so no publication-wide context or source paths belong here.
+    pub(crate) fn runtime_capture_for(
+        &self,
+        row: &crate::model::summary::CatalogRow,
+    ) -> Option<Self> {
+        let source = crate::retention::source_generation(&row.sources).ok()?;
+        let cwd_fingerprint = self.runtime_cwd_fingerprints.get(&source)?.clone();
+        let dependency =
+            crate::native_evidence::runtime::dependency_identity(row, &cwd_fingerprint).ok()?;
+        let row_runtime = self
+            .runtime_rows
+            .get(&row.key)?
+            .get(&source)?
+            .get(&dependency)?
+            .clone();
+        Some(Self {
+            source_runtime: Some(self.source_runtime.as_ref()?.clone()),
+            runtime: Some(self.runtime.as_ref()?.clone()),
+            runtime_rows: BTreeMap::from([(
+                row.key.clone(),
+                BTreeMap::from([(source.clone(), BTreeMap::from([(dependency, row_runtime)]))]),
+            )]),
+            runtime_cwd_fingerprints: BTreeMap::from([(source, cwd_fingerprint)]),
+            facts_known: false,
+            selection_known: false,
+            machine_label: None,
+            sources: BTreeMap::new(),
+            relative_statuses: BTreeMap::new(),
+            authority: None,
+        })
+    }
+    /// Validate the compact persisted form before a direct owner slot can use
+    /// its witness. Extra publication context is not accepted as row authority.
+    pub(crate) fn is_runtime_capture_for(&self, row: &crate::model::summary::CatalogRow) -> bool {
+        let Ok(source) = crate::retention::source_generation(&row.sources) else {
+            return false;
+        };
+        let Some(cwd_fingerprint) = self.runtime_cwd_fingerprints.get(&source) else {
+            return false;
+        };
+        let Ok(dependency) =
+            crate::native_evidence::runtime::dependency_identity(row, cwd_fingerprint)
+        else {
+            return false;
+        };
+        let Some(rows) = self.runtime_rows.get(&row.key) else {
+            return false;
+        };
+        let Some(sources) = rows.get(&source) else {
+            return false;
+        };
+        self.source_runtime.is_some()
+            && self.runtime.is_some()
+            && !self.facts_known
+            && !self.selection_known
+            && self.machine_label.is_none()
+            && self.sources.is_empty()
+            && self.relative_statuses.is_empty()
+            && self.authority.is_none()
+            && self.runtime_cwd_fingerprints.len() == 1
+            && self.runtime_rows.len() == 1
+            && rows.len() == 1
+            && sources.len() == 1
+            && sources.contains_key(&dependency)
+            && sources
+                .get(&dependency)
+                .is_some_and(|runtime| runtime.starts_with("source-runtime-v1:"))
+    }
     pub(crate) fn retired(&self, source: &crate::model::summary::CatalogSource) -> bool {
         Self::source_key(source)
             .ok()

@@ -11,6 +11,8 @@ use crate::storage::proof_lifetime::{
 use crate::storage::{NativeReaderBinding, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
+const DIRECT_CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
@@ -20,7 +22,7 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_root_immutable BEFORE UP
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_proof_source_path ON storage_proof_sources(namespace,path,ledger,id);
 CREATE TABLE IF NOT EXISTS storage_proof_refs(namespace TEXT NOT NULL,session_key TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN('current','history')),id TEXT NOT NULL,PRIMARY KEY(namespace,session_key,kind,id)) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS storage_catalog_native_observation_grants(namespace TEXT NOT NULL,session_key TEXT NOT NULL,owner_kind TEXT NOT NULL CHECK(owner_kind IN('catalog','history')),metadata_digest TEXT NOT NULL CHECK(length(metadata_digest)=64 AND metadata_digest NOT GLOB '*[^0-9a-f]*'),admission INTEGER NOT NULL CHECK(admission>0),stream TEXT NOT NULL CHECK(length(stream)=64 AND lower(stream) NOT GLOB '*[^0-9a-f]*'),PRIMARY KEY(namespace,session_key,owner_kind)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_catalog_native_observation_grants(namespace TEXT NOT NULL,session_key TEXT NOT NULL,owner_kind TEXT NOT NULL CHECK(owner_kind IN('catalog','history')),metadata_digest TEXT NOT NULL CHECK(length(metadata_digest)=64 AND metadata_digest NOT GLOB '*[^0-9a-f]*'),admission INTEGER NOT NULL CHECK(admission>0),stream TEXT NOT NULL CHECK(length(stream)=64 AND lower(stream) NOT GLOB '*[^0-9a-f]*'),direct_capture TEXT CHECK(direct_capture IS NULL OR octet_length(direct_capture)<=8388608),PRIMARY KEY(namespace,session_key,owner_kind)) STRICT, WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_insert BEFORE INSERT ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
 CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_update BEFORE UPDATE ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
 CREATE TRIGGER IF NOT EXISTS storage_catalog_native_observation_grants_delete BEFORE DELETE ON storage_catalog_native_observation_grants WHEN semon_semantic_publisher()<>1 BEGIN SELECT RAISE(ABORT,'native observation publisher refused'); END;
@@ -689,20 +691,48 @@ pub(crate) fn observation_binding_with_observations(
         serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
     let selected_digest = proof_codec::digest(selected_metadata.as_bytes());
     let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-    let exact_owner_grant: bool = db
+    let imported = imported_catalog(db, current)?;
+    let direct_grant = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
+            "SELECT CASE WHEN ?7=0 AND octet_length(direct_capture)<=8388608 THEN direct_capture END,?7=0 AND direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6",
             params![
                 current.namespace.as_str(),
                 selected.key,
                 owner_kind,
                 selected_digest,
                 admission,
-                current.stream_epoch
+                current.stream_epoch,
+                imported
             ],
-            |row| row.get(0),
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
         )
+        .optional()
         .map_err(failed)?;
+    let exact_owner_grant = direct_grant.is_some();
+    if !imported && let Some((capture, oversized)) = direct_grant {
+        if oversized {
+            return Err(StorageError::HistoryRetentionBounds);
+        }
+        if let Some(capture) = capture {
+            crate::selected_read::charge(1, capture.len()).map_err(|_| StorageError::Busy)?;
+            let observations: crate::storage::selected::PresentationObservations =
+                serde_json::from_str(&capture).map_err(|_| StorageError::ScopeChanged)?;
+            let source_runtime = observations
+                .source_runtime
+                .as_deref()
+                .ok_or(StorageError::ScopeChanged)?;
+            let captured_global = current
+                .witness(source_runtime)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            if observations.runtime.as_deref() != Some(captured_global.as_str())
+                || !observations.is_runtime_capture_for(selected)
+                || observations.runtime_for(selected).is_none()
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            return Ok((current.clone(), observations));
+        }
+    }
     let mut statement = db
         .prepare(
             "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
@@ -1087,6 +1117,7 @@ pub(crate) fn native_catalog_observation_grant(
     admission: u64,
     stream: &str,
     metadata: &str,
+    observations: Option<&crate::storage::selected::PresentationObservations>,
 ) -> Result<(), StorageError> {
     let mut row: CatalogRow =
         serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
@@ -1097,16 +1128,48 @@ pub(crate) fn native_catalog_observation_grant(
     // row in its producer form so either retained display tag selects it.
     row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    let direct_capture = match observations.and_then(|observations| {
+        observations.runtime_capture_for(&row)
+    }) {
+        Some(capture) => {
+            if !capture.is_runtime_capture_for(&row) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let capture = serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
+            if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
+                return Err(StorageError::HistoryRetentionBounds);
+            }
+            Some(capture)
+        }
+        None => None,
+    };
     let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     db.execute(
-        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'catalog',?3,?4,?5) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream",
+        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'catalog',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
         params![
             namespace,
             session_key,
             proof_codec::digest(metadata.as_bytes()),
             admission,
-            stream
+            stream,
+            direct_capture
         ],
+    )
+    .map_err(failed)?;
+    Ok(())
+}
+
+pub(crate) fn clear_native_catalog_observation_capture(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<(), StorageError> {
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    db.execute(
+        "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND admission=?3 AND stream=?4 AND direct_capture IS NOT NULL",
+        params![namespace, session_key, admission, stream],
     )
     .map_err(failed)?;
     Ok(())
@@ -1147,6 +1210,7 @@ pub(crate) struct PreparedObservationUpdate {
     after_digest: String,
     admission: i64,
     stream: String,
+    direct_capture: Option<String>,
     existing_slot: bool,
     history_activity: (Option<i64>, bool),
 }
@@ -1168,16 +1232,16 @@ impl PreparedObservationUpdate {
         }
         if self.existing_slot {
             let changed = db.execute(
-                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
-                params![self.namespace, self.key, self.owner.kind(), self.before_digest, self.admission, self.after_digest, self.stream],
+                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6,direct_capture=?8 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
+                params![self.namespace, self.key, self.owner.kind(), self.before_digest, self.admission, self.after_digest, self.stream, self.direct_capture],
             )?;
             if changed != 1 {
                 return Err(rusqlite::Error::InvalidQuery);
             }
         } else {
             db.execute(
-                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,?3,?4,?5,?6)",
-                params![self.namespace, self.key, self.owner.kind(), self.after_digest, self.admission, self.stream],
+                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![self.namespace, self.key, self.owner.kind(), self.after_digest, self.admission, self.stream, self.direct_capture],
             )?;
         }
         Ok(())
@@ -1276,17 +1340,17 @@ fn prepare_observation_update(
     let before_metadata = serde_json::to_string(&before).map_err(|_| StorageError::Unavailable)?;
     let before_digest = proof_codec::digest(before_metadata.as_bytes());
     let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-    let owner_slot: Option<(String, i64, String)> = db
+    let owner_slot: Option<(String, i64, String, Option<String>, bool)> = db
         .query_row(
-            "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
+            "SELECT metadata_digest,admission,stream,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
             params![namespace, selected.key, owner_kind],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
         )
         .optional()
         .map_err(ObservationPreparationError::Sql)?;
     if owner_slot
         .as_ref()
-        .is_some_and(|(digest, slot_admission, stream)| {
+        .is_some_and(|(digest, slot_admission, stream, _, _)| {
             digest != &before_digest
                 || *slot_admission != admission
                 || stream != &current.stream_epoch
@@ -1294,6 +1358,24 @@ fn prepare_observation_update(
     {
         return Err(StorageError::ScopeChanged.into());
     }
+    if owner_slot
+        .as_ref()
+        .is_some_and(|(_, _, _, _, oversized)| *oversized)
+    {
+        return Err(StorageError::HistoryRetentionBounds.into());
+    }
+    let direct_capture = owner_slot
+        .as_ref()
+        .and_then(|(_, _, _, capture, _)| capture.as_ref())
+        .and_then(|capture| {
+            serde_json::from_str::<crate::storage::selected::PresentationObservations>(capture)
+                .ok()
+                .filter(|observations| {
+                    observations.is_runtime_capture_for(repaired)
+                        && observations.runtime_for(repaired).is_some()
+                })
+                .map(|_| capture.clone())
+        });
 
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
     let mut normalized = repaired.clone();
@@ -1312,6 +1394,7 @@ fn prepare_observation_update(
         after_digest: proof_codec::digest(normalized.as_bytes()),
         admission,
         stream: current.stream_epoch.clone(),
+        direct_capture,
         existing_slot: owner_slot.is_some(),
         history_activity: crate::storage::query::history_activity(repaired),
     })
@@ -1366,7 +1449,7 @@ pub(crate) fn reconcile_native_observation_owners(
     };
     let mut statement = db
         .prepare(
-            "SELECT owner_kind,metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 LIMIT 3",
+            "SELECT owner_kind,metadata_digest,admission,stream,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 LIMIT 3",
         )
         .map_err(failed)?;
     let grants = statement
@@ -1376,6 +1459,8 @@ pub(crate) fn reconcile_native_observation_owners(
                 row.get::<_, String>(1)?,
                 row.get::<_, i64>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, bool>(5)?,
             ))
         })
         .map_err(failed)?
@@ -1384,16 +1469,17 @@ pub(crate) fn reconcile_native_observation_owners(
     if grants.len() > 2 {
         return Err(StorageError::Unavailable);
     }
+    if grants.iter().any(|grant| grant.5) {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
     let owned = |kind: &str, digest: Option<&String>| {
         digest.is_some_and(|digest| {
-            grants
-                .iter()
-                .any(|(owner, actual, actual_admission, actual_stream)| {
-                    owner == kind
-                        && actual == digest
-                        && *actual_admission == admission
-                        && actual_stream == stream
-                })
+            grants.iter().any(|grant| {
+                grant.0.as_str() == kind
+                    && &grant.1 == digest
+                    && grant.2 == admission
+                    && grant.3.as_str() == stream
+            })
         })
     };
     if !owned("catalog", catalog_digest.as_ref()) {
@@ -1404,12 +1490,22 @@ pub(crate) fn reconcile_native_observation_owners(
         .map_err(failed)?;
     }
     let history_owned = owned("history", history_digest.as_ref());
-    let history_from_catalog = owned("catalog", history_digest.as_ref());
-    if !history_owned && history_from_catalog {
+    let history_capture = history_digest.as_ref().and_then(|digest| {
+        grants
+            .iter()
+            .find(|grant| {
+                grant.0.as_str() == "catalog"
+                    && &grant.1 == digest
+                    && grant.2 == admission
+                    && grant.3.as_str() == stream
+            })
+            .map(|grant| grant.4.clone())
+    });
+    if !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
         db.execute(
-            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream) VALUES(?1,?2,'history',?3,?4,?5) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream",
-            params![namespace, session_key, digest, admission, stream],
+            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
+            params![namespace, session_key, digest, admission, stream, history_capture.flatten()],
         )
         .map_err(failed)?;
     } else if !history_owned {
