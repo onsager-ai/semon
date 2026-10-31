@@ -58,6 +58,28 @@ pub(crate) fn cache(config: &StoreConfig) -> crate::events::EventCache {
     }
 }
 
+pub(crate) fn begin_active_catalog(
+    cache: &mut crate::events::EventCache,
+    paths: &[String],
+    runtime: &str,
+    journaled: bool,
+) {
+    // Written may advance private GC before the successor stage exists. A live
+    // batch remains available until recorded by the caller's ordinary producer.
+    for _ in 0..512 {
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(paths, runtime, journaled)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        if cache.semantic_batch(64).unwrap().is_some() {
+            return;
+        }
+    }
+    panic!("bounded private GC failed to yield a successor stage");
+}
+
 pub(crate) fn stage(
     source: &StoreConfig,
     target: &StoreConfig,
@@ -621,15 +643,11 @@ fn current_transfer_catalog_reprice_preserves_imported_original_authority() {
     let mut producer = cache(&source);
     producer.ingest(&"9".repeat(64), &path, "claude").unwrap();
     producer.flush_cold_writes().unwrap();
-    assert_eq!(
-        producer
-            .begin_semantic_stage_with_journal(
-                &[path.to_str().unwrap().to_owned()],
-                "transfer-real-model",
-                true,
-            )
-            .unwrap(),
-        crate::events::Outcome::Written
+    begin_active_catalog(
+        &mut producer,
+        &[path.to_str().unwrap().to_owned()],
+        "transfer-real-model",
+        true,
     );
     let rows = finish_catalog(&mut producer, &options, std::slice::from_ref(&input));
     let original = &rows[0];

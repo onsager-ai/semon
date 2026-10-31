@@ -8125,10 +8125,9 @@ mod tests {
             .unwrap();
             let paths = [input.full_path(options).to_string_lossy().into_owned()];
             let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            // Written may advance private GC before the successor stage exists.
             assert_eq!(
-                cache
-                    .begin_semantic_stage_with_journal(&paths, &runtime, true)
-                    .unwrap(),
+                begin_active_stage(&mut cache, &f, &paths, &runtime).unwrap(),
                 Outcome::Written
             );
             let batch = cache.semantic_batch(64).unwrap().unwrap();
