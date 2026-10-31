@@ -164,6 +164,10 @@ struct OriginHeader {
     first_publication: Option<String>,
     final_generation: Option<String>,
     final_revision: Option<i64>,
+    final_key_epoch: Option<i64>,
+    final_owner_count: Option<u64>,
+    final_source_count: Option<u64>,
+    final_queue_digest: Option<String>,
     finish_phase: FinishPhase,
     finish_after: String,
 }
@@ -189,6 +193,8 @@ struct OriginGroup {
 }
 enum FinishPhase { VerifyOwners, VerifySources, Cleanup, Finalize }
 enum SemanticWork { Batch(Batch), OriginContextAdvanced }
+enum ContextPageKind { ReplayOwners, CompanionOwners, ParentKeys,
+                       ParentChildren, Endpoints, OtherFields }
 struct OriginPublicationReceipt {
     origin: OriginId,
     held_epoch: i64,
@@ -201,11 +207,15 @@ struct OriginPublicationReceipt {
     stream: String,
 }
 struct OriginContext {
-    owner: String,
-    after_child: String,
+    selection_digest: String,
+    scope_key: String,
+    kind: ContextPageKind,
+    after_key: String,
+    item_count: u64,
+    byte_count: u64,
     complete: bool,
-    // Canonically ordered child keys for one selected parent, at most 1 MiB.
-    child_keys: Vec<String>,
+    // Canonical selected Context accumulator, at most 1 MiB.
+    payload: Vec<u8>,
 }
 struct OriginOwnerWitness {
     key: String,
@@ -237,6 +247,13 @@ presentation observations. Claims include every selected path, including paths
 whose accepted claim is null. The batch and the original `PreparedSources` stay
 together at the caller boundary for exact replay.
 
+Before context paging, derive one canonical `OriginGroup` from the first
+unpublished owners, their complete owned paths and current claims, then bind its
+selection digest to the context row. On every resumed tick, derive that same
+group and compare its digest before appending a page. If the queue, head or
+claims select a different group, discard the unfinished context and start a new
+selection; never attach old keys or fields to the new request.
+
 `semantic_batch` returns either a bounded `Batch` or
 `OriginContextAdvanced`. The latter means one durable context page was advanced;
 the producer returns pending without opening Raw or preparing a model. It
@@ -244,6 +261,13 @@ prevents a metadata paging loop from becoming unbounded inside one producer
 tick. The batch carries `selected_owners` separately from
 `Context.replay_owners`: selected owners define publication progress, while
 replay owners define bounded native relationship context.
+
+Before opening the selected Raw cohort or preparing its model, the producer
+finishes collecting the selected group's SQL/native `Context` fields. Each tick
+advances one indexed page of at most 64 metadata rows and returns
+`OriginContextAdvanced`; it does not build a stage-wide endpoint map. The one
+selected `Context` is assembled only after its owner, parent, child and endpoint
+pages are complete.
 
 Only an owned native discovery producer may create the origin. The proposed
 private operations are `enroll_origin_page`, `seal_origin`,
@@ -261,8 +285,11 @@ SQLite keeps the existing `catalog_semantic_stage` row and adds nullable origin
 header fields: `origin_epoch`, `origin_phase` (`discovering`, `sealed`,
 `draining`, `finishing`, `invalid`, `finished`), `origin_admission`,
 `origin_stream`, `origin_sealed_revision`, `origin_first_generation`,
-`origin_final_generation`, `origin_final_revision`, `origin_finish_phase` and
-`origin_finish_after`. Existing `generation`,
+`origin_final_generation`, `origin_final_revision`, `origin_final_key_epoch`,
+`origin_final_owner_count`, `origin_final_source_count`,
+`origin_final_queue_digest`, `origin_finish_phase` and `origin_finish_after`.
+The six `origin_final_*` fields are all absent until the atomic pre-cleanup
+completion seal is written. Existing `generation`,
 `runtime`, `epoch` and reduction cursors keep their current jobs. The SQLite WIP
 represents an unactivated runtime using explicit `origin_runtime_bound=0` while
 retaining the existing non-null runtime column. Its placeholder contents convey
@@ -276,7 +303,7 @@ invalidation. `catalog_semantic_endpoints.published` is the selected-owner
 queue; source `publication_done` and `ack_done` remain independent per-path
 queue bits.
 
-Two small witness relations belong to that same stage family:
+Small witness, receipt and context relations belong to that same stage family:
 
 ```sql
 -- Conceptual DDL; final constraints/guards require schema review.
@@ -294,9 +321,10 @@ catalog_semantic_origin_publications(
   PRIMARY KEY(namespace, origin_epoch, held_epoch, key_epoch, group_digest),
   UNIQUE(namespace, origin_epoch, held_epoch, key_epoch, selection_digest));
 catalog_semantic_origin_context(
-  namespace, origin_epoch, key_epoch, owner_key, kind, after_key,
-  complete, payload CHECK(octet_length(payload)<=1048576),
-  PRIMARY KEY(namespace, origin_epoch, key_epoch, owner_key, kind));
+  namespace, origin_epoch, key_epoch, selection_digest, scope_key, kind,
+  after_key, item_count, byte_count, complete,
+  payload CHECK(octet_length(payload)<=1048576),
+  PRIMARY KEY(namespace, origin_epoch, key_epoch, selection_digest));
 ```
 
 `group_digest` hashes the full request and `selection_digest` names the selected
@@ -304,9 +332,20 @@ group. The unique selection key makes one selected group admit only one request:
 an exact digest replays its receipt, while a changed body, projection or
 presentation for the same selected owners and claims conflicts. Different
 selected groups in one held epoch have different selection digests and receipts.
-The receipt stores the original holder epoch and expected head. `payload` in the
-context table is used only for one selected owner's bounded parent summary; it
-is at most 1 MiB and is never an all-stage or all-endpoint document.
+The receipt stores the original holder epoch and expected head. There is one
+`catalog_semantic_origin_context` row per selected-group digest. Its `kind`,
+`scope_key`, and `after_key` are the current composite cursor; `payload` is the
+canonical selected `Context` accumulated so far and `byte_count` is the group
+total. Every tick atomically advances that cursor and appends one bounded page.
+The row never contains a stage-wide or all-endpoint map and remains at most
+1 MiB.
+
+In the context row, `scope_key` is the selected or companion physical path for
+`ReplayOwners` or `CompanionOwners`, a summary-parent key for `ParentChildren`,
+and the empty group scope for `ParentKeys`, `Endpoints` and `OtherFields`.
+`after_key` is the last owner key, child key, endpoint key, or field key in the
+current sorted set. The full selection digest, kind, scope and cursor qualify
+each next page.
 
 Allocation also proves the Current baseline is empty in that same owned
 transaction: no Current Catalog rows, Current source membership, native Current
@@ -326,25 +365,75 @@ its existing membership check must still pass. Source witnesses are deduplicated
 by physical path within the origin. An accepted null claim is
 `acknowledged=1, accepted_claim=NULL`, distinct from a missing witness.
 
-For `kind='parent_children'`, one `catalog_semantic_origin_context` row stores
-one selected parent's canonical child-key list, last child key read and
-completion bit. Each producer tick reads at most 64 rows using the
-`catalog_semantic_parent_key(namespace,parent_key,session_key)` index and
-`session_key > after_key ORDER BY session_key LIMIT 65`. It appends at most 64
-keys, checks the accumulated payload remains at most 1 MiB, and advances the
-cursor and `complete` bit in the same transaction. `load_context` reads that
-row only after `complete=1`. Thus the 80-child parent summary is assembled from
-bounded durable metadata pages without reading child Raw logs or retaining an
-all-endpoint map. If the one selected summary exceeds 1 MiB, refuse without
-publishing a truncated parent. The aggregate selected `Context`, including all
-selected endpoints and completed summaries, also remains within 1 MiB.
+Context paging uses these `kind` values and complete key sets:
+
+* `replay_owners` is scoped to each selected physical path. Read
+  `catalog_semantic_owner_sources` through its
+  `catalog_semantic_source_owner(namespace,source_path,session_key)` index with
+  `session_key > after_key ORDER BY session_key LIMIT 64`. Append at most 64
+  full canonical session keys per tick. `Context.replay_owners` is the sorted,
+  deduplicated union across every selected path; persist the path and owner
+  keyset cursor so a large list spans ticks without a global endpoint map.
+* After the existing relation/event ports produce the at-most-64 physical
+  `Context.companions` paths, collect their owner keys through the same indexed
+  source-owner lookup as `companion_owners`. These owners add endpoint context
+  only; they do not enter `selected_owners`, `replay_owners`, or `Batch.paths`.
+  Charge both the companion path strings and every companion owner key.
+* `parent_keys` pages the sorted owner-key set from `replay_owners` and
+  `companion_owners`, then point-reads at most 64 exact keys through the endpoint
+  primary key to obtain each direct `parent_key`. It never scans unrelated
+  endpoints. The exact `Context.endpoints` key set is replay owners and
+  companion owners union these non-null direct parent keys. No parent key is
+  inferred from an absent endpoint row.
+* The exact summary parent set is replay owners union the non-null direct parent
+  keys of replay owners. Companion owners and their direct parents add endpoint
+  context only; they do not trigger child-summary reads. For each summary parent,
+  `parent_children` reads
+  `catalog_semantic_endpoints` through
+  `catalog_semantic_parent_key(namespace,parent_key,session_key)` with
+  `session_key > after_key ORDER BY session_key LIMIT 64`. This deliberately
+  includes a selected child's parent even when that parent is not itself among
+  the selected owners: the 80 child keys for that parent are all retained in
+  `Context.children[parent]` across durable pages. The child keys do not add
+  physical sources to `Batch.paths` or split the complete owned 64-source
+  cohort.
+* `endpoints` loads only the exact owner/parent key set above, in keyset pages
+  of at most 64 rows. The existing relationship and event ports similarly page
+  `relations`, `native_events`, `companions`, and `matching_locations`; the
+  existing complete prior-owner closure populates `prior_owners`, and selected
+  outgoing observations populate `retired_owners`. `family_costs` is charged
+  for every summary parent.
+
+Each tick advances one context page of at most 64 metadata rows, persists its
+`after_key`, `item_count`, `byte_count`, and completion bit in the same
+transaction, then returns `OriginContextAdvanced`. Context kinds, scopes and
+keys advance in canonical order; `after_key` records the last fully appended
+key in the current scope. A short page ends that scope; an exactly full 64-row
+page needs a following empty page to prove its end. Advance to the next
+scope/kind only after proving the current scope ended, and set `complete=1` only
+after the final scope ends. `item_count` counts appended context entries and
+`byte_count` counts their aggregate canonical encoding. Every field in the actual
+`Context` shares one aggregate 1 MiB budget: `epoch`, `endpoints`, `relations`,
+`family_costs`, `children`, `native_events`, `companions`,
+`matching_locations`, `replay_owners`, `prior_owners`, `retired_owners`,
+`presentation`, and `lifecycle_authority`. Charge each canonical encoded key
+and value, map/vector delimiters, and scalar; charge a key again when it occurs
+in another field. `presentation` is charged by its canonical observation
+encoding even though the Rust field is skipped by ordinary `Context` serde;
+`lifecycle_authority` is charged by its canonical descriptor encoding. Check
+the remaining group budget before retaining each value or advancing its page.
+If the complete Context would exceed 1 MiB, refuse before opening the selected
+Raw cohort or preparing its model. Never truncate a key list or endpoint row.
+Thus the 80-child parent summary is assembled from bounded durable metadata
+pages without reading child Raw logs or retaining an all-stage endpoint map.
 
 PostgreSQL uses the existing `catalog_stage_items` family. `seq=0` remains a
 bounded header; other rows are typed items for source progress, endpoints,
-frontiers, relations, origin owners, origin sources and publication receipts.
-The physical `stage_epoch` key is the stable lifecycle root (`OriginId` for an
-origin stage); the header records the current held epoch. Takeover changes the
-held epoch by CAS and never copies all item rows into another epoch.
+frontiers, relations, origin owners, origin sources, context pages and
+publication receipts. The physical `stage_epoch` key is the stable lifecycle
+root (`OriginId` for an origin stage); the header records the current held epoch
+and all completion-seal fields. Takeover changes the held epoch by CAS and
+never copies all item rows into another epoch.
 
 Add typed item kind, key digest and full key to this existing family, with a
 namespace/root/kind/digest index. Full namespace and key bytes qualify every
@@ -366,7 +455,7 @@ it is not an origin/holder epoch. Conceptual item mappings are:
 | Accepted owner comparison | Origin-owner witness row | `origin-owner`, full session key |
 | Accepted source comparison | Origin-source witness row | `origin-source`, full physical path |
 | Selected-group replay | Group-qualified stage publication receipt | `publication`, origin plus full group digest |
-| Parent summary cursor/payload | Bounded selected-owner context row | `origin-context`, origin plus owner key |
+| Selected `Context` key/field pages | Bounded selected-group context rows | `origin-context`, selection digest plus full scope/kind |
 | Existing derived work | Existing sources/endpoints/frontiers/relations | Typed item with its complete existing logical key |
 
 For example, a PostgreSQL source lookup qualifies namespace bytes, stable root,
@@ -480,19 +569,19 @@ be in the sealed inventory to receive an origin exception. A post-seal path
 stays an ordinary journal claim and cannot inherit its parent's exception.
 
 Relationship context is loaded only for the selected owner group and its
-bounded companions. In the current SQLite `load_context`, parent-child keys
-are read with an unbounded loop even though the accumulated byte count is
-checked. Replace that loop with `catalog_semantic_origin_context` progress:
-`(origin_epoch,key_epoch,owner_key,kind='parent_children',after_key,complete,
-payload)`. Each `semantic_batch` call advances at most 64 children from the
-indexed `catalog_semantic_endpoints(parent_key,session_key)` relation and
-appends their canonical keys to this one-parent payload, capped at 1 MiB. It
-returns `OriginContextAdvanced` until the completion bit is set; these ticks do
-not parse Raw or prepare models. The final `Context` reads a completed payload
-for only the selected parent(s). The 80-child fixture therefore keeps all 80
-keys in the parent summary while each metadata fetch and each context stays
-within its existing bound. Physical companions remain at most 64 and are not
-expanded to every child source.
+bounded companions. The current SQLite `load_context` reads every owner key for
+each selected path, then every direct parent key, and then all parent-child
+keys; the first two key collections are not byte-charged and the child loop
+has no row bound. Replace all three with the indexed `replay_owners`,
+`parent_keys`, and `parent_children` pages defined above. Persist the cursor and
+completion state per selection/path or owner; each tick advances one page of at
+most 64 metadata rows and returns `OriginContextAdvanced` until every exact key
+set is complete. The summary-parent set includes direct parents of selected
+child owners, so the 80-child fixture retains the parent's full summary even
+when those child owners are selected. All `Context` fields share the same 1 MiB
+canonical byte accounting, and overflow refuses before opening the selected
+Raw cohort or preparing its model. Physical owned sources remain capped at 64
+and are never expanded to every child source.
 
 `catalog_semantic_sources.ack_done` records source-claim ACK and
 `publication_done` records selected source publication; endpoint `published`
@@ -598,40 +687,70 @@ owner exception fail comparison; a new validated publication may record its
 successor. Runtime, admission or stream replacement invalidates the origin's
 exception entirely. Do the Q1 sibling/native identity invalidation and mark the
 affected comparison stale before any JSON claim deletion, in the reset's same
-transaction. `reset_page` uses the existing 64-metadata-item mutation budget;
-it resumes by keyset cursor after restart and never deletes Raw, Current or
-History.
+transaction. The reset transaction also clears all six final seal fields and
+all finish cursors before rebuilding. `reset_page` uses the existing
+64-metadata-item mutation budget; it resumes by keyset cursor after restart and
+never deletes Raw, Current or History.
 
 Finish has four durable phases on the same stage: `VerifyOwners`,
-`VerifySources`, `Cleanup`, and `Finalize`. Verification checks at most 64 owner
-or source witnesses per call, including complete Current membership, native
-grant, exact source ledger/claim and the recorded acknowledgement bit. It
-requires every initial member and selected endpoint to be complete, no pending
-claims, the current Catalog head equal to the stage generation, and an unchanged
-source journal revision. Persist the verified owner/source keyset cursor and
-the exact final head/revision; do not build a final inventory map.
+`VerifySources`, `Cleanup`, and `Finalize`. Verification pages run while the
+origin remains `Draining`; `finish_phase` and `finish_after` retain the active
+owner/source scan. If a group advances the head or the journal revision changes,
+discard the affected finish cursors and restart the bounded scan. Only the
+pre-cleanup CAS below freezes publication. Verification checks at most 64 owner
+records or 64 source records per call, including complete Current membership,
+native grant, exact source ledger/claim and the recorded acknowledgement bit.
+The owner pass scans every selected endpoint key and requires `published=1`;
+the source pass scans every sealed member path and requires `publication_done=1`
+and `ack_done=1`. Both passes retain canonical keyset cursors and fold their
+exact sorted keys into owner/source counts and one deterministic queue digest
+over type-tagged, length-prefixed owner keys followed by source paths. They
+require no pending claims or invalidations, the current Catalog head equal to
+the stage generation, and an unchanged source journal revision. They do not
+build a final inventory map.
 
-After both verification passes, set `origin_phase='finishing'` and freeze new
-group publications. Cleanup removes derived context, frontier, event, relation,
-endpoint and model-witness rows in pages of at most 64 metadata mutations total.
-Keep immutable origin membership and accepted owner/source witnesses until
+After both passes, one transaction rechecks the held epoch, `key_epoch`, exact
+head, source journal revision, no pending invalidations/claims, and the endpoint
+and sealed-source completion predicates. Group publication changes those queue
+bits and the live head in one transaction, so the exact head fence proves the
+saved queue counts/digest still describe these rows. If every fence matches,
+that same CAS sets `origin_phase='finishing'` (freezing new groups), advances
+`finish_phase` to `Cleanup`, and writes the durable completion seal:
+`origin_final_generation`, `origin_final_revision`,
+`origin_final_key_epoch`, `origin_final_owner_count`,
+`origin_final_source_count`, and `origin_final_queue_digest`. This atomic
+pre-cleanup freeze and seal bind the exact completed selected endpoint/source
+key sets to the final head, journal revision and key epoch. Exact receipt replay
+remains read-only during `Finishing`. If any predicate differs, clear the finish
+cursors and seal and resume normal bounded reset/recovery with the same origin.
+
+Cleanup removes derived context, frontier, event, relation, endpoint and
+model-witness rows in pages of at most 64 metadata mutations total. The seal is
+the durable evidence that selected queues were complete before endpoint rows
+were deleted; queue emptiness is never inferred from deleted rows. Keep
+immutable origin membership and accepted owner/source witnesses until
 finalization so a journal change during cleanup can return to bounded reset and
 recovery. The active source rows retain their immutable origin fields; a later
 ordinary `begin` refreshes mutable claim/progress fields with an upsert while
 preserving immutable `origin_epoch`, `origin_member` and `origin_claim`.
 
-The final transaction rechecks the exact final Catalog head, source journal
-revision, no pending invalidations, completed selected queues and all final
-witness cursors. Only then may it mark the Catalog complete and remove the
+The final transaction validates the completion seal's exact final Catalog
+head, source journal revision, and key epoch against the still-current stage
+and source fences. It also rechecks no pending invalidations/claims and the
+surviving witness cursors. It does not query selected queues after cleanup has
+removed their endpoint rows; the pre-cleanup seal is the proof of those exact
+queue contents. Only then may it mark the Catalog complete and remove the
 active stage row. If any input changes during finish, keep completeness partial,
-invalidate the old finish cursor, and resume or reset with the same OriginId;
-cleanup never ACKs a source claim. Group receipts are excluded from derived
-cleanup and retained with the origin for the exact-replay lifetime. During
-`Finishing` they may only return a matching generation with zero writes; after
-the active stage is removed they remain read-only receipts. A Finished receipt,
-owner witness or source witness cannot create a new group, exclude an owner
-from a later ordinary closure, or grant source/native authority. This prevents
-an orphan receipt from authorizing work and preserves the M2 exact retry after
+atomically clear the seal and finish cursors, and resume or reset with the same
+OriginId; cleanup never ACKs a source claim. Reset or origin invalidation clears
+all six seal fields before rebuilding and cannot treat cleanup-induced empty
+queues as completion. Group receipts are excluded from derived cleanup and
+retained with the origin for the exact-replay lifetime. During `Finishing` they
+may only return a matching generation with zero writes; after the active stage
+is removed they remain read-only receipts. A Finished receipt, owner witness or
+source witness cannot create a new group, exclude an owner from a later
+ordinary closure, or grant source/native authority. This prevents an orphan
+receipt from authorizing work and preserves the M2 exact retry after
 finalization.
 
 #### Operation bounds and implementation checkpoints
@@ -641,11 +760,11 @@ finalization.
 | Discovery | Existing 512 examined entries, at most 64 accepted paths | Append the same accepted page and claims; seal in final transaction |
 | Index/identity | At most 64 physical sources, existing 4 MiB source slices, and one complete selected owner's source cohort | Per-source progress and existing ledger witnesses |
 | Selected owner cohort | At most 64 selected owners and at most 64 distinct complete owned physical sources; never split an owner's sources | `published` owner queue plus exact selected source paths |
-| Relationship/context | Existing actor/seed/event limits, at most 64 physical companions, 1 MiB aggregate selected `Context` | Frontier/event/relation cursors; parent summary cursor and completion payload; no all-endpoint map |
+| Relationship/context | Existing actor/seed/event limits, at most 64 physical companions, 1 MiB aggregate selected `Context` | Frontier/event/relation cursors; selected/companion owner, parent-key, endpoint and parent-summary pages; no all-endpoint map |
 | Witness/context reads | At most 64 metadata items per page, 1 MiB per payload/context | Keyset cursor; one page per producer tick; no uncapped loop |
 | Publication | At most 64 selected owners and 64 distinct physical sources; existing metadata/projection byte limits | Group-qualified receipt, selected owner/source flags, exact ACK and live head in one transaction |
 | Prior owners outside origin | Complete affected closure; existing 64-owner/source and 1 MiB refusal | Origin matches exclude only exact accepted Current owners; no origin-based increase or truncation |
-| Reset/cleanup | At most 64 metadata-item mutations per call | Existing holder/key epochs, reset cursor, finish verification cursors and cleanup cursor |
+| Reset/cleanup | At most 64 metadata-item mutations per call | Existing holder/key epochs, reset cursor, finish verification cursors, pre-cleanup seal and cleanup cursor |
 
 Receipt records contain keys/digests and source witnesses, not another copy of
 all model metadata. PostgreSQL packs them by both item count and bytes; it may
