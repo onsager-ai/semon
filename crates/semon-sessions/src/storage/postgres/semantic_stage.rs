@@ -367,7 +367,7 @@ pub(super) fn record(
     if batch.phase == Phase::Publication {
         stage.model = Some(
             prepared
-                .staged_model_witness()
+                .staged_publication_witness()
                 .map_err(|_| StorageError::ScopeChanged)?,
         );
         save(tx, &stage, false)?;
@@ -446,7 +446,7 @@ pub(super) fn publish(
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let revision = lock(tx)?;
     let witness = prepared
-        .staged_model_witness()
+        .staged_publication_witness()
         .map_err(|_| StorageError::ScopeChanged)?;
     if let Some(stage) = load_epoch(tx, false, Some(batch.epoch))?
         && !stage.active

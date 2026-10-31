@@ -64,6 +64,18 @@ renderers, repair, immutable proof publication or a new format marker; those
 hooks must change together before activation. Existing inline producer rows
 remain the current active publication contract.
 
+Private semantic coordinators bind each key's exact prepared compact metadata
+and detached payload bytes together with the existing model/projection and
+presentation witness. Record and publication compare the same ordered cells;
+the compact typed row is retained by preparation without decoding its freshly
+encoded metadata. SQLite charges the encoded cell vector and existing witness
+against its unchanged 2 MiB coordinator limit. PostgreSQL includes both in its
+unchanged 1 MiB whole-Stage limit. Preparation retains the combined 1 MiB limit
+per metadata/payload pair. Digest references never replace payload byte charges.
+Earlier private witness shapes cannot satisfy this exact comparison. Current
+rows, Query header hashes, observation grants and immutable proof/presentation
+bytes remain inline in this prerequisite; this is not detached-format activation.
+
 ## One current SQLite contract
 
 All current tables use the namespace-leading physical contract. Namespace-local

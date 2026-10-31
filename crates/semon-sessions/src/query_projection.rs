@@ -26,8 +26,9 @@ pub(crate) struct SelectedRecipeRef {
 }
 
 /// A single publication's compact metadata and complete selected payload.
-/// This preparation boundary is inactive until every storage/read hook is ready.
+/// Coordinators bind these cells; Current writers/readers activate together later.
 pub(crate) struct SelectedRecipePublication {
+    pub(crate) row: CatalogRow,
     pub(crate) metadata: String,
     pub(crate) query_recipe: Option<String>,
 }
@@ -80,9 +81,20 @@ impl SelectedRecipe {
             ));
         }
         Ok(SelectedRecipePublication {
+            row: compact,
             metadata,
             query_recipe,
         })
+    }
+
+    /// Exact keyed cells recorded by the private publication coordinator.
+    pub(crate) fn coordinator_metadata(rows: &[Self]) -> serde_json::Result<String> {
+        serde_json::to_string(
+            &rows
+                .iter()
+                .map(|row| (&row.row.key, &row.metadata, &row.query_recipe))
+                .collect::<Vec<_>>(),
+        )
     }
 
     /// Replace selected result metadata with its exact publication reference.

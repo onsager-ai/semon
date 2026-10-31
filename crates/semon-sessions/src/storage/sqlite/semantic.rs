@@ -1719,7 +1719,13 @@ impl Stage {
         let producer_witness = prepared
             .staged_model_witness()
             .map_err(|e| StoreError::Data(e.to_string()))?;
-        if producer_witness.len() > 2 * 1048576 {
+        let publications = prepared
+            .selected_publications()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        let coordinator_metadata =
+            crate::query_projection::SelectedRecipePublication::coordinator_metadata(&publications)
+                .map_err(|e| StoreError::Data(e.to_string()))?;
+        if coordinator_metadata.len().saturating_add(producer_witness.len()) > 2 * 1048576 {
             return Err(refuse("semantic_context_budget"));
         }
         let metadata = prepared
@@ -1941,10 +1947,7 @@ impl Stage {
             || !prepared.lineage_dependencies.is_empty()
             || !prepared.relationships.retired_owners.is_empty()
         {
-            let witness = prepared
-                .staged_model_witness()
-                .map_err(|e| StoreError::Data(e.to_string()))?;
-            let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS (SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1))",params![ns,batch.epoch,metadata_text,witness,claims_text,batch.base_generation,batch.source_revision,batch.runtime,selected_paths],|r|r.get(0)).map_err(error)?;
+            let exact: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS (SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1))",params![ns,batch.epoch,coordinator_metadata,producer_witness,claims_text,batch.base_generation,batch.source_revision,batch.runtime,selected_paths],|r|r.get(0)).map_err(error)?;
             if !exact {
                 #[cfg(test)]
                 eprintln!("semantic_publication_conflict reason=staged_model_witness");
@@ -3350,8 +3353,10 @@ impl Stage {
                         .iter()
                         .map(|s| s.path.to_string_lossy().into_owned()),
                 );
-                metadata
-                    .push(serde_json::to_string(row).map_err(|e| StoreError::Data(e.to_string()))?);
+                metadata.push(
+                    crate::query_projection::SelectedRecipe::prepare(row)
+                        .map_err(|e| StoreError::Data(e.to_string()))?,
+                );
             }
             if covered != batch.paths.iter().cloned().collect() {
                 #[cfg(test)]
@@ -3362,7 +3367,8 @@ impl Stage {
                 retirement_plan(&tx, &self.source, prepared)?;
             }
             let metadata =
-                serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
+                crate::query_projection::SelectedRecipePublication::coordinator_metadata(&metadata)
+                    .map_err(|e| StoreError::Data(e.to_string()))?;
             let projections = prepared
                 .staged_model_witness()
                 .map_err(|e| StoreError::Data(e.to_string()))?;

@@ -7631,6 +7631,29 @@ impl PreparedSources {
         .map_err(io::Error::other)
     }
 
+    /// Prepare persistence cells without changing the inline producer model.
+    pub(crate) fn selected_publications(
+        &self,
+    ) -> io::Result<Vec<crate::query_projection::SelectedRecipePublication>> {
+        self.rows
+            .iter()
+            .map(crate::query_projection::SelectedRecipe::prepare)
+            .collect()
+    }
+
+    /// The PG coordinator stores both exact cells and the existing model input.
+    /// Its outer Stage serialization retains its independent whole-record cap.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn staged_publication_witness(&self) -> io::Result<String> {
+        let publications = self.selected_publications()?;
+        let metadata = crate::query_projection::SelectedRecipePublication::coordinator_metadata(
+            &publications,
+        )
+        .map_err(io::Error::other)?;
+        serde_json::to_string(&(metadata, self.staged_model_witness()?))
+            .map_err(io::Error::other)
+    }
+
     /// Exact content-free publication witness shared by staging and publish.
     pub(crate) fn staged_projection_witness(&self) -> io::Result<String> {
         serde_json::to_string(&(
