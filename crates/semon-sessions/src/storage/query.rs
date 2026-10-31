@@ -557,12 +557,7 @@ mod tests {
 
         let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
         let observation = crate::storage::navigation_store(binding)
-            .native_resolution(
-                "claude",
-                "lead",
-                crate::CatalogReadScope::Current,
-                None,
-            )
+            .native_resolution("claude", "lead", crate::CatalogReadScope::Current, None)
             .unwrap();
         assert!(observation.qualified_head().is_some());
         assert_eq!(observation.keys, vec!["lead".to_owned()]);
