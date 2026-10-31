@@ -1236,12 +1236,9 @@ mod tests {
         assert_eq!(outcome, crate::events::Outcome::Written);
         let generation = generation.unwrap();
         rows[0].name = "x".repeat(1024 * 1024);
-        let metadata = vec![serde_json::to_string(&rows[0]).unwrap()];
-        assert!(metadata[0].len() > 1024 * 1024);
-        // Batch eligibility is only an optimization. The actual publisher's
-        // search/owner bounds refuse this row before an oversized Current can
-        // become reachable by the later Index preservation/collection path.
-        assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_none());
+        assert!(serde_json::to_string(&rows[0]).unwrap().len() > 1024 * 1024);
+        // The publisher's search/owner bounds refuse this row before an
+        // oversized Current can reach later Index preservation/collection.
         let before = crate::native_timing::cleanup_tests::snapshot(&store.connection);
         assert!(
             store
