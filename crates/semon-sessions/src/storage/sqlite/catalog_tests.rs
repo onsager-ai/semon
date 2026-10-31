@@ -8954,6 +8954,8 @@ fn cold_origin_head_loss_with_current_is_not_an_empty_baseline() {
         .source
         .config(&fixture.options.cache)
         .unwrap();
+    config.create_native_store().unwrap();
+    crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
     crate::storage::transfer::reported::tests::seed_catalog(&config, &fixture.root);
     let db = fixture.db();
     let before: String = db.query_row("SELECT group_concat(metadata) FROM (SELECT metadata FROM session_catalog ORDER BY session_key)", [], |row| row.get(0)).unwrap();
