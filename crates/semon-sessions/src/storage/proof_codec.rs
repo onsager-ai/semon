@@ -74,6 +74,16 @@ pub(crate) struct GenerationRecord {
     pub(crate) prefix: String,
 }
 
+pub(crate) fn validate_query_recipe_cell(
+    metadata: &str,
+    query_recipe: Option<&str>,
+) -> Result<(), StorageError> {
+    if metadata.len() + query_recipe.map_or(0, str::len) > METADATA_MAX {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    Ok(())
+}
+
 pub(crate) fn digest(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
