@@ -111,9 +111,47 @@ fn pg_selected_endpoint_requires_its_physical_owner_authority() {
         )
         .unwrap();
     }
-    let current = &continued[0];
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pg_imported_current_handoff_preserves_its_proof_and_old_current_reads() {
+    let root = root();
+    let source = sqlite(&root, "imported-current-native-history");
+    let (mut options, original) = seed_catalog(&source, &root);
+    let (pool, _) = fixture(|limits| {
+        limits.idle_timeout = Duration::from_secs(1);
+    });
+    let control = PgCancellation::default();
+    let config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        },
+        namespace: source.namespace.clone(),
+        expected_stream_epoch: source.expected_stream_epoch.clone(),
+    };
+    config.create_native_store().unwrap();
+    let manifest = stage(&source, &config, &[178; 32]);
+    apply(&config, &manifest);
+    let generation = config
+        .transfer_inbox()
+        .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
+        .unwrap();
+    let namespace = &config.namespace;
+    options.source = crate::storage::HostSource::new(
+        namespace.clone(),
+        config.expected_stream_epoch.clone().unwrap(),
+    )
+    .unwrap()
+    .with_store(config.clone())
+    .unwrap();
+
+    let current = &original[0];
     let original_id = snapshot::with_generation(
         &pool, namespace, &control, &generation, |snapshot| {
+            assert!(snapshot.catalog(&current.key, true)?.is_none());
+            snapshot::query::qualify_context_candidate(snapshot, &options, current, false)?;
             let (_, _, origin) = snapshot.row_observation(current, Some(crate::storage::catalog::CatalogObservationOwner::Catalog))
                 .map_err(|_| StorageError::ScopeChanged)?.unwrap();
             let observations::Origin::Imported(id) = origin else { panic!("genuine transferred Current proof") };
