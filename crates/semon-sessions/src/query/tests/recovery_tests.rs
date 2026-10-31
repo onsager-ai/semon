@@ -1708,19 +1708,26 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
 #[test]
 fn recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication() {
     let home = Home::new("recovery-stage-reuse");
-    home.top("first", &[
-        human("first", ts(1, 0), "Publication reuse prompt"),
-        assistant("first", ts(1, 1), vec![text("Publication reuse answer")]),
-    ]);
+    home.top(
+        "first",
+        &[
+            human("first", ts(1, 0), "Publication reuse prompt"),
+            assistant("first", ts(1, 1), vec![text("Publication reuse answer")]),
+        ],
+    );
     publish(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-    ).unwrap().into_test_connection();
-    let generation = || db.query_row(
+    )
+    .unwrap()
+    .into_test_connection();
+    let generation = || {
+        db.query_row(
         "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
         [], |row| row.get::<_, String>(0),
-    ).unwrap();
+    ).unwrap()
+    };
     let direct_generation = generation();
     assert!(recovery_proof_snapshot(&db, "first").is_empty());
     let input = crate::Input {
@@ -2331,6 +2338,28 @@ fn recovery_ordinary_index_advance_supersedes_the_old_semantic_source() {
         )
         .unwrap();
     assert!(direct_capture.is_some());
+    assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
+    assert!(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=semon_namespace() AND f.session_key='first' AND f.kind='current' AND g.prefix=?1)",
+        [crate::retention::source_generation(&before.sources).unwrap()],
+        |row| row.get::<_, bool>(0),
+    ).unwrap(), "the prior immutable Current ref survives the ordinary Index advance");
+    let direct_metadata = recovery_catalog_metadata(&db, "session_catalog", "first");
+    let old_refs = recovery_proof_snapshot(&db, "first");
+    publish_semantic_stage(
+        &home,
+        &crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/first.jsonl".into(),
+        },
+    );
+    assert_eq!(recovery_catalog_metadata(&db, "session_catalog", "first"), direct_metadata);
+    assert_ne!(recovery_proof_snapshot(&db, "first"), old_refs);
+    let direct_capture: Option<String> = db.query_row(
+        "SELECT direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='first' AND owner_kind='catalog'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(direct_capture.is_none());
     assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
 }
 

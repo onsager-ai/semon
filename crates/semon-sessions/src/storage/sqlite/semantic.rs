@@ -2118,11 +2118,16 @@ impl Stage {
                 &crate::storage::QueryRuntimeBinding {
                     namespace: self.source.config.namespace.clone(),
                     admission: self.source.admission,
-                    stream_epoch: self.source.config.expected_stream_epoch.clone()
+                    stream_epoch: self
+                        .source
+                        .config
+                        .expected_stream_epoch
+                        .clone()
                         .ok_or_else(|| refuse("semantic_stream_epoch"))?,
                 },
                 prepared,
-            ).map_err(StoreError::Configured)?;
+            )
+            .map_err(StoreError::Configured)?;
         let old_epoch = old_epoch
             .map(|s| s.parse::<u64>())
             .transpose()

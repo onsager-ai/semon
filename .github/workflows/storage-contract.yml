@@ -534,7 +534,7 @@ jobs:
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         run: |
           result=0
-          for test in events::store::configured::tests::configured_semantic_publication_replay_is_idempotent events::store::configured::tests::configured_semantic_noop_refuses_dangling_proof_source_and_grant query::tests::recovery_tests::recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication; do
+          for test in events::store::configured::tests::configured_semantic_publication_replay_is_idempotent events::store::configured::tests::configured_semantic_noop_refuses_dangling_proof_source_and_grant events::store::configured::tests::configured_semantic_changed_observation_issues_receipt_for_identical_rows query::tests::recovery_tests::recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication query::tests::recovery_tests::recovery_ordinary_index_advance_supersedes_the_old_semantic_source; do
             case_result=0
             cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/semantic-publication-reuse-case.log" 2>&1 || case_result=$?
             if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/semantic-publication-reuse-case.log"; then case_result=1; fi
