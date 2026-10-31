@@ -1151,10 +1151,10 @@ mod tests {
             assert_eq!(rows.len(), 65);
             assert!(rows
                 .iter()
-                .all(|row| row.get::<_, Option<Vec<u8>>>(0).unwrap().is_none()));
+                .all(|row| row.get::<_, Option<Vec<u8>>>(0).is_none()));
             assert!(rows
                 .iter()
-                .all(|row| row.get::<_, Option<Vec<u8>>>(1).unwrap().is_none()));
+                .all(|row| row.get::<_, Option<Vec<u8>>>(1).is_none()));
             assert_eq!(
                 finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
                 Some(StorageError::Busy)
@@ -1179,8 +1179,8 @@ mod tests {
         super::super::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
             let rows = finite_history_page_rows(snapshot, 0, false, None, bytes_left)?;
             assert_eq!(rows.len(), 1);
-            assert!(rows[0].get::<_, Option<Vec<u8>>>(0).unwrap().is_some());
-            assert!(rows[0].get::<_, Option<Vec<u8>>>(1).unwrap().is_none());
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(0).is_some());
+            assert!(rows[0].get::<_, Option<Vec<u8>>>(1).is_none());
             assert_eq!(
                 finite_history_page(snapshot, 0, false, None, &mut bytes_left).err(),
                 Some(StorageError::Busy)
