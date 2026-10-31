@@ -430,7 +430,7 @@ impl QueryCatalogStore for QueryCatalog {
                         saved,
                         &current_row.sources,
                         true,
-                        expected.as_deref(),
+                        Some(expected.as_str()),
                     )
                     .map_err(|_| StorageError::ScopeChanged)?
                     {
