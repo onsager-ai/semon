@@ -75,7 +75,15 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             return Err(unavailable("Native Catalog changed during the query"));
         }
         for (key, expected) in &part.witnesses {
-            let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM main.session_catalog c LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
+            let actual: Option<String> = db
+                .query_row(
+                    "SELECT CASE WHEN json_extract(h.metadata,'$.query')=?2 THEN json_extract(h.metadata,'$.query') WHEN json_extract(c.metadata,'$.query')=?2 THEN json_extract(c.metadata,'$.query') END FROM main.session_catalog c LEFT JOIN main.session_history_catalog h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",
+                    rusqlite::params![key, expected],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(unavailable)?
+                .flatten();
             let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
             if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
                 return Err(unavailable("Native Query facts changed during the query"));
@@ -284,10 +292,16 @@ fn read(
     let mut owners = BTreeMap::new();
     let mut content = BTreeMap::new();
     let mut witnesses = Vec::new();
-    let mut metadata = db.prepare("SELECT c.lifecycle,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),hc.session_key IS NOT NULL FROM main.session_catalog c LEFT JOIN main.session_history_catalog hc ON hc.namespace=c.namespace AND hc.session_key=c.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1").map_err(unavailable)?;
+    // In a finite query, select History only if that History row passed its
+    // own cutoff; a recent Current row must not be replaced by older history.
+    let mut metadata = db
+        .prepare(
+            "SELECT CASE WHEN hc.session_key IS NOT NULL AND (?2 IS NULL OR json_extract(hc.metadata,'$.query.last')>=?2) THEN json_extract(hc.metadata,'$.lifecycle') ELSE c.lifecycle END,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,CASE WHEN octet_length(hc.metadata)<=1048576 THEN hc.metadata ELSE NULL END,json_extract(h.metadata,'$.content_generation'),CASE WHEN hc.session_key IS NOT NULL AND (?2 IS NULL OR json_extract(hc.metadata,'$.query.last')>=?2) THEN 1 ELSE 0 END FROM main.session_catalog c LEFT JOIN main.session_history_catalog hc ON hc.namespace=c.namespace AND hc.session_key=c.session_key LEFT JOIN main.session_trace_headers h ON h.namespace=c.namespace AND h.session_key=c.session_key WHERE c.namespace=semon_namespace() AND c.session_key=?1",
+        )
+        .map_err(unavailable)?;
     for key in needed {
         let record = metadata
-            .query_row([&key], |row| {
+            .query_row(rusqlite::params![&key, cutoff], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
@@ -298,12 +312,12 @@ fn read(
             })
             .optional()
             .map_err(unavailable)?;
-        let Some((lifecycle, current, history, version, has_history)) = record else {
+        let Some((lifecycle, current, history, version, selected_history)) = record else {
             continue;
         };
         #[cfg(test)]
         measured(1, 0, 0, 0);
-        let text = if has_history { history } else { current };
+        let text = if selected_history { history } else { current };
         let text = text.ok_or_else(|| unavailable("Catalog metadata exceeds its bound"))?;
         spend(bytes_left, text.len())?;
         let row: crate::model::summary::CatalogRow =
@@ -311,6 +325,12 @@ fn read(
         if row.key != key {
             return Err(unavailable("Catalog metadata identity changed"));
         }
+        // A History table row may preserve a still-Current source as well as
+        // retained provenance, so its selected metadata supplies its lifecycle.
+        if row.lifecycle.as_str() != lifecycle.as_str() {
+            return Err(unavailable("Catalog lifecycle changed"));
+        }
+        let current_lifecycle = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
         if row.sources.is_empty()
             || row.sources.len() > 64
             || row.sources.iter().any(|source| {
@@ -337,7 +357,7 @@ fn read(
         };
         // Retained Query rows keep their provenance checks above, but their
         // recorded summaries do not require a live runtime or source ledger.
-        let row_runtime = if lifecycle == "current" {
+        let row_runtime = if current_lifecycle {
             let cwds = super::catalog::runtime_source_cwds(db, &row.sources)
                 .inspect_err(|_| {
                     if crate::native_timing::enabled() {
@@ -361,7 +381,7 @@ fn read(
         if !crate::model::summary::query_observation_matches(
             &saved,
             &row.sources,
-            lifecycle == "current",
+            current_lifecycle,
             row_runtime.as_deref(),
         )
         .map_err(unavailable)?
@@ -382,7 +402,7 @@ fn read(
             if saved["summary"]["id"] != *id {
                 return Err(unavailable("Catalog summary identity changed"));
             }
-            if lifecycle != "current" {
+            if !current_lifecycle {
                 saved["summary"]["alive"] = Value::Null;
                 saved["summary"]["run"] = Value::Null;
                 if matches!(
