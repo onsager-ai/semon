@@ -1309,6 +1309,7 @@ pub(crate) fn read_page_snapshot_with_search(
             facts_known,
             retired_native,
         )?;
+        let current_lifecycle = row.lifecycle == crate::model::summary::CatalogLifecycle::Current;
         let mut item = serde_json::to_value(row)?;
         if let Some(indexed) = indexed_display[index].take() {
             for field in [
@@ -1332,7 +1333,7 @@ pub(crate) fn read_page_snapshot_with_search(
             item["details"]["live_observation"] = json!(
                 details["live_observation"] == true
                     && request.scope == CatalogReadScope::Current
-                    && row.lifecycle == crate::model::summary::CatalogLifecycle::Current
+                    && current_lifecycle
                     && facts_known
                     && !retired_native
                     && state == "cached"
