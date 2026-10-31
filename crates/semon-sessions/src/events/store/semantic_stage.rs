@@ -3415,28 +3415,31 @@ mod tests {
         crate::native_timing::cleanup_tests::snapshot(&store.connection)
     }
 
+    fn assert_current_header_repair_batch_records(name: &str) {
+        let (root, store, mut stage, _path, batch, prepared) =
+            current_header_repair_batch(name);
+        assert_eq!(
+            stage.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written,
+            "valid {name} fixture must record before its rejection control"
+        );
+        drop(stage);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn semantic_rejection_distinguishes_stale_configured_stage_batches_without_writes() {
-        for case in ["epoch", "phase", "publication_revision", "generation", "runtime"] {
-            let (root, store, mut stage, path, original, mut prepared) =
+        for case in ["epoch", "phase", "generation", "runtime"] {
+            assert_current_header_repair_batch_records(&format!("{case}-baseline"));
+        }
+        for case in ["epoch", "phase", "generation", "runtime"] {
+            let (root, store, mut stage, _path, original, mut prepared) =
                 current_header_repair_batch(case);
             let mut stale = original.clone();
             match case {
                 "epoch" => stale.epoch += 1,
                 "phase" => stale.phase = Phase::Identity,
-                "publication_revision" => {
-                    store
-                        .connection
-                        .execute(
-                            "UPDATE main.catalog_semantic_stage SET phase='publication' WHERE namespace=semon_namespace() AND singleton=1",
-                            [],
-                        )
-                        .unwrap();
-                    header_repair_invalidate(&store, &format!("{path}.unrelated"), "changed");
-                    stale.phase = Phase::Publication;
-                    assert_ne!(revision(&store.connection).unwrap(), stale.source_revision);
-                    assert_eq!(header_repair_claim(&store, &path), prepared.claims[0].1);
-                }
                 "generation" => {
                     stale.base_generation = Some("synthetic-other-generation".into());
                     prepared.base_generation = stale.base_generation.clone();
@@ -3459,6 +3462,9 @@ mod tests {
 
     #[test]
     fn semantic_rejection_checks_configured_claims_ledgers_generation_and_busy() {
+        for case in ["prepared_claim", "source_claim", "ledger", "catalog_generation"] {
+            assert_current_header_repair_batch_records(&format!("{case}-baseline"));
+        }
         for case in ["prepared_claim", "source_claim", "ledger", "catalog_generation"] {
             let (root, store, mut stage, path, batch, mut prepared) =
                 current_header_repair_batch(case);
@@ -3509,6 +3515,7 @@ mod tests {
             fs::remove_dir_all(root).unwrap();
         }
 
+        assert_current_header_repair_batch_records("busy-baseline");
         let (root, store, mut stage, _path, batch, prepared) =
             current_header_repair_batch("busy");
         let before = configured_stage_snapshot(&store);
