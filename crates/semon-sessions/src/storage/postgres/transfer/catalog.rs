@@ -1085,7 +1085,7 @@ mod tests {
                 let ns = config.namespace.as_str().as_bytes();
                 let generation = super::super::super::model_cache::generation(tx)?;
                 let operations: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",&[&ns]).map_err(sqlstate::error)?.get(0);
-                let grants: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND convert_from(key,'UTF8') LIKE 'native_transfer_v1:catalog-owner:%'",&[&ns]).map_err(sqlstate::error)?.get(0);
+                let grants: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key>='native_transfer_v1:catalog-owner:'::bytea AND key<'native_transfer_v1:catalog-owner;'::bytea",&[&ns]).map_err(sqlstate::error)?.get(0);
                 Ok((generation,operations,grants))
             }).unwrap();
             eprintln!(
