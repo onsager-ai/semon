@@ -3726,9 +3726,13 @@ impl Stage {
             };
             let mut expected = ledger.source(&source.path, &source.native_id);
             expected.native_role = source.native_role.clone();
-            let physical_matches = crate::events::Stat::of(&source.path)
-                .ok()
-                .is_some_and(|physical| indexing_physical_stat_matches(&physical, &ledger));
+            let physical = crate::events::Stat::of(&source.path).ok();
+            let index_complete = physical
+                .as_ref()
+                .is_some_and(|physical| ledger.offset == physical.size);
+            let physical_matches = physical
+                .as_ref()
+                .is_some_and(|physical| indexing_physical_stat_matches(physical, &ledger));
             if expected != *source || !physical_matches {
                 #[cfg(test)]
                 eprintln!("semantic_record_conflict: indexing_ledger_changed");
@@ -3765,7 +3769,7 @@ impl Stage {
                 eprintln!("semantic_record_conflict: indexing_prepared_claim_missing");
                 return Ok(Outcome::Conflict);
             };
-            indexed_claims.insert(path, prepared_claim);
+            indexed_claims.insert(path, (prepared_claim, index_complete));
         }
         let mut negative_paths = std::collections::BTreeSet::new();
         for withdrawal in &prepared.withdrawals {
@@ -3900,17 +3904,18 @@ impl Stage {
                 .1;
             let ledger =
                 serde_json::to_string(&ledger).map_err(|e| StoreError::Data(e.to_string()))?;
-            let Some(claim) = indexed_claims.get(path.as_ref()).copied() else {
+            let Some((claim, index_complete)) = indexed_claims.get(path.as_ref()).copied() else {
                 #[cfg(test)]
                 eprintln!("semantic_record_conflict: indexing_claim_missing");
                 return Ok(Outcome::Conflict);
             };
+            let index_done = if index_complete { 1 } else { 0 };
             let top = source
                 .native_role
                 .as_ref()
                 .is_some_and(|r| r.get("Top").is_some());
             tx.execute("INSERT INTO main.catalog_semantic_inputs(namespace,source_path,harness,native_id,is_top,metadata) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,source_path) DO UPDATE SET harness=excluded.harness,native_id=excluded.native_id,is_top=excluded.is_top,metadata=excluded.metadata", params![ns,path.as_ref(),harness,source.native_id,top,metadata]).map_err(error)?;
-            tx.execute("UPDATE main.catalog_semantic_sources SET claim=?3,ledger=?4,index_done=1,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=?1 AND path=?2) WHERE namespace=?1 AND source_path=?2", params![ns,path.as_ref(),claim,ledger]).map_err(error)?;
+            tx.execute("UPDATE main.catalog_semantic_sources SET claim=?3,ledger=?4,index_done=?5,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=?1 AND path=?2) WHERE namespace=?1 AND source_path=?2", params![ns,path.as_ref(),claim,ledger,index_done]).map_err(error)?;
             let layout = FrontierLayout::bind(&tx).map_err(error)?;
             crate::events::store::semantic_stage::native_frontier_with(
                 &layout.frontier(ns),
