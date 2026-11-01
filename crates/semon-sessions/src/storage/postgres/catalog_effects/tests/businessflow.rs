@@ -7588,10 +7588,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Ok(())
     })
     .unwrap();
-    assert!(matches!(
-        final_catchup.publish_semantic_catalog(&final_batch, final_model.prepared()),
-        Err(StorageError::ScopeChanged)
-    ));
+    assert_eq!(
+        final_catchup
+            .publish_semantic_catalog(&final_batch, final_model.prepared())
+            .unwrap_err()
+            .to_string(),
+        StorageError::ScopeChanged.to_string()
+    );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
         Some(upgraded.clone())
@@ -7651,10 +7654,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         Ok(())
     })
     .unwrap();
-    assert!(matches!(
-        final_catchup.publish_semantic_catalog(&final_batch, final_model.prepared()),
-        Err(StorageError::ScopeChanged)
-    ));
+    assert_eq!(
+        final_catchup
+            .publish_semantic_catalog(&final_batch, final_model.prepared())
+            .unwrap_err()
+            .to_string(),
+        StorageError::ScopeChanged.to_string()
+    );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
         Some(upgraded.clone())
@@ -7755,12 +7761,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         .history_qualified(&physical)
                         .map_err(|_| StorageError::ScopeChanged)?
                 );
-                snapshot::query::qualify_context_candidate(
-                    snapshot,
-                    &facts_options,
-                    &physical,
-                    true,
-                )?;
+                assert_eq!(
+                    snapshot::query::qualify_context_candidate(
+                        snapshot,
+                        &facts_options,
+                        &physical,
+                        true,
+                    )
+                    .unwrap_err(),
+                    StorageError::ScopeChanged,
+                    "queryless composite has no exact Context observation"
+                );
                 let (selected, _, _) = snapshot
                     .selected(composite_key, true, 0, 64)?
                     .ok_or(StorageError::ScopeChanged)?;

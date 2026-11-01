@@ -4,6 +4,7 @@ use super::*;
 use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 
 type ProofTuple = (Vec<u8>, i64, bool);
+type TraceFamilyHeader = (String, String, Vec<u8>);
 
 struct RecipeContents {
     header: OriginalHeader,
@@ -229,7 +230,7 @@ impl History<'_, '_> {
         let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
-        let rows = tx.driver.query("SELECT p.generation,p.source_path,p.path_digest=sha256(p.source_path),p.page_generation,p.usage_generation,p.usage_ready,g.source_path=p.source_path,g.ledger FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=ANY($2::bytea[]) AND p.source_path=ANY($3::bytea[]) ORDER BY p.generation,p.source_path,p.page_generation", &[&ns, &generation_bytes, &source_paths]).map_err(sqlstate::error)?;
+        let rows = tx.driver.query("SELECT p.generation,p.source_path,p.path_digest=sha256(p.source_path),p.page_generation,p.usage_generation,p.usage_ready,g.source_path=p.source_path,g.ledger FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=ANY($2::bytea[]) AND p.source_path=ANY($3::bytea[]) ORDER BY p.generation,p.source_path,p.page_generation LIMIT 129", &[&ns, &generation_bytes, &source_paths]).map_err(sqlstate::error)?;
         if rows.len() > generations.len() * sources.len() {
             return Err(StorageError::ScopeChanged);
         }
@@ -266,6 +267,131 @@ impl History<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         Ok(rows[0].get(1))
+    }
+
+    fn denormalized_history_matches(
+        &self,
+        header_generation: &str,
+        owner_generation: &str,
+        key: &str,
+        row: &CatalogRow,
+    ) -> Result<bool, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT h.session_key=$4,h.last_ms,h.harness,h.repo,h.model,h.query_activity,h.query_active,h.parent_key,o.session_key=$4,o.owner_generation,o.original,o.last_ms,o.harness,o.repo,o.model,o.query_activity,o.query_active,o.parent_key FROM semon_pg_native_catalog_history_headers h JOIN semon_pg_native_catalog_history_owners o ON o.namespace_digest=h.namespace_digest AND o.namespace=h.namespace AND o.key_digest=h.key_digest AND o.session_key=h.session_key AND o.owner_generation=h.generation WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=$2 AND h.key_digest=$3 AND h.session_key=$4 AND o.generation=$5", &[&ns, &header_generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes(), &owner_generation.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len() != 1 || !rows[0].get::<_, bool>(0) || !rows[0].get::<_, bool>(8) {
+            return Ok(false);
+        }
+        let last = row.last.unwrap_or(0);
+        let harness = row.harness.as_bytes();
+        let repo = row.repo.as_deref().unwrap_or("").as_bytes();
+        let model = row.model.as_bytes();
+        let (activity, active) = crate::storage::query::history_activity(row);
+        let parent = row.parent.as_deref().map(str::as_bytes);
+        Ok(rows[0].get::<_, Vec<u8>>(9).as_slice() == header_generation.as_bytes()
+            && !rows[0].get::<_, bool>(10)
+            && rows[0].get::<_, i64>(1) == last
+            && rows[0].get::<_, Option<Vec<u8>>>(2).as_deref() == Some(harness)
+            && rows[0].get::<_, Option<Vec<u8>>>(3).as_deref() == Some(repo)
+            && rows[0].get::<_, Option<Vec<u8>>>(4).as_deref() == Some(model)
+            && rows[0].get::<_, Option<i64>>(5) == activity
+            && rows[0].get::<_, bool>(6) == active
+            && rows[0].get::<_, Option<Vec<u8>>>(7).as_deref() == parent
+            && rows[0].get::<_, i64>(11) == last
+            && rows[0].get::<_, Option<Vec<u8>>>(12).as_deref() == Some(harness)
+            && rows[0].get::<_, Option<Vec<u8>>>(13).as_deref() == Some(repo)
+            && rows[0].get::<_, Option<Vec<u8>>>(14).as_deref() == Some(model)
+            && rows[0].get::<_, Option<i64>>(15) == activity
+            && rows[0].get::<_, bool>(16) == active
+            && rows[0].get::<_, Option<Vec<u8>>>(17).as_deref() == parent)
+    }
+
+    fn trace_header_at(
+        &self,
+        generation: &str,
+        key: &str,
+    ) -> Result<Option<TraceFamilyHeader>, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT session_key=$4,trace_generation,source_generation,CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 LIMIT 2", &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len() > 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+        rows.first()
+            .map(|row| {
+                if !row.get::<_, bool>(0) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                Ok((
+                    text(row.get(1))?,
+                    text(row.get(2))?,
+                    row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::Busy)?,
+                ))
+            })
+            .transpose()
+    }
+
+    fn trace_members_without_header(&self, generation: &str, key: &str) -> Result<bool, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        Ok(tx
+            .driver
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_turns c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND c.key_digest=$3 AND c.session_key=$4 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_headers h WHERE h.namespace_digest=c.namespace_digest AND h.namespace=c.namespace AND h.generation=c.generation AND h.key_digest=c.key_digest AND h.session_key=$4)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_edges c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND c.key_digest=$3 AND c.session_key=$4 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_headers h WHERE h.namespace_digest=c.namespace_digest AND h.namespace=c.namespace AND h.generation=c.generation AND h.key_digest=c.key_digest AND h.session_key=$4)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_bookmarks c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND c.key_digest=$3 AND c.session_key=$4 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_headers h WHERE h.namespace_digest=c.namespace_digest AND h.namespace=c.namespace AND h.generation=c.generation AND h.key_digest=c.key_digest AND h.session_key=$4))",
+                &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?
+            .get(0))
+    }
+
+    fn trace_family_matches(
+        &self,
+        key: &str,
+        source_generation: &str,
+    ) -> Result<bool, StorageError> {
+        let previous = self.trace_header_at(self.previous, key)?;
+        let target = self.trace_header_at(self.effects.generation, key)?;
+        if self.trace_members_without_header(self.previous, key)?
+            || self.trace_members_without_header(self.effects.generation, key)?
+        {
+            return Ok(false);
+        }
+        let previous_composite = previous
+            .as_ref()
+            .filter(|header| header.1 == source_generation);
+        let target_composite = target
+            .as_ref()
+            .filter(|header| header.1 == source_generation);
+        match (previous_composite, target_composite) {
+            (Some(previous), Some(target)) if previous == target => {}
+            (Some(_), Some(_)) | (None, Some(_)) => return Ok(false),
+            // A staged Current family may already own the key in the target
+            // generation. The source filter leaves that distinct family alone.
+            (Some(_), None) if target.is_some() => return Ok(true),
+            (Some(_), None) => return Ok(false),
+            (None, None) => return Ok(true),
+        }
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let changed: bool = tx
+            .driver
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_turns s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest=$4 AND s.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_turns t WHERE t.namespace_digest=s.namespace_digest AND t.namespace=s.namespace AND t.generation=$3 AND t.key_digest=s.key_digest AND t.session_key=$5 AND t.turn_digest=s.turn_digest AND t.turn_id=s.turn_id AND t.start_id IS NOT DISTINCT FROM s.start_id AND t.metadata=s.metadata)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_turns t WHERE t.namespace_digest=sha256($1::bytea) AND t.namespace=$1 AND t.generation=$3 AND t.key_digest=$4 AND t.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_turns s WHERE s.namespace_digest=t.namespace_digest AND s.namespace=t.namespace AND s.generation=$2 AND s.key_digest=t.key_digest AND s.session_key=$5 AND s.turn_digest=t.turn_digest AND s.turn_id=t.turn_id AND s.start_id IS NOT DISTINCT FROM t.start_id AND s.metadata=t.metadata)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_edges s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest=$4 AND s.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_edges t WHERE t.namespace_digest=s.namespace_digest AND t.namespace=s.namespace AND t.generation=$3 AND t.key_digest=s.key_digest AND t.session_key=$5 AND t.edge_digest=s.edge_digest AND t.edge_id=s.edge_id AND t.metadata=s.metadata)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_edges t WHERE t.namespace_digest=sha256($1::bytea) AND t.namespace=$1 AND t.generation=$3 AND t.key_digest=$4 AND t.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_edges s WHERE s.namespace_digest=t.namespace_digest AND s.namespace=t.namespace AND s.generation=$2 AND s.key_digest=t.key_digest AND s.session_key=$5 AND s.edge_digest=t.edge_digest AND s.edge_id=t.edge_id AND s.metadata=t.metadata)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_bookmarks s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest=$4 AND s.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_bookmarks t WHERE t.namespace_digest=s.namespace_digest AND t.namespace=s.namespace AND t.generation=$3 AND t.key_digest=s.key_digest AND t.session_key=$5 AND t.target_digest=s.target_digest AND t.target=s.target AND t.edge_digest=s.edge_digest AND t.edge_id=s.edge_id)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_bookmarks t WHERE t.namespace_digest=sha256($1::bytea) AND t.namespace=$1 AND t.generation=$3 AND t.key_digest=$4 AND t.session_key=$5 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_trace_bookmarks s WHERE s.namespace_digest=t.namespace_digest AND s.namespace=t.namespace AND s.generation=$2 AND s.key_digest=t.key_digest AND s.session_key=$5 AND s.target_digest=t.target_digest AND s.target=t.target AND s.edge_digest=t.edge_digest AND s.edge_id=t.edge_id))",
+                &[
+                    &ns,
+                    &self.previous.as_bytes(),
+                    &self.effects.generation.as_bytes(),
+                    &digest(key.as_bytes()),
+                    &key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?
+            .get(0);
+        Ok(!changed)
     }
 
     fn validate_saved_slots(
@@ -309,6 +435,14 @@ impl History<'_, '_> {
             || history.query.is_some()
             || history.sources.len() > 64
         {
+            return Err(StorageError::ScopeChanged);
+        }
+        if !self.denormalized_history_matches(
+            owner_generation,
+            self.previous,
+            &current.key,
+            &history,
+        )? {
             return Err(StorageError::ScopeChanged);
         }
         let paths = history
@@ -431,6 +565,7 @@ impl History<'_, '_> {
             || self.metadata("semon_pg_native_catalog_history_headers", generation, key)?
                 .as_deref()
                 != Some(metadata)
+            || !self.denormalized_history_matches(generation, generation, key, history)?
         {
             return Ok(false);
         }
@@ -476,6 +611,11 @@ impl History<'_, '_> {
                 return Ok(false);
             }
         }
+        let source_generation = crate::retention::source_generation(&history.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if !self.trace_family_matches(key, &source_generation)? {
+            return Ok(false);
+        }
         Ok(true)
     }
 
@@ -505,14 +645,27 @@ impl History<'_, '_> {
         for source in &history.sources {
             self.retain_source(&history, source)?;
         }
+        let source_generation = crate::retention::source_generation(&history.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
         self.composed(
             &current.key,
             &recipe.header.0,
-            recipe.header.2.as_deref().ok_or(StorageError::ScopeChanged)?,
+            &source_generation,
             &metadata,
             &recipe.slots,
             recipe.incomplete,
         )?;
+        {
+            let mut tx = self.effects.tx.borrow_mut();
+            let owner = vec![(digest(current.key.as_bytes()), current.key.as_bytes().to_vec())];
+            super::carry::trace_families(
+                &mut tx,
+                self.effects.generation,
+                self.previous,
+                &owner,
+                Some(&source_generation),
+            )?;
+        }
         if !self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
             return Err(StorageError::ScopeChanged);
         }
