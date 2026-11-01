@@ -2,9 +2,7 @@ use super::super::snapshot;
 use super::*;
 use crate::events::EventCache;
 use crate::storage::{
-    catalog::CatalogSnapshot,
-    native_events::NativeEventStore,
-    postgres::txn::TxnKind,
+    catalog::CatalogSnapshot, native_events::NativeEventStore, postgres::txn::TxnKind,
 };
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -61,13 +59,8 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         crate::native_evidence::catalog_input(&source, &options).unwrap(),
         crate::native_evidence::catalog_input(&second_source, &options).unwrap(),
     ];
-    let prepared = crate::model::prepare_sources(
-        &options,
-        &mut source_cache,
-        &inputs,
-        1790812802000,
-    )
-    .unwrap();
+    let prepared =
+        crate::model::prepare_sources(&options, &mut source_cache, &inputs, 1790812802000).unwrap();
     assert_eq!(prepared.rows.len(), 2);
     assert!(
         prepared
@@ -79,12 +72,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let bytes = prepared
         .rows
         .iter()
-        .map(|row| {
-            (
-                row.key.clone(),
-                fs::read(&row.sources[0].path).unwrap(),
-            )
-        })
+        .map(|row| (row.key.clone(), fs::read(&row.sources[0].path).unwrap()))
         .collect::<BTreeMap<_, _>>();
     let (pool, _) = fixture(|_| {});
     let control = PgCancellation::default();
@@ -121,8 +109,8 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         })
         .unwrap();
     options.source = host.with_store(config).unwrap();
-    let mut cache = EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone())
-        .unwrap();
+    let mut cache =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     for (at, row) in rows.iter().enumerate() {
         cache
             .ingest(
@@ -148,9 +136,12 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let seen = BTreeSet::new();
     let mut dirty = false;
     cache.retain(&seen, &mut dirty).unwrap();
-    assert!(dirty, "a deferred removal remains pending for the next step");
+    assert!(
+        dirty,
+        "a deferred removal remains pending for the next step"
+    );
     assert_eq!(
-        cache.session_catalog_generation().unwrap().as_deref(),
+        cache.session_catalog_generation().as_deref(),
         Some(before.as_str()),
         "partial custody leaves Current and its head in place"
     );
@@ -209,9 +200,12 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         .unwrap();
     let mut dirty = false;
     cache.retain(&seen_resumed, &mut dirty).unwrap();
-    assert!(dirty, "the still-missing owner remains queued after reappearance");
+    assert!(
+        dirty,
+        "the still-missing owner remains queued after reappearance"
+    );
     assert_eq!(
-        cache.session_catalog_generation().unwrap().as_deref(),
+        cache.session_catalog_generation().as_deref(),
         Some(before.as_str()),
         "reappearance cancels only that path from the pending batch"
     );
@@ -221,7 +215,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         let mut dirty = false;
         cache.retain(&seen_resumed, &mut dirty).unwrap();
         attempts += 1;
-        let generation = cache.session_catalog_generation().unwrap().unwrap();
+        let generation = cache.session_catalog_generation().unwrap();
         if generation != before {
             break generation;
         }
@@ -230,21 +224,15 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     };
     assert!(attempts > 1, "custody resumes across bounded attempts");
     assert_eq!(fs::read(&archives[&later_key]).unwrap(), bytes[&later_key]);
-    snapshot::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &later_generation,
-        |snapshot| {
-            assert!(snapshot.catalog(resumed_key, false)?.is_some());
-            assert!(snapshot.catalog(&later_key, false)?.is_none());
-            let history = snapshot
-                .catalog(&later_key, true)?
-                .ok_or(StorageError::ScopeChanged)?;
-            assert!(snapshot.history_qualified(&history).unwrap());
-            snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
-        },
-    )
+    snapshot::with_generation(&pool, &namespace, &control, &later_generation, |snapshot| {
+        assert!(snapshot.catalog(resumed_key, false)?.is_some());
+        assert!(snapshot.catalog(&later_key, false)?.is_none());
+        let history = snapshot
+            .catalog(&later_key, true)?
+            .ok_or(StorageError::ScopeChanged)?;
+        assert!(snapshot.history_qualified(&history).unwrap());
+        snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
+    })
     .unwrap();
 
     let query = format!(
@@ -282,9 +270,12 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let no_sources_seen = BTreeSet::new();
     let mut dirty = false;
     cache.retain(&no_sources_seen, &mut dirty).unwrap();
-    assert!(dirty, "a later removal starts another bounded custody advance");
+    assert!(
+        dirty,
+        "a later removal starts another bounded custody advance"
+    );
     assert_eq!(
-        cache.session_catalog_generation().unwrap().as_deref(),
+        cache.session_catalog_generation().as_deref(),
         Some(later_generation.as_str())
     );
     let mut attempts = 1;
@@ -292,7 +283,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         let mut dirty = false;
         cache.retain(&no_sources_seen, &mut dirty).unwrap();
         attempts += 1;
-        let generation = cache.session_catalog_generation().unwrap().unwrap();
+        let generation = cache.session_catalog_generation().unwrap();
         if generation != later_generation {
             break generation;
         }
