@@ -395,6 +395,12 @@ pub(super) fn record(
         return Err(StorageError::Conflict);
     }
     if batch.phase == Phase::Publication {
+        #[cfg(test)]
+        if batch.paths.len() == 17 {
+            let header = crate::model::typed_witness::measure(&stage)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            eprintln!("typed_witness_pg_header bytes={header} model_present={}", stage.model.is_some());
+        }
         stage.model = Some(
             prepared
                 .staged_publication_witness()

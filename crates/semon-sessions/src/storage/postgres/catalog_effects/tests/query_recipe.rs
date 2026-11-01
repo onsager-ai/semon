@@ -8,6 +8,15 @@ use crate::storage::{
 
 #[test]
 fn pg_selected_recipe_large_fixture_measurement() {
+    measure_large_fixture(false);
+}
+
+#[test]
+fn typed_witness_genuine_fixture_pg_reconstruction_and_refusal() {
+    measure_large_fixture(true);
+}
+
+fn measure_large_fixture(typed: bool) {
     let (pool, _) = fixture(|_| {});
     let control = PgCancellation::default();
     let config = crate::storage::StoreConfig {
@@ -20,7 +29,7 @@ fn pg_selected_recipe_large_fixture_measurement() {
     };
     config.create_native_store().unwrap();
     let root = crate::storage::transfer::reported::tests::root();
-    crate::storage::transfer::reported::tests::large_catalog::measure(
+    crate::storage::transfer::reported::tests::large_catalog::measure_mode(
         &config,
         &root,
         |key, path| {
@@ -39,6 +48,7 @@ fn pg_selected_recipe_large_fixture_measurement() {
             Ok(())
         }).unwrap();
         },
+        typed,
     );
     fs::remove_dir_all(root).unwrap();
 }

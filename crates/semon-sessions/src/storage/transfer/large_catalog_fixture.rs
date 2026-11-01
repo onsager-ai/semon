@@ -8,6 +8,23 @@ pub(crate) fn measure(
     root: &std::path::Path,
     verify_completed_withdrawal: impl FnOnce(&str, &str),
 ) {
+    measure_mode(config, root, verify_completed_withdrawal, false);
+}
+
+pub(crate) fn measure_typed(
+    config: &StoreConfig,
+    root: &std::path::Path,
+    verify_completed_withdrawal: impl FnOnce(&str, &str),
+) {
+    measure_mode(config, root, verify_completed_withdrawal, true);
+}
+
+pub(crate) fn measure_mode(
+    config: &StoreConfig,
+    root: &std::path::Path,
+    verify_completed_withdrawal: impl FnOnce(&str, &str),
+    typed: bool,
+) {
     const CHILDREN: usize = 16;
     const USAGE_REPORTS: usize = 1000;
     let (options, initial_input) = seed_catalog_input(config, root);
@@ -28,6 +45,7 @@ pub(crate) fn measure(
         &mut initial_cache,
         &options,
         std::slice::from_ref(&initial_input),
+        typed,
     );
     assert_eq!(initial[0].repo.as_deref(), Some("facts-transfer-repo"));
     drop(initial_cache);
@@ -64,7 +82,7 @@ pub(crate) fn measure(
             &runtime,
             true,
         );
-        assert!(finish_measured(&mut cache, &options, std::slice::from_ref(&old_input)).is_empty());
+        assert!(finish_measured(&mut cache, &options, std::slice::from_ref(&old_input), typed).is_empty());
     }
     let mut inputs = vec![input];
     let children = (0..CHILDREN)
@@ -157,7 +175,7 @@ pub(crate) fn measure(
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     begin_active_catalog(&mut cache, &paths, &runtime, true);
-    let rows = finish_measured(&mut cache, &options, &inputs);
+    let rows = finish_measured(&mut cache, &options, &inputs, typed);
     assert_eq!(rows.len(), CHILDREN + 1);
     assert_eq!(
         rows.iter()
@@ -177,6 +195,7 @@ fn finish_measured(
     cache: &mut crate::events::EventCache,
     options: &crate::Options,
     inputs: &[crate::Input],
+    typed: bool,
 ) -> Vec<crate::model::summary::CatalogRow> {
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
@@ -332,6 +351,13 @@ fn finish_measured(
                 );
             }
         }
+        let typed_publication = typed && batch.paths.len() == 17
+            && batch.phase == crate::model::relation_stage::Phase::Publication;
+        if typed_publication {
+            crate::model::typed_witness::qualify(model.prepared()).unwrap();
+        }
+        let before = cache.session_catalog_generation();
+        let pending = if typed_publication { Some(cache.pending_catalog_sources(64).unwrap()) } else { None };
         let recorded = cache.record_semantic_batch(&batch, model.prepared());
         if batch.paths.len() == 17 {
             eprintln!(
@@ -339,6 +365,18 @@ fn finish_measured(
                 batch.phase,
                 cache.semantic_rejection()
             );
+        }
+        if typed_publication {
+            match cache.semantic_rejection() {
+                Some("semantic_context_budget") => assert!(recorded.is_err()),
+                None => assert!(matches!(recorded, Err(crate::events::StoreError::Configured(crate::storage::StorageError::Busy)))),
+                other => panic!("unexpected production record refusal: {other:?}"),
+            }
+            assert_eq!(cache.session_catalog_generation(), before);
+            assert_eq!(before, batch.base_generation);
+            assert_eq!(cache.pending_catalog_sources(64).unwrap(), pending.unwrap());
+            eprintln!("typed_witness_production_refusal unchanged_head=true pending_claim_paths_unchanged=true publication_not_activated=true");
+            return model.prepared().rows.clone();
         }
         assert_eq!(recorded.unwrap(), crate::events::Outcome::Written);
         if batch.phase == crate::model::relation_stage::Phase::Publication {
@@ -367,5 +405,13 @@ fn selected_recipe_large_fixture_sqlite_measurement() {
     let root = root();
     let source = sqlite(&root, "selected-large-fixture");
     measure(&source, &root, |_, _| {});
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn typed_witness_genuine_fixture_sqlite_reconstruction_and_refusal() {
+    let root = root();
+    let source = sqlite(&root, "typed-witness-fixture");
+    measure_typed(&source, &root, |_, _| {});
     std::fs::remove_dir_all(root).unwrap();
 }

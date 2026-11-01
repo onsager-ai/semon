@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
+#[cfg(test)]
+pub(crate) mod typed_witness;
 use serde_json::Value;
 
 #[cfg(test)]
