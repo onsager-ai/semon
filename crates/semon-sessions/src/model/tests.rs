@@ -2134,8 +2134,75 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
         json!({"type":"custom-title","customTitle":"Updated Alpha","sessionId":"alpha"})
     )
     .unwrap();
-    home.build_query();
+    let rebuilt = home.build_query();
     let renamed = read();
+    let diag_db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let current_metadata: Option<String> = diag_db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='alpha' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let history_metadata: Option<String> = diag_db
+        .query_row(
+            "SELECT metadata FROM session_history_catalog WHERE session_key='alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let trace_source_generation: Option<String> = diag_db
+        .query_row(
+            "SELECT source_generation FROM session_trace_headers WHERE session_key='alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let current_name_updated = current_metadata
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .is_some_and(|metadata| metadata["name"] == "Updated Alpha");
+    let history_name_updated = history_metadata
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .is_some_and(|metadata| metadata["name"] == "Updated Alpha");
+    let current_source_generation = current_metadata
+        .as_deref()
+        .and_then(|metadata| {
+            serde_json::from_str::<crate::model::summary::CatalogRow>(metadata).ok()
+        })
+        .and_then(|row| crate::retention::source_generation(&row.sources).ok());
+    let trace_generation_matches_current = trace_source_generation
+        .zip(current_source_generation)
+        .is_some_and(|(trace, current)| trace == current);
+    let alpha_source = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/alpha.jsonl")
+        .to_string_lossy()
+        .into_owned();
+    let pending_invalidation: bool = diag_db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+            [&alpha_source],
+            |row| row.get(0),
+        )
+        .unwrap();
+    eprintln!(
+        "causal_peer_name_probe in_memory_updated={} current_updated={} history_updated={} trace_matches_current={} pending_invalidation={}",
+        rebuilt
+            .sessions
+            .get("alpha")
+            .is_some_and(|session| session.name == "Updated Alpha"),
+        current_name_updated,
+        history_name_updated,
+        trace_generation_matches_current,
+        pending_invalidation,
+    );
+    drop(diag_db);
     assert_eq!(renamed["participants"]["alpha"], "Updated Alpha");
     assert_ne!(renamed["generation"], before["generation"]);
     assert_eq!(renamed["turns"], before["turns"]);
@@ -11981,6 +12048,10 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             Some(&archive),
             crate::SessionSourceReadMode::LocalThenProvider,
         );
+        eprintln!(
+            "partial_lineage_source_disappearance_selected_read_stage={:?}",
+            crate::transcript_range::last_selected_read_stage()
+        );
         assert_eq!(
             reply.status,
             200,
@@ -14168,6 +14239,10 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
                 "fixture",
                 &format!("sid={native}&scope=retained_history&after=0&limit=100"),
                 None,
+            );
+            eprintln!(
+                "staged_current_native_key_selected_read_stage={:?}",
+                crate::transcript_range::last_selected_read_stage()
             );
             assert_eq!(
                 transcript.status, 200,
