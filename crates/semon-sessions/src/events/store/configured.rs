@@ -9662,7 +9662,9 @@ mod tests {
                     return (batch, model);
                 }
                 assert_eq!(
-                    cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
                     Outcome::Written
                 );
             }
@@ -14162,8 +14164,7 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(prior_receipt.0, first.epoch);
-                let mut prior_paths: Vec<String> =
-                    serde_json::from_str(&prior_receipt.1).unwrap();
+                let mut prior_paths: Vec<String> = serde_json::from_str(&prior_receipt.1).unwrap();
                 prior_paths.sort();
                 let mut first_paths = first.paths.clone();
                 first_paths.sort();
@@ -14266,8 +14267,7 @@ mod tests {
                     )
                     .unwrap();
                 assert_eq!(prior_receipt.0, first.epoch);
-                let mut prior_paths: Vec<String> =
-                    serde_json::from_str(&prior_receipt.1).unwrap();
+                let mut prior_paths: Vec<String> = serde_json::from_str(&prior_receipt.1).unwrap();
                 prior_paths.sort();
                 let mut first_paths = first.paths.clone();
                 first_paths.sort();
@@ -14288,7 +14288,9 @@ mod tests {
                 .unwrap();
                 oversized_query(oversized.prepared_mut_for_test(), 1_100_000);
                 assert_eq!(
-                    cache.record_semantic_batch(&later, oversized.prepared()).unwrap(),
+                    cache
+                        .record_semantic_batch(&later, oversized.prepared())
+                        .unwrap(),
                     Outcome::Deferred,
                     "the prior successful group's receipt does not block a later record"
                 );
@@ -14311,12 +14313,7 @@ mod tests {
                 assert_eq!(retry.paths.len(), 1);
                 let retry_inputs = selected_inputs(&inputs, options, &retry);
                 let retry_model = cache
-                    .prepare_semantic_model_batch(
-                        options,
-                        &retry_inputs,
-                        &retry,
-                        1_790_000_000_000,
-                    )
+                    .prepare_semantic_model_batch(options, &retry_inputs, &retry, 1_790_000_000_000)
                     .unwrap()
                     .expect("halved publication record fits");
                 assert_eq!(
@@ -14348,7 +14345,10 @@ mod tests {
                 );
                 let done = cache.semantic_batch(64).unwrap().unwrap();
                 assert!(done.paths.is_empty());
-                assert_eq!(cache.finish_semantic_stage(done.epoch).unwrap(), Outcome::Written);
+                assert_eq!(
+                    cache.finish_semantic_stage(done.epoch).unwrap(),
+                    Outcome::Written
+                );
                 assert_eq!(hint(&f, "source-a"), None);
             }
 
@@ -14377,9 +14377,7 @@ mod tests {
                 prepared.claims.reverse();
                 oversized_query(prepared, 1_100_000);
                 assert_eq!(
-                    cache
-                        .record_semantic_batch(&permuted, prepared)
-                        .unwrap(),
+                    cache.record_semantic_batch(&permuted, prepared).unwrap(),
                     Outcome::Conflict,
                     "sorted physical selections bind the same recorded request"
                 );
@@ -14420,10 +14418,12 @@ mod tests {
 
                 prepared.claims = original_claims;
                 let original_trace = prepared.rows[0].trace.take();
-                let error = cache
-                    .record_semantic_batch(&batch, prepared)
-                    .unwrap_err();
-                assert!(error.to_string().contains("semantic_publication_trace_missing"));
+                let error = cache.record_semantic_batch(&batch, prepared).unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("semantic_publication_trace_missing")
+                );
                 assert_eq!(shared_state(&f), before);
                 assert_eq!(hint(&f, "source-a"), None);
                 prepared.rows[0].trace = original_trace;
@@ -14442,7 +14442,11 @@ mod tests {
                 assert_eq!(batch.paths.len(), 1);
                 oversized_query(model.prepared_mut_for_test(), 2_100_000);
                 let before = shared_state(&f);
-                assert!(cache.record_semantic_batch(&batch, model.prepared()).is_err());
+                assert!(
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .is_err()
+                );
                 assert_eq!(shared_state(&f), before);
                 assert_eq!(hint(&f, "source-a"), None);
                 assert_eq!(

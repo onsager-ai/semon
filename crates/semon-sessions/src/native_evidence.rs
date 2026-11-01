@@ -1338,8 +1338,7 @@ impl NativeEvidence {
         let prepared = if batch.phase == Phase::Publication {
             cache.prepare_semantic_model_batch(&catalog_options, &inputs, &batch, now)
         } else {
-            model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now)
-                .map(Some)
+            model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now).map(Some)
         };
         cache.scan_byte_budget = None;
         let prepared = match prepared {
@@ -4539,6 +4538,7 @@ mod catalog_owner_tests {
 
     #[test]
     fn deferred_publication_record_keeps_native_producer_pending_in_same_epoch() {
+        use crate::storage::native_events::NativeEventStore;
         use rusqlite::OptionalExtension;
 
         let (root, options, first) = audit_fixture();
@@ -4569,10 +4569,7 @@ mod catalog_owner_tests {
                 .unwrap();
             assert_eq!(
                 cache
-                    .begin_semantic_stage(
-                        &paths,
-                        &query_runtime_generation(&options).unwrap(),
-                    )
+                    .begin_semantic_stage(&paths, &query_runtime_generation(&options).unwrap(),)
                     .unwrap(),
                 crate::events::Outcome::Written
             );
@@ -4590,7 +4587,9 @@ mod catalog_owner_tests {
         let mut work = lock(&evidence.work);
         let mut deferred = false;
         for _ in 0..24 {
-            let complete = evidence.refresh_catalog(&mut work, model::now_ms()).unwrap();
+            let complete = evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap();
             let hint: Option<String> = database
                 .query_row(
                     "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_semantic_group_admission'",
@@ -4607,9 +4606,15 @@ mod catalog_owner_tests {
                 deferred = true;
                 break;
             }
-            assert!(!complete, "the producer completed before its publication deferral");
+            assert!(
+                !complete,
+                "the producer completed before its publication deferral"
+            );
         }
-        assert!(deferred, "native producer did not reach the injected record overflow");
+        assert!(
+            deferred,
+            "native producer did not reach the injected record overflow"
+        );
         assert_eq!(
             database
                 .query_row(
@@ -4636,12 +4641,17 @@ mod catalog_owner_tests {
 
         let mut complete = false;
         for _ in 0..24 {
-            complete = evidence.refresh_catalog(&mut work, model::now_ms()).unwrap();
+            complete = evidence
+                .refresh_catalog(&mut work, model::now_ms())
+                .unwrap();
             if complete {
                 break;
             }
         }
-        assert!(complete, "producer did not continue and finish the packed groups");
+        assert!(
+            complete,
+            "producer did not continue and finish the packed groups"
+        );
         assert!(!evidence.catalog_pending(&work));
         assert_eq!(
             database

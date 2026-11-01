@@ -1385,8 +1385,11 @@ fn publication_projection_shape(
     {
         return Err(refuse("semantic_publication_trace_missing"));
     }
-    let projection_rows: std::collections::BTreeMap<_, _> =
-        prepared.rows.iter().map(|row| (row.key.as_str(), row)).collect();
+    let projection_rows: std::collections::BTreeMap<_, _> = prepared
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
     let mut projection_keys = std::collections::BTreeSet::new();
     let mut real_projection_keys = std::collections::BTreeSet::new();
     let mut slot_bytes = 0usize;
@@ -1416,11 +1419,9 @@ fn publication_projection_shape(
             }
         }
         for slot in &projection.slots {
-            if slot
-                .source_paths()
-                .iter()
-                .any(|path| row.is_none_or(|row| !row.sources.iter().any(|source| &source.path == *path)))
-            {
+            if slot.source_paths().iter().any(|path| {
+                row.is_none_or(|row| !row.sources.iter().any(|source| &source.path == *path))
+            }) {
                 return Err(refuse("semantic_publication_projection_source"));
             }
             slot_bytes = slot_bytes.saturating_add(
@@ -1504,8 +1505,7 @@ fn defer_oversized_publication_record(
         || pending
         || !lifecycle_current(prepared)
         || !reduction_witnesses(&tx, ns).map_err(error)?.current()?
-        || super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)?
-            != prepared.claims
+        || super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)? != prepared.claims
         || prepared.claims != batch.source_claims
         || !group_current(&tx, ns, batch, prepared)?
         || !selected_witnesses(&tx, ns, &batch.paths)?
@@ -1525,8 +1525,8 @@ fn defer_oversized_publication_record(
         .optional()
         .map_err(error)?;
     let existing_receipt = if let Some(recorded) = recorded_paths {
-        let mut recorded: Vec<String> = serde_json::from_str(&recorded)
-            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let mut recorded: Vec<String> =
+            serde_json::from_str(&recorded).map_err(|error| StoreError::Data(error.to_string()))?;
         recorded.sort();
         recorded == selected_paths
     } else {
@@ -3256,7 +3256,7 @@ impl Stage {
         )
         .map_err(error)?;
         if prepared.rows.iter().all(|row| row.query.is_some())
-            && projection_keys.len() == prepared.rows.len()
+            && prepared.transcripts.len() == prepared.rows.len()
         {
             let complete: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path)) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND published=0) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_prior_owners WHERE namespace=?1 AND published=0) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints e WHERE e.namespace=c.namespace AND e.session_key=c.session_key))",[ns],|r|r.get(0)).map_err(error)?;
             if complete || carried_listing {
