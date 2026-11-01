@@ -112,6 +112,21 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Transfer search records and original-authority repricing
+        id: transfer_search
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer225_search_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/transfer-search.log"
+          cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer_catalog_reprice_preserves_imported_original_authority -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/transfer-search.log"
+      - name: Retain transfer search diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.transfer_search.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: transfer-search-${{ github.sha }}
+          path: ${{ runner.temp }}/transfer-search.log
+          if-no-files-found: error
       - name: Inactive PostgreSQL selected Query recipe loader
         id: query_recipe
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}

@@ -173,6 +173,7 @@ pub(in crate::storage::postgres) fn import(
     if missing {
         return Err(StorageError::ScopeChanged);
     }
+    super::search::verify_state(tx,import.generation())?;
     let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NULL", &[&ns,&import.generation()]).map_err(sqlstate::error)?;
     if changed != 1 {
         return Err(StorageError::Conflict);
@@ -501,6 +502,7 @@ pub(in crate::storage::postgres) fn publish(
             effects.counts(scope)?;
         }
     }
+    super::search::publish_state(tx,&generation)?;
     let expected_value = expected.map(str::to_owned);
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE state_cas");

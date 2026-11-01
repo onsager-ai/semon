@@ -202,6 +202,7 @@ pub(crate) fn admit_catalog(
         if affected_rows != 1 {
             return Err(StorageError::ScopeChanged);
         }
+        catalog::verify_search_state(tx, import.generation())?;
         head.publish_generation(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),

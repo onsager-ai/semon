@@ -470,7 +470,7 @@ pub(super) fn stage(
 }
 
 pub(super) mod history;
-mod search;
+pub(super) mod search;
 
 #[cfg(test)]
 mod tests;
