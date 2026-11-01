@@ -5832,7 +5832,328 @@ fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
     evidence.retire();
 }
 
+#[derive(Debug)]
+struct TraceRowsSnapshot {
+    current_catalog_metadata: Option<String>,
+    history_catalog_metadata: Option<String>,
+    current_source_generation: Option<String>,
+    history_source_generation: Option<String>,
+    history_present: bool,
+    original_header: bool,
+    turns: Vec<(String, Option<String>, String)>,
+    edges: Vec<(String, String)>,
+    bookmarks: Vec<(String, String)>,
+}
+
+fn catalog_row_source_generation(metadata: Option<String>) -> Option<String> {
+    metadata
+        .and_then(|metadata| serde_json::from_str::<summary::CatalogRow>(&metadata).ok())
+        .and_then(|row| crate::retention::source_generation(&row.sources).ok())
+}
+
+fn trace_rows_snapshot(options: &Options, key: &str) -> Option<(String, TraceRowsSnapshot)> {
+    let namespace = options.source.namespace().unwrap();
+    let mut db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    let tx = db.transaction().unwrap();
+    let trace_source_generation: Option<String> = tx
+        .query_row(
+            "SELECT source_generation FROM session_trace_headers WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![namespace.as_str(), key],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let Some(trace_source_generation) = trace_source_generation else {
+        tx.rollback().unwrap();
+        return None;
+    };
+    let current_metadata: Option<String> = tx
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='current'",
+            rusqlite::params![namespace.as_str(), key],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let history_metadata: Option<String> = tx
+        .query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![namespace.as_str(), key],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap();
+    let history_present = history_metadata.is_some();
+    let current_source_generation = catalog_row_source_generation(current_metadata.clone());
+    let history_source_generation = catalog_row_source_generation(history_metadata.clone());
+    let original_header: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key=?2)",
+            rusqlite::params![
+                namespace.as_str(),
+                format!("history_original_header:{key}")
+            ],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let turns = tx
+        .prepare(
+            "SELECT turn_id,start_id,metadata FROM session_trace_turns WHERE namespace=?1 AND session_key=?2 ORDER BY turn_id",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![namespace.as_str(), key], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let edges = tx
+        .prepare(
+            "SELECT edge_id,metadata FROM session_trace_edges WHERE namespace=?1 AND session_key=?2 ORDER BY edge_id",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![namespace.as_str(), key], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let bookmarks = tx
+        .prepare(
+            "SELECT target,edge_id FROM session_trace_bookmarks WHERE namespace=?1 AND session_key=?2 ORDER BY target,edge_id",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![namespace.as_str(), key], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    tx.commit().unwrap();
+    Some((
+        trace_source_generation,
+        TraceRowsSnapshot {
+            current_catalog_metadata: current_metadata,
+            history_catalog_metadata: history_metadata,
+            current_source_generation,
+            history_source_generation,
+            history_present,
+            original_header,
+            turns,
+            edges,
+            bookmarks,
+        },
+    ))
+}
+
+fn assert_current_trace_witness(oracle: &QueryData, key: &str, witness: &str) {
+    let witness: Value = serde_json::from_str(witness).unwrap();
+    let expected_turns = oracle
+        .turns
+        .iter()
+        .filter(|turn| turn.sid == key)
+        .map(|turn| {
+            json!({
+                "id": turn.id,
+                "sid": turn.sid,
+                "start": turn.start,
+                "u": turn.u,
+                "at": turn.at,
+                "end": turn.end,
+                "sent": turn.sent,
+                "last": turn.last,
+            })
+        })
+        .collect::<Vec<_>>();
+    let actual_turns = witness[1].as_array().unwrap();
+    assert_eq!(
+        actual_turns.len(),
+        expected_turns.len(),
+        "Current producer turn count for {key}"
+    );
+    assert_eq!(actual_turns, &expected_turns, "Current producer turns for {key}");
+    assert_eq!(
+        witness[0]["details"]["turns"],
+        json!(expected_turns.len()),
+        "Current producer header turn count for {key}"
+    );
+
+    let expected_edges = oracle
+        .handoffs
+        .iter()
+        .filter(|edge| edge.from == key || edge.to.as_deref() == Some(key))
+        .collect::<Vec<_>>();
+    let actual_edges = witness[2].as_array().unwrap();
+    assert_eq!(
+        actual_edges.len(),
+        expected_edges.len(),
+        "Current producer edges for {key}"
+    );
+    for edge in expected_edges {
+        let actual = actual_edges
+            .iter()
+            .find(|actual| actual["id"] == edge.id)
+            .unwrap_or_else(|| panic!("Current producer omitted edge {} for {key}", edge.id));
+        assert_eq!(actual["kind"], json!(edge.kind));
+        assert_eq!(actual["ask"], json!(edge.ask));
+        assert_eq!(actual["from"], json!(edge.from));
+        assert_eq!(actual["to"], json!(edge.to));
+        assert_eq!(actual["at"], json!(edge.at));
+        assert_eq!(actual["done"], json!(edge.done));
+        assert_eq!(actual["status"], json!(edge.status));
+        assert_eq!(actual["declined"], json!(edge.declined));
+        assert_eq!(actual["unmatched"], json!(edge.unmatched));
+        assert_eq!(actual["ambiguous"], json!(edge.ambiguous));
+    }
+
+    let mut expected_bookmarks = oracle
+        .handoffs
+        .iter()
+        .filter(|edge| edge.from == key && edge.to.is_none())
+        .filter_map(|edge| {
+            edge.target
+                .as_ref()
+                .map(|target| (target.clone(), edge.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    expected_bookmarks.sort();
+    let mut actual_bookmarks = witness[3]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|bookmark| {
+            (
+                bookmark[0].as_str().unwrap().to_owned(),
+                bookmark[1].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    actual_bookmarks.sort();
+    assert_eq!(
+        actual_bookmarks, expected_bookmarks,
+        "Current producer bookmarks for {key}"
+    );
+}
+
+fn assert_history_trace_witness(
+    options: &Options,
+    key: &str,
+    oracle: &QueryData,
+    snapshots: &BTreeMap<(String, String), TraceRowsSnapshot>,
+    prepared_witnesses: &BTreeMap<(String, String), String>,
+) {
+    let (trace_source_generation, current) = trace_rows_snapshot(options, key)
+        .unwrap_or_else(|| panic!("History trace header missing for {key}"));
+    let history_source_generation = current
+        .history_source_generation
+        .as_ref()
+        .unwrap_or_else(|| panic!("History Catalog row missing for {key}"));
+    let current_source_generation = current
+        .current_source_generation
+        .as_ref()
+        .unwrap_or_else(|| panic!("Current Catalog row missing for {key}"));
+    assert!(current.history_present, "History row missing for {key}");
+    assert!(current.original_header, "original History header missing for {key}");
+    assert_eq!(
+        &trace_source_generation, history_source_generation,
+        "stored trace belongs to History for {key}"
+    );
+    assert_ne!(
+        &trace_source_generation, current_source_generation,
+        "stored trace must not be mislabeled as Current for {key}"
+    );
+
+    let original = snapshots
+        .get(&(key.to_owned(), history_source_generation.clone()))
+        .unwrap_or_else(|| {
+            panic!(
+                "no earlier trace snapshot for {key} at History source generation {history_source_generation}"
+            )
+        });
+    assert!(
+        !original.history_present && !original.original_header,
+        "trace snapshot for {key} must predate History activation"
+    );
+    assert_eq!(
+        original.current_source_generation.as_deref(),
+        Some(history_source_generation.as_str()),
+        "pre-History trace snapshot must belong to the then-Current row for {key}"
+    );
+    let mut expected_history: Value = serde_json::from_str(
+        original
+            .current_catalog_metadata
+            .as_deref()
+            .expect("pre-History Current metadata snapshot"),
+    )
+    .unwrap();
+    expected_history["lifecycle"] = json!("retained");
+    let actual_history: Value = serde_json::from_str(
+        current
+            .history_catalog_metadata
+            .as_deref()
+            .expect("final History metadata"),
+    )
+    .unwrap();
+    assert_eq!(
+        actual_history, expected_history,
+        "original History metadata for {key}"
+    );
+    assert_eq!(
+        current.turns, original.turns,
+        "retained History turns for {key}"
+    );
+    assert_eq!(
+        current.edges, original.edges,
+        "retained History edges for {key}"
+    );
+    assert_eq!(
+        current.bookmarks, original.bookmarks,
+        "retained History bookmarks for {key}"
+    );
+
+    let current_witness = prepared_witnesses
+        .get(&(key.to_owned(), current_source_generation.clone()))
+        .unwrap_or_else(|| {
+            panic!(
+                "prepared Current trace missing for {key} at source generation {current_source_generation}"
+            )
+        });
+    assert_current_trace_witness(oracle, key, current_witness);
+
+    for (turn_id, _, metadata) in &original.turns {
+        let query = format!(
+            "sid={}&turn={}&scope=retained_history",
+            crate::viewer::percent_encode(key),
+            crate::viewer::percent_encode(turn_id),
+        );
+        let reply = crate::session_causal_trace(options, "fixture", &query);
+        assert_eq!(
+            reply.status,
+            200,
+            "History read for {key}/{turn_id}: {}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let expected: Value = serde_json::from_str(metadata).unwrap();
+        let actual = body["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|turn| turn["id"] == turn_id)
+            .unwrap_or_else(|| panic!("History read omitted {key}/{turn_id}"));
+        assert_eq!(actual, &expected, "History turn {key}/{turn_id}");
+    }
+}
+
 fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> QueryData {
+    assert_queued_identity_matches_oracle_with_history_trace(home, options, None)
+}
+
+fn assert_queued_identity_matches_oracle_with_history_trace(
+    home: &Home,
+    options: &Options,
+    history_trace_key: Option<&str>,
+) -> QueryData {
     const STAGED_FAILURE_TESTS: [&str; 5] = [
         "catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages",
         "catalog_runtime_staged_publication_replays_large_incident_relationships",
@@ -5847,6 +6168,10 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
             .iter()
             .any(|name| test_name.ends_with(name)),
     );
+    let prepared_trace_capture = history_trace_key.map(|key| {
+        crate::model::PreparedTraceWitnessCapture::new([key.to_owned()])
+    });
+    let mut trace_snapshots = BTreeMap::new();
     let mut oracle_options = options.clone();
     oracle_options.cache = options.cache.with_extension("oracle.json");
     let oracle = home.build_at(&oracle_options, NOW);
@@ -5918,6 +6243,13 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     let mut complete = false;
     for _ in 0..512 {
         let refreshed = evidence.refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW);
+        if let Some(key) = history_trace_key
+            && let Some((source_generation, snapshot)) = trace_rows_snapshot(options, key)
+        {
+            trace_snapshots
+                .entry((key.to_owned(), source_generation))
+                .or_insert(snapshot);
+        }
         if let Err(error) = &refreshed {
             if probe.enabled() {
                 let work = crate::viewer::lock(&evidence.work);
@@ -5948,6 +6280,16 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         assert_eq!(cache.backfill_state().unwrap().as_deref(), Some("complete"));
         assert!(cache.pending_catalog_sources(1).unwrap().is_empty());
     }
+    let retained_history_key = if let Some(key) = history_trace_key {
+        let prepared_witnesses = prepared_trace_capture
+            .as_ref()
+            .expect("trace capture was installed")
+            .take();
+        assert_history_trace_witness(options, key, &oracle, &trace_snapshots, &prepared_witnesses);
+        Some(key)
+    } else {
+        None
+    };
     let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
     let namespace = options.source.namespace().unwrap();
     for (key, session) in &oracle.sessions {
@@ -5982,6 +6324,9 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     {
         for owner in [Some(&edge.from), edge.to.as_ref()].into_iter().flatten() {
             if oracle.sessions[owner].stub {
+                continue;
+            }
+            if retained_history_key == Some(owner.as_str()) {
                 continue;
             }
             let metadata: String = db
@@ -6082,6 +6427,9 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     }
     for turn in &oracle.turns {
         if oracle.sessions[&turn.sid].stub {
+            continue;
+        }
+        if retained_history_key == Some(turn.sid.as_str()) {
             continue;
         }
         let metadata: String = db
@@ -6907,7 +7255,11 @@ fn staged_identity_reprepares_copy_resume_split_across_source_pages() {
             &[human(&format!("middle-{n:03}"), ts(8, 0), "Independent")],
         );
     }
-    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let oracle = assert_queued_identity_matches_oracle_with_history_trace(
+        &home,
+        &home.options,
+        Some("000-original"),
+    );
     assert!(oracle.sessions.contains_key("000-original"));
     assert!(!oracle.sessions.contains_key("zzz-resumed"));
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
@@ -7076,7 +7428,11 @@ fn staged_claude_ambiguity_and_received_copy_policy_match_shared_builder() {
             &[human(&format!("middle-{n:03}"), ts(5, 0), "Independent")],
         );
     }
-    let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let oracle = assert_queued_identity_matches_oracle_with_history_trace(
+        &home,
+        &home.options,
+        Some("beta"),
+    );
     assert!(by_brief(&oracle, "to a twin").unmatched);
     assert_eq!(
         by_brief(&oracle, "by unique name").to.as_deref(),

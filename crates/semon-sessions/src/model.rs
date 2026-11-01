@@ -42,6 +42,83 @@ use crate::{
 };
 
 #[cfg(test)]
+pub(crate) type PreparedTraceWitnesses = BTreeMap<(String, String), String>;
+
+#[cfg(test)]
+thread_local! {
+    static PREPARED_TRACE_WITNESS_CAPTURE: std::cell::RefCell<
+        Option<(BTreeSet<String>, PreparedTraceWitnesses)>
+    > = std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) struct PreparedTraceWitnessCapture {
+    previous: Option<(BTreeSet<String>, PreparedTraceWitnesses)>,
+}
+
+#[cfg(test)]
+impl PreparedTraceWitnessCapture {
+    pub(crate) fn new(keys: impl IntoIterator<Item = String>) -> Self {
+        let state = Some((keys.into_iter().collect(), BTreeMap::new()));
+        let previous = PREPARED_TRACE_WITNESS_CAPTURE.with(|capture| {
+            std::mem::replace(&mut *capture.borrow_mut(), state)
+        });
+        Self { previous }
+    }
+
+    pub(crate) fn take(&self) -> PreparedTraceWitnesses {
+        PREPARED_TRACE_WITNESS_CAPTURE.with(|capture| {
+            capture
+                .borrow_mut()
+                .as_mut()
+                .map(|(_, witnesses)| std::mem::take(witnesses))
+                .unwrap_or_default()
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for PreparedTraceWitnessCapture {
+    fn drop(&mut self) {
+        PREPARED_TRACE_WITNESS_CAPTURE.with(|capture| {
+            *capture.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn capture_prepared_trace_witnesses(
+    phase: relation_stage::Phase,
+    rows: &[summary::CatalogRow],
+) {
+    if phase != relation_stage::Phase::Publication
+        || !crate::storage::sqlite::staged_failure_probe_enabled()
+    {
+        return;
+    }
+    PREPARED_TRACE_WITNESS_CAPTURE.with(|capture| {
+        let mut capture = capture.borrow_mut();
+        let Some((keys, witnesses)) = capture.as_mut() else {
+            return;
+        };
+        for row in rows {
+            if !keys.contains(&row.key) {
+                continue;
+            }
+            let Some(trace) = &row.trace else {
+                continue;
+            };
+            if let Ok(source_generation) = crate::retention::source_generation(&row.sources) {
+                witnesses.insert(
+                    (row.key.clone(), source_generation),
+                    trace.publication_witness(row),
+                );
+            }
+        }
+    });
+}
+
+#[cfg(test)]
 macro_rules! archive_read_diagnostic {
     ($stage:literal, $result:expr) => {
         $result.inspect_err(|error| {
@@ -8027,6 +8104,8 @@ pub(crate) fn prepare_semantic_batch(
             .collect();
     }
     prepared.retain_withdrawal_fence(options)?;
+    #[cfg(test)]
+    capture_prepared_trace_witnesses(batch.phase, &prepared.rows);
     Ok(SemanticModelBatch { prepared })
 }
 
