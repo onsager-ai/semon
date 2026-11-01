@@ -56,9 +56,79 @@ fn relation_context_budget_error(error: &rusqlite::Error) -> bool {
     )
 }
 
+fn relation_sender_context(
+    db: &Connection,
+    namespace: &str,
+    physical: &impl crate::events::store::semantic_stage::ContextPort,
+    sender_candidates: &std::collections::BTreeSet<(Option<String>, Option<String>)>,
+    used: &mut usize,
+    preloaded: &std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+) -> rusqlite::Result<(
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+)> {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut endpoints = std::collections::BTreeMap::new();
+    for (peer, task) in sender_candidates {
+        let mut previous = None;
+        for native in peer.iter().chain(task.iter()) {
+            if previous == Some(native) {
+                continue;
+            }
+            previous = Some(native);
+            let mut lookup = AdmittedLookup {
+                db,
+                ns: namespace,
+                replay: Vec::new(),
+            };
+            let selected = crate::model::relation_stage::select_with(
+                &mut lookup,
+                &crate::model::relation_stage::Selector::NativeKey {
+                    native: native.clone(),
+                    harness: "claude".to_owned(),
+                },
+            )?;
+            let Some(key) = selected.key.filter(|_| selected.count == 1) else {
+                continue;
+            };
+            let endpoint = match preloaded.get(&key) {
+                Some(endpoint) => Some(endpoint.clone()),
+                None => crate::events::store::semantic_stage::ContextPort::endpoint(
+                    physical,
+                    &key,
+                    used,
+                )?,
+            };
+            let Some(endpoint) = endpoint else {
+                return Err(rusqlite::Error::InvalidQuery);
+            };
+            if endpoint.row.harness != "claude" || !endpoint.row.native_ids.contains(native) {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            if endpoint.facts_kind != "subagent" {
+                continue;
+            }
+            if endpoint.row.sources.is_empty() {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            endpoints.insert(key, endpoint.clone());
+            for source in endpoint.row.sources {
+                paths.insert(source.path.to_string_lossy().into_owned());
+                if paths.len() > RELATION_OUTPUT_LIMIT {
+                    return Err(crate::events::store::semantic_stage::context_budget());
+                }
+            }
+            break;
+        }
+    }
+    Ok((paths, endpoints))
+}
+
 struct RelationPage {
     cursor: RelationCursor,
     locations: Vec<Location>,
+    /// `(origin.from, senderTaskId)` candidates in model lookup priority.
+    sender_candidates: std::collections::BTreeSet<(Option<String>, Option<String>)>,
     primary_events: usize,
     budget_blocked: bool,
 }
@@ -304,6 +374,7 @@ fn relation_page(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut locations = Vec::new();
+    let mut sender_candidates = std::collections::BTreeSet::new();
     let mut end = after.clone();
     let mut primary_events = 0usize;
     let mut budget_blocked = false;
@@ -368,6 +439,20 @@ fn relation_page(
         if overflow {
             break;
         }
+        if own.event.k == crate::events::Kind::Agm
+            && own.event.script & crate::events::AGM_PROGRESS != 0
+        {
+            let peer = own
+                .event
+                .peer
+                .as_ref()
+                .and_then(|peer| peer.sock.as_ref())
+                .cloned();
+            let task = own.event.id.clone();
+            if peer.is_some() || task.is_some() {
+                sender_candidates.insert((peer, task));
+            }
+        }
         locations.extend(selected);
         end = key;
         primary_events += 1;
@@ -379,6 +464,7 @@ fn relation_page(
             end,
         },
         locations,
+        sender_candidates,
         primary_events,
         budget_blocked,
     })
@@ -4083,6 +4169,7 @@ impl Stage {
             // canonical owner closure; unrelated pending Claude paths stay pending.
             relation_primary_paths = Some(primary);
         }
+        let mut relation_context_bytes = 0usize;
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
             Context {
                 epoch: (result_phase == Phase::Identity).then_some(epoch),
@@ -4090,13 +4177,17 @@ impl Stage {
             }
         } else {
             loop {
+                relation_context_bytes = 0;
                 let loaded = (|| -> rusqlite::Result<Context> {
-                    let mut context = crate::events::store::semantic_stage::context_with(
-                        &physical,
-                        &paths,
-                        result_phase,
-                        epoch,
-                    )?;
+                    let mut context =
+                        crate::events::store::semantic_stage::context_with_budget(
+                            &physical,
+                            &paths,
+                            result_phase,
+                            epoch,
+                            &mut relation_context_bytes,
+                            &std::collections::BTreeMap::new(),
+                        )?;
                     if result_phase == Phase::Publication {
                         context.prior_owners = owners::Owners {
                             db: &tx,
@@ -4159,6 +4250,21 @@ impl Stage {
                 if page.primary_events == 0 && page.budget_blocked {
                     return Err(refuse("semantic_source_budget"));
                 }
+                let (sender_paths, sender_endpoints) = match relation_sender_context(
+                    &tx,
+                    ns,
+                    &physical,
+                    &page.sender_candidates,
+                    &mut relation_context_bytes,
+                    &context.endpoints,
+                ) {
+                    Ok(sender_context) => sender_context,
+                    Err(source_error) if relation_context_budget_error(&source_error) => {
+                        return Err(refuse("semantic_source_budget"));
+                    }
+                    Err(source_error) => return Err(error(source_error)),
+                };
+                context.endpoints.extend(sender_endpoints);
                 context.matching_locations = Some(page.locations);
                 context.matching_header_paths = Some(vec![selected.clone()]);
                 let mut actors = context
@@ -4168,22 +4274,51 @@ impl Stage {
                     .map(|location| location.source.path.to_string_lossy().into_owned())
                     .collect::<std::collections::BTreeSet<_>>();
                 actors.insert(selected.clone());
+                actors.extend(sender_paths.iter().cloned());
+                if actors.len() > RELATION_OUTPUT_LIMIT {
+                    return Err(refuse("semantic_source_budget"));
+                }
                 let mut companions = std::collections::BTreeSet::new();
                 for actor in &actors {
-                    companions.extend(
-                        crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
-                            .map_err(error)?,
-                    );
+                    match crate::events::store::semantic_stage::owner_closure_with(
+                        &physical, actor,
+                    ) {
+                        Ok(paths) => companions.extend(paths),
+                        Err(source_error)
+                            if sender_paths.contains(actor)
+                                && relation_context_budget_error(&source_error) =>
+                        {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    }
                 }
-                let companion_context = crate::events::store::semantic_stage::context_with(
-                    &physical,
-                    &companions.iter().cloned().collect::<Vec<_>>(),
-                    result_phase,
-                    epoch,
-                )
-                .map_err(error)?;
+                if companions.len() > RELATION_OUTPUT_LIMIT {
+                    return Err(refuse("semantic_source_budget"));
+                }
+                let companion_context =
+                    match crate::events::store::semantic_stage::context_with_budget(
+                        &physical,
+                        &companions.iter().cloned().collect::<Vec<_>>(),
+                        result_phase,
+                        epoch,
+                        &mut relation_context_bytes,
+                        &context.endpoints,
+                    )
+                    {
+                        Ok(context) => context,
+                        Err(source_error)
+                            if !sender_paths.is_empty()
+                                && relation_context_budget_error(&source_error) =>
+                        {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    };
                 context.endpoints.extend(companion_context.endpoints);
                 companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
+                // Sender sources carry their exact claims and context, while
+                // this receipt page remains the only relation cursor.
                 paths = vec![selected.clone()];
                 paths.extend(companions.into_iter().filter(|path| path != &selected));
                 relation_cursors.push(page.cursor);
@@ -4239,6 +4374,7 @@ impl Stage {
                         locations,
                         primary_events,
                         budget_blocked,
+                        ..
                     } = relation_page(
                         &tx,
                         ns,

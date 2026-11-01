@@ -194,6 +194,21 @@ pub(crate) fn context_with(
     phase: Phase,
     epoch: i64,
 ) -> rusqlite::Result<Context> {
+    let mut used = 0usize;
+    let preloaded = BTreeMap::new();
+    context_with_budget(port, paths, phase, epoch, &mut used, &preloaded)
+}
+
+/// Extend a context with one shared metadata budget and already loaded
+/// endpoints. Preloaded endpoints are reused without another physical read.
+pub(crate) fn context_with_budget(
+    port: &impl ContextPort,
+    paths: &[String],
+    phase: Phase,
+    epoch: i64,
+    used: &mut usize,
+    preloaded: &BTreeMap<String, Endpoint>,
+) -> rusqlite::Result<Context> {
     let mut owners = BTreeSet::new();
     for path in paths {
         owners.extend(port.owners(path)?);
@@ -211,17 +226,20 @@ pub(crate) fn context_with(
         },
         ..Context::default()
     };
-    let mut used = 0usize;
     for owner in &owners {
         if phase == Phase::Publication {
-            let children = port.children(owner, &mut used)?;
+            let children = port.children(owner, used)?;
             out.children.insert(owner.clone(), children);
             out.family_costs.insert(owner.clone(), port.cost(owner)?);
         }
         selected.extend(port.parent(owner)?);
     }
     for key in selected {
-        if let Some(endpoint) = port.endpoint(&key, &mut used)? {
+        let endpoint = match preloaded.get(&key) {
+            Some(endpoint) => Some(endpoint.clone()),
+            None => port.endpoint(&key, used)?,
+        };
+        if let Some(endpoint) = endpoint {
             out.endpoints.insert(key, endpoint);
         }
     }
