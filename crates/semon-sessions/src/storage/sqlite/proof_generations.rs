@@ -2647,8 +2647,16 @@ pub(super) fn capture_presentations(
             None
         };
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
-        bytes = bytes.saturating_add(text.len());
+        let witness_bytes = text.len();
+        bytes = bytes.saturating_add(witness_bytes);
         if bytes > 8 * 1048576 {
+            #[cfg(test)]
+            eprintln!(
+                "native-history-bound=presentation-witnesses total_bytes={} last_witness_bytes={} owners={} limit_bytes=8388608",
+                bytes,
+                witness_bytes,
+                result.len() + 1
+            );
             return Err(StorageError::HistoryRetentionBounds);
         }
         result.push((row.key.clone(), text));
@@ -2689,6 +2697,12 @@ pub(super) fn bind_presentations(
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
+        #[cfg(test)]
+        eprintln!(
+            "native-history-bound=presentation-manifest bytes={} owners={} limit_bytes=1048576",
+            manifest.len(),
+            rows.len()
+        );
         return Err(StorageError::HistoryRetentionBounds);
     }
     let joined = joined_digest(base, &manifest)?;
