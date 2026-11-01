@@ -3492,12 +3492,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         prefix_sha256: source.prefix_sha256,
                         tail_sha256: source.tail_sha256,
                     };
-                    let proof = captured_config.captured_source_proof_at(
-                        &options,
-                        &generation,
-                        &row.key,
-                        &reference,
-                    );
+                    let (proof, proof_phase) =
+                        crate::storage::postgres::navigation::with_captured_source_proof_trace(
+                            || {
+                                captured_config.captured_source_proof_at(
+                                    &options,
+                                    &generation,
+                                    &row.key,
+                                    &reference,
+                                )
+                            },
+                        );
                     let parked_agent = row.harness == "claude"
                         && (source.path == claude_agent || source.path == claude_agent191);
                     if !source.path.exists() && (row.harness == "copilot" || parked_agent) {
@@ -3508,7 +3513,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         continue;
                     }
                     let proof = proof.unwrap_or_else(|error| {
-                        panic!("captured source proof harness={}: {error:?}", row.harness)
+                        panic!(
+                            "captured source proof key={} harness={} path={} source_path={} native_id={} offset={} generation={} phase={proof_phase}: {error:?}",
+                            row.key,
+                            row.harness,
+                            reference.path,
+                            source.path.display(),
+                            reference.native_id,
+                            reference.offset,
+                            generation,
+                        )
                     });
                     assert_eq!(proof.source, reference);
                     let physical_path = if source.path.exists() {

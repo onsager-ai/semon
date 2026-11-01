@@ -11,6 +11,41 @@ pub(crate) struct Navigation {
     pub(crate) control: PgCancellation,
 }
 
+#[cfg(test)]
+thread_local! {
+    static CAPTURED_SOURCE_PROOF_PHASE: std::cell::Cell<Option<&'static str>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+struct CapturedSourceProofTraceReset(Option<&'static str>);
+
+#[cfg(test)]
+impl Drop for CapturedSourceProofTraceReset {
+    fn drop(&mut self) {
+        CAPTURED_SOURCE_PROOF_PHASE.with(|phase| phase.set(self.0.take()));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_captured_source_proof_trace<T>(read: impl FnOnce() -> T) -> (T, &'static str) {
+    let previous = CAPTURED_SOURCE_PROOF_PHASE
+        .with(|phase| phase.replace(Some("store_config_source_binding")));
+    let _reset = CapturedSourceProofTraceReset(previous);
+    let result = read();
+    let phase = CAPTURED_SOURCE_PROOF_PHASE.with(|phase| phase.get());
+    (result, phase.unwrap_or("trace_unmatched"))
+}
+
+#[cfg(test)]
+fn captured_source_proof_trace_phase(phase: &'static str) {
+    CAPTURED_SOURCE_PROOF_PHASE.with(|current| {
+        if current.get().is_some() {
+            current.set(Some(phase));
+        }
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn captured_source_proof(
     config: &StoreConfig,
@@ -21,24 +56,40 @@ pub(crate) fn captured_source_proof(
     key: &str,
     reference: &crate::SessionSourceRef,
 ) -> Result<crate::SessionSourceProof, StorageError> {
+    #[cfg(test)]
+    captured_source_proof_trace_phase("request_binding");
     if key.is_empty() || key.len() > 4096 || !crate::is_input_path(&reference.root, &reference.path)
     {
         return Err(StorageError::InvalidArguments);
     }
+    #[cfg(test)]
+    captured_source_proof_trace_phase("configured_admission");
     super::require_configured(config, pool, control)?;
+    #[cfg(test)]
+    captured_source_proof_trace_phase("namespace_stream_binding");
     let pool = pool.bind_source(
         &config.namespace,
         config.expected_stream_epoch.as_deref(),
         control,
     )?;
+    #[cfg(test)]
+    captured_source_proof_trace_phase("admitted_snapshot");
     snapshot::with_admitted_snapshot(&pool, &config.namespace, control, generation, |snapshot| {
+        #[cfg(test)]
+        captured_source_proof_trace_phase("old_generation_row_lookup");
         let history = snapshot.catalog(key, true)?.is_some();
+        #[cfg(test)]
+        captured_source_proof_trace_phase("old_generation_selected_row");
         let (row, header, _) = snapshot
             .selected(key, history, 0, 1)?
             .ok_or(StorageError::ScopeChanged)?;
+        #[cfg(test)]
+        captured_source_proof_trace_phase("old_generation_header");
         if header.1 != crate::slot_projection::VERSION {
             return Err(StorageError::ScopeChanged);
         }
+        #[cfg(test)]
+        captured_source_proof_trace_phase("source_reference_match");
         let source = row
             .sources
             .iter()
@@ -56,11 +107,15 @@ pub(crate) fn captured_source_proof(
         // A historical recipe's old descriptor clocks are not a witness for
         // today's covering file. The host separately verifies Native block
         // hashes while copying bytes using the returned current descriptor.
+        #[cfg(test)]
+        captured_source_proof_trace_phase("native_proof_receipt");
         let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
         let absolute = source.path.to_str().ok_or(StorageError::ScopeChanged)?;
         super::catalog_effects::selected_reader::native_proof(&mut tx, generation, source)?;
         tx.check()?;
         let ledger = crate::source_carrier::ledger(source);
+        #[cfg(test)]
+        captured_source_proof_trace_phase("relocation_metadata");
         let relocation = super::native_keys::read_meta(
             &mut tx,
             format!("native_catalog_relocation:{absolute}").as_bytes(),
@@ -90,7 +145,11 @@ pub(crate) fn captured_source_proof(
         } else {
             (source.path.as_path(), ledger.stat)
         };
+        #[cfg(test)]
+        captured_source_proof_trace_phase("covering_file_open");
         let file = crate::open_input(physical_path).map_err(|_| StorageError::ScopeChanged)?;
+        #[cfg(test)]
+        captured_source_proof_trace_phase("covering_file_metadata");
         let stat = crate::events::Stat::from_metadata(
             &file.metadata().map_err(|_| StorageError::ScopeChanged)?,
         )
@@ -101,6 +160,8 @@ pub(crate) fn captured_source_proof(
         {
             return Err(StorageError::ScopeChanged);
         }
+        #[cfg(test)]
+        captured_source_proof_trace_phase("covering_file_name");
         let named =
             std::fs::symlink_metadata(physical_path).map_err(|_| StorageError::ScopeChanged)?;
         if !named.is_file()
@@ -109,7 +170,11 @@ pub(crate) fn captured_source_proof(
         {
             return Err(StorageError::ScopeChanged);
         }
+        #[cfg(test)]
+        captured_source_proof_trace_phase("snapshot_recheck");
         tx.check()?;
+        #[cfg(test)]
+        captured_source_proof_trace_phase("complete");
         Ok(crate::SessionSourceProof {
             source: reference.clone(),
             dev: stat.dev,
