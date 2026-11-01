@@ -8651,12 +8651,7 @@ mod tests {
                 cache
                     .ingest(&"c".repeat(64), &input.full_path(options), "codex")
                     .unwrap();
-                let (batch, model) = ready(
-                    &mut cache,
-                    &f,
-                    options,
-                    std::slice::from_ref(input),
-                );
+                let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
                 publish(&mut cache, &f, &batch, &model);
                 cache.finish_semantic_stage(batch.epoch).unwrap();
 
@@ -8675,12 +8670,7 @@ mod tests {
                     crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
                 )
                 .unwrap();
-                let (batch, model) = ready(
-                    &mut cache,
-                    &f,
-                    options,
-                    std::slice::from_ref(input),
-                );
+                let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
                 assert_eq!(model.prepared().withdrawals.len(), 1);
                 let source_path = model.prepared().withdrawals[0].path.clone();
                 if removed == "source" {
@@ -8712,11 +8702,11 @@ mod tests {
                 );
 
                 for path in ["facts", source_path.as_str()] {
-                    let lock = crate::source_change::SourceLock::try_exclusive_cache(
-                        &options.cache,
-                        path,
-                    )
-                    .unwrap_or_else(|error| panic!("publication released {path} lock: {error}"));
+                    let lock =
+                        crate::source_change::SourceLock::try_exclusive_cache(&options.cache, path)
+                            .unwrap_or_else(|error| {
+                                panic!("publication released {path} lock: {error}")
+                            });
                     drop(lock);
                 }
             }

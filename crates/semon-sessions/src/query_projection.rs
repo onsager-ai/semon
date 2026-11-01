@@ -404,8 +404,17 @@ pub(crate) fn validate_query_content_recipe(value: &Value) -> std::io::Result<()
     if object.keys().any(|field| {
         !matches!(
             field.as_str(),
-            "path" | "offset" | "block" | "kind" | "tool" | "cwd" | "source" | "field"
-                | "arg" | "skip" | "structured"
+            "path"
+                | "offset"
+                | "block"
+                | "kind"
+                | "tool"
+                | "cwd"
+                | "source"
+                | "field"
+                | "arg"
+                | "skip"
+                | "structured"
         )
     }) {
         return Err(invalid());
@@ -439,11 +448,16 @@ pub(crate) fn validate_query_content_recipe(value: &Value) -> std::io::Result<()
         return Err(invalid());
     }
     for field in ["tool", "cwd", "arg"] {
-        if value.get(field).is_some_and(|value| !value.is_null() && !value.is_string()) {
+        if value
+            .get(field)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
             return Err(invalid());
         }
     }
-    if value.get("skip").is_some_and(|value| value.as_u64().is_none())
+    if value
+        .get("skip")
+        .is_some_and(|value| value.as_u64().is_none())
         || value
             .get("structured")
             .is_some_and(|value| value.as_bool().is_none())

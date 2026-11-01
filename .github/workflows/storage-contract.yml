@@ -290,7 +290,7 @@ jobs:
         run: |
           result=0
           cargo test --locked -p semon-sessions --lib semantic_rejection_ -- --nocapture > "$RUNNER_TEMP/semantic-rejection-tests.log" 2>&1 || result=$?
-          if ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/semantic-rejection-tests.log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 5 passed; 0 failed;' "$RUNNER_TEMP/semantic-rejection-tests.log"; then result=1; fi
           cat "$RUNNER_TEMP/semantic-rejection-tests.log"
           exit "$result"
       - name: Retain configured semantic rejection results

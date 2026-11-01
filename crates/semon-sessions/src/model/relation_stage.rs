@@ -1109,10 +1109,9 @@ impl Context {
                                 endpoints
                                     .get(owner)
                                     .is_some_and(|endpoint| endpoint.row.sources.contains(&source))
-                                    || builder
-                                        .staged_endpoints
-                                        .get(owner)
-                                        .is_some_and(|endpoint| endpoint.row.sources.contains(&source))
+                                    || builder.staged_endpoints.get(owner).is_some_and(|endpoint| {
+                                        endpoint.row.sources.contains(&source)
+                                    })
                             })
                     {
                         return Err(io::Error::other(SourceGenerationChanged));

@@ -8449,8 +8449,9 @@ fn collect_foreign_query_content_sources(
                 .as_str()
                 .map(PathBuf::from)
                 .ok_or_else(|| io::Error::other(relation_stage::SourceGenerationChanged))?;
-            let source: summary::CatalogSource = serde_json::from_value(recipe["source"].clone())
-                .map_err(|_| io::Error::other(relation_stage::SourceGenerationChanged))?;
+            let source: summary::CatalogSource =
+                serde_json::from_value(recipe["source"].clone())
+                    .map_err(|_| io::Error::other(relation_stage::SourceGenerationChanged))?;
             if source.path != path
                 || !std::iter::once(&relation.from)
                     .chain(relation.to.iter())
@@ -8469,9 +8470,7 @@ fn collect_foreign_query_content_sources(
             } else {
                 sources.insert(path, source);
                 if sources.len() > 64 {
-                    return Err(io::Error::other(
-                        "semantic foreign preview metadata budget",
-                    ));
+                    return Err(io::Error::other("semantic foreign preview metadata budget"));
                 }
             }
         }
