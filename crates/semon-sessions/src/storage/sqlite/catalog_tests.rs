@@ -2318,8 +2318,11 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
         (row.sources, scope, runtime, grant)
     };
 
-    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-    let mut work = crate::viewer::lock(&evidence.work);
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+        .unwrap();
+    cache.scan_byte_budget = Some(4 * 1024 * 1024);
+    let mut dirty = false;
+    let mut texts = crate::model::Texts::default();
     let mut previous_offset = None;
     let mut partial_seen = false;
     let mut advances = 0;
@@ -2328,9 +2331,16 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
     let mut completed_source = None;
     let mut complete = false;
     for _ in 0..32 {
-        let ready = evidence
-            .refresh_catalog(&mut work, crate::model::now_ms())
-            .unwrap();
+        // Exercise the full direct Catalog publication API with more than 64
+        // rows, rather than NativeEvidence's staged Sources preparation path.
+        crate::model::observe_catalog_fenced(
+            &fixture.options,
+            &mut cache,
+            &mut dirty,
+            &mut texts,
+            crate::model::now_ms(),
+        )
+        .unwrap();
         let db = fixture.db();
         let count: i64 = db
             .query_row(
@@ -2369,7 +2379,10 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
         if let Some(source) = current_source {
             assert_eq!(count, 65, "exercise the full Catalog path above 64 rows");
             assert_eq!(source.size, source.offset);
-            assert!(source.offset <= source.size);
+            assert!(
+                source.offset <= physical_size,
+                "Catalog source offset stays within the captured physical file"
+            );
             if let Some(previous) = previous_offset {
                 assert!(source.offset >= previous);
                 advances += usize::from(source.offset > previous);
@@ -2394,32 +2407,30 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
                 );
             } else {
                 unrelated_before = Some(snapshot);
-                completed_source = Some(source);
+                completed_source = Some(source.clone());
                 drop(db);
-                drop(work);
                 selected_before = Some(selected_read(&fixture));
-                work = crate::viewer::lock(&evidence.work);
-                if ready {
+                if source.offset == physical_size {
                     complete = true;
                     break;
                 }
                 continue;
             }
             completed_source = Some(source.clone());
-            if ready {
+            if source.offset == physical_size {
                 assert_eq!(
                     source.offset, source.size,
                     "final Catalog source reaches EOF"
                 );
+                assert_eq!(source.size, physical_size);
                 complete = true;
                 break;
             }
-        } else if ready {
-            panic!("completed Catalog omitted its large source");
+        } else {
+            panic!("direct Catalog publication omitted its large source");
         }
     }
-    drop(work);
-    evidence.retire();
+    drop(cache);
     assert!(
         complete,
         "full Catalog source did not finish bounded indexing"
