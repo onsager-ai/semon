@@ -48,7 +48,7 @@ pub(crate) type PreparedTraceWitnesses = BTreeMap<(String, String), String>;
 thread_local! {
     static PREPARED_TRACE_WITNESS_CAPTURE: std::cell::RefCell<
         Option<(BTreeSet<String>, PreparedTraceWitnesses)>
-    > = std::cell::RefCell::new(None);
+    > = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -1855,6 +1855,7 @@ struct Sess {
 }
 
 type Ref = (usize, usize);
+type CompleteSenderTurns = (Vec<Turn>, BTreeMap<String, Ref>);
 
 struct H {
     out: Handoff,
@@ -5858,7 +5859,7 @@ impl<'a> Builder<'a> {
     /// Complete native receipts are needed even when their edges belong to a
     /// different message page. These temporary boundaries carry no sender claim
     /// and never enter the staged relationships or published projection.
-    fn complete_sender_turns(&mut self) -> io::Result<Option<(Vec<Turn>, BTreeMap<String, Ref>)>> {
+    fn complete_sender_turns(&mut self) -> io::Result<Option<CompleteSenderTurns>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
         };

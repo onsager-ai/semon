@@ -6357,19 +6357,19 @@ fn assert_queued_identity_matches_oracle_with_history_trace(
                 .entry((key.to_owned(), source_generation))
                 .or_insert(snapshot);
         }
-        if let Err(error) = &refreshed {
-            if probe.enabled() {
-                let work = crate::viewer::lock(&evidence.work);
-                let semantic_rejection = work
-                    .events
-                    .as_ref()
-                    .and_then(|cache| cache.semantic_rejection())
-                    .unwrap_or("none");
-                eprintln!(
-                    "staged_refresh_refusal semantic_rejection={semantic_rejection} io_kind={:?}",
-                    error.kind()
-                );
-            }
+        if let Err(error) = &refreshed
+            && probe.enabled()
+        {
+            let work = crate::viewer::lock(&evidence.work);
+            let semantic_rejection = work
+                .events
+                .as_ref()
+                .and_then(|cache| cache.semantic_rejection())
+                .unwrap_or("none");
+            eprintln!(
+                "staged_refresh_refusal semantic_rejection={semantic_rejection} io_kind={:?}",
+                error.kind()
+            );
         }
         if refreshed.unwrap() {
             complete = true;
@@ -13766,7 +13766,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
                 |row| row.get(0),
             )
             .unwrap();
-        let first_pending: Option<(
+        type PendingInvalidation = (
             String,
             i64,
             String,
@@ -13778,7 +13778,8 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             Option<bool>,
             Option<bool>,
             Option<bool>,
-        )> = db
+        );
+        let first_pending: Option<PendingInvalidation> = db
             .query_row(
                 "SELECT i.source_path,i.revision,i.reason,s.claim,s.ledger IS NOT NULL,s.index_done,s.events_done,s.identity_done,s.relation_done,s.publication_done,s.ack_done FROM session_catalog_invalidations i LEFT JOIN catalog_semantic_sources s ON s.namespace=i.namespace AND s.source_path=i.source_path ORDER BY i.source_path LIMIT 1",
                 [],

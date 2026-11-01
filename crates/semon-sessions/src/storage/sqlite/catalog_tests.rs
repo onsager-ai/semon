@@ -10475,7 +10475,7 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         .chain(child_relatives.iter())
         .map(|relative| crate::Input {
             root: crate::InputRoot::Codex,
-            path: relative.clone().into(),
+            path: relative.clone(),
         })
         .collect::<Vec<_>>();
     inputs.push(unrelated_input);
@@ -10635,7 +10635,7 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
     );
     assert_eq!(batch.paths.len(), 64);
     assert!(!batch.paths.contains(&unrelated_path));
-    let expected_children = child_paths.iter().cloned().collect::<Vec<_>>();
+    let expected_children = child_paths.to_vec();
     assert_eq!(
         batch.context.matching_header_paths,
         Some(expected_children.clone())
@@ -10790,7 +10790,7 @@ fn claude_continuation_inputs(fixture: &Fixture, count: usize) -> Vec<crate::Inp
             let id = format!("continuation-{n:02}");
             let input = crate::Input {
                 root: crate::InputRoot::Claude,
-                path: format!("projects/project/{id}.jsonl").into(),
+                path: format!("projects/project/{id}.jsonl"),
             };
             let path = input.full_path(&fixture.options);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -12302,39 +12302,41 @@ fn semantic_stage_summary_overflow_preflights_before_trace_publication() {
         .unwrap();
     let mut db = fixture.stage().into_test_connection();
     let tx = db.transaction().unwrap();
-    let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
-    crate::overview::cap_stage_summary_budget_for_test(summary_bytes - 1);
-    let mut overview_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
-    let error = crate::overview::publish_current_stage_owned(
-        &tx,
-        row,
-        &mut crate::native_timing::Measurements::default(),
-        &trace,
-        &mut overview_budget,
-    )
-    .unwrap_err();
-    assert!(matches!(
-        error,
-        rusqlite::Error::ToSqlConversionFailure(ref cause)
-            if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
-    ));
-    let trace_exists: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1)",
-            [&row.key],
-            |row| row.get(0),
+    {
+        let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
+        crate::overview::cap_stage_summary_budget_for_test(summary_bytes - 1);
+        let mut overview_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let error = crate::overview::publish_current_stage_owned(
+            &tx,
+            row,
+            &mut crate::native_timing::Measurements::default(),
+            &trace,
+            &mut overview_budget,
         )
-        .unwrap();
-    let overview_exists: bool = tx
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1)",
-            [&row.key],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!trace_exists);
-    assert!(!overview_exists);
-    drop(trace);
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            rusqlite::Error::ToSqlConversionFailure(ref cause)
+                if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
+        ));
+        let trace_exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1)",
+                [&row.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let overview_exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1)",
+                [&row.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!trace_exists);
+        assert!(!overview_exists);
+    }
     tx.rollback().unwrap();
 }
 
@@ -12485,58 +12487,59 @@ fn semantic_stage_retained_input_overflow_is_aggregated_without_current_overview
         .unwrap();
     let mut db = fixture.stage().into_test_connection();
     let tx = db.transaction().unwrap();
-    let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
-    let mut overview_budget =
-        crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
-    let mut measurements = crate::native_timing::Measurements::default();
-    let mut overflowed_row = None;
-    for (index, row) in rows.iter().enumerate() {
-        match crate::overview::publish_current_stage_owned(
-            &tx,
-            row,
-            &mut measurements,
-            &trace,
-            &mut overview_budget,
-        ) {
-            Ok(()) => {
-                assert_eq!(index, 0, "the second retained row exceeds the group budget");
-                let changed_trace: (String, String) = tx
-                    .query_row(
-                        "SELECT metadata,generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
-                        [&row.key],
-                        |record| Ok((record.get(0)?, record.get(1)?)),
-                    )
-                    .unwrap();
-                assert_ne!(
-                    (&changed_trace.0, &changed_trace.1),
-                    (&before[0].1.2, &before[0].1.3),
-                    "the first Trace effect must happen before the later overflow rolls it back"
-                );
-            }
-            Err(error) => {
-                assert_eq!(index, 1, "each first-row retained input fits the budget");
-                assert!(matches!(
-                    error,
-                    rusqlite::Error::ToSqlConversionFailure(ref cause)
-                        if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
-                ));
-                overflowed_row = Some(index);
-                break;
+    {
+        let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
+        let mut overview_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
+        let mut measurements = crate::native_timing::Measurements::default();
+        let mut overflowed_row = None;
+        for (index, row) in rows.iter().enumerate() {
+            match crate::overview::publish_current_stage_owned(
+                &tx,
+                row,
+                &mut measurements,
+                &trace,
+                &mut overview_budget,
+            ) {
+                Ok(()) => {
+                    assert_eq!(index, 0, "the second retained row exceeds the group budget");
+                    let changed_trace: (String, String) = tx
+                        .query_row(
+                            "SELECT metadata,generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
+                            [&row.key],
+                            |record| Ok((record.get(0)?, record.get(1)?)),
+                        )
+                        .unwrap();
+                    assert_ne!(
+                        (&changed_trace.0, &changed_trace.1),
+                        (&before[0].1.2, &before[0].1.3),
+                        "the first Trace effect must happen before the later overflow rolls it back"
+                    );
+                }
+                Err(error) => {
+                    assert_eq!(index, 1, "each first-row retained input fits the budget");
+                    assert!(matches!(
+                        error,
+                        rusqlite::Error::ToSqlConversionFailure(ref cause)
+                            if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
+                    ));
+                    overflowed_row = Some(index);
+                    break;
+                }
             }
         }
+        assert_eq!(overflowed_row, Some(1));
+        for key in &keys {
+            let query_state: (Option<String>, i64) = tx
+                .query_row(
+                    "SELECT query_recipe,query_active FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                    [key],
+                    |record| Ok((record.get(0)?, record.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(query_state, (None, 0), "retained Query cells stay inactive");
+        }
     }
-    assert_eq!(overflowed_row, Some(1));
-    for key in &keys {
-        let query_state: (Option<String>, i64) = tx
-            .query_row(
-                "SELECT query_recipe,query_active FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
-                [key],
-                |record| Ok((record.get(0)?, record.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(query_state, (None, 0), "retained Query cells stay inactive");
-    }
-    drop(trace);
     tx.rollback().unwrap();
 
     let db = fixture.db();
