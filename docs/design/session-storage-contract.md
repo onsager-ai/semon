@@ -122,6 +122,17 @@ proofs, Catalog/retained references, then outbox/checkpoint. SQL commit does not
 prove Raw durability. Uncertain effects are reconciled by the same durable OpID;
 a later cursor or peer result cannot manufacture the original ACK.
 
+Semantic batches capture current source claims with their selected paths in the
+same storage transaction, including an absent claim after an earlier ACK. If a
+complete committed Index witness no longer matches the physical source stat,
+the existing local-host producer may persist one typed invalidation using that
+captured claim. A CAS conflict acknowledges that operation and yields to the
+current journal; it never recaptures a newer claim to overwrite replacement
+work. Ordinary bounded Indexing performs the eventual ingestion. Configured
+SQLite and PostgreSQL readers have no local-host capability and retain the
+original refusal until their explicit native producer ingests the change.
+Incomplete or corrupt Index witnesses retain their separate refusal path.
+
 PostgreSQL semantic withdrawal qualifies Facts/Source metadata before opening
 the SQL writer, under the existing shared Facts and sorted Source locks. The
 operation retains those locks through transaction return, while SQL rechecks
