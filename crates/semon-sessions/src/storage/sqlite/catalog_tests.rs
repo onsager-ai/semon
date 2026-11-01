@@ -2166,6 +2166,10 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
             history_source.map(|(offset, _)| offset),
             history_source.map(|(_, size)| size),
         );
+        assert!(
+            history_source.is_none(),
+            "bounded indexing of one unchanged physical generation must not create Retained History"
+        );
         drop(db);
         refresh_step += 1;
         if ready {

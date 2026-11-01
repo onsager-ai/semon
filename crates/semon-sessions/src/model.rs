@@ -9233,10 +9233,15 @@ fn build_sources_inner(
             })));
         }
         BuildTarget::Catalog => {
+            let rows = catalog.as_deref().unwrap_or_default();
+            let continuations = cache.take_source_continuations(rows);
+            if let Some(observations) = presentation.as_mut() {
+                observations.set_source_continuations(continuations)?;
+            }
             let publication_started = std::time::Instant::now();
             let generation = cache.publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {
-                    rows: catalog.as_deref().unwrap_or_default(),
+                    rows,
                     transcripts: slot_projections.as_deref(),
                     observations: presentation.as_ref(),
                 },

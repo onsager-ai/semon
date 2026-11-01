@@ -1478,6 +1478,8 @@ struct CachedFile {
 #[derive(Default)]
 pub(crate) struct EventCache {
     files: BTreeMap<String, CachedFile>,
+    source_continuations:
+        BTreeMap<String, crate::storage::catalog::VerifiedSourceContinuation>,
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
@@ -2922,6 +2924,7 @@ impl EventCache {
     pub(crate) fn begin_scan(&mut self) -> io::Result<()> {
         self.require_current_store()?;
         self.cold_writes.clear();
+        self.source_continuations.clear();
         self.index_clone = Duration::ZERO;
         self.scan_timing = crate::native_timing::enabled();
         self.parse_duration = Duration::ZERO;
@@ -2929,6 +2932,22 @@ impl EventCache {
         self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
         Ok(())
+    }
+
+    pub(crate) fn take_source_continuations(
+        &mut self,
+        rows: &[crate::model::summary::CatalogRow],
+    ) -> Vec<crate::storage::catalog::VerifiedSourceContinuation> {
+        let published_paths = rows
+            .iter()
+            .flat_map(|row| row.sources.iter())
+            .map(|source| source.path.clone())
+            .collect::<BTreeSet<_>>();
+        std::mem::take(&mut self.source_continuations)
+            .into_values()
+            .filter(|proof| published_paths.contains(proof.path()))
+            .take(crate::storage::catalog::SOURCE_CONTINUATION_LIMIT)
+            .collect()
     }
 
     fn from_loaded(loaded: Loaded) -> Self {
@@ -3583,6 +3602,7 @@ fn scan_file_with_mode(
             None
         };
     let key = path.to_string_lossy().into_owned();
+    cache.source_continuations.remove(&key);
     let mut initial_recorded = host_operation.as_ref().and(initial_recorded);
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3748,16 +3768,20 @@ fn scan_file_with_mode(
             }
         }
         let started = cache.scan_measurements.start();
-        let trusted_receiver = match recorded.as_ref() {
+        let accepted_evidence = match recorded.as_ref() {
             Some(ledger) if !verify_prefix => cache
                 .store
                 .as_ref()
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
                 .append_evidence(&key)
-                .map_err(store_io_error)?
-                .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat)),
-            _ => false,
+                .map_err(store_io_error)?,
+            _ => None,
         };
+        let trusted_receiver = recorded.as_ref().is_some_and(|ledger| {
+            accepted_evidence
+                .as_ref()
+                .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat))
+        });
         let mut trusted_append = false;
         let mut base = None;
         if let Some(ledger) = &recorded
@@ -4183,6 +4207,14 @@ fn scan_file_with_mode(
             {
                 Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
             }
+        }
+        if trusted_append
+            && let (Some(prior), Some(accepted)) = (recorded.as_ref(), accepted_evidence.as_ref())
+            && let Some(proof) = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
+                path, prior, &ledger, accepted, &stat,
+            )
+        {
+            cache.source_continuations.insert(key.clone(), proof);
         }
         cache.files.insert(
             key,

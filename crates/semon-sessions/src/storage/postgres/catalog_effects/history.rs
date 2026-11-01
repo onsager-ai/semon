@@ -206,11 +206,8 @@ impl OriginalHistoryStore for History<'_, '_> {
         }
         Ok(false)
     }
-    fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {
+    fn previous(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, StorageError> {
         let previous = self.metadata("semon_pg_native_catalog_rows", self.previous, &row.key)?;
-        // Same-harness Source revision changes retain their original recipe;
-        // withdrawals compose retained sources. A different native harness
-        // replaces the original owner.
         if previous.as_deref()
             == Some(
                 serde_json::to_string(row)
@@ -225,13 +222,7 @@ impl OriginalHistoryStore for History<'_, '_> {
             .map(serde_json::from_str)
             .transpose()
             .map_err(|_| StorageError::ScopeChanged)?;
-        Ok(old.filter(|old| {
-            old.harness != row.harness
-                || row
-                    .sources
-                    .iter()
-                    .any(|source| !old.sources.contains(source))
-        }))
+        Ok(old)
     }
     fn header(&self, key: &str) -> Result<Option<OriginalHeader>, StorageError> {
         Ok(self
@@ -579,7 +570,11 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !catalog::preserve_rows(&store, publication.rows, &old)? {
+    let continuations = publication
+        .observations
+        .and_then(crate::storage::selected::PresentationObservations::verified_continuations)
+        .unwrap_or(&[]);
+    if !catalog::preserve_rows(&store, publication.rows, &old, continuations)? {
         return Ok(false);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;

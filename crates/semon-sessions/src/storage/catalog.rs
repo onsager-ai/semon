@@ -28,6 +28,87 @@ impl std::ops::Deref for SelectedCatalogRow {
 
 pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 
+/// Ephemeral proof that one indexed prefix advanced inside an unchanged
+/// physical generation. The ordinary Catalog publisher carries this beside
+/// its observations; it is never stored as row metadata.
+pub(crate) const SOURCE_CONTINUATION_LIMIT: usize = 64;
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct VerifiedSourceContinuation {
+    path: std::path::PathBuf,
+    prior: crate::events::Ledger,
+    current: crate::events::Ledger,
+    accepted: crate::source_change::AppendEvidence,
+}
+
+impl VerifiedSourceContinuation {
+    pub(crate) fn from_scan(
+        path: &std::path::Path,
+        prior: &crate::events::Ledger,
+        current: &crate::events::Ledger,
+        accepted: &crate::source_change::AppendEvidence,
+        physical: &crate::events::Stat,
+    ) -> Option<Self> {
+        let same_physical_stamp = |stat: &crate::events::Stat| {
+            (stat.dev, stat.ino, stat.modified_ns, stat.changed_ns)
+                == (
+                    physical.dev,
+                    physical.ino,
+                    physical.modified_ns,
+                    physical.changed_ns,
+                )
+        };
+        if !accepted.qualifies(&prior.stat, physical)
+            || accepted.generation != crate::source_change::stat_generation(physical).ok()?
+            || prior.stat.size != prior.offset
+            || current.offset <= prior.offset
+            || current.offset > physical.size
+            || current.offset > current.stat.size
+            || current.stat.size > physical.size
+            || !same_physical_stamp(&prior.stat)
+            || !same_physical_stamp(&current.stat)
+        {
+            return None;
+        }
+        Some(Self {
+            path: path.to_owned(),
+            prior: prior.clone(),
+            current: current.clone(),
+            accepted: accepted.clone(),
+        })
+    }
+
+    fn advances(&self, old: &CatalogSource, new: &CatalogSource) -> bool {
+        let matches_ledger = |source: &CatalogSource, ledger: &crate::events::Ledger| {
+            source.dev == ledger.stat.dev
+                && source.ino == ledger.stat.ino
+                && source.size == ledger.stat.size
+                && source.modified_ns == ledger.stat.modified_ns
+                && source.changed_ns == ledger.stat.changed_ns
+                && source.offset == ledger.offset
+                && source.prefix_sha256 == ledger.prefix
+                && source.tail_sha256 == ledger.tail
+        };
+        old.path == self.path
+            && new.path == self.path
+            && old.native_id == new.native_id
+            && old.native_role == new.native_role
+            && matches_ledger(old, &self.prior)
+            && matches_ledger(new, &self.current)
+            && self.accepted.before == self.prior.stat
+            && self.accepted.after.dev == old.dev
+            && self.accepted.after.ino == old.ino
+            && self.accepted.after.modified_ns == old.modified_ns
+            && self.accepted.after.changed_ns == old.changed_ns
+            && self.current.offset > self.prior.offset
+            && self.current.offset <= self.accepted.after.size
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 /// Physical trace effects in the publisher's existing fenced transaction.
 /// Derivation, digests and ordering remain in the single trace producer.
 pub(crate) trait TracePublicationStore {
@@ -195,7 +276,7 @@ pub(crate) trait OriginalHistoryStore {
     type Error;
     fn data(error: serde_json::Error) -> Self::Error;
     fn retained(&self, key: &str) -> Result<bool, Self::Error>;
-    fn replacement(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, Self::Error>;
+    fn previous(&self, row: &CatalogRow) -> Result<Option<CatalogRow>, Self::Error>;
     fn header(&self, key: &str) -> Result<Option<OriginalHeader>, Self::Error>;
     fn transfer(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn reset_transfer(&self, key: &str) -> Result<(), Self::Error>;
@@ -336,13 +417,16 @@ pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
     store: &P,
     rows: &[CatalogRow],
     withdrawn: &[CatalogRow],
+    continuations: &[VerifiedSourceContinuation],
 ) -> Result<bool, P::Error> {
     let mut advanced = false;
     for row in rows {
         if store.retained(&row.key)? {
             continue;
         }
-        if let Some(old) = store.replacement(row)? {
+        if let Some(old) = store.previous(row)?
+            && replaces_original(&old, row, continuations)
+        {
             if advanced || !preserve_original(store, &old)? {
                 return Ok(false);
             }
@@ -359,6 +443,50 @@ pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
         advanced = true;
     }
     Ok(true)
+}
+
+/// Shared source-revision classification for SQLite and PostgreSQL History.
+/// Every changed incoming source must have one exact scanner proof; any
+/// addition, rewrite, role change, or ambiguous proof keeps original custody.
+fn replaces_original(
+    old: &CatalogRow,
+    current: &CatalogRow,
+    continuations: &[VerifiedSourceContinuation],
+) -> bool {
+    if old.harness != current.harness {
+        return true;
+    }
+    let mut old_paths = std::collections::BTreeSet::new();
+    if old
+        .sources
+        .iter()
+        .any(|source| !old_paths.insert(source.path.clone()))
+    {
+        return true;
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    current.sources.iter().any(|source| {
+        if !paths.insert(source.path.clone()) {
+            return true;
+        }
+        if old.sources.contains(source) {
+            return false;
+        }
+        let mut previous = old.sources.iter().filter(|prior| {
+            prior.path == source.path && prior.native_id == source.native_id
+        });
+        let Some(previous) = previous.next() else {
+            return true;
+        };
+        if previous.next().is_some() {
+            return true;
+        }
+        continuations
+            .iter()
+            .filter(|proof| proof.advances(previous, source))
+            .count()
+            != 1
+    })
 }
 
 pub(crate) struct SlotPublicationHeader<'a> {
@@ -493,6 +621,56 @@ fn catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics() {
         }
         assert!(!source_matches_ledger(&source, &changed));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn catalog_history_classification_rejects_duplicate_current_source_paths() {
+    let source = CatalogSource {
+        path: std::path::PathBuf::from("/source.jsonl"),
+        native_id: "native".into(),
+        dev: 1,
+        ino: 2,
+        size: 10,
+        modified_ns: 3,
+        changed_ns: Some(4),
+        offset: 10,
+        prefix_sha256: [1; 32],
+        tail_sha256: [2; 32],
+        native_role: None,
+    };
+    let old = CatalogRow {
+        overview: None,
+        trace: None,
+        query_recipe: None,
+        query: None,
+        lifecycle: Default::default(),
+        key: "session".into(),
+        name: "session".into(),
+        harness: "claude".into(),
+        kind: "session".into(),
+        presentation_kind: None,
+        native_ids: vec!["native".into()],
+        parent: None,
+        parent_source: None,
+        repo: None,
+        branch: None,
+        model: "model".into(),
+        effort: None,
+        start: None,
+        last: None,
+        tokens: [0.0; 3],
+        cost: Default::default(),
+        sources: vec![source.clone()],
+    };
+    let mut appended = source.clone();
+    appended.size = 20;
+    appended.offset = 18;
+    appended.prefix_sha256 = [3; 32];
+    let mut current = old.clone();
+    current.sources.push(appended);
+
+    assert!(replaces_original(&old, &current, &[]));
 }
 
 /// Publication head operations share the native publisher's surrounding write
