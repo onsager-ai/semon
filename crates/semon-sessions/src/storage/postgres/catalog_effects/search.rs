@@ -19,6 +19,13 @@ impl SearchPublicationStore for Effects<'_, '_> {
         let rows = tx.driver.query("SELECT count(*),count(*) FILTER (WHERE octet_length(gram)<=12) FROM (SELECT gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 LIMIT 1025) p", &[&ns, &self.generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
         let count: i64 = rows[0].get(0);
         if count > 1024 || count != rows[0].get::<_, i64>(1) {
+            #[cfg(test)]
+            eprintln!(
+                "PG_SEARCH_PUBLICATION_REFUSED boundary=existing_membership_validation membership_count={} within_bound={} all_grams_valid={}",
+                count,
+                count <= 1024,
+                count == rows[0].get::<_, i64>(1),
+            );
             return Err(StorageError::ScopeChanged);
         }
         tx.check()
@@ -38,7 +45,7 @@ impl SearchPublicationStore for Effects<'_, '_> {
         if fields.len() > MAX {
             return Err(StorageError::Busy);
         }
-        self.put(
+        let result = self.put(
             "semon_pg_native_catalog_search_documents",
             &["scope", "key_digest", "session_key", "fields", "complete"],
             "scope,key_digest",
@@ -49,7 +56,12 @@ impl SearchPublicationStore for Effects<'_, '_> {
                 &fields.as_bytes(),
                 &complete,
             ],
-        )
+        );
+        #[cfg(test)]
+        if let Err(StorageError::ScopeChanged) = &result {
+            eprintln!("PG_SEARCH_PUBLICATION_REFUSED boundary=document_write");
+        }
+        result
     }
     fn postings(
         &self,
@@ -80,6 +92,12 @@ impl SearchPublicationStore for Effects<'_, '_> {
             let ns = tx.namespace.as_str().as_bytes();
             let changed = tx.driver.execute("INSERT INTO semon_pg_native_catalog_search_memberships(namespace,generation,key_digest,session_key,gram,last_ms) SELECT $1,$2,sha256(k),k,g,t FROM unnest($3::bytea[],$4::bytea[],$5::bigint[]) AS p(k,g,t) ON CONFLICT(namespace_digest,generation,key_digest,gram) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_search_memberships.namespace=excluded.namespace AND semon_pg_native_catalog_search_memberships.session_key=excluded.session_key AND semon_pg_native_catalog_search_memberships.last_ms=excluded.last_ms", &[&ns, &self.generation.as_bytes(), &keys, &grams, &times]).map_err(sqlstate::error)?;
             if changed != rows.len() as u64 {
+                #[cfg(test)]
+                eprintln!(
+                    "PG_SEARCH_PUBLICATION_REFUSED boundary=posting_write row_count={} written_count={}",
+                    rows.len(),
+                    changed,
+                );
                 return Err(StorageError::ScopeChanged);
             }
             boundary(&tx)?;
@@ -95,10 +113,11 @@ impl SearchPublicationStore for Effects<'_, '_> {
         // retained generation participates in this aggregate.
         let row = tx.driver.query_one("WITH physical AS MATERIALIZED (SELECT m.gram FROM semon_pg_native_catalog_search_memberships m JOIN semon_pg_native_catalog_search_documents d ON d.namespace_digest=m.namespace_digest AND d.namespace=m.namespace AND d.generation=m.generation AND d.key_digest=m.key_digest AND d.session_key=m.session_key WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND d.scope=$3), valid AS (SELECT coalesce(bool_and(octet_length(gram)<=12),true) AS ok FROM physical), counts AS MATERIALIZED (SELECT gram,count(*) AS members FROM physical WHERE (SELECT ok FROM valid) GROUP BY gram), written AS (INSERT INTO semon_pg_native_catalog_search_counts(namespace,generation,scope,gram,members) SELECT $1,$2,$3,gram,members FROM counts ON CONFLICT(namespace_digest,generation,scope,gram) DO UPDATE SET generation=excluded.generation WHERE semon_pg_native_catalog_search_counts.namespace=excluded.namespace AND semon_pg_native_catalog_search_counts.members=excluded.members RETURNING 1) SELECT (SELECT ok FROM valid) AND (SELECT count(*) FROM counts)=(SELECT count(*) FROM written)", &[&ns, &self.generation.as_bytes(), &crate::catalog_search::scope_key(scope).as_bytes()]).map_err(sqlstate::error)?;
         if !row.get::<_, bool>(0) {
+            #[cfg(test)]
+            eprintln!("PG_SEARCH_PUBLICATION_REFUSED boundary=count_write_consistency");
             return Err(StorageError::ScopeChanged);
         }
-        boundary(&tx)?;
-        Ok(())
+        boundary(&tx)
     }
 }
 
@@ -183,12 +202,19 @@ pub(super) fn publish_retained_history(
     key_digests: &[Vec<u8>],
     receipt: super::history::HistorySearchReceipt,
 ) -> Result<(), StorageError> {
+    macro_rules! refusal {
+        ($boundary:literal) => {{
+            #[cfg(test)]
+            eprintln!("PG_RETAINED_SEARCH_REFUSED boundary={}", $boundary);
+        }};
+    }
     if key_digests.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
         return Err(StorageError::Busy);
     }
     let mut keys = key_digests.to_vec();
     keys.sort();
     if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        refusal!("duplicate_keys");
         return Err(StorageError::ScopeChanged);
     }
 
@@ -205,6 +231,16 @@ pub(super) fn publish_retained_history(
         || composites.len() > keys.len()
         || receipt_bytes > crate::catalog_search::MAX_PUBLICATION_BYTES
     {
+        #[cfg(test)]
+        eprintln!(
+            "PG_RETAINED_SEARCH_REFUSED boundary=receipt_binding key_count={} composite_count={} namespace_matches={} generation_matches={} composite_count_within_keys={} receipt_bytes_within_limit={}",
+            keys.len(),
+            composites.len(),
+            receipt_namespace.as_bytes() == namespace,
+            receipt_generation.as_bytes() == generation.as_bytes(),
+            composites.len() <= keys.len(),
+            receipt_bytes <= crate::catalog_search::MAX_PUBLICATION_BYTES,
+        );
         return Err(StorageError::ScopeChanged);
     }
     let mut composite_keys = std::collections::BTreeSet::new();
@@ -219,15 +255,29 @@ pub(super) fn publish_retained_history(
             || keys.binary_search(&key_digest).is_err()
             || !composite_keys.insert(key_digest.clone())
         {
+            #[cfg(test)]
+            eprintln!(
+                "PG_RETAINED_SEARCH_REFUSED boundary=composite_shape lifecycle_retained={} query_absent={} source_count={} metadata_nonempty={} key_present={} key_unique={}",
+                row.lifecycle == crate::model::summary::CatalogLifecycle::Retained,
+                row.query.is_none(),
+                row.sources.len(),
+                metadata_bytes != 0,
+                keys.binary_search(&key_digest).is_ok(),
+                !composite_keys.contains(&key_digest),
+            );
             return Err(StorageError::ScopeChanged);
         }
         composite_bytes = composite_bytes
             .checked_add(metadata_bytes)
             .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
-            .ok_or(StorageError::ScopeChanged)?;
+            .ok_or_else(|| {
+                refusal!("composite_bytes_bound");
+                StorageError::ScopeChanged
+            })?;
         catalog_rows.push((key_digest, row));
     }
     if composite_bytes != receipt_bytes {
+        refusal!("composite_bytes_receipt_match");
         return Err(StorageError::ScopeChanged);
     }
     let original_keys = keys
@@ -248,6 +298,13 @@ pub(super) fn publish_retained_history(
         .map_err(sqlstate::error)?;
     tx.check()?;
     if lengths.len() != original_keys.len() {
+        #[cfg(test)]
+        eprintln!(
+            "PG_RETAINED_SEARCH_REFUSED boundary=original_length_row_count key_count={} original_key_count={} length_row_count={}",
+            keys.len(),
+            original_keys.len(),
+            lengths.len(),
+        );
         return Err(StorageError::ScopeChanged);
     }
     let mut total_bytes = receipt_bytes;
@@ -255,13 +312,23 @@ pub(super) fn publish_retained_history(
     for (index, row) in lengths.iter().enumerate() {
         let key: Vec<u8> = row.get(0);
         let metadata_length =
-            usize::try_from(row.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
+            usize::try_from(row.get::<_, i64>(1)).map_err(|_| {
+                refusal!("original_metadata_length_conversion");
+                StorageError::ScopeChanged
+            })?;
         let original_header_length = usize::try_from(
             row.get::<_, Option<i64>>(2)
-                .ok_or(StorageError::ScopeChanged)?,
+                .ok_or_else(|| {
+                    refusal!("original_header_length_missing");
+                    StorageError::ScopeChanged
+                })?,
         )
-        .map_err(|_| StorageError::ScopeChanged)?;
+        .map_err(|_| {
+            refusal!("original_header_length_conversion");
+            StorageError::ScopeChanged
+        })?;
         if key.as_slice() != original_keys[index].as_slice() {
+            refusal!("original_length_key_order");
             return Err(StorageError::ScopeChanged);
         }
         total_bytes = total_bytes
@@ -282,6 +349,13 @@ pub(super) fn publish_retained_history(
         .map_err(sqlstate::error)?;
     tx.check()?;
     if headers.len() != original_keys.len() {
+        #[cfg(test)]
+        eprintln!(
+            "PG_RETAINED_SEARCH_REFUSED boundary=original_header_row_count key_count={} original_key_count={} header_row_count={}",
+            keys.len(),
+            original_keys.len(),
+            headers.len(),
+        );
         return Err(StorageError::ScopeChanged);
     }
 
@@ -307,11 +381,16 @@ pub(super) fn publish_retained_history(
         let metadata: Vec<u8> = header.get(18);
         let original_header: Vec<u8> = header
             .get::<_, Option<Vec<u8>>>(19)
-            .ok_or(StorageError::ScopeChanged)?;
+            .ok_or_else(|| {
+                refusal!("original_header_bytes_missing");
+                StorageError::ScopeChanged
+            })?;
         let recipe_generation: Vec<u8> = header.get(20);
         let source_generation: Option<Vec<u8>> = header.get(21);
-        let version =
-            u32::try_from(header.get::<_, i64>(22)).map_err(|_| StorageError::ScopeChanged)?;
+        let version = u32::try_from(header.get::<_, i64>(22)).map_err(|_| {
+            refusal!("original_header_version_conversion");
+            StorageError::ScopeChanged
+        })?;
         let total: i64 = header.get(23);
         let incomplete: bool = header.get(24);
         if key_digest.as_slice() != original_keys[index].as_slice()
@@ -321,26 +400,52 @@ pub(super) fn publish_retained_history(
             || metadata.len() != payload_lengths[index].0
             || original_header.len() != payload_lengths[index].1
         {
+            #[cfg(test)]
+            eprintln!(
+                "PG_RETAINED_SEARCH_REFUSED boundary=original_header_shape digest_matches={} owner_generation_well_formed={} original_owner={} metadata_length_matches={} original_header_length_matches={}",
+                key_digest.as_slice() == original_keys[index].as_slice(),
+                owner_generation.len() == 64
+                    && owner_generation.iter().all(|byte| byte.is_ascii_hexdigit()),
+                original,
+                metadata.len() == payload_lengths[index].0,
+                original_header.len() == payload_lengths[index].1,
+            );
             return Err(StorageError::ScopeChanged);
         }
-        let row: CatalogRow =
-            serde_json::from_slice(&metadata).map_err(|_| StorageError::ScopeChanged)?;
+        let row: CatalogRow = serde_json::from_slice(&metadata).map_err(|_| {
+            refusal!("original_metadata_decode");
+            StorageError::ScopeChanged
+        })?;
         let last = row.last.unwrap_or(0);
         let (activity, active) = crate::storage::query::history_activity(&row);
         let parent = row.parent.as_deref().map(str::as_bytes);
         let expected_source_generation = crate::retention::source_generation(&row.sources)
-            .map_err(|_| StorageError::ScopeChanged)?;
+            .map_err(|_| {
+                refusal!("expected_source_generation");
+                StorageError::ScopeChanged
+            })?;
         let source_generation = source_generation
             .as_deref()
             .filter(|source| {
                 source.len() == 64 && source.iter().all(|byte| byte.is_ascii_hexdigit())
             })
-            .ok_or(StorageError::ScopeChanged)?;
+            .ok_or_else(|| {
+                refusal!("recorded_source_generation_shape");
+                StorageError::ScopeChanged
+            })?;
         let original_header: Option<crate::storage::catalog::OriginalHeader> =
-            serde_json::from_slice(&original_header).map_err(|_| StorageError::ScopeChanged)?;
-        let original_header = original_header.ok_or(StorageError::ScopeChanged)?;
-        let recorded_source_generation =
-            std::str::from_utf8(source_generation).map_err(|_| StorageError::ScopeChanged)?;
+            serde_json::from_slice(&original_header).map_err(|_| {
+                refusal!("original_header_decode");
+                StorageError::ScopeChanged
+            })?;
+        let original_header = original_header.ok_or_else(|| {
+            refusal!("original_header_value_missing");
+            StorageError::ScopeChanged
+        })?;
+        let recorded_source_generation = std::str::from_utf8(source_generation).map_err(|_| {
+            refusal!("recorded_source_generation_utf8");
+            StorageError::ScopeChanged
+        })?;
         if digest(row.key.as_bytes()).as_slice() != key_digest.as_slice()
             || row.key.as_bytes() != session_key.as_slice()
             || last != owner_last
@@ -374,6 +479,37 @@ pub(super) fn publish_retained_history(
             || original_header.2.as_deref() != Some(recorded_source_generation)
             || original_header.3 != total
         {
+            #[cfg(test)]
+            eprintln!(
+                "PG_RETAINED_SEARCH_REFUSED boundary=original_header_integrity key_digest_matches={} session_key_matches={} row_owner_timestamp_matches={} row_header_timestamp_matches={} lifecycle_retained={} harness_fields_match={} repo_fields_match={} model_fields_match={} activity_matches={} active_matches={} parent_matches={} source_header_qualified={} total_nonnegative={} recipe_generation_well_formed={} recipe_generation_matches={} recipe_version_matches={} recipe_source_generation_matches={} recipe_total_matches={}",
+                digest(row.key.as_bytes()).as_slice() == key_digest.as_slice(),
+                row.key.as_bytes() == session_key.as_slice(),
+                last == owner_last,
+                last == header_last,
+                row.lifecycle == crate::model::summary::CatalogLifecycle::Retained,
+                row.harness.as_bytes() == owner_harness.as_slice()
+                    && row.harness.as_bytes() == header_harness.as_slice(),
+                row.repo.as_deref().unwrap_or("").as_bytes() == owner_repo.as_slice()
+                    && row.repo.as_deref().unwrap_or("").as_bytes() == header_repo.as_slice(),
+                row.model.as_bytes() == owner_model.as_slice()
+                    && row.model.as_bytes() == header_model.as_slice(),
+                activity == owner_activity && activity == header_activity,
+                active == owner_active && active == header_active,
+                parent == owner_parent.as_deref() && parent == header_parent.as_deref(),
+                crate::history_projection::qualified_header(
+                    &expected_source_generation,
+                    version,
+                    recorded_source_generation,
+                    incomplete,
+                ),
+                total >= 0,
+                recipe_generation.len() == 64
+                    && recipe_generation.iter().all(|byte| byte.is_ascii_hexdigit()),
+                original_header.0.as_bytes() == recipe_generation.as_slice(),
+                original_header.1 == version,
+                original_header.2.as_deref() == Some(recorded_source_generation),
+                original_header.3 == total,
+            );
             return Err(StorageError::ScopeChanged);
         }
         // `name` and `branch` have no SQL mirrors and remain authoritative in
@@ -394,6 +530,16 @@ pub(super) fn publish_retained_history(
             .any(|(key_digest, row)| key_digest != &digest(row.key.as_bytes()))
         || catalog_digests != keys
     {
+        #[cfg(test)]
+        eprintln!(
+            "PG_RETAINED_SEARCH_REFUSED boundary=catalog_row_coverage key_count={} catalog_row_count={} row_digests_match={} digest_set_matches={}",
+            keys.len(),
+            catalog_rows.len(),
+            catalog_rows
+                .iter()
+                .all(|(key_digest, row)| key_digest == &digest(row.key.as_bytes())),
+            catalog_digests == keys,
+        );
         return Err(StorageError::ScopeChanged);
     }
     let catalog_rows = catalog_rows
@@ -418,6 +564,16 @@ pub(super) fn publish_retained_history(
         tx: RefCell::new(&mut *tx),
         generation,
     };
-    crate::catalog_search::publish_scoped_rows_port(&effects, &keys, &rows, 64, |_, _| {})?;
+    crate::catalog_search::publish_scoped_rows_port(&effects, &keys, &rows, 64, |phase, units| {
+        #[cfg(test)]
+        eprintln!("PG_RETAINED_SEARCH_PHASE phase={phase} units={units}");
+    })
+    .map_err(|error| {
+        #[cfg(test)]
+        if matches!(&error, StorageError::ScopeChanged) {
+            eprintln!("PG_RETAINED_SEARCH_REFUSED boundary=scoped_publisher");
+        }
+        error
+    })?;
     Ok(())
 }
