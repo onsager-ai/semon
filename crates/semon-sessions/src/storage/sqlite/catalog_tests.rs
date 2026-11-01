@@ -11653,11 +11653,17 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
         .options
         .claude_home
         .join("projects/project/first-copy.jsonl");
+    let mut first_raw = fs::read_to_string(&first).unwrap();
+    first_raw.push_str(&format!(
+        "{}\n",
+        json!({"type":"continued-in","sessionId":"first","continuedInSessionId":"first-copy","timestamp":"2026-10-01T00:00:00Z"})
+    ));
+    fs::write(&first, first_raw).unwrap();
     fs::write(
         &first_copy,
         format!(
             "{}\n",
-            json!({"type":"user","sessionId":"first","uuid":"first-copy","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt copy"}})
+            json!({"type":"user","sessionId":"first-copy","uuid":"first-copy","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt copy"}})
         ),
     )
     .unwrap();
@@ -11679,7 +11685,7 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
 
     for (path, key, uuid) in [
         (&first, "first", "updated-first"),
-        (&first_copy, "first", "updated-first-copy"),
+        (&first_copy, "first-copy", "updated-first-copy"),
         (&second, "second", "updated-second"),
     ] {
         writeln!(
@@ -11704,19 +11710,95 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
         .len();
     assert!(first_summary_bytes > 0);
 
+    let mut setup = fixture.stage().into_test_connection();
+    let tx = setup.transaction().unwrap();
+    for row in &prepared.rows {
+        let previous_metadata: String = tx
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'",
+                [&row.key],
+                |record| record.get(0),
+            )
+            .unwrap();
+        let previous: crate::model::summary::CatalogRow =
+            serde_json::from_str(&previous_metadata).unwrap();
+        let previous_generation =
+            crate::retention::source_generation(&previous.sources).unwrap();
+        let mut summary = serde_json::to_value(row.overview.as_ref().unwrap()).unwrap();
+        summary["source_generation"] = json!(previous_generation);
+        tx.execute(
+            "UPDATE main.session_overview SET summary=?1 WHERE namespace=semon_namespace() AND session_key=?2",
+            rusqlite::params![summary.to_string(), row.key],
+        )
+        .unwrap();
+    }
+    tx.commit().unwrap();
+    drop(setup);
+
     let db = fixture.db();
     let before = ["first", "second"].map(|key| (key, semantic_publication_snapshot(&db, key)));
+    let retained_metadata_bytes = ["first", "second"]
+        .iter()
+        .map(|key| {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'",
+                    [key],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut row: crate::model::summary::CatalogRow =
+                serde_json::from_str(&metadata).unwrap();
+            row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            serde_json::to_string(&row).unwrap().len()
+        })
+        .sum::<usize>();
+    let prior_summary_bytes: usize = ["first", "second"]
+        .iter()
+        .map(|key| {
+            db.query_row(
+                "SELECT octet_length(summary) FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap() as usize
+        })
+        .sum();
     drop(db);
 
-    // This is a budget exercise using genuine producer summaries and receipts.
-    // The cap admits the first exact summary and makes the next encoded summary
-    // exceed the shared remaining byte budget.
-    crate::overview::cap_stage_summary_budget_for_test(first_summary_bytes);
-    let mut stage = fixture.stage();
-    assert_eq!(
-        stage.publish(&batch, prepared).unwrap().0,
-        crate::events::Outcome::Deferred
+    let output_metadata_bytes = prepared
+        .rows
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .iter()
+        .map(String::len)
+        .sum::<usize>();
+    assert!(output_metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
+    let capture_cap = retained_metadata_bytes + prior_summary_bytes + first_summary_bytes;
+    assert!(
+        capture_cap
+            < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - output_metadata_bytes
     );
+
+    let mut stage = fixture.stage();
+    let mut next = None;
+    for _ in 0..64 {
+        // The same cap survives each custody checkpoint and admits all retained
+        // inputs plus one output summary before the next summary overflows.
+        crate::overview::cap_stage_summary_budget_for_test(capture_cap);
+        assert_eq!(
+            stage.publish(&batch, prepared).unwrap().0,
+            crate::events::Outcome::Deferred
+        );
+        let retry = cache.semantic_batch(64).unwrap().unwrap();
+        if retry.paths.len() < batch.paths.len() {
+            next = Some(retry);
+            break;
+        }
+    }
+    let next = next.expect("summary overflow defers the whole group after History custody");
 
     let db = fixture.db();
     for (key, snapshot) in before {
@@ -11724,7 +11806,6 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
     }
     drop(db);
 
-    let next = cache.semantic_batch(64).unwrap().unwrap();
     assert_eq!(next.phase, crate::model::relation_stage::Phase::Publication);
     let next_paths = next
         .paths
@@ -11767,20 +11848,74 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
         .unwrap()
         .len();
     assert!(summary_bytes > 0);
-    let db = fixture.db();
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let previous_metadata: String = tx
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='singleton' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut previous_row: crate::model::summary::CatalogRow =
+        serde_json::from_str(&previous_metadata).unwrap();
+    previous_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let history_metadata_bytes = serde_json::to_string(&previous_row).unwrap().len();
+    let previous_generation =
+        crate::retention::source_generation(&previous_row.sources).unwrap();
+    let mut prior_summary = serde_json::to_value(prepared.rows[0].overview.as_ref().unwrap())
+        .unwrap();
+    prior_summary["source_generation"] = json!(previous_generation);
+    tx.execute(
+        "UPDATE main.session_overview SET summary=?1 WHERE namespace=semon_namespace() AND session_key='singleton'",
+        rusqlite::params![prior_summary.to_string()],
+    )
+    .unwrap();
+    tx.commit().unwrap();
     let before = semantic_publication_snapshot(&db, "singleton");
+    let prior_summary_bytes: i64 = db
+        .query_row(
+            "SELECT octet_length(summary) FROM main.session_overview WHERE namespace=semon_namespace() AND session_key='singleton'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     drop(db);
+    let current_metadata_bytes = prepared
+        .rows
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .iter()
+        .map(String::len)
+        .sum::<usize>();
+    assert!(current_metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
+    let capture_cap = history_metadata_bytes + prior_summary_bytes as usize + summary_bytes - 1;
+    assert!(
+        capture_cap
+            < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - current_metadata_bytes
+    );
 
-    // Reduce only this test publication's available bytes by one; the genuine
-    // serialized summary itself crosses the bounded writer's limit.
-    crate::overview::cap_stage_summary_budget_for_test(summary_bytes - 1);
     let mut stage = fixture.stage();
-    assert!(matches!(
-        stage.publish(&batch, prepared),
-        Err(crate::events::StoreError::Configured(
-            crate::storage::StorageError::HistoryRetentionBounds
-        ))
-    ));
+    let mut refused = false;
+    for _ in 0..64 {
+        // Each deferred custody checkpoint constructs a fresh publication
+        // budget; keep the same cap until original History is ready and the
+        // singleton overview record reaches its overflow path.
+        crate::overview::cap_stage_summary_budget_for_test(capture_cap);
+        match stage.publish(&batch, prepared) {
+            Err(crate::events::StoreError::Configured(
+                crate::storage::StorageError::HistoryRetentionBounds,
+            )) => {
+                refused = true;
+                break;
+            }
+            Ok((crate::events::Outcome::Deferred, None)) => {}
+            other => panic!("unexpected result while completing original History: {other:?}"),
+        }
+    }
+    assert!(refused, "the ready singleton reaches the summary overflow refusal");
     let db = fixture.db();
     assert_eq!(semantic_publication_snapshot(&db, "singleton"), before);
     drop(db);
@@ -11865,6 +12000,211 @@ fn semantic_stage_summary_overflow_preflights_before_trace_publication() {
     assert!(!overview_exists);
     drop(trace);
     tx.rollback().unwrap();
+}
+
+#[test]
+fn semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews() {
+    let fixture = Fixture::new();
+    let keys = ["history-input-a", "history-input-b"];
+    let relative = keys
+        .iter()
+        .map(|key| {
+            fixture.codex_source_with_records(
+                key,
+                key,
+                None,
+                None,
+                1,
+                &[
+                    json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}),
+                    json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}}),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some(relative.iter().cloned().collect());
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    fixture.publish_existing();
+
+    let paths = relative
+        .iter()
+        .map(|path| fixture.options.codex_home.join(path))
+        .collect::<Vec<_>>();
+    let (_cache, batch, prepared) = fixture.prepare_publication(&paths);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
+    let mut rows = prepared.prepared().rows.clone();
+    rows.sort_by(|left, right| left.key.cmp(&right.key));
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.trace.is_some()));
+    assert!(rows.iter().all(|row| row.query.is_some()));
+    assert!(rows.iter().all(|row| row.query_recipe.is_some()));
+    for row in &mut rows {
+        row.overview = None;
+    }
+
+    let mut setup = fixture.stage().into_test_connection();
+    let tx = setup.transaction().unwrap();
+    let mut retained_metadata_bytes = Vec::new();
+    let mut prior_summary_bytes = Vec::new();
+    for row in &rows {
+        let mut history = row.clone();
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let source = history.sources.first_mut().unwrap();
+        source.native_id.push_str("-retained");
+        source.native_role = Some(json!({"budget_padding":"x".repeat(100_000)}));
+        let expected_generation =
+            crate::retention::source_generation(&history.sources).unwrap();
+        let history_text = serde_json::to_string(&history).unwrap();
+        assert!(history_text.len() < 1048576);
+        retained_metadata_bytes.push(history_text.len());
+        tx.execute(
+            "INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_recipe,query_activity,query_active) VALUES(semon_namespace(),?1,?2,NULL,NULL,0)",
+            rusqlite::params![row.key, history_text],
+        )
+        .unwrap();
+
+        let summary_text = if row.key == keys[0] {
+            let summary_text: String = tx
+                .query_row(
+                    "SELECT summary FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",
+                    [&row.key],
+                    |record| record.get(0),
+                )
+                .unwrap();
+            let mut summary: Value = serde_json::from_str(&summary_text).unwrap();
+            summary["source_generation"] = json!(expected_generation);
+            summary["home"]["budget_padding"] = json!("x".repeat(450_000));
+            summary.to_string()
+        } else {
+            // The group budget must reject this row before its prior summary is decoded.
+            format!("{{{}", "x".repeat(450_000))
+        };
+        assert!(summary_text.len() < 4194304);
+        prior_summary_bytes.push(summary_text.len());
+        tx.execute(
+            "UPDATE main.session_overview SET summary=?1 WHERE namespace=semon_namespace() AND session_key=?2",
+            rusqlite::params![summary_text, row.key],
+        )
+        .unwrap();
+    }
+    assert!(retained_metadata_bytes.iter().all(|bytes| *bytes < 1048576));
+    assert!(prior_summary_bytes.iter().all(|bytes| *bytes < 4194304));
+    let metadata_bytes = rows
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+        .iter()
+        .map(String::len)
+        .sum::<usize>();
+    assert!(metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
+    assert!(
+        prior_summary_bytes.iter().sum::<usize>()
+            < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - metadata_bytes
+    );
+    assert!(
+        retained_metadata_bytes.iter().sum::<usize>()
+            + prior_summary_bytes.iter().sum::<usize>()
+            > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - metadata_bytes
+    );
+    tx.commit().unwrap();
+
+    let db = fixture.db();
+    let before = keys
+        .iter()
+        .map(|key| (*key, semantic_publication_snapshot(&db, key)))
+        .collect::<Vec<_>>();
+    let history_before = keys
+        .iter()
+        .map(|key| {
+            db.query_row(
+                "SELECT metadata,query_recipe,query_active FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |record| {
+                    Ok((
+                        record.get::<_, String>(0)?,
+                        record.get::<_, Option<String>>(1)?,
+                        record.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+    drop(db);
+
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&config)
+        .unwrap();
+    let mut db = fixture.stage().into_test_connection();
+    let tx = db.transaction().unwrap();
+    let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
+    let mut overview_budget =
+        crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
+    let mut measurements = crate::native_timing::Measurements::default();
+    let mut overflowed_row = None;
+    for (index, row) in rows.iter().enumerate() {
+        match crate::overview::publish_current_stage_owned(
+            &tx,
+            row,
+            &mut measurements,
+            &trace,
+            &mut overview_budget,
+        ) {
+            Ok(()) => assert_eq!(index, 0, "the second retained row exceeds the group budget"),
+            Err(error) => {
+                assert_eq!(index, 1, "each first-row retained input fits the budget");
+                assert!(matches!(
+                    error,
+                    rusqlite::Error::ToSqlConversionFailure(ref cause)
+                        if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
+                ));
+                overflowed_row = Some(index);
+                break;
+            }
+        }
+    }
+    assert_eq!(overflowed_row, Some(1));
+    for key in &keys {
+        let query_state: (Option<String>, i64) = tx
+            .query_row(
+                "SELECT query_recipe,query_active FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |record| Ok((record.get(0)?, record.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(query_state, (None, 0), "retained Query cells stay inactive");
+    }
+    drop(trace);
+    tx.rollback().unwrap();
+
+    let db = fixture.db();
+    for (key, snapshot) in before {
+        assert_eq!(semantic_publication_snapshot(&db, key), snapshot);
+    }
+    for (key, expected) in keys.iter().zip(history_before) {
+        let actual: (String, Option<String>, i64) = db
+            .query_row(
+                "SELECT metadata,query_recipe,query_active FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
 }
 
 #[test]

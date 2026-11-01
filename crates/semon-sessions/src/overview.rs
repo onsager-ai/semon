@@ -54,15 +54,35 @@ impl SummaryPublicationBudget {
         }
     }
 
-    fn serialize(&mut self, summary: &Summary) -> rusqlite::Result<String> {
+    fn available(&self) -> usize {
         #[cfg(test)]
-        let remaining = self
-            .test_cap_bytes
-            .map_or(self.remaining, |cap| self.remaining.min(cap));
+        {
+            self.test_cap_bytes
+                .map_or(self.remaining, |cap| self.remaining.min(cap))
+        }
         #[cfg(not(test))]
-        let remaining = self.remaining;
+        {
+            self.remaining
+        }
+    }
 
-        let mut writer = BoundedSummaryWriter::new(remaining);
+    /// Share one byte allowance across retained inputs and emitted summaries.
+    fn charge(&mut self, bytes: usize) -> rusqlite::Result<()> {
+        if bytes > self.available() {
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                SummaryPublicationBudgetOverflow,
+            )));
+        }
+        self.remaining -= bytes;
+        #[cfg(test)]
+        if let Some(cap) = &mut self.test_cap_bytes {
+            *cap -= bytes;
+        }
+        Ok(())
+    }
+
+    fn serialize(&mut self, summary: &Summary) -> rusqlite::Result<String> {
+        let mut writer = BoundedSummaryWriter::new(self.available());
         if let Err(error) = serde_json::to_writer(&mut writer, summary) {
             if writer.overflowed {
                 return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
@@ -73,11 +93,7 @@ impl SummaryPublicationBudget {
         }
         let text = String::from_utf8(writer.bytes)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        self.remaining -= text.len();
-        #[cfg(test)]
-        if let Some(cap) = &mut self.test_cap_bytes {
-            *cap = cap.saturating_sub(text.len());
-        }
+        self.charge(text.len())?;
         Ok(text)
     }
 }
@@ -354,6 +370,21 @@ fn publish_current_owned_with_policy(
     mut budget: Option<&mut SummaryPublicationBudget>,
 ) -> rusqlite::Result<()> {
     let started = measurements.start();
+    if let Some(budget) = budget.as_deref_mut() {
+        // Size the retained payload before the bounded History projection read.
+        let history_bytes: Option<i64> = tx
+            .query_row(
+                "SELECT octet_length(metadata) FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                [&row.key],
+                |record| record.get(0),
+            )
+            .optional()?;
+        if let Some(bytes) = history_bytes {
+            budget.charge(
+                usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
+            )?;
+        }
+    }
     let history = crate::history_projection::catalog(tx, &row.key)?
         .map(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text))
         .transpose()
@@ -363,6 +394,21 @@ fn publish_current_owned_with_policy(
         && history.sources != row.sources
     {
         let started = measurements.start();
+        if let Some(budget) = budget.as_deref_mut() {
+            // Charge retained summaries before loading them, including rows without Current overview.
+            let prior_bytes: Option<i64> = tx
+                .query_row(
+                    "SELECT octet_length(summary) FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",
+                    [&row.key],
+                    |record| record.get(0),
+                )
+                .optional()?;
+            if let Some(bytes) = prior_bytes {
+                budget.charge(
+                    usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                )?;
+            }
+        }
         let expected = crate::retention::source_generation(&history.sources)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let prior=tx.query_row("SELECT CASE WHEN octet_length(summary)<=4194304 THEN summary ELSE NULL END FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",[&row.key],|row|row.get::<_,String>(0)).optional()?.map(|text|serde_json::from_str::<Summary>(&text)).transpose().map_err(|error|rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
