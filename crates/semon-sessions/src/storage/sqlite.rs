@@ -63,38 +63,6 @@ pub(crate) fn staged_failure_probe_enabled() -> bool {
     STAGED_FAILURE_PROBE.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
-fn rusqlite_variant(error: &rusqlite::Error) -> &'static str {
-    use rusqlite::Error;
-
-    match error {
-        Error::SqliteFailure(..) => "SqliteFailure",
-        Error::SqliteSingleThreadedMode => "SqliteSingleThreadedMode",
-        Error::FromSqlConversionFailure(..) => "FromSqlConversionFailure",
-        Error::IntegralValueOutOfRange(..) => "IntegralValueOutOfRange",
-        Error::Utf8Error(..) => "Utf8Error",
-        Error::NulError(..) => "NulError",
-        Error::InvalidParameterName(..) => "InvalidParameterName",
-        Error::InvalidPath(..) => "InvalidPath",
-        Error::ExecuteReturnedResults => "ExecuteReturnedResults",
-        Error::QueryReturnedNoRows => "QueryReturnedNoRows",
-        Error::QueryReturnedMoreThanOneRow => "QueryReturnedMoreThanOneRow",
-        Error::InvalidColumnIndex(..) => "InvalidColumnIndex",
-        Error::InvalidColumnName(..) => "InvalidColumnName",
-        Error::InvalidColumnType(..) => "InvalidColumnType",
-        Error::StatementChangedRows(..) => "StatementChangedRows",
-        Error::InvalidFunctionParameterType(..) => "InvalidFunctionParameterType",
-        Error::UserFunctionError(..) => "UserFunctionError",
-        Error::ToSqlConversionFailure(..) => "ToSqlConversionFailure",
-        Error::InvalidQuery => "InvalidQuery",
-        Error::UnwindingPanic => "UnwindingPanic",
-        Error::GetAuxWrongType => "GetAuxWrongType",
-        Error::MultipleStatement => "MultipleStatement",
-        Error::InvalidParameterCount(..) => "InvalidParameterCount",
-        _ => "Other",
-    }
-}
-
 fn error_class(error: &rusqlite::Error) -> (&'static str, Option<i32>) {
     let kind = match error {
         rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
@@ -119,15 +87,9 @@ pub(super) fn failed(error: rusqlite::Error) -> StorageError {
             extended_code
         );
         if staged_failure_probe_enabled() {
-            let (sqlite_code, sqlite_extended_code) = match &error {
-                rusqlite::Error::SqliteFailure(code, _) => {
-                    (Some(code.code as i32), Some(code.extended_code))
-                }
-                _ => (None, None),
-            };
+            let sqlite_code = extended_code.map(|code| code & 0xff);
             eprintln!(
-                "staged_sqlite_refusal rusqlite_variant={} sqlite_code={sqlite_code:?} sqlite_extended_code={sqlite_extended_code:?}",
-                rusqlite_variant(&error),
+                "staged_sqlite_refusal kind={kind} sqlite_code={sqlite_code:?} sqlite_extended_code={extended_code:?}",
             );
         }
     }
