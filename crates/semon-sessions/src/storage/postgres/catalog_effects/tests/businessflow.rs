@@ -6135,7 +6135,24 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &store_at(&successor),
         )
         .unwrap();
-    assert_eq!(successor_list["total"].as_u64(), Some(total - 1));
+    assert_eq!(successor_list["total"].as_u64(), Some(total));
+    assert!(
+        successor_list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "bulk169-001")
+    );
+    // Query keeps the qualified History owner after its Current row withdraws.
+    snapshot::with_generation(&pool, &namespace, &control, &successor, |snapshot| {
+        assert!(snapshot.catalog("bulk169-001", false)?.is_none());
+        let history = snapshot
+            .catalog("bulk169-001", true)?
+            .ok_or(StorageError::ScopeChanged)?;
+        assert!(snapshot.history_qualified(&history).unwrap());
+        snapshot::query::qualify_context_candidate(snapshot, &facts_options, &history, true)
+    })
+    .unwrap();
     // (d) Restart: reopened stores read the newest Current and the old
     // selected bodies exactly as before.
     drop(store);
@@ -6188,11 +6205,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         started.elapsed() < Duration::from_secs(8),
         "cold first page"
     );
-    assert_eq!(first["total"].as_u64(), Some(total - 1));
+    assert_eq!(first["total"].as_u64(), Some(total));
     for (at, expected) in [
         (&bulk_generation, total),
         (&partial_generation, total),
-        (&withdrawn, total - 1),
+        (&withdrawn, total),
     ] {
         let listed = facts_query
             .call_bound_catalog_at(
