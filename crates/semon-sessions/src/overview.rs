@@ -13,6 +13,7 @@ use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io, sync::Arc};
 
 pub(crate) const SEMANTIC_OVERVIEW_METADATA_BUDGET: usize = 1024 * 1024;
@@ -85,6 +86,19 @@ struct BoundedSummaryWriter {
     bytes: Vec<u8>,
     limit: usize,
     overflowed: bool,
+}
+
+struct Sha256Writer(Sha256);
+
+impl io::Write for Sha256Writer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl BoundedSummaryWriter {
@@ -419,6 +433,18 @@ fn publish_current_owned_with_policy(
         }
         return Ok(());
     }
+    // Stage must prove that the whole summary fits the remaining shared
+    // metadata budget before deriving or publishing its Trace digest. Keep the
+    // bounded encoding for the later Overview upsert so it is charged once.
+    let encoded_summary = match (&row.overview, budget.as_deref_mut()) {
+        (Some(summary), Some(budget)) => {
+            let started = measurements.start();
+            let text = budget.serialize(summary)?;
+            measurements.record("summary_serialization", started, 1);
+            Some(text)
+        }
+        _ => None,
+    };
     if let Some(trace) = &row.trace {
         let started = measurements.start();
         let trace_store = trace_store.ok_or(rusqlite::Error::InvalidQuery)?;
@@ -433,13 +459,13 @@ fn publish_current_owned_with_policy(
         measurements.record("trace_publish_inclusive", started, 1);
     }
     if let Some(summary) = &row.overview {
-        if let Some(budget) = budget.as_deref_mut() {
-            publish_measured_bounded(
+        if let Some(text) = encoded_summary.as_deref() {
+            publish_measured_encoded(
                 tx,
                 &row.key,
                 row.last.unwrap_or(0),
-                summary,
-                budget,
+                summary.home["state"].as_str().unwrap_or("off"),
+                text,
                 measurements,
             )?;
         } else {
@@ -572,11 +598,9 @@ fn read(
     Ok((records, complete, generation))
 }
 pub(crate) fn content_generation(summary: &Summary) -> String {
-    use sha2::{Digest, Sha256};
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(summary).expect("owned summary"))
-    )
+    let mut writer = Sha256Writer(Sha256::new());
+    serde_json::to_writer(&mut writer, summary).expect("owned summary");
+    format!("{:x}", writer.0.finalize())
 }
 /// Resolve only named Home previews through the same qualified source reader as
 /// selected transcripts. All message text remains request-local.

@@ -11779,6 +11779,79 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
 }
 
 #[test]
+fn semantic_stage_summary_overflow_preflights_before_trace_publication() {
+    let fixture = Fixture::new();
+    let relative = fixture.codex_source_with_records(
+        "stage-overflow-order",
+        "stage-overflow-order",
+        None,
+        None,
+        1,
+        &[
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}}),
+        ],
+    );
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some([relative.clone()].into_iter().collect());
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    let source = fixture.options.codex_home.join(relative);
+    let (_cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
+    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    let prepared = prepared.prepared();
+    let row = prepared.rows.first().unwrap();
+    let summary = row.overview.as_ref().unwrap();
+    assert!(row.trace.is_some());
+    let summary_bytes = serde_json::to_vec(summary).unwrap().len();
+    assert!(summary_bytes > 0);
+
+    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&config)
+        .unwrap();
+    let mut db = fixture.stage().into_test_connection();
+    let tx = db.transaction().unwrap();
+    let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
+    crate::overview::cap_stage_summary_budget_for_test(summary_bytes - 1);
+    let mut overview_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+    let error = crate::overview::publish_current_stage_owned(
+        &tx,
+        row,
+        &mut crate::native_timing::Measurements::default(),
+        &trace,
+        &mut overview_budget,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        rusqlite::Error::ToSqlConversionFailure(ref cause)
+            if cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
+    ));
+    let trace_exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1)",
+            [&row.key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let overview_exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1)",
+            [&row.key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!trace_exists);
+    assert!(!overview_exists);
+    drop(trace);
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn semantic_stage_publishes_summary_and_trace_without_query_recipes() {
     let fixture = Fixture::new();
     let relative = fixture.codex_source_with_records(
