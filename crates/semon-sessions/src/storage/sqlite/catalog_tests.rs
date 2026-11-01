@@ -2318,8 +2318,8 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
         (row.sources, scope, runtime, grant)
     };
 
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
-        .unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     cache.scan_byte_budget = Some(4 * 1024 * 1024);
     let mut dirty = false;
     let mut texts = crate::model::Texts::default();
