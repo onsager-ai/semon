@@ -11722,8 +11722,7 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
             .unwrap();
         let previous: crate::model::summary::CatalogRow =
             serde_json::from_str(&previous_metadata).unwrap();
-        let previous_generation =
-            crate::retention::source_generation(&previous.sources).unwrap();
+        let previous_generation = crate::retention::source_generation(&previous.sources).unwrap();
         let mut summary = serde_json::to_value(row.overview.as_ref().unwrap()).unwrap();
         summary["source_generation"] = json!(previous_generation);
         tx.execute(
@@ -11778,8 +11777,7 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
     assert!(output_metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
     let capture_cap = retained_metadata_bytes + prior_summary_bytes + first_summary_bytes;
     assert!(
-        capture_cap
-            < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - output_metadata_bytes
+        capture_cap < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - output_metadata_bytes
     );
 
     let mut stage = fixture.stage();
@@ -11861,10 +11859,9 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
         serde_json::from_str(&previous_metadata).unwrap();
     previous_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
     let history_metadata_bytes = serde_json::to_string(&previous_row).unwrap().len();
-    let previous_generation =
-        crate::retention::source_generation(&previous_row.sources).unwrap();
-    let mut prior_summary = serde_json::to_value(prepared.rows[0].overview.as_ref().unwrap())
-        .unwrap();
+    let previous_generation = crate::retention::source_generation(&previous_row.sources).unwrap();
+    let mut prior_summary =
+        serde_json::to_value(prepared.rows[0].overview.as_ref().unwrap()).unwrap();
     prior_summary["source_generation"] = json!(previous_generation);
     tx.execute(
         "UPDATE main.session_overview SET summary=?1 WHERE namespace=semon_namespace() AND session_key='singleton'",
@@ -11893,8 +11890,7 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
     assert!(current_metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
     let capture_cap = history_metadata_bytes + prior_summary_bytes as usize + summary_bytes - 1;
     assert!(
-        capture_cap
-            < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - current_metadata_bytes
+        capture_cap < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - current_metadata_bytes
     );
 
     let mut stage = fixture.stage();
@@ -11915,7 +11911,10 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
             other => panic!("unexpected result while completing original History: {other:?}"),
         }
     }
-    assert!(refused, "the ready singleton reaches the summary overflow refusal");
+    assert!(
+        refused,
+        "the ready singleton reaches the summary overflow refusal"
+    );
     let db = fixture.db();
     assert_eq!(semantic_publication_snapshot(&db, "singleton"), before);
     drop(db);
@@ -12061,8 +12060,7 @@ fn semantic_stage_retained_input_overflow_is_aggregated_without_current_overview
         let source = history.sources.first_mut().unwrap();
         source.native_id.push_str("-retained");
         source.native_role = Some(json!({"budget_padding":"x".repeat(100_000)}));
-        let expected_generation =
-            crate::retention::source_generation(&history.sources).unwrap();
+        let expected_generation = crate::retention::source_generation(&history.sources).unwrap();
         let history_text = serde_json::to_string(&history).unwrap();
         assert!(history_text.len() < 1048576);
         retained_metadata_bytes.push(history_text.len());
@@ -12112,8 +12110,7 @@ fn semantic_stage_retained_input_overflow_is_aggregated_without_current_overview
             < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - metadata_bytes
     );
     assert!(
-        retained_metadata_bytes.iter().sum::<usize>()
-            + prior_summary_bytes.iter().sum::<usize>()
+        retained_metadata_bytes.iter().sum::<usize>() + prior_summary_bytes.iter().sum::<usize>()
             > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET - metadata_bytes
     );
     tx.commit().unwrap();

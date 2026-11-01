@@ -380,9 +380,7 @@ fn publish_current_owned_with_policy(
             )
             .optional()?;
         if let Some(bytes) = history_bytes {
-            budget.charge(
-                usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
-            )?;
+            budget.charge(usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?)?;
         }
     }
     let history = crate::history_projection::catalog(tx, &row.key)?
@@ -404,9 +402,8 @@ fn publish_current_owned_with_policy(
                 )
                 .optional()?;
             if let Some(bytes) = prior_bytes {
-                budget.charge(
-                    usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?,
-                )?;
+                budget
+                    .charge(usize::try_from(bytes).map_err(|_| rusqlite::Error::InvalidQuery)?)?;
             }
         }
         let expected = crate::retention::source_generation(&history.sources)
