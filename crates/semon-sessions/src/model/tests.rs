@@ -4965,16 +4965,19 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         .is_some()
     );
 
-    let metadata: String = db
+    let overview: String = db
         .query_row(
-            "SELECT metadata FROM session_catalog WHERE session_key='child-000' AND lifecycle='current'",
+            "SELECT summary FROM session_overview WHERE session_key='child-000'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    let replayed: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
     let expected_overview = serde_json::to_value(full_row.overview.as_ref().unwrap()).unwrap();
-    let replayed_overview = serde_json::to_value(replayed.overview.as_ref().unwrap()).unwrap();
+    let replayed_overview: Value = serde_json::from_str(&overview).unwrap();
+    assert!(
+        replayed_overview["home"]["content"]["events"][&full_relation.id]["brief"].is_object(),
+        "durable staged replay publishes the native preview pointer"
+    );
     assert_eq!(
         replayed_overview["home"]["content"]["events"][&full_relation.id]["brief"],
         expected_overview["home"]["content"]["events"][&full_relation.id]["brief"],
