@@ -83,9 +83,7 @@ pub(crate) fn record_root_durable_relations(
             diag.root_durable_outgoing_placements += relation
                 .placements
                 .iter()
-                .filter(|placement| {
-                    placement.outgoing && placement.at.source.native_id == "root"
-                })
+                .filter(|placement| placement.outgoing && placement.at.source.native_id == "root")
                 .count();
         }
     });

@@ -4561,8 +4561,8 @@ fn staged_claude_unmatched_send_and_orphan_receipt_keep_stubs_and_native_recipes
 #[test]
 fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     let home = Home::new();
-    let trace_previous = crate::native_evidence::TRACE_ROOT_PUBLICATION
-        .with(|enabled| enabled.replace(true));
+    let trace_previous =
+        crate::native_evidence::TRACE_ROOT_PUBLICATION.with(|enabled| enabled.replace(true));
     let _trace_reset = RootPublicationTraceReset(trace_previous);
     let mut records = vec![codex_user(ts(6, 0), "Coordinate a large native family")];
     for n in 0..80 {
@@ -4845,8 +4845,7 @@ struct RootPublicationTraceReset(bool);
 impl Drop for RootPublicationTraceReset {
     fn drop(&mut self) {
         crate::native_evidence::clear_root_publication_diag();
-        crate::native_evidence::TRACE_ROOT_PUBLICATION
-            .with(|enabled| enabled.set(self.0));
+        crate::native_evidence::TRACE_ROOT_PUBLICATION.with(|enabled| enabled.set(self.0));
     }
 }
 
@@ -4891,7 +4890,12 @@ fn semantic_relation_batches_continue_after_codex_primary_event_budget() {
     assert_eq!(inputs.len(), 33);
     let paths = inputs
         .iter()
-        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     let root_path = home
         .options
@@ -4981,7 +4985,10 @@ fn semantic_relation_batches_continue_after_codex_primary_event_budget() {
         cache.end_scan();
         cache.release_published_indexes();
     }
-    assert!(reached_publication, "relation staging did not progress to publication");
+    assert!(
+        reached_publication,
+        "relation staging did not progress to publication"
+    );
     assert!(relation_batches > 1, "the primary event pages must resume");
     assert!(max_relation_outputs <= 64);
 
@@ -4998,7 +5005,9 @@ fn semantic_relation_batches_continue_after_codex_primary_event_budget() {
         .prepare("SELECT relation_id,metadata FROM main.catalog_semantic_relations")
         .unwrap();
     let relation_rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -5051,7 +5060,12 @@ fn semantic_relation_batch_respects_output_budget_with_header_fanout() {
     assert_eq!(inputs.len(), 64);
     let paths = inputs
         .iter()
-        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
@@ -5106,8 +5120,14 @@ fn semantic_relation_batch_respects_output_budget_with_header_fanout() {
         cache.end_scan();
         cache.release_published_indexes();
     }
-    assert!(reached_publication, "relation staging did not progress to publication");
-    assert!(relation_batches > 1, "header paths must progress in bounded groups");
+    assert!(
+        reached_publication,
+        "relation staging did not progress to publication"
+    );
+    assert!(
+        relation_batches > 1,
+        "header paths must progress in bounded groups"
+    );
 
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let unfinished: i64 = db
@@ -5122,7 +5142,9 @@ fn semantic_relation_batch_respects_output_budget_with_header_fanout() {
         .prepare("SELECT relation_id,metadata FROM main.catalog_semantic_relations")
         .unwrap();
     let relation_rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
@@ -5146,7 +5168,10 @@ fn semantic_relation_batch_respects_output_budget_with_header_fanout() {
     let expected_relays = (0..16)
         .map(|n| stable_id("r", &format!("relay:codex:relay-{n:03}")))
         .collect::<BTreeSet<_>>();
-    assert_eq!(spawn_ids, expected_spawns, "all child header spawns must persist");
+    assert_eq!(
+        spawn_ids, expected_spawns,
+        "all child header spawns must persist"
+    );
     assert_eq!(relay_ids, expected_relays, "all root relays must persist");
 }
 
@@ -5673,7 +5698,11 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(discovered as usize, inputs.len(), "discovered JSONL inventory");
+        assert_eq!(
+            discovered as usize,
+            inputs.len(),
+            "discovered JSONL inventory"
+        );
         let staged: Option<(String, i64)> = db
             .query_row(
                 "SELECT phase,(SELECT count(*) FROM catalog_semantic_sources WHERE namespace=?1) FROM catalog_semantic_stage WHERE namespace=?1",
@@ -5690,7 +5719,11 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         drop(db);
 
         let queued = cache.pending_catalog_sources(256).unwrap();
-        assert_eq!(queued.len(), paths.len(), "discovered JSONL claims are queued");
+        assert_eq!(
+            queued.len(),
+            paths.len(),
+            "discovered JSONL claims are queued"
+        );
         if paths.len() > page.len() {
             assert!(
                 queued.iter().any(|path| !page.contains(path)),
