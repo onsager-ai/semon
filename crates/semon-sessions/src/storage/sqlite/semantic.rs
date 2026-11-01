@@ -262,7 +262,7 @@ pub(crate) fn pricing_connection(
 }
 
 /// Internal runtime qualification, deliberately absent from public configuration.
-/// It qualifies primitive Codex reduction; composite ownership also admits the
+/// It admits Codex, Claude and Copilot source reduction; composite ownership also admits the
 /// bounded initial Current publisher. No public configuration constructs it.
 pub(crate) struct SemanticStaging {
     config: StoreConfig,
@@ -1208,7 +1208,7 @@ impl crate::events::store::semantic_stage::QualificationPort for ScopedQualifica
 
 fn event_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError> {
     let c = layout.db;
-    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND harness NOT IN ('codex','claude'))",[ns],|r|r.get(0)).map_err(error)?;
+    let unsupported: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND harness NOT IN ('codex','claude','copilot'))",[ns],|r|r.get(0)).map_err(error)?;
     if unsupported {
         return Err(refuse("semantic_nonprimitive_event_harness"));
     }
@@ -3509,7 +3509,7 @@ impl Stage {
                 let mut encoded = Vec::new();
                 let mut bytes = 0usize;
                 for endpoint in prepared.relationships.endpoints.values() {
-                    if !matches!(endpoint.row.harness.as_str(), "codex" | "claude") {
+                    if !matches!(endpoint.row.harness.as_str(), "codex" | "claude" | "copilot") {
                         return Err(refuse("semantic_nonprimitive_identity_pending"));
                     }
                     if endpoint.row.sources.is_empty() || endpoint.row.sources.len() > 64 {
@@ -3846,7 +3846,7 @@ impl Stage {
             tx.execute("UPDATE main.catalog_semantic_stage SET key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1 WHERE namespace=?1", [ns]).map_err(error)?;
         }
         for (harness, source) in &prepared.indexed_sources {
-            if self.reduction && !matches!(harness.as_str(), "codex" | "claude") {
+            if self.reduction && !matches!(harness.as_str(), "codex" | "claude" | "copilot") {
                 return Err(refuse("semantic_nonprimitive_event_harness"));
             }
             let path = source.path.to_string_lossy();
