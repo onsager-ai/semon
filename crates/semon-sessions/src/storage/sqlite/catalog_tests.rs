@@ -12164,7 +12164,21 @@ fn semantic_stage_retained_input_overflow_is_aggregated_without_current_overview
             &trace,
             &mut overview_budget,
         ) {
-            Ok(()) => assert_eq!(index, 0, "the second retained row exceeds the group budget"),
+            Ok(()) => {
+                assert_eq!(index, 0, "the second retained row exceeds the group budget");
+                let changed_trace: (String, String) = tx
+                    .query_row(
+                        "SELECT metadata,generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
+                        [&row.key],
+                        |record| Ok((record.get(0)?, record.get(1)?)),
+                    )
+                    .unwrap();
+                assert_ne!(
+                    (&changed_trace.0, &changed_trace.1),
+                    (&before[0].1.2, &before[0].1.3),
+                    "the first Trace effect must happen before the later overflow rolls it back"
+                );
+            }
             Err(error) => {
                 assert_eq!(index, 1, "each first-row retained input fits the budget");
                 assert!(matches!(

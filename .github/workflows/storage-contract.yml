@@ -93,7 +93,8 @@ jobs:
             catalog::tests::semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group \
             catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
             catalog::tests::semantic_stage_publishes_summary_and_trace_without_query_recipes \
-            catalog::tests::semantic_stage_summary_overflow_preflights_before_trace_publication; do
+            catalog::tests::semantic_stage_summary_overflow_preflights_before_trace_publication \
+            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0
