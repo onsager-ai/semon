@@ -13878,8 +13878,22 @@ mod tests {
                 options: &crate::Options,
                 inputs: &[crate::Input],
             ) {
+                admit_inputs_with_alias_group(cache, options, inputs, 0);
+            }
+
+            fn admit_inputs_with_alias_group(
+                cache: &mut EventCache,
+                options: &crate::Options,
+                inputs: &[crate::Input],
+                alias_count: usize,
+            ) {
                 for (index, input) in inputs.iter().enumerate() {
-                    write(options, input, &format!("capture-{index}"), None);
+                    let id = if index < alias_count {
+                        "000-shared-owner".to_owned()
+                    } else {
+                        format!("capture-independent-{index}")
+                    };
+                    write(options, input, &id, None);
                     cache
                         .ingest(
                             &format!("{:064x}", 9600 + index),
@@ -13896,7 +13910,7 @@ mod tests {
                 let options = &options[0];
                 let inputs = inputs(4);
                 let mut cache = open(&f.config);
-                admit_independent_inputs(&mut cache, options, &inputs);
+                admit_inputs_with_alias_group(&mut cache, options, &inputs, 2);
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
                 assert_eq!(batch.phase, Phase::Publication);
                 assert_eq!(batch.paths.len(), 4);
@@ -13949,13 +13963,21 @@ mod tests {
                 );
                 let (hint_epoch, max_groups) = hint(&f, "source-a").unwrap();
                 assert_eq!(hint_epoch, batch.epoch);
-                assert_eq!(max_groups, 2);
+                assert_eq!(max_groups, 1, "halving counts three physical groups");
                 assert_eq!(hint(&f, "source-b"), None, "hints are namespace scoped");
 
                 let retry = cache.semantic_batch(64).unwrap().unwrap();
                 assert_eq!(retry.phase, Phase::Publication);
                 assert_eq!(retry.paths.len(), 2);
+                let mut retry_paths = retry.paths.clone();
+                retry_paths.sort();
+                let expected_alias_paths = inputs[..2]
+                    .iter()
+                    .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(retry_paths, expected_alias_paths);
                 let selected = selected_inputs(&inputs, options, &retry);
+                assert_eq!(selected.len(), 2, "the two aliases stay in one group");
                 let retry_model = cache
                     .prepare_semantic_model_batch(
                         options,
@@ -13971,7 +13993,8 @@ mod tests {
                         .0,
                     Outcome::Written
                 );
-                assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 2)));
+                assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 1)));
+                assert_eq!(cache.semantic_batch(64).unwrap().unwrap().paths.len(), 1);
 
                 drop(cache);
                 let mut resumed = open(&f.config);
@@ -13993,8 +14016,8 @@ mod tests {
                     )
                     .unwrap();
                 assert_ne!(resumed_epoch, batch.epoch);
-                assert_eq!(hint(&f, "source-a"), Some((resumed_epoch, 2)));
-                assert_eq!(resumed.semantic_batch(64).unwrap().unwrap().paths.len(), 2);
+                assert_eq!(hint(&f, "source-a"), Some((resumed_epoch, 1)));
+                assert_eq!(resumed.semantic_batch(64).unwrap().unwrap().paths.len(), 1);
             }
 
             #[test]

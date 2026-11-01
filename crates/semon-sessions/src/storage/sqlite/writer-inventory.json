@@ -31,7 +31,7 @@
     "chunk pages, tree witnesses and retained proof copy/cleanup",
     "launch pages and bounded measured cleanup",
     "relocation evidence and Tree metadata readiness join",
-    "source-owned semantic recipe, generation, journal revision, header frontiers and progress metadata",
+    "source-owned semantic recipe, generation, journal revision, header frontiers, progress metadata and bounded presentation-admission hint",
     "storage_catalog_native_observation_grants uses namespace/session/owner-kind primary key for latest Catalog and History digests, admission, stream and bounded row-sliced direct runtime capture only when an exact immutable semantic owner does not bind the selected row/runtime; semon_semantic_publisher guards all DML; qualified Overview repair updates only an exact preimage owner digest and preserves a capture only when runtime_for(updated row) remains valid; semantic Stage clears captures for proof-owned Current and History rows and retains receipt-bound meta grants",
     "store pricing target versus source pricing work/completion metadata; repair clock",
     "SourceJournal seed reads, physical reader epoch and source change-stream floors",
@@ -146,6 +146,7 @@
     ],
     "source": [
       "catalog_semantic_recipe",
+      "catalog_semantic_group_admission",
       "catalog_generation",
       "catalog_source_revision",
       "catalog_backfill_state",
