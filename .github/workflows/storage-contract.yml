@@ -292,6 +292,8 @@ jobs:
         run: |
           result=0
           for test in \
+            storage::sqlite::namespace::tests::current_admission_keeps_unowned_writers_fenced \
+            storage::sqlite::namespace::tests::unenroll_refuses_current_custody_without_releasing_writers_or_rows \
             events::store::configured::tests::configured_semantic_reset_and_reduction_rollback_zero_partial_writes \
             events::store::semantic_stage::tests::codex_physical_owner_closure_is_complete_exact_and_bounded \
             events::store::semantic_stage::tests::codex_physical_owner_closure_uses_binary_id_and_harness_equality \

@@ -166,6 +166,7 @@ mod tests {
     struct Fixture {
         root: PathBuf,
         config: StoreConfig,
+        generation: String,
     }
     impl Fixture {
         fn new() -> Self {
@@ -193,6 +194,7 @@ mod tests {
                     None,
                 )
                 .unwrap();
+            let generation = producer.session_catalog_generation().unwrap();
             let database = EventCache::path(&cache);
             let epoch = Connection::open(&database)
                 .unwrap()
@@ -207,7 +209,11 @@ mod tests {
                 namespace: LogicalSourceNamespace::new("source-A").unwrap(),
                 expected_stream_epoch: Some(epoch),
             };
-            Self { root, config }
+            Self {
+                root,
+                config,
+                generation,
+            }
         }
         fn db(&self) -> Connection {
             let database = self.config.backend.sqlite_database().unwrap();
@@ -281,7 +287,7 @@ mod tests {
                 |r| r.get::<_, String>(0)
             )
             .unwrap(),
-            "a".repeat(64)
+            f.generation
         );
     }
 
@@ -448,6 +454,6 @@ mod tests {
         assert!(is_bound(&f.db()).unwrap());
         assert_eq!(f.config.admit_namespace().unwrap(), admitted);
         assert!(f.db().execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
-        assert_eq!(f.db().query_row("SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(), "a".repeat(64));
+        assert_eq!(f.db().query_row("SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(), f.generation);
     }
 }
