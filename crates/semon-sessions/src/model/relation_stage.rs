@@ -455,8 +455,8 @@ pub(crate) fn selector_event<P: SelectorLookup>(
     text: Option<String>,
     used: &mut usize,
 ) -> Result<NativeEvent, P::Error> {
-    let mut native: NativeEvent = selector_metadata(text, used)
-        .map_err(|error| selector_metadata_error(port, error))?;
+    let mut native: NativeEvent =
+        selector_metadata(text, used).map_err(|error| selector_metadata_error(port, error))?;
     native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
     Ok(native)
 }
@@ -471,8 +471,8 @@ pub(crate) fn selector_endpoint<P: SelectorLookup>(
     if require_root && root.is_none() {
         return Err(port.invalid("semantic_selector_root_missing"));
     }
-    let mut endpoint: Endpoint = selector_metadata(text, used)
-        .map_err(|error| selector_metadata_error(port, error))?;
+    let mut endpoint: Endpoint =
+        selector_metadata(text, used).map_err(|error| selector_metadata_error(port, error))?;
     endpoint.parent = parent.clone();
     endpoint.row.parent = parent;
     endpoint.root = root.unwrap_or_else(|| key.to_owned());
@@ -1643,22 +1643,28 @@ mod selector_metadata_tests {
         let _: serde_json::Value = selector_metadata(Some("{}".into()), &mut used).unwrap();
         assert_eq!(used, 1048576);
 
-        let error = selector_metadata::<serde_json::Value>(Some("{}".into()), &mut used)
-            .unwrap_err();
-        assert!(error
-            .get_ref()
-            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
+        let error =
+            selector_metadata::<serde_json::Value>(Some("{}".into()), &mut used).unwrap_err();
+        assert!(
+            error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<SelectorMetadataBudget>())
+        );
         assert_eq!(used, 1048576);
 
         used = 0;
         let error = selector_metadata::<serde_json::Value>(None, &mut used).unwrap_err();
-        assert!(!error
-            .get_ref()
-            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
-        let error = selector_metadata::<serde_json::Value>(Some("not-json".into()), &mut used)
-            .unwrap_err();
-        assert!(!error
-            .get_ref()
-            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
+        assert!(
+            !error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<SelectorMetadataBudget>())
+        );
+        let error =
+            selector_metadata::<serde_json::Value>(Some("not-json".into()), &mut used).unwrap_err();
+        assert!(
+            !error
+                .get_ref()
+                .is_some_and(|cause| cause.is::<SelectorMetadataBudget>())
+        );
     }
 }
