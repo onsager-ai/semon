@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, types::Value as SqlValue};
 use std::time::Duration;
 use std::{
     fs,
+    io::Write,
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -11690,7 +11691,10 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
     }
     let paths = [first.clone(), first_copy.clone(), second.clone()];
     let (mut cache, batch, prepared) = fixture.prepare_publication(&paths);
-    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
     assert_eq!(batch.paths.len(), paths.len());
     let prepared = prepared.prepared();
     assert_eq!(prepared.rows.len(), 2);
@@ -11701,8 +11705,7 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
     assert!(first_summary_bytes > 0);
 
     let db = fixture.db();
-    let before = ["first", "second"]
-        .map(|key| (key, semantic_publication_snapshot(&db, key)));
+    let before = ["first", "second"].map(|key| (key, semantic_publication_snapshot(&db, key)));
     drop(db);
 
     // This is a budget exercise using genuine producer summaries and receipts.
@@ -11723,7 +11726,10 @@ fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() 
 
     let next = cache.semantic_batch(64).unwrap().unwrap();
     assert_eq!(next.phase, crate::model::relation_stage::Phase::Publication);
-    let next_paths = next.paths.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let next_paths = next
+        .paths
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     let first_group = [first, first_copy]
         .into_iter()
         .map(|path| path.to_string_lossy().into_owned())
@@ -11750,7 +11756,10 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
     )
     .unwrap();
     let (cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
-    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
     assert_eq!(batch.paths.len(), 1);
     let prepared = prepared.prepared();
     assert_eq!(prepared.rows.len(), 1);
@@ -11802,7 +11811,10 @@ fn semantic_stage_summary_overflow_preflights_before_trace_publication() {
     .unwrap();
     let source = fixture.options.codex_home.join(relative);
     let (_cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
-    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
     let prepared = prepared.prepared();
     let row = prepared.rows.first().unwrap();
     let summary = row.overview.as_ref().unwrap();
@@ -11810,7 +11822,11 @@ fn semantic_stage_summary_overflow_preflights_before_trace_publication() {
     let summary_bytes = serde_json::to_vec(summary).unwrap().len();
     assert!(summary_bytes > 0);
 
-    let config = fixture.options.source.config(&fixture.options.cache).unwrap();
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
     let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&config)
         .unwrap();
     let mut db = fixture.stage().into_test_connection();
@@ -11875,7 +11891,10 @@ fn semantic_stage_publishes_summary_and_trace_without_query_recipes() {
     .unwrap();
     let source = fixture.options.codex_home.join(relative);
     let (_cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
-    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
     assert_eq!(prepared.prepared().rows.len(), 1);
     let row = &prepared.prepared().rows[0];
     assert!(row.query.is_some());
@@ -12090,7 +12109,7 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
         crate::model::now_ms(),
     )
     .unwrap();
-    let mut row = prepared
+    let row = prepared
         .rows
         .iter()
         .find(|row| row.key == "shared-key")
@@ -12134,7 +12153,8 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
             .get("foreign_namespace_marker")
             .is_none()
     );
-    let updated_summary: crate::overview::Summary = serde_json::from_value(updated_summary).unwrap();
+    let updated_summary: crate::overview::Summary =
+        serde_json::from_value(updated_summary).unwrap();
     let updated_trace: String = db
         .query_row(
             "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
