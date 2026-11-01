@@ -6950,7 +6950,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        pg_parent_transcript["total"], sqlite_parent_transcript["total"],
+        pg_parent_transcript["total"],
+        sqlite_parent_transcript["projection"]["total"],
         "retained parent transcript totals match SQLite"
     );
     assert_eq!(
