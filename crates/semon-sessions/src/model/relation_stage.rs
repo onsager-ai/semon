@@ -1072,6 +1072,43 @@ impl Context {
                 (relation.id.clone(), relation)
             })
             .collect();
+        #[cfg(test)]
+        {
+            let mut spawn_codex = 0usize;
+            let mut spawn_claude = 0usize;
+            let mut spawn_other = 0usize;
+            let mut relay_codex = 0usize;
+            let mut relay_claude = 0usize;
+            let mut relay_other = 0usize;
+            for handoff in &builder.handoffs {
+                let from_harness = builder
+                    .by_key
+                    .get(&handoff.out.from)
+                    .map(|at| builder.sessions[*at].out.harness)
+                    .unwrap_or("other");
+                match (handoff.out.kind, from_harness) {
+                    ("spawn", "codex") => spawn_codex += 1,
+                    ("spawn", "claude") => spawn_claude += 1,
+                    ("spawn", _) => spawn_other += 1,
+                    ("relay", "codex") => relay_codex += 1,
+                    ("relay", "claude") => relay_claude += 1,
+                    ("relay", _) => relay_other += 1,
+                    _ => {}
+                }
+            }
+            eprintln!(
+                "semantic_relation_capture_diag files={} matching_refs={} spawn_codex={} spawn_claude={} spawn_other={} relay_codex={} relay_claude={} relay_other={} relations={}",
+                builder.files.len(),
+                builder.matching_refs.as_ref().map_or(0, |refs| refs.len()),
+                spawn_codex,
+                spawn_claude,
+                spawn_other,
+                relay_codex,
+                relay_claude,
+                relay_other,
+                relations.len(),
+            );
+        }
         for row in rows {
             let Some(recipe) = &row.query_recipe else {
                 continue;
