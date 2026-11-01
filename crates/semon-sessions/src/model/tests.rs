@@ -9811,14 +9811,9 @@ fn persisted_descriptions_reuse_restart_and_revalidate_changed_sources() {
     let updated = home.build_query();
     SESSION_DESCRIPTIONS
         .with(|counts| assert_eq!(*counts.borrow(), BTreeMap::from([("root".into(), 1)])));
-    let mut fresh = EventCache::default();
-    let oracle = build_with_cache(
-        &home.options,
-        &mut fresh,
-        &mut false,
-        &mut Texts::default(),
-        NOW,
-    );
+    let mut fresh_options = home.options.clone();
+    fresh_options.cache = home.root.join("fresh-descriptions.json");
+    let oracle = home.build_at(&fresh_options, NOW);
     assert_equivalent(&updated, &oracle, NOW);
 
     let connection =
