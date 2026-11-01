@@ -4127,6 +4127,37 @@ impl<'a> Builder<'a> {
             peer_sends.push((at, reply));
         }
         let sends = peer_sends;
+        let mut canonical_receipts = HashMap::<String, Option<Ref>>::new();
+        if let Some(epoch) = self.staged_epoch {
+            for (_, reply) in &sends {
+                let Some(id) = &reply.m else {
+                    continue;
+                };
+                if canonical_receipts.contains_key(id) {
+                    continue;
+                }
+                let selected = self.cache.semantic_select(
+                    epoch,
+                    &relation_stage::Selector::ClaudeReceipt {
+                        id: id.to_owned(),
+                    },
+                )?;
+                let canonical = match selected.location {
+                    Some(location) => location.local(self)?,
+                    None => None,
+                };
+                let canonical = canonical.filter(|at| self.match_selected(*at));
+                canonical_receipts.insert(id.to_owned(), canonical);
+            }
+        }
+        let staged_receipts = self.staged_epoch.is_some();
+        let receipt_for = |id: &str| {
+            if staged_receipts {
+                canonical_receipts.get(id).copied().flatten()
+            } else {
+                received.get(id).and_then(|found| found.first()).copied()
+            }
+        };
         // D3's fallback: names learned only from exact joins and records.
         let mut names = HashMap::<String, BTreeSet<usize>>::new();
         for (index, session) in self.sessions.iter().enumerate() {
@@ -4139,8 +4170,8 @@ impl<'a> Builder<'a> {
         let mut joined = BTreeSet::new();
         for (at, reply) in &sends {
             if let Some(id) = &reply.m
-                && let Some(receiver) = received.get(id).and_then(|found| found.first())
-                && let Some(name) = event(self.files, *receiver).n.as_deref()
+                && let Some(receiver) = receipt_for(id)
+                && let Some(name) = event(self.files, receiver).n.as_deref()
             {
                 let sender = self.root(self.of_file[at.0]);
                 if self.sessions[sender].kind == SessKind::Lineage {
@@ -4186,12 +4217,7 @@ impl<'a> Builder<'a> {
                 Some(id) => format!("relay:{id}"),
                 None => format!("relay:tool:{tool_id}"),
             };
-            let joined_at = reply
-                .m
-                .as_ref()
-                .and_then(|id| received.get(id))
-                .and_then(|found| found.first())
-                .copied();
+            let joined_at = reply.m.as_ref().and_then(|id| receipt_for(id));
             let mut target = None;
             let (to, receiver) = if let Some(receiver) = joined_at {
                 joined.extend(reply.m.clone());
