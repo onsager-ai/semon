@@ -11549,11 +11549,13 @@ fn semantic_index_rejects_unannounced_physical_change_after_producer_preparation
     file.sync_all().unwrap();
     let after = crate::events::Stat::of(&source_path).unwrap();
     assert_ne!(
-        after,
-        before,
+        after, before,
         "the unjournaled append changes the physical source stat"
     );
-    assert!(after.size > ledger.offset, "append extends the scanned prefix");
+    assert!(
+        after.size > ledger.offset,
+        "append extends the scanned prefix"
+    );
     assert_ne!(after.changed_ns, ledger.stat.changed_ns);
     assert_eq!(
         cache.catalog_claims(&paths).unwrap(),
@@ -11613,9 +11615,18 @@ fn semantic_index_rejects_unannounced_physical_change_after_producer_preparation
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(source_after, source_before, "conflict leaves staged source unchanged");
-    assert_eq!(inputs_after, inputs_before, "conflict writes no staged input");
-    assert_eq!(frontier_after, frontier_before, "conflict writes no owner frontier");
+    assert_eq!(
+        source_after, source_before,
+        "conflict leaves staged source unchanged"
+    );
+    assert_eq!(
+        inputs_after, inputs_before,
+        "conflict writes no staged input"
+    );
+    assert_eq!(
+        frontier_after, frontier_before,
+        "conflict writes no owner frontier"
+    );
 }
 
 #[test]
@@ -11716,7 +11727,10 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
                 )
                 .unwrap();
             assert!(index_done, "Index is acknowledged after reaching EOF");
-            assert_eq!(resume_at as u64, large_size, "EOF offset matches source size");
+            assert_eq!(
+                resume_at as u64, large_size,
+                "EOF offset matches source size"
+            );
             eof_index = true;
         }
         if done {
