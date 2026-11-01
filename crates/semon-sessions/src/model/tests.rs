@@ -5644,6 +5644,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     oracle_options.cache = options.cache.with_extension("oracle.json");
     let oracle = home.build_at(&oracle_options, NOW);
     let mut inputs = crate::inputs(options).unwrap();
+    enroll_stage_inventory(options, &inputs);
     inputs.retain(|input| input.path.ends_with(".jsonl"));
     let paths = inputs
         .iter()
@@ -5662,6 +5663,40 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
             cache.begin_semantic_stage(page, &runtime).unwrap(),
             crate::events::Outcome::Written
         );
+
+        let namespace = options.source.namespace().unwrap();
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        let discovered: i64 = db
+            .query_row(
+                "SELECT count(*) FROM catalog_backfill_sources WHERE namespace=?1",
+                [namespace.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(discovered as usize, inputs.len(), "discovered JSONL inventory");
+        let staged: Option<(String, i64)> = db
+            .query_row(
+                "SELECT phase,(SELECT count(*) FROM catalog_semantic_sources WHERE namespace=?1) FROM catalog_semantic_stage WHERE namespace=?1",
+                [namespace.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            staged,
+            Some(("indexing".into(), page.len() as i64)),
+            "one bounded semantic stage is queued"
+        );
+        drop(db);
+
+        let queued = cache.pending_catalog_sources(256).unwrap();
+        assert_eq!(queued.len(), paths.len(), "discovered JSONL claims are queued");
+        if paths.len() > page.len() {
+            assert!(
+                queued.iter().any(|path| !page.contains(path)),
+                "unseeded JSONL sources remain queued for the ordinary producer"
+            );
+        }
     }
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     crate::viewer::lock(&evidence.work).events = Some(cache);
@@ -5680,6 +5715,12 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         complete,
         "queued identity closure did not finish bounded steps"
     );
+    {
+        let work = crate::viewer::lock(&evidence.work);
+        let cache = work.events.as_ref().unwrap();
+        assert_eq!(cache.backfill_state().unwrap().as_deref(), Some("complete"));
+        assert!(cache.pending_catalog_sources(1).unwrap().is_empty());
+    }
     let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
     for (key, session) in &oracle.sessions {
         if session.stub {
