@@ -124,9 +124,8 @@ fn verify_search_publications(
     {
         return Err(StorageError::ScopeChanged);
     }
-    let coverage_count: i64 = tx
-        .0
-        .query_row(
+    let coverage_count: i64 =
+        tx.0.query_row(
             "SELECT count(*) FROM main.session_search_coverage WHERE namespace=?1",
             [tx.1],
             |row| row.get(0),
@@ -212,10 +211,7 @@ pub(super) fn verify_search_state(tx: &Inbox<'_>, generation: &str) -> Result<()
     verify_search_content(tx)
 }
 
-fn verify_imported_search_state(
-    tx: &mut Inbox<'_>,
-    generation: &str,
-) -> Result<(), StorageError> {
+fn verify_imported_search_state(tx: &mut Inbox<'_>, generation: &str) -> Result<(), StorageError> {
     let staged_count: i64 = tx
         .0
         .query_row(
@@ -230,7 +226,10 @@ fn verify_imported_search_state(
     let mut publications = Vec::with_capacity(2);
     for scope in ["current", "retained_history"] {
         let bytes = tx
-            .get(&format!("native_transfer_v1:search-publication:{scope}"), 4096)?
+            .get(
+                &format!("native_transfer_v1:search-publication:{scope}"),
+                4096,
+            )?
             .ok_or(StorageError::ScopeChanged)?;
         let values: Vec<serde_json::Value> =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
@@ -803,10 +802,7 @@ mod tests {
             apply(&mut inbox, &record, &mut budget).unwrap();
         }
         let current_publication_key = "native_transfer_v1:search-publication:current";
-        let current_publication = inbox
-            .get(current_publication_key, 4096)
-            .unwrap()
-            .unwrap();
+        let current_publication = inbox.get(current_publication_key, 4096).unwrap().unwrap();
         verify_imported_search_state(&mut inbox, &generation).unwrap();
         let assert_no_authority = || {
             let clean: bool = tx
