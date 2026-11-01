@@ -94,7 +94,16 @@ jobs:
             catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
             catalog::tests::semantic_stage_publishes_summary_and_trace_without_query_recipes \
             catalog::tests::semantic_stage_summary_overflow_preflights_before_trace_publication \
-            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews; do
+            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews \
+            events::store::configured::tests::domain52::presentation_capture_overflow::aggregate_overflow_rolls_back_then_halves_and_rebinds_admission \
+            events::store::configured::tests::domain52::presentation_capture_overflow::stale_wider_oversized_retry_preserves_narrower_hint_and_prior_receipt \
+            events::store::configured::tests::domain52::presentation_capture_overflow::later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch \
+            events::store::configured::tests::domain52::presentation_capture_overflow::recorded_same_selection_blocks_permuted_oversized_request \
+            events::store::configured::tests::domain52::presentation_capture_overflow::oversized_identity_or_claim_mismatch_does_not_write_a_hint \
+            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_record_refuses_without_a_receipt_or_hint \
+            events::store::configured::tests::domain52::presentation_capture_overflow::overflow_rejects_a_missing_exact_model_receipt \
+            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_physical_group_keeps_its_receipt_and_stays_pending \
+            native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0

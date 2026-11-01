@@ -193,7 +193,8 @@ fn publish_semantic_stage(home: &Home, input: &crate::Input) {
         }
         let model = cache
             .prepare_semantic_model_batch(&home.options, std::slice::from_ref(input), &batch, NOW)
-            .unwrap();
+            .unwrap()
+            .expect("query recovery batch is recorded");
         if batch.phase == Phase::Publication {
             assert_eq!(
                 cache

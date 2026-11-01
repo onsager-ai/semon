@@ -780,17 +780,34 @@ fn indexing_physical_stat_matches(
     physical == &expected
 }
 
+fn canonical_publication_paths(paths: &[String]) -> Vec<String> {
+    let mut paths = paths.to_vec();
+    paths.sort();
+    paths
+}
+
+fn publication_paths_text(paths: &[String]) -> Result<String, StoreError> {
+    serde_json::to_string(&canonical_publication_paths(paths))
+        .map_err(|error| StoreError::Data(error.to_string()))
+}
+
 const PUBLICATION_GROUP_HINT_KEY: &str = "catalog_semantic_group_admission";
-const PRESENTATION_CAPTURE_BUDGET: &str = "semantic_presentation_capture_budget";
+const PUBLICATION_GROUP_BUDGET: &str = "semantic_publication_group_budget";
 
 #[cfg(test)]
 std::thread_local! {
     static DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_PUBLICATION_RECORD_BUDGET_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
 pub(crate) fn drop_capture_overflow_receipt_once() {
     DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.set(true));
+}
+
+#[cfg(test)]
+pub(crate) fn force_publication_record_budget_once() {
+    FORCE_PUBLICATION_RECORD_BUDGET_ONCE.with(|value| value.set(true));
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1341,7 +1358,7 @@ fn group_current(
     batch: &Batch,
     prepared: &PreparedSources,
 ) -> Result<bool, StoreError> {
-    let paths = serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+    let paths = publication_paths_text(&batch.paths)?;
     let keys = serde_json::to_string(&prepared.rows.iter().map(|row| &row.key).collect::<Vec<_>>())
         .map_err(|e| StoreError::Data(e.to_string()))?;
     // A selected source may not omit a replacement owner or an original owner.
@@ -1356,6 +1373,202 @@ fn lifecycle_current(prepared: &PreparedSources) -> bool {
         return prepared.relationships.retired_owners.is_empty();
     };
     authority.current().unwrap_or(false)
+}
+
+fn publication_projection_shape(
+    prepared: &PreparedSources,
+) -> Result<std::collections::BTreeMap<&str, &crate::model::summary::CatalogRow>, StoreError> {
+    if prepared
+        .rows
+        .iter()
+        .any(|row| row.query.is_some() && row.trace.is_none())
+    {
+        return Err(refuse("semantic_publication_trace_missing"));
+    }
+    let projection_rows: std::collections::BTreeMap<_, _> = prepared
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    let mut projection_keys = std::collections::BTreeSet::new();
+    let mut real_projection_keys = std::collections::BTreeSet::new();
+    let mut slot_bytes = 0usize;
+    for projection in &prepared.transcripts {
+        if !projection_keys.insert(&projection.key) {
+            return Err(refuse("semantic_publication_projection_budget"));
+        }
+        let row = projection_rows.get(projection.key.as_str());
+        if row.is_some() {
+            real_projection_keys.insert(projection.key.as_str().to_owned());
+        } else {
+            // Virtual stub transcripts are witness-only, but must be anchored
+            // by a real endpoint in the same prepared physical group.
+            let anchored_stub = prepared.relationships.relations.values().any(|relation| {
+                relation.stubs.iter().any(|stub| stub.key == projection.key)
+                    && (relation.from == projection.key
+                        || relation.to.as_ref() == Some(&projection.key))
+                    && std::iter::once(&relation.from)
+                        .chain(relation.to.iter())
+                        .any(|key| {
+                            projection_rows.contains_key(key.as_str())
+                                && prepared.relationships.endpoints.contains_key(key)
+                        })
+            });
+            if !anchored_stub {
+                return Err(refuse("semantic_publication_projection_owner"));
+            }
+        }
+        for slot in &projection.slots {
+            if slot.source_paths().iter().any(|path| {
+                row.is_none_or(|row| !row.sources.iter().any(|source| &source.path == *path))
+            }) {
+                return Err(refuse("semantic_publication_projection_source"));
+            }
+            slot_bytes = slot_bytes.saturating_add(
+                serde_json::to_vec(slot)
+                    .map_err(|error| StoreError::Data(error.to_string()))?
+                    .len(),
+            );
+            if slot_bytes > 1048576 {
+                return Err(refuse("semantic_publication_projection_budget"));
+            }
+        }
+    }
+    if !prepared.transcripts.is_empty() && real_projection_keys.len() != projection_rows.len() {
+        return Err(refuse("semantic_publication_projection_owner"));
+    }
+    Ok(projection_rows)
+}
+
+fn defer_oversized_publication_record(
+    tx: rusqlite::Transaction<'_>,
+    source: &AdmittedSource,
+    stage_epoch: Option<i64>,
+    batch: &Batch,
+    prepared: &PreparedSources,
+) -> Result<Outcome, StoreError> {
+    use crate::storage::catalog::CatalogPublicationHead;
+
+    if batch.phase != Phase::Publication
+        || stage_epoch != Some(batch.epoch)
+        || prepared.base_generation != batch.base_generation
+        || source.generation != batch.base_generation
+    {
+        return Ok(Outcome::Conflict);
+    }
+    source
+        .validate_publication(&tx)
+        .map_err(StoreError::Configured)?;
+    let ns = source.namespace();
+    let stage: Option<(String, Option<String>, i64, bool)> = tx
+        .query_row(
+            "SELECT runtime,original_generation,revision,resetting FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication'",
+            params![ns, batch.epoch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((runtime, original_generation, stage_revision, resetting)) = stage else {
+        return Ok(Outcome::Conflict);
+    };
+    if resetting
+        || runtime != batch.runtime
+        || stage_revision != batch.source_revision
+        || head(&tx).map_err(error)? != batch.base_generation
+    {
+        return Ok(Outcome::Conflict);
+    }
+    let publication_head =
+        super::publication::admitted_head(&tx, source).map_err(StoreError::Configured)?;
+    if publication_head
+        .base_generation()
+        .map_err(StoreError::Configured)?
+        != batch.base_generation
+    {
+        return Ok(Outcome::Conflict);
+    }
+    let revision: i64 = tx
+        .query_row(
+            "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+            [ns],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let pending: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",
+            [ns],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if revision != batch.source_revision
+        || pending
+        || !lifecycle_current(prepared)
+        || !reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        || super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)? != prepared.claims
+        || prepared.claims != batch.source_claims
+        || !group_current(&tx, ns, batch, prepared)?
+        || !selected_witnesses(&tx, ns, &batch.paths)?
+    {
+        return Ok(Outcome::Conflict);
+    }
+    // A stale receipt for this exact request must not be paired with a new
+    // packing hint. A previous committed group's receipt has different paths
+    // and is replaced by the next ordinary record UPSERT.
+    let selected_paths = canonical_publication_paths(&batch.paths);
+    let recorded_paths: Option<String> = tx
+        .query_row(
+            "SELECT paths FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2",
+            params![ns, batch.epoch],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let existing_receipt = if let Some(recorded) = recorded_paths {
+        let mut recorded: Vec<String> =
+            serde_json::from_str(&recorded).map_err(|error| StoreError::Data(error.to_string()))?;
+        recorded.sort();
+        recorded == selected_paths
+    } else {
+        false
+    };
+    if existing_receipt {
+        return Ok(Outcome::Conflict);
+    }
+    let groups = crate::events::store::semantic_stage::publication_group_count_with(
+        &plan::Plan { db: &tx, ns },
+        &batch.paths,
+    )
+    .map_err(error)?;
+    if groups == 0 {
+        return Ok(Outcome::Conflict);
+    }
+    if groups == 1 {
+        return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
+    }
+    let narrowed_groups = (groups / 2).max(1);
+    let max_groups = read_publication_group_hint(
+        &tx,
+        ns,
+        batch.epoch,
+        &runtime,
+        batch.source_revision,
+        original_generation.as_deref(),
+    )?
+    .map_or(narrowed_groups, |current| current.min(narrowed_groups));
+    write_publication_group_hint(
+        &tx,
+        ns,
+        &PublicationGroupHint {
+            epoch: batch.epoch,
+            runtime: batch.runtime.clone(),
+            source_revision: batch.source_revision,
+            original_generation,
+            max_groups,
+        },
+    )?;
+    tx.commit().map_err(error)?;
+    Ok(Outcome::Deferred)
 }
 
 struct ScopedProjection<'a> {
@@ -2159,7 +2372,7 @@ fn error(error: rusqlite::Error) -> StoreError {
     if let rusqlite::Error::ToSqlConversionFailure(cause) = &error
         && cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
     {
-        return refuse(PRESENTATION_CAPTURE_BUDGET);
+        return refuse(PUBLICATION_GROUP_BUDGET);
     }
     StoreError::Configured(failed(error))
 }
@@ -2191,11 +2404,10 @@ impl Stage {
         prepared: &PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         match self.publish_transaction(batch, prepared) {
-            Err(StoreError::Data(reason)) if reason == PRESENTATION_CAPTURE_BUDGET => {
+            Err(StoreError::Data(reason)) if reason == PUBLICATION_GROUP_BUDGET => {
                 #[cfg(test)]
                 if DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.replace(false)) {
-                    let paths = serde_json::to_string(&batch.paths)
-                        .map_err(|error| StoreError::Data(error.to_string()))?;
+                    let paths = publication_paths_text(&batch.paths)?;
                     self.db
                         .execute(
                             "DELETE FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND paths=?3",
@@ -2280,8 +2492,7 @@ impl Stage {
         if pending {
             return Ok((Outcome::Conflict, None));
         }
-        let selected_paths = serde_json::to_string(&batch.paths)
-            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let selected_paths = publication_paths_text(&batch.paths)?;
         let staged: Vec<String> = tx
             .prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65")
             .map_err(error)?
@@ -2384,13 +2595,7 @@ impl Stage {
         {
             return Err(refuse("semantic_publication_component_budget"));
         }
-        if prepared
-            .rows
-            .iter()
-            .any(|row| row.query.is_some() && row.trace.is_none())
-        {
-            return Err(refuse("semantic_publication_trace_missing"));
-        }
+        let projection_rows = publication_projection_shape(prepared)?;
         let database = self
             .source
             .config
@@ -2401,63 +2606,6 @@ impl Stage {
             crate::native_timing::enabled(),
             database,
         );
-        let projection_rows: std::collections::BTreeMap<_, _> =
-            prepared.rows.iter().map(|r| (r.key.as_str(), r)).collect();
-        let mut projection_keys = std::collections::BTreeSet::new();
-        let mut real_projection_keys = std::collections::BTreeSet::new();
-        let mut slot_bytes = 0usize;
-        for projection in &prepared.transcripts {
-            // 64 bounds source/owner admission, not a native transcript's
-            // length. Slot work is bounded by the aggregate byte budget below,
-            // as the shared writer accepts complete multi-page transcripts.
-            if !projection_keys.insert(&projection.key) {
-                return Err(refuse("semantic_publication_projection_budget"));
-            }
-            let row = projection_rows.get(projection.key.as_str());
-            if row.is_some() {
-                real_projection_keys.insert(&projection.key);
-            } else {
-                // Ordinary slot publication skips virtual trace endpoints. Keep
-                // their exact model witness, but never give them Raw membership
-                // or a Catalog/slot row. The real anchor is independently checked
-                // against this namespace's staged identity below, and the entire
-                // relation/projection payload must match the recorded witness.
-                let anchored_stub = prepared.relationships.relations.values().any(|relation| {
-                    relation.stubs.iter().any(|stub| stub.key == projection.key)
-                        && (relation.from == projection.key
-                            || relation.to.as_ref() == Some(&projection.key))
-                        && std::iter::once(&relation.from)
-                            .chain(relation.to.iter())
-                            .any(|key| {
-                                projection_rows.contains_key(key.as_str())
-                                    && prepared.relationships.endpoints.contains_key(key)
-                            })
-                });
-                if !anchored_stub {
-                    return Err(refuse("semantic_publication_projection_owner"));
-                }
-            }
-            for slot in &projection.slots {
-                if slot
-                    .source_paths()
-                    .iter()
-                    .any(|path| row.is_none_or(|row| !row.sources.iter().any(|s| &s.path == *path)))
-                {
-                    return Err(refuse("semantic_publication_projection_source"));
-                }
-                slot_bytes = slot_bytes.saturating_add(
-                    serde_json::to_vec(slot)
-                        .map_err(|e| StoreError::Data(e.to_string()))?
-                        .len(),
-                );
-                if slot_bytes > 1048576 {
-                    return Err(refuse("semantic_publication_projection_budget"));
-                }
-            }
-        }
-        if !prepared.transcripts.is_empty() && real_projection_keys.len() != projection_rows.len() {
-            return Err(refuse("semantic_publication_projection_owner"));
-        }
         let projection_witness = prepared
             .transcripts
             .iter()
@@ -2477,7 +2625,7 @@ impl Stage {
             .map_err(|e| StoreError::Data(e.to_string()))?;
         let metadata_bytes = metadata.iter().map(String::len).sum::<usize>();
         if metadata_bytes > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET {
-            return Err(refuse("semantic_publication_metadata_budget"));
+            return Err(refuse(PUBLICATION_GROUP_BUDGET));
         }
         let mut overview_budget =
             crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
@@ -2591,8 +2739,7 @@ impl Stage {
             eprintln!("semantic_publication_conflict reason=source_revision");
             return Ok((Outcome::Conflict, None));
         }
-        let selected_paths =
-            serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+        let selected_paths = publication_paths_text(&batch.paths)?;
         let staged:Vec<String>=tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65").map_err(error)?.query_map(params![ns,selected_paths],|r|r.get(0)).map_err(error)?.collect::<rusqlite::Result<_>>().map_err(error)?;
         let mut requested = batch.paths.clone();
         requested.sort();
@@ -2945,7 +3092,7 @@ impl Stage {
                 selected_observed_at,
             ) {
                 Err(StorageError::HistoryRetentionBounds) => {
-                    return Err(refuse(PRESENTATION_CAPTURE_BUDGET));
+                    return Err(refuse(PUBLICATION_GROUP_BUDGET));
                 }
                 Err(error) => return Err(StoreError::Configured(error)),
                 Ok(presentations) => presentations,
@@ -3123,7 +3270,7 @@ impl Stage {
         )
         .map_err(error)?;
         if prepared.rows.iter().all(|row| row.query.is_some())
-            && projection_keys.len() == prepared.rows.len()
+            && prepared.transcripts.len() == prepared.rows.len()
         {
             let complete: bool = tx.query_row("SELECT NOT EXISTS(SELECT 1 FROM main.files f WHERE f.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources s WHERE s.namespace=f.namespace AND s.source_path=f.path)) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND published=0) AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_prior_owners WHERE namespace=?1 AND published=0) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints e WHERE e.namespace=c.namespace AND e.session_key=c.session_key))",[ns],|r|r.get(0)).map_err(error)?;
             if complete || carried_listing {
@@ -4355,11 +4502,65 @@ impl Stage {
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
-            if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
-                return Err(refuse("semantic_context_budget"));
+            let record_budget_exceeded =
+                metadata.len().saturating_add(projections.len()) > 2 * 1048576;
+            #[cfg(test)]
+            let record_budget_exceeded = record_budget_exceeded
+                || FORCE_PUBLICATION_RECORD_BUDGET_ONCE.with(|value| value.replace(false));
+            if record_budget_exceeded {
+                #[cfg(test)]
+                {
+                    let physical_group_count =
+                        crate::events::store::semantic_stage::publication_group_count_with(
+                            &plan::Plan { db: &tx, ns },
+                            &batch.paths,
+                        )
+                        .ok();
+                    let max_owner_trace_witness_bytes = prepared
+                        .rows
+                        .iter()
+                        .filter_map(|row| row.trace.as_ref().map(|trace| (row, trace)))
+                        .try_fold(0usize, |max_bytes, (row, trace)| {
+                            serde_json::to_vec(&trace.publication_witness(row))
+                                .ok()
+                                .map(|bytes| max_bytes.max(bytes.len()))
+                        });
+                    let transcript_slot_bytes =
+                        prepared
+                            .transcripts
+                            .iter()
+                            .try_fold(0usize, |total, projection| {
+                                projection.slots.iter().try_fold(total, |total, slot| {
+                                    serde_json::to_vec(slot)
+                                        .ok()
+                                        .map(|bytes| total.saturating_add(bytes.len()))
+                                })
+                            });
+                    let show_bytes = |value: Option<usize>| {
+                        value.map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+                    };
+                    eprintln!(
+                        "semantic_publication_record_budget metadata_bytes={} model_witness_bytes={} combined_bytes={} limit_bytes={} physical_group_count={} max_owner_trace_witness_bytes={} transcript_slot_bytes={}",
+                        metadata.len(),
+                        projections.len(),
+                        metadata.len().saturating_add(projections.len()),
+                        2 * 1048576,
+                        physical_group_count
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+                        show_bytes(max_owner_trace_witness_bytes),
+                        show_bytes(transcript_slot_bytes),
+                    );
+                }
+                publication_projection_shape(prepared)?;
+                return defer_oversized_publication_record(
+                    tx,
+                    &self.source,
+                    self.epoch,
+                    batch,
+                    prepared,
+                );
             }
-            let paths =
-                serde_json::to_string(&batch.paths).map_err(|e| StoreError::Data(e.to_string()))?;
+            let paths = publication_paths_text(&batch.paths)?;
             tx.execute("INSERT INTO storage_semantic_model_batches VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,(SELECT original_generation FROM main.catalog_semantic_stage WHERE namespace=?1)) ON CONFLICT(namespace) DO UPDATE SET epoch=excluded.epoch,metadata=excluded.metadata,projections=excluded.projections,claims=excluded.claims,base_generation=excluded.base_generation,source_revision=excluded.source_revision,runtime=excluded.runtime,paths=excluded.paths,original_generation=excluded.original_generation",params![ns,batch.epoch,metadata,projections,claims,batch.base_generation,batch.source_revision,batch.runtime,paths]).map_err(error)?;
             #[cfg(test)]
             crate::events::store::configured::effect("semantic_model_record").map_err(error)?;

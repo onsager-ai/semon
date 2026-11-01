@@ -5722,7 +5722,112 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
         home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
     }
     let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let mut full_options = home.options.clone();
+    full_options.cache = home.root.join("full-origin-oracle.json");
+    let full_inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/alpha.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/beta.jsonl".into(),
+        },
+    ];
+    let mut full_cache = EventCache::open(&full_options.cache, &full_options.source).unwrap();
+    let full = prepare_sources(&full_options, &mut full_cache, &full_inputs, NOW).unwrap();
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let full_rows: BTreeMap<_, _> = full
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    let staged_rows: BTreeMap<_, _> = ["alpha", "beta"]
+        .into_iter()
+        .map(|owner| {
+            let metadata: String = db
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1 AND lifecycle='current'",
+                    [owner],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (owner, serde_json::from_str::<Value>(&metadata).unwrap())
+        })
+        .collect();
+    let selected_origin = |row: &Value, id: &str| {
+        row["query"]["selected"]["edges"]
+            .as_array()
+            .and_then(|edges| edges.iter().find(|edge| edge["id"].as_str() == Some(id)))
+            .map(|edge| edge["query_content"]["origin"].clone())
+            .unwrap_or(Value::Null)
+    };
+    let mut owned_origins = 0;
+    for (id, relation) in &full.relationships.relations {
+        let expected = relation
+            .query_content
+            .get("origin")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let (Some(sender), Some(receiver_key)) = (
+            full_rows.get(relation.from.as_str()),
+            relation.to.as_deref(),
+        ) && let Some(receiver) = full_rows.get(receiver_key)
+        {
+            let sender_origin = sender
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            let receiver_origin = receiver
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            assert_eq!(sender_origin, expected, "{id}: full build origin owner");
+            if !expected.is_null() {
+                owned_origins += 1;
+                assert!(
+                    sender
+                        .sources
+                        .iter()
+                        .any(|source| source.path.to_str() == expected["path"].as_str()),
+                    "{id}: origin source belongs to the full-build sender"
+                );
+                assert_eq!(
+                    receiver_origin,
+                    Value::Null,
+                    "{id}: full-build receiver does not own the origin"
+                );
+            }
+        }
+
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM catalog_semantic_relations WHERE relation_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let persisted: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(
+            persisted["query_content"]["origin"], expected,
+            "{id}: persisted selected origin recipe matches the full build"
+        );
+        if let Some(receiver_key) = relation.to.as_deref()
+            && full_rows.contains_key(relation.from.as_str())
+            && full_rows.contains_key(receiver_key)
+        {
+            for owner in [relation.from.as_str(), receiver_key] {
+                assert_eq!(
+                    selected_origin(&staged_rows[owner], id),
+                    expected,
+                    "{owner}: staged selected origin recipe matches the full build"
+                );
+            }
+        }
+    }
+    assert!(owned_origins > 0, "fixture has sender-owned origins");
     for turn in &oracle.turns {
         for edge in &turn.sent {
             let handoff = oracle.handoffs.iter().find(|h| h.id == *edge).unwrap();

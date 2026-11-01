@@ -5444,6 +5444,7 @@ impl<'a> Builder<'a> {
         &self,
         key: &str,
         turns: &[&Turn],
+        canonical_origins: Option<&BTreeMap<String, Ref>>,
         tx: &Transcript,
         saved: Option<&crate::slot_projection::Projection>,
     ) -> Value {
@@ -5638,7 +5639,12 @@ impl<'a> Builder<'a> {
                     "skip": preview.skip,
                 }));
             }
-            if let Some(turn) = turns
+            if h.out.from == key
+                && let Some(at) =
+                    canonical_origins.and_then(|origins| origins.get(&h.out.id).copied())
+            {
+                fields["origin"] = recipe(at, "prompt");
+            } else if let Some(turn) = turns
                 .iter()
                 .find(|turn| turn.sid == key && turn.sent.contains(&h.out.id))
             {
@@ -5838,7 +5844,7 @@ impl<'a> Builder<'a> {
     /// Complete native receipts are needed even when their edges belong to a
     /// different message page. These temporary boundaries carry no sender claim
     /// and never enter the staged relationships or published projection.
-    fn complete_sender_turns(&mut self) -> io::Result<Option<Vec<Turn>>> {
+    fn complete_sender_turns(&mut self) -> io::Result<Option<(Vec<Turn>, BTreeMap<String, Ref>)>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
         };
@@ -5896,16 +5902,18 @@ impl<'a> Builder<'a> {
             }
         }
         let original = self.handoffs.len();
+        let mut synthetic_starts = BTreeMap::new();
         for at in &boundaries {
             let found = event(self.files, *at);
             let receiver = self.of_file[at.0];
             let source = relay_msg_id(found)
                 .map(|id| format!("relay:{id}"))
                 .unwrap_or_else(|| format!("relay:recv:{}:{}", self.files[at.0].id, found.o));
+            let id = stable_id("r", &source);
             let index = self.handoffs.len();
             self.handoffs.push(H {
                 out: Handoff::new(
-                    stable_id("r", &source),
+                    id.clone(),
                     "relay",
                     (String::new(), self.sessions[receiver].key.clone()),
                     found.t.unwrap_or(self.sessions[receiver].out.start),
@@ -5920,16 +5928,39 @@ impl<'a> Builder<'a> {
                 inline: false,
             });
             self.placed.insert(*at, vec![(index, Place::In)]);
+            synthetic_starts.insert(id, *at);
         }
         let mut turns = Vec::new();
+        let mut origins = BTreeMap::new();
         for sender in senders {
-            turns.extend(self.split(sender, &self.entries(sender)).0);
+            let completed = self.split(sender, &self.entries(sender)).0;
+            for turn in &completed {
+                let Some(start) = turn.start.as_deref() else {
+                    continue;
+                };
+                let at = synthetic_starts.get(start).copied().or_else(|| {
+                    self.placed.iter().find_map(|(at, entries)| {
+                        entries
+                            .iter()
+                            .any(|(handoff, place)| {
+                                self.handoffs[*handoff].out.id == start && *place == Place::In
+                            })
+                            .then_some(*at)
+                    })
+                });
+                if let Some(at) = at {
+                    for edge in &turn.sent {
+                        origins.insert(edge.clone(), at);
+                    }
+                }
+            }
+            turns.extend(completed);
         }
         for at in boundaries {
             self.placed.remove(&at);
         }
         self.handoffs.truncate(original);
-        Ok(Some(turns))
+        Ok(Some((turns, origins)))
     }
 
     /// A stub has no transcript of its own: it shows the handoffs that name
@@ -9333,6 +9364,11 @@ fn build_sources_inner(
             }
         }
     });
+    let completed_sender_turns = if matches!(target, BuildTarget::Sources) {
+        builder.complete_sender_turns()?
+    } else {
+        None
+    };
     let post_started = std::time::Instant::now();
     let started = measurements.start();
     let mut handoffs: Vec<Handoff> = builder
@@ -9607,6 +9643,7 @@ fn build_sources_inner(
                                 builder.overview_content(
                                     &row.key,
                                     selected_turns,
+                                    completed_sender_turns.as_ref().map(|(_, origins)| origins),
                                     tx,
                                     projections_by_key.get(row.key.as_str()).copied(),
                                 )
@@ -9714,11 +9751,13 @@ fn build_sources_inner(
     }
     match target {
         BuildTarget::Sources => {
-            let sender_turns = builder.complete_sender_turns()?;
             let mut relationships = relation_stage::Context::capture(
                 &builder,
                 published_facts.as_ref(),
-                sender_turns.as_deref().unwrap_or(&turns),
+                completed_sender_turns
+                    .as_ref()
+                    .map(|(turns, _)| turns.as_slice())
+                    .unwrap_or(&turns),
                 catalog.as_deref().expect("source catalog captured"),
             )?;
             if let Some(replay) =

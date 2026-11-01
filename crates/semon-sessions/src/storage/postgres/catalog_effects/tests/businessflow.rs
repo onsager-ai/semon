@@ -2345,7 +2345,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812802000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres model batch is recorded");
         let current_binding = pg.query_runtime_binding().unwrap().unwrap();
         assert_eq!(current_binding.namespace, binding.namespace);
         assert_eq!(current_binding.admission, binding.admission);
@@ -4012,7 +4013,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812807000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres continuation batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let ack = resumed
                 .publish_semantic_catalog(&batch, model.prepared())
@@ -5172,7 +5174,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812803000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres moved batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             let rows = model.prepared().rows.clone();
             let ack = moved_cache
@@ -5668,7 +5671,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812805000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres Facts batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(
                 serde_json::to_string(&model.prepared().rows)
@@ -5905,7 +5909,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     &batch,
                     at,
                 )
-                .unwrap();
+                .unwrap()
+                .expect("Postgres withdrawal batch is recorded");
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 // Each bounded custody advance commits as a Deferred checkpoint;
                 // the qualified head is unchanged until the final CAS publishes.
@@ -6470,7 +6475,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812809000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres catchup batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             break (batch, model);
         }
@@ -7323,7 +7329,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &batch,
                 1790812812000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("Postgres final catchup batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             break (batch, model);
         }

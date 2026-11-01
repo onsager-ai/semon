@@ -2688,7 +2688,7 @@ impl EventCache {
         inputs: &[crate::Input],
         batch: &crate::model::relation_stage::Batch,
         now: i64,
-    ) -> io::Result<crate::model::SemanticModelBatch> {
+    ) -> io::Result<Option<crate::model::SemanticModelBatch>> {
         let model = match crate::model::prepare_semantic_batch(options, self, inputs, batch, now) {
             Ok(model) => model,
             Err(error) => {
@@ -2701,17 +2701,20 @@ impl EventCache {
                 return Err(error);
             }
         };
-        if self.record_semantic_batch(batch, model.prepared())? != Outcome::Written {
-            let error = io::Error::other("semantic model stage changed");
-            #[cfg(test)]
-            diagnose_staged_method_refusal(
-                "prepare_semantic_model_batch",
-                Some(batch.phase),
-                &error,
-            );
-            return Err(error);
+        match self.record_semantic_batch(batch, model.prepared())? {
+            Outcome::Written => Ok(Some(model)),
+            Outcome::Deferred => Ok(None),
+            _ => {
+                let error = io::Error::other("semantic model stage changed");
+                #[cfg(test)]
+                diagnose_staged_method_refusal(
+                    "prepare_semantic_model_batch",
+                    Some(batch.phase),
+                    &error,
+                );
+                Err(error)
+            }
         }
-        Ok(model)
     }
 
     pub(crate) fn publish_semantic_catalog(
