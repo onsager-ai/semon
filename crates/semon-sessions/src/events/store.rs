@@ -3199,7 +3199,9 @@ impl SqliteStore {
             eprintln!("catalog_publication_probe stage=history_composition");
             let continuations = publication
                 .observations
-                .and_then(crate::storage::selected::PresentationObservations::verified_continuations)
+                .and_then(
+                    crate::storage::selected::PresentationObservations::verified_continuations,
+                )
                 .unwrap_or(&[]);
             let preserved = crate::storage::catalog::preserve_rows(
                 &history,

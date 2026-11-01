@@ -1478,8 +1478,7 @@ struct CachedFile {
 #[derive(Default)]
 pub(crate) struct EventCache {
     files: BTreeMap<String, CachedFile>,
-    source_continuations:
-        BTreeMap<String, crate::storage::catalog::VerifiedSourceContinuation>,
+    source_continuations: BTreeMap<String, crate::storage::catalog::VerifiedSourceContinuation>,
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,

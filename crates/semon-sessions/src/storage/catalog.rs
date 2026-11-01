@@ -472,9 +472,10 @@ fn replaces_original(
         if old.sources.contains(source) {
             return false;
         }
-        let mut previous = old.sources.iter().filter(|prior| {
-            prior.path == source.path && prior.native_id == source.native_id
-        });
+        let mut previous = old
+            .sources
+            .iter()
+            .filter(|prior| prior.path == source.path && prior.native_id == source.native_id);
         let Some(previous) = previous.next() else {
             return true;
         };

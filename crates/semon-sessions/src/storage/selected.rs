@@ -1182,9 +1182,10 @@ fn catalog_continuation_digest_is_bounded_and_deserialization_fails_closed() {
 
     let mut oversized = PresentationObservations::default();
     oversized
-        .set_source_continuations(
-            vec![proof; crate::storage::catalog::SOURCE_CONTINUATION_LIMIT + 1],
-        )
+        .set_source_continuations(vec![
+            proof;
+            crate::storage::catalog::SOURCE_CONTINUATION_LIMIT + 1
+        ])
         .unwrap();
     assert!(oversized.verified_continuations().is_none());
 }
