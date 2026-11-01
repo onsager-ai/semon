@@ -840,6 +840,7 @@ jobs:
         run: |
           result=0
           cargo test --locked -p semon-sessions --lib model::tests:: -- --nocapture > "$RUNNER_TEMP/native-model-tests.log" 2>&1 || result=$?
+          awk '/panicked at/ { remaining=6 } remaining { print; remaining-- } /^test result:/ || /^    model::tests::/ { print }' "$RUNNER_TEMP/native-model-tests.log" > "$RUNNER_TEMP/native-model-failures.log"
           cat "$RUNNER_TEMP/native-model-tests.log"
           exit "$result"
       - name: Retain native model identity regressions
@@ -847,4 +848,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: native-model-tests
-          path: ${{ runner.temp }}/native-model-tests.log
+          path: |
+            ${{ runner.temp }}/native-model-tests.log
+            ${{ runner.temp }}/native-model-failures.log
