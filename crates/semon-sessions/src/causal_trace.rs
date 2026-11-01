@@ -812,8 +812,8 @@ pub(crate) fn session_causal_trace_with_gate(
                 {
                     return Err(503);
                 }
-                let candidate_source = crate::retention::source_generation(&candidate.sources)
-                    .map_err(|_| 503u16)?;
+                let candidate_source =
+                    crate::retention::source_generation(&candidate.sources).map_err(|_| 503u16)?;
                 current_candidate = Some((candidate, candidate_source));
             }
 
@@ -826,8 +826,7 @@ pub(crate) fn session_causal_trace_with_gate(
             let participant_name_harness = row.harness.clone();
             let mut participant_name_native_id = None;
             let mut participant_name_source = source.clone();
-            if history_selected
-                && let Some((current, current_source)) = current_candidate.as_ref()
+            if history_selected && let Some((current, current_source)) = current_candidate.as_ref()
             {
                 let history_native_id = match row.native_ids.as_slice() {
                     [native_id]
@@ -845,7 +844,10 @@ pub(crate) fn session_causal_trace_with_gate(
                 if let Some(native_id) = history_native_id {
                     participant_name_native_id = Some(native_id.to_owned());
                     if current.harness == row.harness
-                        && current.sources.iter().any(|source| source.native_id == native_id)
+                        && current
+                            .sources
+                            .iter()
+                            .any(|source| source.native_id == native_id)
                     {
                         if !crate::native_resolution::valid_resolution_arguments(
                             source_key,
@@ -865,8 +867,8 @@ pub(crate) fn session_causal_trace_with_gate(
                             )
                             .map_err(|error| match error {
                                 crate::storage::StorageError::ScopeChanged
-                                | crate::storage::StorageError::NamespaceMismatch => 409,
-                                _ => 503,
+                                | crate::storage::StorageError::NamespaceMismatch => 409u16,
+                                _ => 503u16,
                             })?;
                         if let Some(encoded) = &observation.metadata {
                             if encoded.len() > bytes_left {
