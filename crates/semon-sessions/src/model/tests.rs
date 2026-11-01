@@ -4010,6 +4010,10 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
     let replayed_overview = serde_json::to_value(replayed_row.overview.as_ref().unwrap()).unwrap();
     let replayed_pointer = &replayed_overview["home"]["content"]["events"][&relation.id]["brief"];
     assert_eq!(replayed_pointer, &expected_pointer);
+    assert!(
+        replay.publication_guard(&cache).unwrap().is_some(),
+        "the prepared foreign source witness must qualify before mutation"
+    );
 
     let assert_refused = |cache: &mut EventCache, context: &relation_stage::Context| {
         let error = prepare_staged_sources(
