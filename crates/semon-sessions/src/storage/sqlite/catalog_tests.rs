@@ -2267,7 +2267,12 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
             "sid=session-00000&limit=1",
             None,
         );
-        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
         let value: Value = serde_json::from_slice(&reply.body).unwrap();
         json!({
             "details": {
@@ -2347,11 +2352,7 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
             .map(|metadata| {
                 serde_json::from_str::<crate::model::summary::CatalogRow>(metadata).unwrap()
             })
-            .and_then(|row| {
-                row.sources
-                    .into_iter()
-                    .find(|source| source.path == path)
-            });
+            .and_then(|row| row.sources.into_iter().find(|source| source.path == path));
         let history_metadata: Option<String> = db
             .query_row(
                 "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
@@ -2378,13 +2379,19 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
 
             let snapshot = unrelated_snapshot(&db);
             assert!(!snapshot.1.is_empty());
-            assert!(snapshot.2.is_some(), "unrelated row keeps its runtime observation");
+            assert!(
+                snapshot.2.is_some(),
+                "unrelated row keeps its runtime observation"
+            );
             assert!(
                 snapshot.3.as_ref().is_some_and(|grant| grant.3.is_none()),
                 "large Catalog keeps the existing runtime-capture bound"
             );
             if let Some(previous) = &unrelated_before {
-                assert_eq!(&snapshot, previous, "unrelated source scope/runtime/grant changed");
+                assert_eq!(
+                    &snapshot, previous,
+                    "unrelated source scope/runtime/grant changed"
+                );
             } else {
                 unrelated_before = Some(snapshot);
                 completed_source = Some(source);
@@ -2400,7 +2407,10 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
             }
             completed_source = Some(source.clone());
             if ready {
-                assert_eq!(source.offset, source.size, "final Catalog source reaches EOF");
+                assert_eq!(
+                    source.offset, source.size,
+                    "final Catalog source reaches EOF"
+                );
                 complete = true;
                 break;
             }
@@ -2410,9 +2420,18 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
     }
     drop(work);
     evidence.retire();
-    assert!(complete, "full Catalog source did not finish bounded indexing");
-    assert!(partial_seen, "large source never published a partial prefix");
-    assert!(advances > 0, "large source never advanced its indexed prefix");
+    assert!(
+        complete,
+        "full Catalog source did not finish bounded indexing"
+    );
+    assert!(
+        partial_seen,
+        "large source never published a partial prefix"
+    );
+    assert!(
+        advances > 0,
+        "large source never advanced its indexed prefix"
+    );
     let original_source = completed_source.expect("completed Catalog source");
     assert_eq!(original_source.offset, physical_size);
     assert_eq!(
@@ -2441,13 +2460,17 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
             |row| row.get(0),
         )
         .unwrap();
-    let history: crate::model::summary::CatalogRow = serde_json::from_str(&history_metadata).unwrap();
+    let history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
     let history_source = history
         .sources
         .iter()
         .find(|source| source.path == path)
         .unwrap();
-    assert_eq!(history_source, &original_source, "real append retains original custody");
+    assert_eq!(
+        history_source, &original_source,
+        "real append retains original custody"
+    );
     let current_metadata: String = db
         .query_row(
             "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
@@ -2455,7 +2478,8 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
             |row| row.get(0),
         )
         .unwrap();
-    let current: crate::model::summary::CatalogRow = serde_json::from_str(&current_metadata).unwrap();
+    let current: crate::model::summary::CatalogRow =
+        serde_json::from_str(&current_metadata).unwrap();
     let current_source = current
         .sources
         .iter()
