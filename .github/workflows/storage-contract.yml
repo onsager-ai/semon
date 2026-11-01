@@ -124,6 +124,11 @@ jobs:
           result=0
           for test in \
             model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
+            model::tests::native_handoff_restart_reads_candidates_and_repairs_locations_without_event_replay \
+            model::tests::native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_without_event_replay \
+            model::tests::incompatible_or_damaged_description_rebuilds_without_losing_observations \
+            model::tests::cold_semantic_family_discovers_older_disconnected_native_key_collisions \
+            model::tests::staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications \
             model::tests::replay_equivalence_seed_from_env; do
