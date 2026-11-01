@@ -615,11 +615,11 @@ pub(crate) fn session_causal_trace_with_gate(
         let mut versions = Vec::new();
         let mut missing = TraceMissing::default();
         let mut bytes_left = 4 * 1024 * 1024;
-        let mut decode = |text: String| -> Result<Value, u16> {
-            if text.len() > bytes_left {
+        let decode = |text: String, bytes_left: &mut usize| -> Result<Value, u16> {
+            if text.len() > *bytes_left {
                 return Err(413);
             }
-            bytes_left -= text.len();
+            *bytes_left -= text.len();
             serde_json::from_str(&text).map_err(|_| 503u16)
         };
         while let Some((sid, tid)) = queue.pop_front() {
@@ -635,7 +635,7 @@ pub(crate) fn session_causal_trace_with_gate(
                 missing.other = true;
                 continue;
             };
-            let turn = decode(encoded)?;
+            let turn = decode(encoded, &mut bytes_left)?;
             if !sessions.contains_key(&sid) {
                 let (text,version,source):(String,String,String)=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END,generation,source_generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",[&sid],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).map_err(|_|503u16)?;
                 let metadata = crate::history_projection::catalog(&tx, &sid)
@@ -666,7 +666,7 @@ pub(crate) fn session_causal_trace_with_gate(
                     )
                     .optional()
                     .map_err(|_| 503u16)?;
-                let mut header = decode(text)?;
+                let mut header = decode(text, &mut bytes_left)?;
                 missing.other |= header["relationships_incomplete"].as_bool() == Some(true);
                 header["live_observation"] = json!(current.as_deref() == Some("current"));
                 sessions.insert(sid.clone(), header);
@@ -676,7 +676,7 @@ pub(crate) fn session_causal_trace_with_gate(
             {
                 let incoming:Option<String>=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,start],|row|row.get(0)).optional().map_err(|_|503u16)?;
                 if let Some(text) = incoming {
-                    edges.insert(start.to_string(), decode(text)?);
+                    edges.insert(start.to_string(), decode(text, &mut bytes_left)?);
                 } else {
                     missing.other = true;
                 }
@@ -688,7 +688,7 @@ pub(crate) fn session_causal_trace_with_gate(
             for id in ids {
                 let id = id.as_str().ok_or(503u16)?;
                 let encoded:String=tx.query_row("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM main.session_trace_edges WHERE namespace=semon_namespace() AND session_key=?1 AND edge_id=?2",params![sid,id],|row|row.get(0)).map_err(|_|503u16)?;
-                let edge = decode(encoded)?;
+                let edge = decode(encoded, &mut bytes_left)?;
                 if matches!(edge["kind"].as_str(), Some("spawn" | "relay"))
                     && let Some(target) = edge["to"].as_str()
                 {
@@ -746,7 +746,7 @@ pub(crate) fn session_causal_trace_with_gate(
             // Charge every returned relay header before any source/status
             // rejection can discard it. Unavailable peers share the same cap.
             let recorded_activity = match activity_header {
-                Some(encoded) => match decode(encoded) {
+                Some(encoded) => match decode(encoded, &mut bytes_left) {
                     Ok(header) => trace_participant_activity(&header),
                     Err(413) => return Err(413),
                     Err(_) => TraceParticipantActivity::Unavailable,
@@ -760,28 +760,183 @@ pub(crate) fn session_causal_trace_with_gate(
             } else {
                 crate::storage::catalog::CatalogObservationOwner::Catalog
             };
-            let metadata = history_metadata.or(tx
-                    .query_row(
-                        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
-                        [&sid],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()
-                    .map_err(|_| 503u16)?
-                    .flatten());
+            // Keep the physical Current candidate beside History's trace row.
+            // The old `Option::or` evaluated this query eagerly, but discarded
+            // its result whenever retained metadata existed.
+            let current_catalog: Option<(String, i64, Option<String>)> = tx
+                .query_row(
+                    "SELECT lifecycle,octet_length(metadata),CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+                    [&sid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(|_| 503u16)?;
+            let history_selected = history_metadata.is_some();
+            if !history_selected
+                && current_catalog
+                    .as_ref()
+                    .is_some_and(|(_, size, _)| *size > 1_048_576)
+            {
+                return Err(413);
+            }
+            let current_metadata = current_catalog
+                .as_ref()
+                .and_then(|(_, _, metadata)| metadata.clone());
+            let metadata = history_metadata.clone().or(current_metadata.clone());
             let Some(metadata) = metadata else {
                 missing.other = true;
                 continue;
             };
             let row: crate::model::summary::CatalogRow =
-                serde_json::from_value(decode(metadata)?).map_err(|_| 503u16)?;
+                serde_json::from_value(decode(metadata, &mut bytes_left)?).map_err(|_| 503u16)?;
             if row.key != sid
                 || crate::retention::source_generation(&row.sources).map_err(|_| 503u16)? != source
             {
                 missing.other = true;
                 continue;
             }
-            versions.push(json!([sid, version]));
+            let mut current_candidate = None;
+            if history_selected
+                && let Some((lifecycle, size, _)) = current_catalog.as_ref()
+                && lifecycle == "current"
+            {
+                if *size > 1_048_576 {
+                    return Err(413);
+                }
+                let encoded = current_metadata.clone().ok_or(503u16)?;
+                let candidate: crate::model::summary::CatalogRow =
+                    serde_json::from_value(decode(encoded, &mut bytes_left)?)
+                        .map_err(|_| 503u16)?;
+                if candidate.key != sid
+                    || candidate.lifecycle != crate::model::summary::CatalogLifecycle::Current
+                {
+                    return Err(503);
+                }
+                let candidate_source = crate::retention::source_generation(&candidate.sources)
+                    .map_err(|_| 503u16)?;
+                current_candidate = Some((candidate, candidate_source));
+            }
+
+            let mut participant_name = row.name.clone();
+            let mut participant_name_scope = if history_selected {
+                "history"
+            } else {
+                "catalog"
+            };
+            let mut participant_name_harness = row.harness.clone();
+            let mut participant_name_native_id = None;
+            let mut participant_name_source = source.clone();
+            if history_selected
+                && let Some((current, current_source)) = current_candidate.as_ref()
+            {
+                let selected_history = crate::catalog::catalog_selection_in_snapshot(
+                    options,
+                    source_key,
+                    &sid,
+                    crate::CatalogReadScope::RetainedHistory,
+                    &snapshot,
+                )
+                .map_err(|error| {
+                    if error == crate::CatalogIdentityError::ScopeChanged {
+                        409
+                    } else {
+                        503
+                    }
+                })?;
+                if let Some((history_identity, _)) = selected_history {
+                    if history_identity.generation != identity.generation {
+                        return Err(409);
+                    }
+                    if history_identity.catalog_key != sid
+                        || history_identity.harness != row.harness
+                        || history_identity.read_scope != crate::CatalogReadScope::RetainedHistory
+                    {
+                        return Err(503);
+                    }
+                    if history_identity.owner_qualification
+                        == crate::CatalogOwnerQualification::Qualified
+                        && let Some(native_id) = history_identity.native_id.as_deref()
+                    {
+                        participant_name_harness = history_identity.harness.clone();
+                        participant_name_native_id = Some(native_id.to_owned());
+                        if current.harness == history_identity.harness
+                            && current.sources.iter().any(|source| source.native_id == native_id)
+                        {
+                            if !crate::native_resolution::valid_resolution_arguments(
+                                source_key,
+                                &history_identity.harness,
+                                native_id,
+                            ) {
+                                return Err(503);
+                            }
+                            let navigation = crate::storage::navigation_store(binding.clone());
+                            let observation =
+                                crate::storage::navigation::NativeNavigationStore::native_resolution(
+                                    navigation.as_ref(),
+                                    &history_identity.harness,
+                                    native_id,
+                                    crate::CatalogReadScope::Current,
+                                    Some(&identity.generation),
+                                )
+                                .map_err(|error| match error {
+                                    crate::storage::StorageError::ScopeChanged
+                                    | crate::storage::StorageError::NamespaceMismatch => 409,
+                                    _ => 503,
+                                })?;
+                            if let Some(encoded) = &observation.metadata {
+                                if encoded.len() > bytes_left {
+                                    return Err(413);
+                                }
+                                bytes_left -= encoded.len();
+                            }
+                            let mut resolution = crate::CatalogNativeResolution {
+                                state: crate::CatalogNativeResolutionState::Unavailable,
+                                source_key: source_key.to_owned(),
+                                harness: history_identity.harness.clone(),
+                                native_id: native_id.to_owned(),
+                                read_scope: crate::CatalogReadScope::Current,
+                                catalog_key: None,
+                                generation: None,
+                            };
+                            crate::native_resolution::apply_observation(
+                                &mut resolution,
+                                Some(options),
+                                &observation,
+                            )
+                            .map_err(|_| 503u16)?;
+                            if resolution.state == crate::CatalogNativeResolutionState::Resolved
+                                && resolution.catalog_key.as_deref() == Some(sid.as_str())
+                                && resolution.harness == history_identity.harness
+                                && resolution.native_id == native_id
+                                && resolution.read_scope == crate::CatalogReadScope::Current
+                                && resolution.generation.as_deref()
+                                    == Some(identity.generation.as_str())
+                            {
+                                participant_name = current.name.clone();
+                                participant_name_scope = "current";
+                                participant_name_harness = current.harness.clone();
+                                participant_name_source.clone_from(current_source);
+                            }
+                        }
+                    }
+                }
+            }
+            let name_version = format!(
+                "{:x}",
+                Sha256::digest(
+                    json!([
+                        sid,
+                        participant_name_scope,
+                        participant_name_harness,
+                        participant_name_native_id,
+                        participant_name_source,
+                        participant_name,
+                    ])
+                    .to_string()
+                    .as_bytes()
+                )
+            );
+            versions.push(json!([sid, version, name_version]));
             if relay_peers.contains(&sid) {
                 let history_projection_qualified = observation_owner
                     == crate::storage::catalog::CatalogObservationOwner::History
@@ -812,7 +967,7 @@ pub(crate) fn session_causal_trace_with_gate(
                 }
                 participant_summaries.insert(sid.clone(), summary);
             }
-            participants.insert(sid, row.name);
+            participants.insert(sid, participant_name);
         }
         let mut owners: BTreeSet<_> = edges
             .values()

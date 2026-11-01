@@ -52,7 +52,7 @@ pub fn session_catalog_resolve_native(
     .map_err(Into::into)
 }
 
-fn valid_resolution_arguments(source_key: &str, harness: &str, native_id: &str) -> bool {
+pub(crate) fn valid_resolution_arguments(source_key: &str, harness: &str, native_id: &str) -> bool {
     !source_key.is_empty()
         && source_key.len() <= 4096
         && !native_id.is_empty()
