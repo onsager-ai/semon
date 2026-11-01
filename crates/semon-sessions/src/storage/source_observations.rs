@@ -15,6 +15,10 @@ pub struct CatalogSearchLookup<'a> {
 }
 
 pub const CATALOG_SEARCH_LIMIT: usize = 64;
+// Queue state may retain one bounded closure per bounded ticket. This is not
+// a source mutation or preparation batch limit.
+pub(crate) const CATALOG_PENDING_EXCLUSION_LIMIT: usize =
+    CATALOG_SEARCH_LIMIT * CATALOG_SEARCH_LIMIT;
 
 #[derive(Debug)]
 pub struct CatalogPendingSearch<'a> {
@@ -358,6 +362,19 @@ pub(crate) fn validate_intent(
 
 pub(crate) fn validate_paths(paths: &[String]) -> Result<(), StorageError> {
     if paths.len() > 256 || paths.iter().any(|p| p.is_empty() || p.len() > 4096) {
+        return Err(StorageError::InvalidArguments);
+    }
+    Ok(())
+}
+
+/// Validate the union of paths retained by bounded search tickets. Queue
+/// exclusions are scheduling metadata, not a source mutation or preparation
+/// batch, so they use the queue's 64-by-64 bound instead of the generic path
+/// mutation limit.
+pub(crate) fn validate_catalog_pending_exclusions(paths: &[String]) -> Result<(), StorageError> {
+    if paths.len() > CATALOG_PENDING_EXCLUSION_LIMIT
+        || paths.iter().any(|path| path.is_empty() || path.len() > 4096)
+    {
         return Err(StorageError::InvalidArguments);
     }
     Ok(())

@@ -458,15 +458,18 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
     assert!(!batch.search_checked);
 
     let mut fifo = journal(&pool, "selector-fifo");
-    let fifo_paths = ["first", "second", "kept", "hint"]
-        .into_iter()
-        .map(str::to_owned)
+    // Five tickets can each retain 64 distinct pending paths.
+    let excluded = (0..5)
+        .flat_map(|ticket| (0..64).map(move |path| format!("waiting-{ticket:02}-{path:02}")))
         .collect::<Vec<_>>();
-    discover("selector-fifo", &fifo_paths, false)
-        .apply(&mut fifo)
-        .unwrap();
-    let hint = ["hint".to_owned()];
-    let excluded = ["first".to_owned(), "second".to_owned()];
+    let mut fifo_paths = excluded.clone();
+    fifo_paths.extend(["fifo-a".to_owned(), "hint-z".to_owned()]);
+    for paths in fifo_paths.chunks(256) {
+        discover("selector-fifo", paths, false)
+            .apply(&mut fifo)
+            .unwrap();
+    }
+    let hint = ["hint-z".to_owned()];
     let yield_search = CatalogPendingSearch {
         paths: &hint,
         retry: None,
@@ -477,9 +480,10 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
         .pending_catalog_sources(1, Some(&yield_search))
         .unwrap();
     assert_eq!(batch.tier, CatalogPendingTier::Fifo);
-    assert_eq!(batch.paths, vec!["kept"]);
+    assert_eq!(batch.paths, vec!["fifo-a"]);
     assert!(batch.fallback.is_empty());
     assert!(!batch.search_checked);
+    assert!(fifo.claims(&hint).unwrap()[0].1.is_some());
 
     let search = CatalogPendingSearch {
         yield_to_fifo: false,
@@ -487,9 +491,88 @@ fn pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_lim
     };
     let batch = fifo.pending_catalog_sources(1, Some(&search)).unwrap();
     assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
-    assert_eq!(batch.paths, vec!["hint"]);
-    assert_eq!(batch.fallback, vec!["kept"]);
+    assert_eq!(batch.paths, vec!["hint-z"]);
+    assert_eq!(batch.fallback, vec!["fifo-a"]);
     assert!(batch.search_checked);
+}
+
+#[test]
+fn pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = "selector-exclusion-bound";
+    let mut store = journal(&pool, namespace);
+    let hint = ["pending-hint".to_owned()];
+    discover(namespace, &hint, false)
+        .apply(&mut store)
+        .unwrap();
+    let before = store.claims(&hint).unwrap();
+
+    let exclusion_limit =
+        crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
+    let excluded = (0..exclusion_limit)
+        .map(|index| format!("excluded-{index:04}"))
+        .collect::<Vec<_>>();
+    let accepted = CatalogPendingSearch {
+        paths: &hint,
+        retry: None,
+        yield_to_fifo: false,
+        excluded: &excluded,
+    };
+    let batch = store
+        .pending_catalog_sources(1, Some(&accepted))
+        .unwrap();
+    assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
+    assert_eq!(batch.paths, vec!["pending-hint"]);
+
+    let too_many = (0..=exclusion_limit)
+        .map(|index| format!("excluded-{index:04}"))
+        .collect::<Vec<_>>();
+    let oversized = CatalogPendingSearch {
+        excluded: &too_many,
+        ..accepted
+    };
+    assert!(matches!(
+        store.pending_catalog_sources(1, Some(&oversized)),
+        Err(StorageError::InvalidArguments)
+    ));
+    let invalid_path = [String::new()];
+    let invalid = CatalogPendingSearch {
+        excluded: &invalid_path,
+        ..oversized
+    };
+    assert!(matches!(
+        store.pending_catalog_sources(1, Some(&invalid)),
+        Err(StorageError::InvalidArguments)
+    ));
+    assert!(store
+        .claims(&too_many[..256])
+        .unwrap()
+        .iter()
+        .all(|(_, revision)| revision.is_none()));
+    let overlong_path = ["x".repeat(4097)];
+    let invalid = CatalogPendingSearch {
+        excluded: &overlong_path,
+        ..invalid
+    };
+    assert!(matches!(
+        store.pending_catalog_sources(1, Some(&invalid)),
+        Err(StorageError::InvalidArguments)
+    ));
+    assert_eq!(store.claims(&hint).unwrap(), before);
+
+    let too_many_mutations = (0..257)
+        .map(|index| format!("mutation-{index:03}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        discover(namespace, &too_many_mutations, false).apply(&mut store),
+        Err(StorageError::InvalidArguments)
+    );
+    assert_eq!(store.claims(&hint).unwrap(), before);
+    assert!(store
+        .claims(&too_many_mutations[..256])
+        .unwrap()
+        .iter()
+        .all(|(_, revision)| revision.is_none()));
 }
 
 #[test]
