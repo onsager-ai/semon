@@ -88,7 +88,16 @@ jobs:
             model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
             model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
             model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
-            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable; do
+            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
+            events::store::configured::tests::domain52::presentation_capture_overflow::aggregate_overflow_rolls_back_then_halves_and_rebinds_admission \
+            events::store::configured::tests::domain52::presentation_capture_overflow::stale_wider_oversized_retry_preserves_narrower_hint_and_prior_receipt \
+            events::store::configured::tests::domain52::presentation_capture_overflow::later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch \
+            events::store::configured::tests::domain52::presentation_capture_overflow::recorded_same_selection_blocks_permuted_oversized_request \
+            events::store::configured::tests::domain52::presentation_capture_overflow::oversized_identity_or_claim_mismatch_does_not_write_a_hint \
+            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_record_refuses_without_a_receipt_or_hint \
+            events::store::configured::tests::domain52::presentation_capture_overflow::overflow_rejects_a_missing_exact_model_receipt \
+            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_physical_group_keeps_its_receipt_and_stays_pending \
+            native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0
