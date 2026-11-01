@@ -11345,6 +11345,76 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
 }
 
 #[test]
+fn semantic_index_rejects_source_change_after_producer_preparation() {
+    let home = Home::new();
+    home.codex(
+        "index-claim-race",
+        json!({}),
+        &[codex_user(ts(14, 0), "before producer preparation")],
+    );
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert_eq!(inputs.len(), 1);
+    let input = inputs[0].clone();
+    let path = input.full_path(&home.options).to_string_lossy().into_owned();
+    let paths = vec![path.clone()];
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let batch = cache.semantic_batch(64).unwrap().unwrap();
+    assert_eq!(batch.phase, relation_stage::Phase::Indexing);
+    let model =
+        prepare_semantic_batch(&home.options, &mut cache, &inputs, &batch, NOW).unwrap();
+    assert_eq!(model.prepared().indexed_sources.len(), 1);
+    let prepared_claims = model.prepared().claims.clone();
+    assert_eq!(cache.catalog_claims(&paths).unwrap(), prepared_claims);
+    let staged_claim: Option<Option<i64>> = {
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        db.query_row(
+            "SELECT claim FROM catalog_semantic_sources WHERE source_path=?1 AND index_done=0",
+            [&path],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    };
+    assert!(staged_claim.is_some(), "the Index path remains pending");
+    assert_ne!(
+        staged_claim,
+        Some(prepared_claims[0].1),
+        "ordinary Index scan advances the stage's pre-scan claim"
+    );
+
+    let from = fs::metadata(&path).unwrap().len();
+    let intent = crate::SessionSourceWrite::begin(&home.options, &input, None, from).unwrap();
+    let line = format!("{}\n", codex_user(ts(14, 1), "after producer preparation"));
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(line.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    intent.complete(from + line.len() as u64).unwrap();
+    assert_ne!(cache.catalog_claims(&paths).unwrap(), prepared_claims);
+
+    assert_eq!(
+        cache
+            .record_semantic_batch(&batch, model.prepared())
+            .unwrap(),
+        crate::events::Outcome::Conflict,
+        "Index must refuse a source claim changed after preparation"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let index_done: bool = db
+        .query_row(
+            "SELECT index_done FROM catalog_semantic_sources WHERE source_path=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!index_done, "a stale Index batch cannot acknowledge its source");
+}
+
+#[test]
 fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     let mut home = acknowledged_semantic_family();
     // Exceed the producer's 4 MiB scan budget with individually bounded native
@@ -11532,11 +11602,18 @@ fn semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch() {
     file.sync_all().unwrap();
     intent.complete(from + line.len() as u64).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
-    assert_ne!(
-        cache.finish_semantic_stage(old_epoch).unwrap(),
-        crate::events::Outcome::Written,
-        "old epoch accepted a newly announced revision of an acknowledged source"
-    );
+    match cache.finish_semantic_stage(old_epoch) {
+        Ok(outcome) => assert_ne!(
+            outcome,
+            crate::events::Outcome::Written,
+            "old epoch accepted a newly announced revision of an acknowledged source"
+        ),
+        Err(error) => assert_eq!(
+            error.to_string(),
+            crate::storage::StorageError::Conflict.to_string(),
+            "old epoch finish failed for an unexpected reason"
+        ),
+    }
     drop(cache);
     let mut reset = false;
     let mut complete = false;

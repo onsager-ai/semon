@@ -135,7 +135,11 @@ jobs:
             model::tests::cold_codex_family_qualifies_pending_copilot_native_collision \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications \
-            model::tests::replay_equivalence_seed_from_env; do
+            model::tests::replay_equivalence_seed_from_env \
+            model::tests::semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog \
+            model::tests::semantic_large_native_source_own_index_writes_survive_every_owner_restart \
+            model::tests::semantic_index_rejects_source_change_after_producer_preparation \
+            model::tests::semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch; do
             case_result=0
             if [ "$test" = "model::tests::replay_equivalence_seed_from_env" ]; then
               SEMON_EQUIV_SEED=63 cargo test --locked -p semon-sessions --lib "$test" -- --ignored --exact --nocapture > "$RUNNER_TEMP/filename-owner-case.log" 2>&1 || case_result=$?

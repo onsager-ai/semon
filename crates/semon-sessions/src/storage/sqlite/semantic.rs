@@ -3691,6 +3691,7 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         let mut seen = std::collections::BTreeSet::new();
+        let mut indexed_claims = std::collections::BTreeMap::new();
         for (_, source) in &prepared.indexed_sources {
             let path = source.path.to_string_lossy().into_owned();
             if !batch.paths.contains(&path) || !seen.insert(path.clone()) {
@@ -3725,11 +3726,26 @@ impl Stage {
                 return Ok(Outcome::Conflict);
             }
             let captured: Option<Option<i64>> = tx.query_row("SELECT claim FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=0", params![ns,path], |r| r.get(0)).optional().map_err(error)?;
-            if captured != claims.iter().find(|(p, _)| p == &path).map(|(_, c)| *c) {
+            let prepared_claim = prepared
+                .claims
+                .iter()
+                .find(|(prepared_path, _)| prepared_path == &path)
+                .map(|(_, claim)| *claim);
+            // The ordinary Index scan may commit its own Ledger and advance
+            // the source claim after this stage captured the pre-scan value.
+            // The current claim was already matched to prepared.claims above;
+            // here require only that this exact stage path is still pending.
+            if captured.is_none() {
                 #[cfg(test)]
-                eprintln!("semantic_record_conflict: indexing_claim_changed");
+                eprintln!("semantic_record_conflict: indexing_stage_missing");
                 return Ok(Outcome::Conflict);
             }
+            let Some(prepared_claim) = prepared_claim else {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_prepared_claim_missing");
+                return Ok(Outcome::Conflict);
+            };
+            indexed_claims.insert(path, prepared_claim);
         }
         let mut negative_paths = std::collections::BTreeSet::new();
         for withdrawal in &prepared.withdrawals {
@@ -3864,12 +3880,17 @@ impl Stage {
                 .1;
             let ledger =
                 serde_json::to_string(&ledger).map_err(|e| StoreError::Data(e.to_string()))?;
+            let Some(claim) = indexed_claims.get(path.as_ref()).copied() else {
+                #[cfg(test)]
+                eprintln!("semantic_record_conflict: indexing_claim_missing");
+                return Ok(Outcome::Conflict);
+            };
             let top = source
                 .native_role
                 .as_ref()
                 .is_some_and(|r| r.get("Top").is_some());
             tx.execute("INSERT INTO main.catalog_semantic_inputs(namespace,source_path,harness,native_id,is_top,metadata) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(namespace,source_path) DO UPDATE SET harness=excluded.harness,native_id=excluded.native_id,is_top=excluded.is_top,metadata=excluded.metadata", params![ns,path.as_ref(),harness,source.native_id,top,metadata]).map_err(error)?;
-            tx.execute("UPDATE main.catalog_semantic_sources SET ledger=?3,index_done=1,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=?1 AND path=?2) WHERE namespace=?1 AND source_path=?2", params![ns,path.as_ref(),ledger]).map_err(error)?;
+            tx.execute("UPDATE main.catalog_semantic_sources SET claim=?3,ledger=?4,index_done=1,(dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256)=(SELECT dev,ino,size,mtime_ns,ctime_ns,resume_at,head_sha256,tail_sha256 FROM main.files WHERE namespace=?1 AND path=?2) WHERE namespace=?1 AND source_path=?2", params![ns,path.as_ref(),claim,ledger]).map_err(error)?;
             let layout = FrontierLayout::bind(&tx).map_err(error)?;
             crate::events::store::semantic_stage::native_frontier_with(
                 &layout.frontier(ns),
