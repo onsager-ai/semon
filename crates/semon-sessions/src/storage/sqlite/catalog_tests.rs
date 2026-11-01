@@ -9965,15 +9965,10 @@ fn cold_codex_family_crossing_batches_preserves_every_native_parent() {
 fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
     for parent_file in ["000-family-parent", "zzz-family-parent"] {
         let fixture = Fixture::new();
-        let spawn_call = |call_id: String, task: String| {
-            json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":call_id,"arguments":json!({"task_name":task}).to_string()}})
-        };
+        let spawn_call = |call_id: String, task: String| json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":call_id,"arguments":json!({"task_name":task}).to_string()}});
         let mut calls = vec![spawn_call("spawn-first".into(), "task-000".into())];
         for n in 1..80 {
-            calls.push(spawn_call(
-                format!("spawn-{n:03}"),
-                format!("task-{n:03}"),
-            ));
+            calls.push(spawn_call(format!("spawn-{n:03}"), format!("task-{n:03}")));
         }
         for n in 0..176 {
             calls.push(spawn_call(
@@ -9986,14 +9981,8 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
 
         // The duplicate task call is in the seventeenth 16-event page. Keep a
         // second physical source under the same native parent identity.
-        let parent = fixture.codex_source_with_records(
-            parent_file,
-            "family-parent",
-            None,
-            None,
-            1,
-            &calls,
-        );
+        let parent =
+            fixture.codex_source_with_records(parent_file, "family-parent", None, None, 1, &calls);
         let parent_copy = fixture.codex_source_with_records(
             &format!("{parent_file}-copy"),
             "family-parent",
@@ -10080,12 +10069,15 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
             let placements = relation["placements"].as_array().unwrap();
             assert!(placements.iter().any(|placement| {
                 placement["outgoing"] == false
-                    && placement["at"]["source"]["path"].as_str()
-                        == Some(child_source.as_str())
+                    && placement["at"]["source"]["path"].as_str() == Some(child_source.as_str())
             }));
             if child == "family-child-000" {
                 assert_eq!(relation["ambiguous"], true);
-                assert!(!placements.iter().any(|placement| placement["outgoing"] == true));
+                assert!(
+                    !placements
+                        .iter()
+                        .any(|placement| placement["outgoing"] == true)
+                );
             } else {
                 assert_eq!(relation["ambiguous"], false);
                 assert!(placements.iter().any(|placement| {
@@ -10115,23 +10107,13 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
 fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
     let fixture = Fixture::new();
     let spawn = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});
-    let parent = fixture.codex_source_with_records(
-        "parent-a",
-        "family-parent",
-        None,
-        None,
-        1,
-        &[spawn],
-    );
-    let parent_copy = fixture.codex_source_with_records(
-        "parent-b",
-        "family-parent",
-        None,
-        None,
-        1,
-        &[],
-    );
-    let child_records = [json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}})];
+    let parent =
+        fixture.codex_source_with_records("parent-a", "family-parent", None, None, 1, &[spawn]);
+    let parent_copy =
+        fixture.codex_source_with_records("parent-b", "family-parent", None, None, 1, &[]);
+    let child_records = [
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}}),
+    ];
     let child = fixture.codex_source_with_records(
         "child-0",
         "family-child-0",
@@ -10190,27 +10172,36 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
     assert!(batch.paths.contains(&child_path));
     for parent in &parent_paths {
         assert!(batch.paths.contains(parent));
-        assert!(!batch
-            .context
-            .matching_header_paths
-            .as_ref()
-            .unwrap()
-            .contains(parent));
-        assert!(!batch
-            .relation_cursors
-            .iter()
-            .any(|cursor| &cursor.path == parent));
+        assert!(
+            !batch
+                .context
+                .matching_header_paths
+                .as_ref()
+                .unwrap()
+                .contains(parent)
+        );
+        assert!(
+            !batch
+                .relation_cursors
+                .iter()
+                .any(|cursor| &cursor.path == parent)
+        );
     }
-    assert_eq!(batch.context.matching_header_paths, Some(vec![child_path.clone()]));
+    assert_eq!(
+        batch.context.matching_header_paths,
+        Some(vec![child_path.clone()])
+    );
     assert_eq!(batch.relation_cursors.len(), 1);
     assert_eq!(batch.relation_cursors[0].path, child_path);
-    assert!(batch
-        .context
-        .matching_locations
-        .as_ref()
-        .unwrap()
-        .iter()
-        .all(|location| location.source.path.to_string_lossy().as_ref() == child_path));
+    assert!(
+        batch
+            .context
+            .matching_locations
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|location| location.source.path.to_string_lossy().as_ref() == child_path)
+    );
     assert_eq!(
         batch
             .source_claims
@@ -10387,7 +10378,10 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(ordered_paths, vec![first_path.clone(), corrupt_path.clone()]);
+    assert_eq!(
+        ordered_paths,
+        vec![first_path.clone(), corrupt_path.clone()]
+    );
     db.execute(
         "UPDATE main.catalog_semantic_endpoints SET root_key='missing-root' WHERE session_key=?1",
         [&corrupt_owner],
@@ -10448,7 +10442,9 @@ fn codex_relation_closure_over_budget_refuses_without_advancing_sources() {
             records,
         ));
     }
-    let child_records = [json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}})];
+    let child_records = [
+        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}}),
+    ];
     let child = fixture.codex_source_with_records(
         "000-child",
         "wide-child",

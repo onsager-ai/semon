@@ -22,8 +22,10 @@ const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 
 fn relation_owner_source_paths(
-    physical: &(impl crate::events::store::semantic_stage::OwnerClosurePort
-         + crate::events::store::semantic_stage::ContextPort),
+    physical: &(
+         impl crate::events::store::semantic_stage::OwnerClosurePort
+         + crate::events::store::semantic_stage::ContextPort
+     ),
     selected: &str,
     epoch: i64,
 ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
@@ -4062,15 +4064,15 @@ impl Stage {
                             result_phase,
                             epoch,
                         ) {
-                        Ok(context) => context,
-                        Err(source_error) if relation_context_budget_error(&source_error) => {
-                            if relation_cursors.is_empty() {
-                                return Err(refuse("semantic_source_budget"));
+                            Ok(context) => context,
+                            Err(source_error) if relation_context_budget_error(&source_error) => {
+                                if relation_cursors.is_empty() {
+                                    return Err(refuse("semantic_source_budget"));
+                                }
+                                break;
                             }
-                            break;
-                        }
-                        Err(source_error) => return Err(error(source_error)),
-                    };
+                            Err(source_error) => return Err(error(source_error)),
+                        };
                     let RelationPage {
                         cursor,
                         locations,
@@ -4090,16 +4092,12 @@ impl Stage {
                         }
                         break;
                     }
-                    let mut selected_locations = context
-                        .matching_locations
-                        .clone()
-                        .unwrap_or_default();
+                    let mut selected_locations =
+                        context.matching_locations.clone().unwrap_or_default();
                     selected_locations.extend(locations);
                     candidate_context.matching_locations = Some(selected_locations);
-                    let mut selected_headers = context
-                        .matching_header_paths
-                        .clone()
-                        .unwrap_or_default();
+                    let mut selected_headers =
+                        context.matching_header_paths.clone().unwrap_or_default();
                     selected_headers.push(selected);
                     candidate_context.matching_header_paths = Some(selected_headers);
                     if serde_json::to_vec(&candidate_context)
