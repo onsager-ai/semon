@@ -10058,25 +10058,18 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
         calls.push(spawn_call("spawn-last".into(), "task-000".into()));
         assert_eq!(calls.len(), 257);
 
-        // The duplicate task call is in the seventeenth 16-event page. Keep a
-        // second physical source under the same native parent identity.
+        // The duplicate task call is in the seventeenth 16-event page.
+        // Distinct Codex rollout files are versions, not aliases, so keep one
+        // canonical source for this parent identity.
         let parent =
             fixture.codex_source_with_records(parent_file, "family-parent", None, None, 1, &calls);
-        let parent_copy = fixture.codex_source_with_records(
-            &format!("{parent_file}-copy"),
-            "family-parent",
-            None,
-            None,
-            1,
-            &[],
-        );
         let parent_call_path = fixture
             .options
             .codex_home
             .join(&parent)
             .to_string_lossy()
             .into_owned();
-        let mut paths = std::collections::BTreeSet::from([parent.clone(), parent_copy.clone()]);
+        let mut paths = std::collections::BTreeSet::from([parent.clone()]);
         let mut child_paths = std::collections::BTreeMap::new();
         for n in 0..80 {
             let task = format!("task-{n:03}");
@@ -10096,18 +10089,22 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
             paths.insert(source.clone());
             child_paths.insert(child, source);
         }
+        assert_eq!(paths.len(), 81);
 
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
-        facts.codex_rollouts = Some(std::collections::BTreeSet::from([
-            parent.clone(),
-            parent_copy.clone(),
-        ]));
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([parent.clone()]));
         crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
         fixture.publish_existing();
         let db = fixture.db();
         let parent_rows = rows(&db, &Request::parse("sid=family-parent").unwrap()).unwrap();
-        assert_eq!(parent_rows[0].sources.len(), 2);
+        assert_eq!(parent_rows.len(), 1);
+        assert_eq!(parent_rows[0].sources.len(), 1);
+        assert_eq!(parent_rows[0].sources[0].native_id, "family-parent");
+        assert_eq!(
+            parent_rows[0].sources[0].path,
+            fixture.options.codex_home.join(&parent)
+        );
         drop(db);
 
         facts.codex_rollouts = Some(paths);
