@@ -25,6 +25,114 @@ thread_local! {
     pub(crate) static TRACE_COMPANION_FRONTIER: std::cell::Cell<bool> = const {
         std::cell::Cell::new(false)
     };
+    pub(crate) static TRACE_ROOT_PUBLICATION: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+    static ROOT_PUBLICATION_DIAG: std::cell::RefCell<Option<RootPublicationDiag>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct RootPublicationDiag {
+    pub(crate) root_replay_owner: bool,
+    pub(crate) root_incident_handoffs: usize,
+    pub(crate) root_durable_outgoing_handoffs: usize,
+    pub(crate) root_outgoing_handoffs: usize,
+    pub(crate) root_durable_outgoing_placements: usize,
+    pub(crate) root_local_outgoing_placements: usize,
+    pub(crate) root_refs: usize,
+    pub(crate) root_turn_count: usize,
+    pub(crate) root_turn_sent_count: usize,
+    pub(crate) root_prepared_trace_sent_count: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn begin_root_publication_diag(root_replay_owner: bool) {
+    ROOT_PUBLICATION_DIAG.with(|diag| {
+        *diag.borrow_mut() = Some(RootPublicationDiag {
+            root_replay_owner,
+            ..RootPublicationDiag::default()
+        })
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn root_publication_diag_active() -> bool {
+    ROOT_PUBLICATION_DIAG.with(|diag| diag.borrow().is_some())
+}
+
+#[cfg(test)]
+pub(crate) fn record_root_durable_relations(
+    relations: &std::collections::BTreeMap<String, model::relation_stage::Relation>,
+) {
+    ROOT_PUBLICATION_DIAG.with(|diag| {
+        let mut diag = diag.borrow_mut();
+        let Some(diag) = diag.as_mut() else {
+            return;
+        };
+        for relation in relations.values() {
+            let incident = relation.from == "root" || relation.to.as_deref() == Some("root");
+            if incident {
+                diag.root_incident_handoffs += 1;
+            }
+            if relation.from == "root" && matches!(relation.kind.as_str(), "spawn" | "relay") {
+                diag.root_durable_outgoing_handoffs += 1;
+            }
+            diag.root_durable_outgoing_placements += relation
+                .placements
+                .iter()
+                .filter(|placement| {
+                    placement.outgoing && placement.at.source.native_id == "root"
+                })
+                .count();
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn record_root_builder_counts(
+    root_local_outgoing_placements: usize,
+    root_refs: usize,
+    root_outgoing_handoffs: usize,
+) {
+    ROOT_PUBLICATION_DIAG.with(|diag| {
+        if let Some(diag) = diag.borrow_mut().as_mut() {
+            diag.root_local_outgoing_placements = root_local_outgoing_placements;
+            diag.root_refs = root_refs;
+            diag.root_outgoing_handoffs = root_outgoing_handoffs;
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn record_root_turn_counts(root_turn_count: usize, root_turn_sent_count: usize) {
+    ROOT_PUBLICATION_DIAG.with(|diag| {
+        if let Some(diag) = diag.borrow_mut().as_mut() {
+            diag.root_turn_count = root_turn_count;
+            diag.root_turn_sent_count = root_turn_sent_count;
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn record_root_prepared_trace_sent_count(count: usize) {
+    ROOT_PUBLICATION_DIAG.with(|diag| {
+        if let Some(diag) = diag.borrow_mut().as_mut() {
+            diag.root_prepared_trace_sent_count = count;
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) fn take_root_publication_diag() -> Option<RootPublicationDiag> {
+    ROOT_PUBLICATION_DIAG.with(|diag| diag.borrow_mut().take())
+}
+
+#[cfg(test)]
+pub(crate) fn clear_root_publication_diag() {
+    ROOT_PUBLICATION_DIAG.with(|diag| *diag.borrow_mut() = None);
 }
 
 #[cfg(test)]
@@ -1213,6 +1321,16 @@ impl NativeEvidence {
             scan_window: false,
             ..self.options.clone()
         };
+        #[cfg(test)]
+        if batch.phase == Phase::Publication && TRACE_ROOT_PUBLICATION.with(std::cell::Cell::get) {
+            begin_root_publication_diag(
+                batch
+                    .context
+                    .replay_owners
+                    .iter()
+                    .any(|owner| owner == "root"),
+            );
+        }
         if let Some(discovery) = &mut work.cold_catalog {
             discovery
                 .snapshot
@@ -1287,6 +1405,27 @@ impl NativeEvidence {
             }
         };
         let prepared = prepared.prepared();
+        #[cfg(test)]
+        if batch.phase == Phase::Publication && TRACE_ROOT_PUBLICATION.with(std::cell::Cell::get) {
+            let root_in_publication = prepared.rows.iter().any(|row| row.key == "root");
+            let diag = take_root_publication_diag();
+            if root_in_publication {
+                let diag = diag.unwrap_or_default();
+                eprintln!(
+                    "native_root_publication root_replay_owner={} root_incident_handoffs={} root_durable_outgoing_handoffs={} root_outgoing_handoffs={} root_durable_outgoing_placements={} root_local_outgoing_placements={} root_refs={} root_turn_count={} root_turn_sent_count={} root_prepared_trace_sent_count={}",
+                    diag.root_replay_owner,
+                    diag.root_incident_handoffs,
+                    diag.root_durable_outgoing_handoffs,
+                    diag.root_outgoing_handoffs,
+                    diag.root_durable_outgoing_placements,
+                    diag.root_local_outgoing_placements,
+                    diag.root_refs,
+                    diag.root_turn_count,
+                    diag.root_turn_sent_count,
+                    diag.root_prepared_trace_sent_count,
+                );
+            }
+        }
         #[cfg(test)]
         if trace_companion_frontier {
             eprintln!(

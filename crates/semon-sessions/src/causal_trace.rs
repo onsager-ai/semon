@@ -156,13 +156,23 @@ impl Projection {
             "role": session.role,
             "waiting_since": session.waiting_since,
         });
-        Self {
+        let projection = Self {
             query: Some(crate::query_projection::Projection::capture(session,turns,edges)),
             session: json!({"name":session.name,"harness":session.harness,"kind":session.kind,"state":session.state,"model":session.model,"start":session.start,"last":session.last,"tokens":session.tokens,"cost":session.cost,"busy":session.busy,"wait_edges":session.wait_edges,"wait_edges_truncated":session.wait_edges_truncated,"details":details}),
             turns: turns.iter().filter(|turn|turn.sid==key).map(|turn|json!({"id":turn.id,"sid":turn.sid,"start":turn.start,"u":turn.u,"at":turn.at,"end":turn.end,"sent":turn.sent,"last":turn.last})).collect(),
             edges: edges.iter().filter(|edge|edge.from==key || edge.to.as_deref()==Some(key)).map(|edge|json!({"id":edge.id,"kind":edge.kind,"ask":edge.ask,"from":edge.from,"to":edge.to,"at":edge.at,"done":edge.done,"status":edge.status,"declined":edge.declined,"unmatched":edge.unmatched,"ambiguous":edge.ambiguous,"brief_session":owners[&edge.id]["brief_session"],"result_session":owners[&edge.id]["result_session"]})).collect(),
             bookmarks: edges.iter().filter(|edge| edge.from == key && edge.to.is_none()).filter_map(|edge| edge.target.as_ref().map(|target| (target.clone(), edge.id.clone()))).collect(),
+        };
+        #[cfg(test)]
+        if key == "root" && crate::native_evidence::root_publication_diag_active() {
+            let sent_count = projection
+                .turns
+                .iter()
+                .map(|turn| turn["sent"].as_array().map_or(0, Vec::len))
+                .sum();
+            crate::native_evidence::record_root_prepared_trace_sent_count(sent_count);
         }
+        projection
     }
     pub(crate) fn query_virtual(&mut self, key: &str, transcript: &crate::model::Transcript) {
         if let Some(query) = &mut self.query {

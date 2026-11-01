@@ -11699,7 +11699,7 @@ mod tests {
 
             let mut rejected = false;
             for _ in 0..128 {
-                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                let batch = cache.semantic_batch(1).unwrap().unwrap();
                 if batch.paths.is_empty() {
                     continue;
                 }

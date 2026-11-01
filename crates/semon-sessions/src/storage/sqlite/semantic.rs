@@ -16,8 +16,6 @@ use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const RELATION_EVENT_PAGE_LIMIT: usize = 16;
-// Primary source events advanced in one relation batch.
-const RELATION_EVENT_BATCH_LIMIT: usize = 64;
 // Raw metadata reads in one relation batch, including Send/Xsm peers.
 const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
@@ -3961,7 +3959,7 @@ impl Stage {
                 paths.extend(companions.into_iter().filter(|path| path != &selected));
                 relation_cursors.push(page.cursor);
             } else {
-                let mut remaining_primary_events = RELATION_EVENT_BATCH_LIMIT;
+                let mut remaining_primary_events = RELATION_EVENT_PAGE_LIMIT;
                 let mut page_paths = Vec::with_capacity(paths.len());
                 for path in &paths {
                     let is_claude: bool = tx
@@ -3978,8 +3976,7 @@ impl Stage {
                     }
                 }
                 for selected in page_paths {
-                    if remaining_primary_events == 0
-                        || relation_read_budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT
+                    if relation_read_budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT
                         || relation_read_budget.metadata_bytes >= RELATION_METADATA_BATCH_LIMIT
                     {
                         break;

@@ -9155,10 +9155,55 @@ fn build_sources_inner(
         timed!("relays", builder.relays()?);
         timed!("codex_relays", builder.codex_relays()?);
     }
+    #[cfg(test)]
+    if crate::native_evidence::root_publication_diag_active() {
+        let root_files = builder
+            .files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| {
+                (file.harness() == "codex" && file.id == "root").then_some(index)
+            })
+            .collect::<BTreeSet<_>>();
+        let root_refs = root_files
+            .iter()
+            .map(|index| builder.files[*index].summary.events.len())
+            .sum();
+        let root_local_outgoing_placements = builder
+            .placed
+            .iter()
+            .filter(|((file, _), _)| root_files.contains(file))
+            .flat_map(|(_, placements)| placements)
+            .filter(|(_, place)| *place == Place::Out)
+            .count();
+        let root_outgoing_handoffs = builder
+            .handoffs
+            .iter()
+            .filter(|handoff| {
+                handoff.out.from == "root" && matches!(handoff.out.kind, "spawn" | "relay")
+            })
+            .count();
+        crate::native_evidence::record_root_builder_counts(
+            root_local_outgoing_placements,
+            root_refs,
+            root_outgoing_handoffs,
+        );
+    }
     timed!("asks", builder.asks(target));
     timed!("questions", builder.questions());
     timed!("lineage_states", builder.lineage_states());
     let (mut turns, mut tx) = timed!("turns", builder.turns());
+    #[cfg(test)]
+    if crate::native_evidence::root_publication_diag_active() {
+        let root_turns = turns
+            .iter()
+            .filter(|turn| turn.sid == "root")
+            .collect::<Vec<_>>();
+        crate::native_evidence::record_root_turn_counts(
+            root_turns.len(),
+            root_turns.iter().map(|turn| turn.sent.len()).sum(),
+        );
+    }
     timed!("wait_edges", builder.wait_edges(&tx)?);
 
     // Stubs span the handoffs that name them.

@@ -1411,6 +1411,10 @@ impl Context {
                 break;
             };
             after.clone_from(last);
+            #[cfg(test)]
+            if crate::native_evidence::root_publication_diag_active() {
+                crate::native_evidence::record_root_durable_relations(&page.relations);
+            }
             for relation in page.relations.values() {
                 order.insert(relation.id.clone(), relation.order.clone());
             }
