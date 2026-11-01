@@ -3509,7 +3509,10 @@ impl Stage {
                 let mut encoded = Vec::new();
                 let mut bytes = 0usize;
                 for endpoint in prepared.relationships.endpoints.values() {
-                    if !matches!(endpoint.row.harness.as_str(), "codex" | "claude" | "copilot") {
+                    if !matches!(
+                        endpoint.row.harness.as_str(),
+                        "codex" | "claude" | "copilot"
+                    ) {
                         return Err(refuse("semantic_nonprimitive_identity_pending"));
                     }
                     if endpoint.row.sources.is_empty() || endpoint.row.sources.len() > 64 {
