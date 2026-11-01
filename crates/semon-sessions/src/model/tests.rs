@@ -5319,8 +5319,7 @@ struct CompanionTraceReset(bool);
 
 impl Drop for CompanionTraceReset {
     fn drop(&mut self) {
-        crate::native_evidence::TRACE_COMPANION_FRONTIER
-            .with(|enabled| enabled.set(self.0));
+        crate::native_evidence::TRACE_COMPANION_FRONTIER.with(|enabled| enabled.set(self.0));
     }
 }
 
@@ -5466,12 +5465,11 @@ fn record_selected_companion_batch(
 
 fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData, trace: bool) {
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
-    let previous_trace = crate::native_evidence::TRACE_COMPANION_FRONTIER
-        .with(|enabled| enabled.replace(trace));
+    let previous_trace =
+        crate::native_evidence::TRACE_COMPANION_FRONTIER.with(|enabled| enabled.replace(trace));
     let trace_reset = CompanionTraceReset(previous_trace);
-    let diag_db = trace.then(|| {
-        rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap()
-    });
+    let diag_db =
+        trace.then(|| rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap());
     let mut complete = false;
     for iteration in 0..128 {
         let refreshed = evidence
