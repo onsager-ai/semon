@@ -5567,8 +5567,8 @@ impl<'a> Builder<'a> {
                 }));
             }
             if h.out.from == key
-                && let Some(at) = canonical_origins
-                    .and_then(|origins| origins.get(&h.out.id).copied())
+                && let Some(at) =
+                    canonical_origins.and_then(|origins| origins.get(&h.out.id).copied())
             {
                 fields["origin"] = recipe(at, "prompt");
             } else if let Some(turn) = turns
@@ -5747,9 +5747,7 @@ impl<'a> Builder<'a> {
     /// Complete native receipts are needed even when their edges belong to a
     /// different message page. These temporary boundaries carry no sender claim
     /// and never enter the staged relationships or published projection.
-    fn complete_sender_turns(
-        &mut self,
-    ) -> io::Result<Option<(Vec<Turn>, BTreeMap<String, Ref>)>> {
+    fn complete_sender_turns(&mut self) -> io::Result<Option<(Vec<Turn>, BTreeMap<String, Ref>)>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
         };
@@ -9537,9 +9535,7 @@ fn build_sources_inner(
                                 builder.overview_content(
                                     &row.key,
                                     selected_turns,
-                                    completed_sender_turns
-                                        .as_ref()
-                                        .map(|(_, origins)| origins),
+                                    completed_sender_turns.as_ref().map(|(_, origins)| origins),
                                     tx,
                                     projections_by_key.get(row.key.as_str()).copied(),
                                 )

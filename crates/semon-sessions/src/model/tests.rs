@@ -5758,11 +5758,7 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let selected_origin = |row: &Value, id: &str| {
         row["query"]["selected"]["edges"]
             .as_array()
-            .and_then(|edges| {
-                edges
-                    .iter()
-                    .find(|edge| edge["id"].as_str() == Some(id))
-            })
+            .and_then(|edges| edges.iter().find(|edge| edge["id"].as_str() == Some(id)))
             .map(|edge| edge["query_content"]["origin"].clone())
             .unwrap_or(Value::Null)
     };
@@ -5815,8 +5811,7 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
             .unwrap();
         let persisted: Value = serde_json::from_str(&metadata).unwrap();
         assert_eq!(
-            persisted["query_content"]["origin"],
-            expected,
+            persisted["query_content"]["origin"], expected,
             "{id}: persisted selected origin recipe matches the full build"
         );
         if let Some(receiver_key) = relation.to.as_deref()
