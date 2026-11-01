@@ -648,6 +648,41 @@ impl Relation {
         let before = serde_json::to_value(before)?;
         let after = serde_json::to_value(&merged)?;
         if before != after {
+            #[cfg(test)]
+            {
+                let prior_only = prior
+                    .query_content
+                    .keys()
+                    .filter(|field| !self.query_content.contains_key(*field))
+                    .count();
+                let current_only = self
+                    .query_content
+                    .keys()
+                    .filter(|field| !prior.query_content.contains_key(*field))
+                    .count();
+                let mut shared_equal = 0usize;
+                let mut shared_different = 0usize;
+                for (field, recipe) in &self.query_content {
+                    if let Some(old) = prior.query_content.get(field) {
+                        if old == recipe {
+                            shared_equal += 1;
+                        } else {
+                            shared_different += 1;
+                        }
+                    }
+                }
+                eprintln!(
+                    "semantic_relation_merge_structure prior_only={prior_only} current_only={current_only} shared_equal={shared_equal} shared_different={shared_different} prior_unmatched={} current_unmatched={} prior_from_stub={} current_from_stub={} same_from={} same_to={} prior_stub_count={} current_stub_count={}",
+                    prior.unmatched,
+                    self.unmatched,
+                    prior.stubs.iter().any(|stub| stub.key == prior.from),
+                    self.stubs.iter().any(|stub| stub.key == self.from),
+                    prior.from == self.from,
+                    prior.to == self.to,
+                    prior.stubs.len(),
+                    self.stubs.len(),
+                );
+            }
             let before = before
                 .as_object()
                 .ok_or_else(|| io::Error::other("invalid relation"))?;
