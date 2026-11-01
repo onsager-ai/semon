@@ -10617,79 +10617,193 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
     assert_eq!(relations_after, relations_before);
 }
 
-#[test]
-fn codex_relation_closure_over_budget_refuses_without_advancing_sources() {
-    let fixture = Fixture::new();
-    let parent_call = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});
-    let mut paths = std::collections::BTreeSet::new();
-    for n in 0..64 {
-        let records: &[Value] = if n == 0 {
-            std::slice::from_ref(&parent_call)
-        } else {
-            &[]
-        };
-        paths.insert(fixture.codex_source_with_records(
-            &format!("parent-{n:02}"),
-            "wide-parent",
-            None,
-            None,
-            1,
-            records,
-        ));
-    }
-    let child_records = [
-        json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}}),
-    ];
-    let child = fixture.codex_source_with_records(
-        "000-child",
-        "wide-child",
-        Some("wide-parent"),
-        Some("task-0"),
-        2,
-        &child_records,
-    );
-    paths.insert(child.clone());
-    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
-    facts.codex_rollouts = Some(paths);
-    crate::write_facts(
-        fixture.options.facts.as_ref().unwrap(),
-        &facts,
-        &fixture.options.source,
-    )
-    .unwrap();
-
-    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-    let mut work = crate::viewer::lock(&evidence.work);
-    let mut refusal = None;
-    for _ in 0..128 {
-        match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
-            Ok(true) => panic!("an overbudget complete parent closure was published"),
-            Ok(false) => {}
-            Err(error) => {
-                refusal = Some(error.to_string());
-                break;
+fn claude_continuation_inputs(fixture: &Fixture, count: usize) -> Vec<crate::Input> {
+    (0..count)
+        .map(|n| {
+            let id = format!("continuation-{n:02}");
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/{id}.jsonl").into(),
+            };
+            let path = input.full_path(&fixture.options);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let mut row = json!({
+                "type": "user",
+                "sessionId": id,
+                "uuid": format!("uuid-{n:02}"),
+                "parentUuid": null,
+                "cwd": "/synthetic/project",
+                "timestamp": "2026-10-01T00:00:00Z",
+                "message": {"role": "user", "content": "synthetic continuation"}
+            });
+            if n > 0 {
+                row["session_id"] = json!(format!("continuation-{:02}", n - 1));
             }
-        }
-    }
-    drop(work);
-    evidence.retire();
-    assert!(refusal.is_some(), "the overbudget closure was not refused");
+            fs::write(path, format!("{}\n", row)).unwrap();
+            input
+        })
+        .collect()
+}
 
-    let db = fixture.db();
-    let child_path = fixture
-        .options
-        .codex_home
-        .join(child)
-        .to_string_lossy()
-        .into_owned();
-    let child_cursor: (bool, String) = db
-        .query_row(
-            "SELECT relation_done=1,relation_after FROM main.catalog_semantic_sources WHERE source_path=?1",
-            [&child_path],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+fn claude_continuation_relation_batch(
+    fixture: &Fixture,
+    inputs: &[crate::Input],
+) -> Result<crate::model::relation_stage::Batch, crate::events::StoreError> {
+    assert!(!inputs.is_empty());
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    cache.prepare_facts_authority(&fixture.options).unwrap();
+    for (n, input) in inputs.iter().enumerate() {
+        cache
+            .ingest(
+                &format!("{:064x}", 4770 + n),
+                &input.full_path(&fixture.options),
+                "claude",
+            )
+            .unwrap();
+    }
+    let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+    let seed = inputs[0].full_path(&fixture.options).to_string_lossy().into_owned();
+    // All native inputs are durable before the stage starts from one seed.
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(&[seed], &runtime, true)
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+
+    for _ in 0..128 {
+        let batch = match cache.semantic_batch(64) {
+            Ok(Some(batch)) => batch,
+            Ok(None) => panic!("the seeded Claude stage disappeared before Relations"),
+            Err(_) => {
+                drop(cache);
+                return Err(
+                    fixture
+                        .stage()
+                        .batch(64)
+                        .expect_err("the bounded owner closure refusal must remain typed"),
+                );
+            }
+        };
+        if batch.phase == crate::model::relation_stage::Phase::Relations {
+            return Ok(batch);
+        }
+        assert!(matches!(
+            batch.phase,
+            crate::model::relation_stage::Phase::Indexing
+                | crate::model::relation_stage::Phase::Identity
+        ));
+        if batch.paths.is_empty() {
+            continue;
+        }
+        let batch_paths = batch
+            .paths
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        let selected = inputs
+            .iter()
+            .filter(|input| {
+                batch_paths
+                    .contains(&input.full_path(&fixture.options).to_string_lossy().into_owned())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), batch.paths.len());
+        let prepared = crate::model::prepare_semantic_batch(
+            &fixture.options,
+            &mut cache,
+            &selected,
+            &batch,
+            crate::model::now_ms(),
         )
         .unwrap();
-    assert_eq!(child_cursor, (false, String::new()));
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    panic!("the seeded Claude stage did not reach Relations or a bounded refusal")
+}
+
+#[test]
+fn claude_owner_closure_accepts_64_and_refuses_65_during_identity() {
+    let control = Fixture::new();
+    let control_inputs = claude_continuation_inputs(&control, 64);
+    let batch = claude_continuation_relation_batch(&control, &control_inputs).unwrap();
+    let expected_control = control_inputs
+        .iter()
+        .map(|input| {
+            input
+                .full_path(&control.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Relations);
+    assert_eq!(
+        batch
+            .paths
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_control
+    );
+    assert_eq!(batch.paths.len(), 64);
+    assert_eq!(batch.relation_cursors.len(), 1);
+    assert_eq!(
+        batch.context.matching_header_paths.as_ref().unwrap().len(),
+        1
+    );
+    assert_eq!(
+        batch
+            .source_claims
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_control
+    );
+
+    let over_budget = Fixture::new();
+    let over_budget_inputs = claude_continuation_inputs(&over_budget, 65);
+    let refusal = claude_continuation_relation_batch(&over_budget, &over_budget_inputs)
+        .expect_err("the complete 65-source Claude owner closure must be refused");
+    assert!(matches!(
+        refusal,
+        crate::events::StoreError::Data(reason)
+            if reason == "semantic_physical_owner_source_budget"
+    ));
+
+    let db = over_budget.db();
+    let semantic_inputs: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_inputs",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(semantic_inputs, 65);
+    let semantic_sources: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(semantic_sources, 65);
+    let unfinished_identity: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources WHERE index_done=1 AND events_done=1 AND identity_done=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unfinished_identity, 65);
     let advanced: i64 = db
         .query_row(
             "SELECT count(*) FROM main.catalog_semantic_sources WHERE relation_done=1 OR relation_after<>''",
@@ -10698,14 +10812,14 @@ fn codex_relation_closure_over_budget_refuses_without_advancing_sources() {
         )
         .unwrap();
     assert_eq!(advanced, 0);
-    let child_published: bool = db
+    let current: i64 = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE lifecycle='current' AND session_key='wide-child')",
+            "SELECT count(*) FROM main.session_catalog WHERE lifecycle='current'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!child_published);
+    assert_eq!(current, 0);
 }
 
 #[test]
