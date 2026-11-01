@@ -11568,6 +11568,8 @@ fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification(
 
 #[test]
 fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key() {
+    use std::io::Write;
+
     let mut current = Fixture::new();
     let mut foreign = Fixture::new();
     let shared_cache = current.options.cache.clone();
