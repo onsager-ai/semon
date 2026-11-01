@@ -63,6 +63,34 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Retained History identity and original authority
+        id: retained_history
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        env:
+          SEMON_BUILD_TIMING: "1"
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
+            model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
+            model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/retained-history-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/retained-history-case.log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/retained-history-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/retained-history-case.log" | tee -a "$RUNNER_TEMP/retained-history-tests.log"
+            echo "CASE name=$test expected=1 status=$case_result" | tee -a "$RUNNER_TEMP/retained-history-tests.log"
+            if test "$case_result" -ne 0; then result=1; fi
+          done
+          exit "$result"
+      - name: Retain History identity and original authority results
+        if: ${{ !cancelled() && steps.retained_history.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: retained-history-tests
+          path: ${{ runner.temp }}/retained-history-tests.log
+          if-no-files-found: error
       - name: Archived overview large source offset custody regression
         id: archive_offset_regression
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}

@@ -1026,16 +1026,7 @@ pub(crate) fn read_page_snapshot_with_search(
                     }
                     continue;
                 }
-                if request.sid.as_deref() == Some(current.key.as_str()) {
-                    if !transaction.history_qualified(&history)? {
-                        return Ok(error(
-                            503,
-                            "catalog_unavailable",
-                            "The original retained history projection is incomplete.",
-                            true,
-                        ));
-                    }
-                } else {
+                if request.sid.as_deref() != Some(current.key.as_str()) {
                     // List membership, filter display and summary fields stay
                     // anchored to the indexed row. The retained row below is
                     // still the exact stored identity used for source checks.

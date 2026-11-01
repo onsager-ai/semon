@@ -10846,6 +10846,28 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
         .unwrap()
         .unwrap();
     assert_eq!(history.source_refs.len(), 2);
+    let (history_version, recorded_source_generation, history_incomplete): (u32, String, bool) =
+        connection
+            .query_row(
+                "SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key='root'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+    let history_metadata: String = connection
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history_row: summary::CatalogRow = serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(history_version, crate::slot_projection::VERSION);
+    assert!(history_incomplete);
+    assert_eq!(
+        recorded_source_generation,
+        crate::retention::source_generation(&history_row.sources).unwrap()
+    );
     let current = crate::session_catalog_identity(&home.options, "fixture", "root")
         .unwrap()
         .unwrap();
@@ -10869,6 +10891,13 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(body["projection"]["history_incomplete"], true);
     assert_eq!(body["content_observation"]["state"], "incomplete");
+    assert!(
+        body["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["text"] == "current root prompt")
+    );
     assert!(
         body["entries"]
             .as_array()
