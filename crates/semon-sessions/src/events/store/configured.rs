@@ -7730,7 +7730,10 @@ mod tests {
             .stored_ledger_batch(std::slice::from_ref(&path))
             .unwrap();
         assert_eq!(ledgers.len(), 1);
-        assert!(ledgers[0].is_some(), "the configured ledger remains readable");
+        assert!(
+            ledgers[0].is_some(),
+            "the configured ledger remains readable"
+        );
         assert!(
             cache.selected_index(Path::new(&path)).is_none(),
             "metadata lookup must not load a FileIndex"

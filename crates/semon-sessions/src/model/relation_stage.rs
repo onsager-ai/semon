@@ -1240,12 +1240,9 @@ impl Context {
                     );
                 } else if relation.explicit_previews && preview.kind == "trace_prompt" {
                     if preview.reply
-                        || !self
-                            .endpoints
-                            .get(&preview.owner)
-                            .is_some_and(|endpoint| {
-                                endpoint.row.sources.contains(&preview.at.source)
-                            })
+                        || !self.endpoints.get(&preview.owner).is_some_and(|endpoint| {
+                            endpoint.row.sources.contains(&preview.at.source)
+                        })
                     {
                         return Err(io::Error::other(SourceGenerationChanged));
                     }

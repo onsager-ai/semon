@@ -3961,9 +3961,12 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
     assert_eq!(recorded_preview.kind, "trace_prompt");
     assert_eq!(recorded_preview.cwd.as_deref(), Some("/work/proj"));
     let expected_overview = serde_json::to_value(expected_row.overview.as_ref().unwrap()).unwrap();
-    let expected_pointer = expected_overview["home"]["content"]["events"][&relation.id]["brief"]
-        .clone();
-    assert_eq!(expected_pointer["source"], json!(recorded_preview.at.source));
+    let expected_pointer =
+        expected_overview["home"]["content"]["events"][&relation.id]["brief"].clone();
+    assert_eq!(
+        expected_pointer["source"],
+        json!(recorded_preview.at.source)
+    );
     assert_eq!(expected_pointer["cwd"], json!("/work/proj"));
     assert!(expected_pointer.get("field").is_none());
 
@@ -3971,7 +3974,10 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
     // admitted source in that same endpoint. The second source stays foreign
     // to this producer batch, as it does after staged relation replay.
     let preview_path = preview_input.full_path(&home.options);
-    let selected_path = home.options.codex_home.join("sessions/2026/09/24/rollout-child-copy.jsonl");
+    let selected_path = home
+        .options
+        .codex_home
+        .join("sessions/2026/09/24/rollout-child-copy.jsonl");
     fs::copy(&preview_path, &selected_path).unwrap();
     let selected_input = crate::Input {
         root: crate::InputRoot::Codex,
@@ -3979,13 +3985,18 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
     };
     crate::events::scan_file(&selected_path, "codex", &mut cache, &mut false).unwrap();
     let mut selected_source = cache.source(&selected_path, "child").unwrap();
-    selected_source.native_role.clone_from(&recorded_preview.at.source.native_role);
+    selected_source
+        .native_role
+        .clone_from(&recorded_preview.at.source.native_role);
 
     let staged_bytes = serde_json::to_vec(&full.relationships).unwrap();
     let mut staged: relation_stage::Context = serde_json::from_slice(&staged_bytes).unwrap();
     let endpoint = staged.endpoints.get_mut("child").unwrap();
     endpoint.row.sources.push(selected_source.clone());
-    endpoint.row.sources.sort_by(|left, right| left.path.cmp(&right.path));
+    endpoint
+        .row
+        .sources
+        .sort_by(|left, right| left.path.cmp(&right.path));
     let replay = prepare_staged_sources(
         &home.options,
         &mut cache,
@@ -4044,7 +4055,10 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
         .sources
         .retain(|source| source != &recorded_preview.at.source);
     endpoint.row.sources.push(changed_source);
-    endpoint.row.sources.sort_by(|left, right| left.path.cmp(&right.path));
+    endpoint
+        .row
+        .sources
+        .sort_by(|left, right| left.path.cmp(&right.path));
     assert_refused(&mut cache, &ledger_mismatch);
 
     writeln!(

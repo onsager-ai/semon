@@ -7722,9 +7722,7 @@ impl PreparedSources {
         }
         let sources = paths
             .iter()
-            .map(|path| {
-                crate::source_change::SourceLock::acquire_cache(&fence.cache, path, false)
-            })
+            .map(|path| crate::source_change::SourceLock::acquire_cache(&fence.cache, path, false))
             .collect::<io::Result<Vec<_>>>()?;
         let guard = WithdrawalGuard {
             _facts: facts,
