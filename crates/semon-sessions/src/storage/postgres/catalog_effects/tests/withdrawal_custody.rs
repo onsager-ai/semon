@@ -31,13 +31,8 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
     let original_row = data.rows[0].clone();
     let (pool, _) = fixture(|_| {});
     let control = PgCancellation::default();
-    let (initial_generation, _) = bind_custody_fixture(
-        &pool,
-        &namespace,
-        &options,
-        &data.rows,
-        &data.projections,
-    );
+    let (initial_generation, _) =
+        bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
 
     let host = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
     let config = host
@@ -53,7 +48,10 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         Some(initial_generation.as_str())
     );
 
-    let mut file = fs::OpenOptions::new().append(true).open(&source_path).unwrap();
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&source_path)
+        .unwrap();
     for line in [
         serde_json::json!({"type":"custom-title","sessionId":"one","customTitle":"sanitized updated title"}),
         serde_json::json!({"type":"user","sessionId":"one","uuid":"withdrawal-update-user","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:03Z","message":{"role":"user","content":"sanitized updated input"}}),
@@ -66,8 +64,8 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         .ingest(&"f".repeat(64), &source_path, "claude")
         .unwrap();
     let input = crate::native_evidence::catalog_input(&source_path, &options).unwrap();
-    let updated = crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000)
-        .unwrap();
+    let updated =
+        crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
     assert_eq!(updated.rows.len(), 1);
     let updated_row = updated.rows[0].clone();
     assert_eq!(updated_row.key, key);
@@ -114,10 +112,12 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
     );
     assert!(original_search.0[b"retained_history".as_slice()].1);
     assert!(!original_search.1.is_empty());
-    assert!(original_search
-        .1
-        .iter()
-        .all(|(_, last_ms)| *last_ms == original_last));
+    assert!(
+        original_search
+            .1
+            .iter()
+            .all(|(_, last_ms)| *last_ms == original_last)
+    );
 
     let mut republish_attempts = 0;
     let updated_generation = loop {
@@ -140,10 +140,12 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         original_search.0[b"retained_history".as_slice()].0
     );
     assert!(!updated_search.1.is_empty());
-    assert!(updated_search
-        .1
-        .iter()
-        .all(|(_, last_ms)| *last_ms == updated_last));
+    assert!(
+        updated_search
+            .1
+            .iter()
+            .all(|(_, last_ms)| *last_ms == updated_last)
+    );
 
     let authority = |generation: &str| {
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -303,7 +305,10 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         if head.as_deref() != Some(updated_generation.as_str()) {
             break head.expect("withdrawal catalog generation");
         }
-        assert!(dirty, "bounded History custody should request a continuation");
+        assert!(
+            dirty,
+            "bounded History custody should request a continuation"
+        );
         assert!(attempts < 16, "withdrawal custody did not make progress");
     };
 
@@ -328,20 +333,14 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         super::custody_row_content(std::slice::from_ref(&retained_header)),
         super::custody_row_content(std::slice::from_ref(&expected_original))
     );
-    snapshot::with_generation(
-        &pool,
-        &namespace,
-        &control,
-        &withdrawn_generation,
-        |view| {
-            assert!(view.catalog(&key, false)?.is_none());
-            let retained = view
-                .catalog(&key, true)?
-                .ok_or(crate::storage::StorageError::ScopeChanged)?;
-            assert!(view.history_qualified(&retained).unwrap());
-            Ok(())
-        },
-    )
+    snapshot::with_generation(&pool, &namespace, &control, &withdrawn_generation, |view| {
+        assert!(view.catalog(&key, false)?.is_none());
+        let retained = view
+            .catalog(&key, true)?
+            .ok_or(crate::storage::StorageError::ScopeChanged)?;
+        assert!(view.history_qualified(&retained).unwrap());
+        Ok(())
+    })
     .unwrap();
     drop(cache);
     fs::remove_dir_all(&data.root).unwrap();

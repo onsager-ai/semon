@@ -213,8 +213,8 @@ pub(super) fn publish_retained_history(
     let mut payload_lengths = Vec::with_capacity(lengths.len());
     for (index, row) in lengths.iter().enumerate() {
         let key: Vec<u8> = row.get(0);
-        let metadata_length = usize::try_from(row.get::<_, i64>(1))
-            .map_err(|_| StorageError::ScopeChanged)?;
+        let metadata_length =
+            usize::try_from(row.get::<_, i64>(1)).map_err(|_| StorageError::ScopeChanged)?;
         let original_header_length = usize::try_from(
             row.get::<_, Option<i64>>(2)
                 .ok_or(StorageError::ScopeChanged)?,
@@ -270,15 +270,13 @@ pub(super) fn publish_retained_history(
             .ok_or(StorageError::ScopeChanged)?;
         let recipe_generation: Vec<u8> = header.get(20);
         let source_generation: Option<Vec<u8>> = header.get(21);
-        let version = u32::try_from(header.get::<_, i64>(22))
-            .map_err(|_| StorageError::ScopeChanged)?;
+        let version =
+            u32::try_from(header.get::<_, i64>(22)).map_err(|_| StorageError::ScopeChanged)?;
         let total: i64 = header.get(23);
         let incomplete: bool = header.get(24);
         if key_digest.as_slice() != keys[index].as_slice()
             || owner_generation.len() != 64
-            || !owner_generation
-                .iter()
-                .all(|byte| byte.is_ascii_hexdigit())
+            || !owner_generation.iter().all(|byte| byte.is_ascii_hexdigit())
             || !original
             || metadata.len() != payload_lengths[index].0
             || original_header.len() != payload_lengths[index].1
@@ -301,8 +299,8 @@ pub(super) fn publish_retained_history(
         let original_header: Option<crate::storage::catalog::OriginalHeader> =
             serde_json::from_slice(&original_header).map_err(|_| StorageError::ScopeChanged)?;
         let original_header = original_header.ok_or(StorageError::ScopeChanged)?;
-        let recorded_source_generation = std::str::from_utf8(source_generation)
-            .map_err(|_| StorageError::ScopeChanged)?;
+        let recorded_source_generation =
+            std::str::from_utf8(source_generation).map_err(|_| StorageError::ScopeChanged)?;
         if digest(row.key.as_bytes()).as_slice() != key_digest.as_slice()
             || row.key.as_bytes() != session_key.as_slice()
             || last != owner_last
@@ -328,7 +326,9 @@ pub(super) fn publish_retained_history(
             )
             || total < 0
             || recipe_generation.len() != 64
-            || !recipe_generation.iter().all(|byte| byte.is_ascii_hexdigit())
+            || !recipe_generation
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit())
             || original_header.0.as_bytes() != recipe_generation.as_slice()
             || original_header.1 != version
             || original_header.2.as_deref() != Some(recorded_source_generation)

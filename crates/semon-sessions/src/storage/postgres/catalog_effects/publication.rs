@@ -472,7 +472,11 @@ pub(in crate::storage::postgres) fn publish(
             tx.deadline.saturating_duration_since(now).as_millis(),
             tx.control.is_cancelled(),
             publication.rows.len(),
-            publication.rows.iter().map(|row| row.sources.len()).sum::<usize>(),
+            publication
+                .rows
+                .iter()
+                .map(|row| row.sources.len())
+                .sum::<usize>(),
             paths.len(),
             claims.len(),
             payload.len(),
@@ -498,7 +502,11 @@ pub(in crate::storage::postgres) fn publish(
                 proof_reference_count,
                 reference_index,
                 publication.rows.len(),
-                publication.rows.iter().map(|row| row.sources.len()).sum::<usize>(),
+                publication
+                    .rows
+                    .iter()
+                    .map(|row| row.sources.len())
+                    .sum::<usize>(),
                 paths.len(),
                 claims.len(),
                 payload.len(),
@@ -560,7 +568,11 @@ pub(in crate::storage::postgres) fn publish(
             #[cfg(test)]
             eprintln!(
                 "PG_SEARCH_CHECK check=counts scope={scope_name} state={}",
-                if result.is_ok() { "complete" } else { "refused" }
+                if result.is_ok() {
+                    "complete"
+                } else {
+                    "refused"
+                }
             );
             result?;
         }
