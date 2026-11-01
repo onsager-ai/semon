@@ -269,7 +269,9 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         .map_err(failed)?
                     } else {
                         self.runtime_local
-                            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                            .get_or_init(|| {
+                                crate::native_evidence::RuntimeObservations::new(options)
+                            })
                             .scope(row, &cwds)?
                     };
                     #[cfg(test)]

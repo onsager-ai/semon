@@ -6911,7 +6911,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .find(|item| item["key"] == "one")
         .expect("appended Claude parent in PostgreSQL retained list");
     assert_eq!(stable(&pg_parent), stable(sqlite_parent));
-    let caught_store = super::super::snapshot::query::QueryCatalog {
+    let mut caught_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),
         namespace: namespace.clone(),
@@ -6919,6 +6919,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: caught.clone(),
         options: options.clone(),
     };
+    let mismatched_facts = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":"one","limit":100}),
+            1790812802000,
+            &caught_store,
+            &sqlite_host,
+            None,
+        )
+        .expect_err("local-only options cannot qualify the recorded Facts publication");
+    assert_eq!(mismatched_facts.code, "unavailable");
+    caught_store.options = facts_options.clone();
     let pg_parent_transcript = query
         .call_bound_selected_at(
             "read_transcript",

@@ -28,12 +28,7 @@ fn cohort_scope_changed(reason: &'static str) -> StorageError {
 }
 
 #[cfg(test)]
-fn trace_selected_body_refusal(
-    focused: bool,
-    error: StorageError,
-    generation: &str,
-    stage: &str,
-) {
+fn trace_selected_body_refusal(focused: bool, error: StorageError, generation: &str, stage: &str) {
     if focused && error == StorageError::ScopeChanged {
         eprintln!("pg_selected_body_refused generation={generation} stage={stage}");
     }
