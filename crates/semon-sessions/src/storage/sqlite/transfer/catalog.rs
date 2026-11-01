@@ -135,6 +135,7 @@ pub(super) fn occupied(tx: &Inbox<'_>) -> Result<bool, StorageError> {
             "EXISTS(SELECT 1 FROM main.{table} WHERE namespace=?1)"
         ));
     }
+    terms.push("EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history'))".to_owned());
     tx.0.query_row(&format!("SELECT {}", terms.join(" OR ")), [tx.1], |row| {
         row.get(0)
     })
@@ -157,6 +158,7 @@ fn verify_authority(
     tx: &Inbox<'_>,
     kind: CatalogRowKind,
     values: &[serde_json::Value],
+    verification_bytes: &mut usize,
 ) -> Result<(), StorageError> {
     use CatalogRowKind::*;
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
@@ -199,9 +201,11 @@ fn verify_authority(
         }
         SearchDocument => {
             let scope = text(0)?;
-            let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![tx.1,text(1)?], |r| r.get(0)).map_err(failed)?;
+            let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(metadata)<=?3 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![tx.1,text(1)?,*verification_bytes as i64], |r| r.get::<_,Option<String>>(0)).map_err(failed)?.ok_or(StorageError::Busy)?;
             let column = if scope == "current" { "current_last_ms" } else { "history_last_ms" };
-            let postings = tx.0.prepare(&format!("SELECT gram,{column} FROM main.session_search_memberships WHERE namespace=?1 AND session_key=?2 AND {column} IS NOT NULL ORDER BY gram LIMIT 1025")).map_err(failed)?.query_map(params![tx.1,text(1)?], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+            let postings: Vec<(String,i64)> = tx.0.prepare(&format!("SELECT gram,{column} FROM main.session_search_memberships WHERE namespace=?1 AND session_key=?2 AND {column} IS NOT NULL ORDER BY gram LIMIT 1025")).map_err(failed)?.query_map(params![tx.1,text(1)?], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+            let work = metadata.len() + postings.iter().map(|(gram,_)| gram.len()+8).sum::<usize>();
+            *verification_bytes = verification_bytes.checked_sub(work).ok_or(StorageError::Busy)?;
             catalog_rows::verify_search_document(&metadata,text(1)?,text(2)?,values[3].as_bool().ok_or(StorageError::ScopeChanged)?,postings)?;
         }
         _ => {}
@@ -289,6 +293,9 @@ pub(super) fn capture(
         .map(|n| format!("coalesce(octet_length({n}),0)"))
         .collect::<Vec<_>>()
         .join("+");
+    let size = if kind == CatalogRowKind::SearchDocument {
+        format!("{size}+coalesce((SELECT octet_length(c.metadata) FROM main.session_catalog c WHERE c.namespace=?1 AND c.session_key=session_search_documents.session_key),0)+coalesce((SELECT sum(octet_length(m.gram)+8) FROM main.session_search_memberships m WHERE m.namespace=?1 AND m.session_key=session_search_documents.session_key AND CASE WHEN session_search_documents.read_scope='current' THEN m.current_last_ms IS NOT NULL ELSE m.history_last_ms IS NOT NULL END),0)")
+    } else { size };
     let sizes =
         tx.0.prepare(&format!("SELECT {size} {suffix} LIMIT 64"))
             .map_err(failed)?
@@ -321,33 +328,31 @@ pub(super) fn capture(
             .map_err(failed)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(failed)?;
+    let mut verification_bytes = transfer::MAX_PAGE_BYTES-4096;
     if rows.is_empty() {
         state.native_family += 1;
         state.native_key = None;
     } else {
-        for row in &rows {
-            verify_authority(tx, kind, &row.0).inspect_err(|_error| {
-                #[cfg(test)]
-                eprintln!("transfer capture graph refused: component={kind:?} error={_error:?}");
-            })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let record = TransferRecord::CatalogRow { generation: generation.clone(), kind, values: row.0 };
+            let size = serde_json::to_vec(&record).map_err(|_| StorageError::ScopeChanged)?.len()+1;
+            if verification_bytes < size { break; }
+            verification_bytes -= size;
+            let TransferRecord::CatalogRow { values, .. } = &record else { unreachable!() };
+            match verify_authority(tx, kind, values, &mut verification_bytes) {
+                Err(StorageError::Busy) if !records.is_empty() => break,
+                result => result?,
+            }
+            records.push(record);
         }
-        catalog_rows::append(
-            tx,
-            state,
-            rows.into_iter()
-                .map(|row| TransferRecord::CatalogRow {
-                    generation: generation.clone(),
-                    kind,
-                    values: row.0,
-                })
-                .collect(),
-        )?;
+        catalog_rows::append(tx, state, records)?;
     }
     transfer::reported::save_capture(tx, state)?;
     Ok(state.progress())
 }
 
-pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), StorageError> {
+pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord, verification_bytes: &mut usize) -> Result<(), StorageError> {
     catalog_rows::validate(record)?;
     let TransferRecord::CatalogRow {
         generation,
@@ -358,7 +363,7 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord) -> Result<(), S
         return Err(StorageError::InvalidArguments);
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
-    verify_authority(tx, *kind, values)?;
+    verify_authority(tx, *kind, values, verification_bytes)?;
     catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
     if *kind == CatalogRowKind::SearchPublication {
         let scope = values[0].as_str().ok_or(StorageError::ScopeChanged)?;

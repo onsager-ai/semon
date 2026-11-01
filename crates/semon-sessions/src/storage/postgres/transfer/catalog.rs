@@ -98,6 +98,7 @@ fn verify_authority(
     tx: &mut Inbox<'_, '_>,
     kind: CatalogRowKind,
     values: &[Value],
+    verification_bytes: &mut usize,
 ) -> Result<(), StorageError> {
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
@@ -118,7 +119,7 @@ fn verify_authority(
             }
         }
         Presentation => {
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes(),&(*verification_bytes as i64)]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             let slots = decode(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
             let manifest = decode(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
@@ -150,10 +151,12 @@ fn verify_authority(
         }
         SearchDocument => {
             let generation = super::super::model_cache::generation(tx.0)?.or(tx.get(catalog_rows::IMPORTED_GENERATION,64)?.map(|b| String::from_utf8(b).map_err(|_| StorageError::ScopeChanged)).transpose()?).ok_or(StorageError::ScopeChanged)?;
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             let rows = tx.0.driver.query("SELECT gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY gram LIMIT 1025", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
             let postings = rows.into_iter().map(|r| Ok((decode(r.get(0))?,r.get(1)))).collect::<Result<Vec<_>,StorageError>>()?;
+            let work = metadata.len() + postings.iter().map(|(gram,_)| gram.len()+8).sum::<usize>();
+            *verification_bytes = verification_bytes.checked_sub(work).ok_or(StorageError::Busy)?;
             catalog_rows::verify_search_document(&metadata,text(1)?,text(2)?,values[3].as_bool().ok_or(StorageError::ScopeChanged)?,postings)?;
         }
         _ => {}
@@ -275,6 +278,9 @@ pub(super) fn capture(
         .map(|n| format!("coalesce(octet_length({n}::text),0)::bigint"))
         .collect::<Vec<_>>()
         .join("+");
+    let size = if kind == CatalogRowKind::SearchDocument {
+        format!("{size}+coalesce((SELECT octet_length(c.metadata) FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND c.session_key=semon_pg_native_catalog_search_documents.session_key),(SELECT octet_length(h.metadata) FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.session_key=semon_pg_native_catalog_search_documents.session_key),0)+coalesce((SELECT sum(octet_length(m.gram)+8) FROM semon_pg_native_catalog_search_memberships m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND m.session_key=semon_pg_native_catalog_search_documents.session_key),0)")
+    } else { size };
     let sizes =
         tx.0.driver
             .query(&format!("SELECT {size} {suffix} LIMIT 64"), &refs)
@@ -299,6 +305,7 @@ pub(super) fn capture(
         tx.0.driver
             .query(&format!("SELECT {columns} {suffix} LIMIT {count}"), &refs)
             .map_err(sqlstate::error)?;
+    let mut verification_bytes = transfer::MAX_PAGE_BYTES-4096;
     if rows.is_empty() {
         state.native_family += 1;
         state.native_key = None;
@@ -328,12 +335,16 @@ pub(super) fn capture(
                     _ => return Err(StorageError::ScopeChanged),
                 });
             }
-            verify_authority(tx, kind, &values)?;
-            records.push(TransferRecord::CatalogRow {
-                generation: generation.clone(),
-                kind,
-                values,
-            });
+            let record = TransferRecord::CatalogRow { generation: generation.clone(), kind, values };
+            let size = serde_json::to_vec(&record).map_err(|_| StorageError::ScopeChanged)?.len()+1;
+            if verification_bytes < size { break; }
+            verification_bytes -= size;
+            let TransferRecord::CatalogRow { values, .. } = &record else { unreachable!() };
+            match verify_authority(tx, kind, values, &mut verification_bytes) {
+                Err(StorageError::Busy) if !records.is_empty() => break,
+                result => result?,
+            }
+            records.push(record);
         }
         catalog_rows::append(tx, state, records)?;
     }
@@ -341,7 +352,7 @@ pub(super) fn capture(
     Ok(state.progress())
 }
 
-pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(), StorageError> {
+pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord, verification_bytes: &mut usize) -> Result<(), StorageError> {
     catalog_rows::validate(record)?;
     let TransferRecord::CatalogRow {
         generation,
@@ -352,7 +363,7 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
         return Err(StorageError::InvalidArguments);
     };
     catalog_rows::bind_imported_generation(tx, generation)?;
-    verify_authority(tx, *kind, values)?;
+    verify_authority(tx, *kind, values, verification_bytes)?;
     catalog_rows::bind_imported_publication(tx, generation, *kind, values)?;
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();

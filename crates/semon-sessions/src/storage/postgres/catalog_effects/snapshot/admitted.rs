@@ -339,17 +339,40 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 "catalog_version" => Some(crate::model::summary::CATALOG_VERSION.to_string()),
                 // Completeness is not inferred from successful metadata staging.
                 "catalog_completeness" => Some("partial".into()),
-                "search_version" | "search_backfill_complete" | "search_generation_current" | "search_generation_retained_history" | "search_incomplete_current" | "search_incomplete_retained_history" => {
-                    let tx = self.tx.lock().map_err(|_| io::Error::other(StorageError::Unavailable))?;
+                "search_version"
+                | "search_backfill_complete"
+                | "search_generation_current"
+                | "search_generation_retained_history"
+                | "search_incomplete_current"
+                | "search_incomplete_retained_history" => {
+                    let tx = self
+                        .tx
+                        .lock()
+                        .map_err(|_| io::Error::other(StorageError::Unavailable))?;
                     let rows = tx.driver.query("SELECT scope,version,search_generation,backfill_complete,incomplete FROM semon_pg_native_catalog_search_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY scope LIMIT 3", &[&tx.namespace.as_str().as_bytes(),&self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?;
-                    if rows.len()!=2 { return unavailable(); }
-                    let scope = if key.ends_with("retained_history") { b"retained_history".as_slice() } else { b"current".as_slice() };
-                    let row = rows.iter().find(|row| row.get::<_,Vec<u8>>(0)==scope).ok_or_else(|| failed(StorageError::ScopeChanged))?;
+                    if rows.len() != 2 {
+                        return unavailable();
+                    }
+                    let scope = if key.ends_with("retained_history") {
+                        b"retained_history".as_slice()
+                    } else {
+                        b"current".as_slice()
+                    };
+                    let row = rows
+                        .iter()
+                        .find(|row| row.get::<_, Vec<u8>>(0) == scope)
+                        .ok_or_else(|| failed(StorageError::ScopeChanged))?;
                     match key {
-                        "search_version" => Some(String::from_utf8(row.get(1)).map_err(io::Error::other)?),
-                        "search_backfill_complete" => Some(if row.get::<_,bool>(3) { "1" } else { "0" }.to_owned()),
-                        key if key.starts_with("search_generation_") => Some(String::from_utf8(row.get(2)).map_err(io::Error::other)?),
-                        _ => Some(row.get::<_,i64>(4).to_string()),
+                        "search_version" => {
+                            Some(String::from_utf8(row.get(1)).map_err(io::Error::other)?)
+                        }
+                        "search_backfill_complete" => {
+                            Some(if row.get::<_, bool>(3) { "1" } else { "0" }.to_owned())
+                        }
+                        key if key.starts_with("search_generation_") => {
+                            Some(String::from_utf8(row.get(2)).map_err(io::Error::other)?)
+                        }
+                        _ => Some(row.get::<_, i64>(4).to_string()),
                     }
                 }
                 _ => None,
