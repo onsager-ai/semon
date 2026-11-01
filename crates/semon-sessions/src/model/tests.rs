@@ -5027,6 +5027,130 @@ fn semantic_relation_batches_continue_after_codex_primary_event_budget() {
 }
 
 #[test]
+fn semantic_relation_batch_respects_output_budget_with_header_fanout() {
+    let home = Home::new();
+    let mut root_records = Vec::new();
+    for n in 0..16 {
+        root_records.push(codex_line(
+            ts(7, 1),
+            "response_item",
+            json!({"type":"function_call","name":"collaboration.send_message","call_id":format!("relay-{n:03}"),"arguments":json!({"target":format!("root/part{n:03}"),"message":format!("Follow up {n}")}).to_string()}),
+        ));
+    }
+    home.codex("root", json!({}), &root_records);
+    for n in 0..63 {
+        let task = format!("part{n:03}");
+        home.codex(
+            &format!("child-{n:03}"),
+            json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":format!("root/{task}"),"agent_nickname":format!("worker-{n}")}),
+            &[],
+        );
+    }
+
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert_eq!(inputs.len(), 64);
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut relation_batches = 0;
+    let mut reached_publication = false;
+    for _ in 0..128 {
+        let Some(batch) = cache.semantic_batch(64).unwrap() else {
+            break;
+        };
+        if batch.phase == relation_stage::Phase::Publication {
+            reached_publication = true;
+            break;
+        }
+        if batch.paths.is_empty() {
+            assert!(matches!(
+                batch.phase,
+                relation_stage::Phase::Indexing | relation_stage::Phase::Identity
+            ));
+            continue;
+        }
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Codex,
+                path: Path::new(path)
+                    .strip_prefix(&home.options.codex_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
+        if batch.phase == relation_stage::Phase::Relations {
+            relation_batches += 1;
+            assert!(
+                prepared.prepared().relationships.relations.len() <= 64,
+                "header fanout plus selected primary events must fit the relation output cap"
+            );
+        }
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    assert!(reached_publication, "relation staging did not progress to publication");
+    assert!(relation_batches > 1, "header paths must progress in bounded groups");
+
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let unfinished: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources WHERE relation_done=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(unfinished, 0, "all selected relation sources must advance");
+    let mut statement = db
+        .prepare("SELECT relation_id,metadata FROM main.catalog_semantic_relations")
+        .unwrap();
+    let relation_rows = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let spawn_ids = relation_rows
+        .iter()
+        .filter_map(|(id, metadata)| {
+            let relation: Value = serde_json::from_str(metadata).unwrap();
+            (relation["kind"] == "spawn").then_some(id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let relay_ids = relation_rows
+        .iter()
+        .filter_map(|(id, metadata)| {
+            let relation: Value = serde_json::from_str(metadata).unwrap();
+            (relation["kind"] == "relay").then_some(id.clone())
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_spawns = (0..63)
+        .map(|n| stable_id("s", &format!("spawn:codex:child-{n:03}")))
+        .collect::<BTreeSet<_>>();
+    let expected_relays = (0..16)
+        .map(|n| stable_id("r", &format!("relay:codex:relay-{n:03}")))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(spawn_ids, expected_spawns, "all child header spawns must persist");
+    assert_eq!(relay_ids, expected_relays, "all root relays must persist");
+}
+
+#[test]
 fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
     let home = Home::new();
     let mut root_records = vec![codex_user(ts(6, 0), "Coordinate relation pages")];

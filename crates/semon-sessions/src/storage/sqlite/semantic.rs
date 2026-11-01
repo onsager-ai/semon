@@ -16,6 +16,7 @@ use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const RELATION_EVENT_PAGE_LIMIT: usize = 16;
+const RELATION_OUTPUT_LIMIT: usize = 64;
 // Raw metadata reads in one relation batch, including Send/Xsm peers.
 const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
@@ -3862,6 +3863,8 @@ impl Stage {
         let claude = result_phase == Phase::Relations && paths.first().map(|path| tx.query_row("SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get::<_,bool>(0)).optional()).transpose().map_err(error)?.flatten().unwrap_or(false);
         if claude {
             paths.truncate(1);
+        } else if result_phase == Phase::Relations {
+            paths.truncate(RELATION_OUTPUT_LIMIT - RELATION_EVENT_PAGE_LIMIT);
         }
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
             Context {
@@ -4415,7 +4418,7 @@ impl Stage {
                     }
                     tx.execute("UPDATE main.catalog_semantic_endpoints SET metadata=?3 WHERE namespace=?1 AND session_key=?2",params![ns,endpoint.row.key,text]).map_err(error)?;
                 }
-                if prepared.relationships.relations.len() > 64 {
+                if prepared.relationships.relations.len() > RELATION_OUTPUT_LIMIT {
                     return Err(refuse("semantic_relation_budget"));
                 }
                 for relation in prepared.relationships.relations.values() {
