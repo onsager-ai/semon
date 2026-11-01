@@ -88,7 +88,8 @@ jobs:
             model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
             model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
             model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
-            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable; do
+            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
+            catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0
