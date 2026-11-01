@@ -664,27 +664,23 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         // History headers keep their captured lifecycle. Project
                         // only this bounded fallback candidate through the same
                         // owner rule as history_display_catalog.
-                        if !is_live {
-                            if let Some(bytes) = encoded.take() {
-                                let mut value: CatalogRow = serde_json::from_slice(&bytes)
-                                    .map_err(|_| failed(StorageError::ScopeChanged))?;
-                                let captured = value.lifecycle;
-                                lifecycle = super::history_display_lifecycle(
-                                    original.ok_or_else(|| failed(StorageError::ScopeChanged))?,
-                                    has_current
-                                        .ok_or_else(|| failed(StorageError::ScopeChanged))?,
-                                    captured,
-                                );
-                                if lifecycle != captured {
-                                    value.lifecycle = lifecycle;
-                                    let projected =
-                                        serde_json::to_vec(&value).map_err(io::Error::other)?;
-                                    length =
-                                        i64::try_from(projected.len()).map_err(io::Error::other)?;
-                                    encoded = (length <= budget as i64).then_some(projected);
-                                } else {
-                                    encoded = Some(bytes);
-                                }
+                        if !is_live && let Some(bytes) = encoded.take() {
+                            let mut value: CatalogRow = serde_json::from_slice(&bytes)
+                                .map_err(|_| failed(StorageError::ScopeChanged))?;
+                            let captured = value.lifecycle;
+                            lifecycle = super::history_display_lifecycle(
+                                original.ok_or_else(|| failed(StorageError::ScopeChanged))?,
+                                has_current.ok_or_else(|| failed(StorageError::ScopeChanged))?,
+                                captured,
+                            );
+                            if lifecycle != captured {
+                                value.lifecycle = lifecycle;
+                                let projected =
+                                    serde_json::to_vec(&value).map_err(io::Error::other)?;
+                                length = i64::try_from(projected.len()).map_err(io::Error::other)?;
+                                encoded = (length <= budget as i64).then_some(projected);
+                            } else {
+                                encoded = Some(bytes);
                             }
                         }
                         Ok(Candidate {
