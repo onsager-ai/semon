@@ -2286,7 +2286,10 @@ fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
     drop(db);
 
     let after = read();
-    assert_eq!(after["participants"]["alpha"], "Alpha");
+    // The reused key has a new trace-header source generation. It cannot
+    // qualify the old History peer or rename it from another harness.
+    assert!(after["participants"].get("alpha").is_none());
+    assert_eq!(after["incomplete"], true);
     assert_eq!(after["turns"], before["turns"]);
     assert_eq!(after["sessions"], before["sessions"]);
 }
