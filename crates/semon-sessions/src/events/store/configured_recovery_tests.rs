@@ -93,7 +93,7 @@ mod current_recovery {
             .map(|input| input.full_path(&options).to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
-        let mut cache = f.native_cache();
+        let mut cache = cache(&f);
 
         // Keep a genuine previous Publication batch so the epoch change can
         // also prove that a stale prepared publisher remains fenced.
