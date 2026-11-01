@@ -1232,6 +1232,51 @@ impl NativeEvidence {
                 work.texts.release_published_derivations();
                 return Ok(true);
             }
+            Err(error)
+                if error
+                    .get_ref()
+                    .and_then(|cause| {
+                        cause.downcast_ref::<crate::events::CommittedSourceChanged>()
+                    })
+                    .is_some() =>
+            {
+                let path = error
+                    .get_ref()
+                    .and_then(|cause| {
+                        cause.downcast_ref::<crate::events::CommittedSourceChanged>()
+                    })
+                    .expect("matched committed source stat change")
+                    .path()
+                    .to_owned();
+                let expected_claim = if batch.paths.contains(&path) {
+                    let mut claims = batch
+                        .source_claims
+                        .iter()
+                        .filter(|(candidate, _)| candidate == &path);
+                    match (claims.next(), claims.next()) {
+                        (Some((_, claim)), None) => Some(*claim),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let Some(expected_claim) = expected_claim else {
+                    return Err(error);
+                };
+                let Some(_receipt) = cache.invalidate_stale_host_source(&path, expected_claim)?
+                else {
+                    // Configured stores must wait for their explicit native
+                    // producer; keep the original stat-mismatch refusal.
+                    return Err(error);
+                };
+                // Applied, replayed, or CAS-conflicted invalidations are all
+                // terminal here. The next semantic turn observes the current
+                // journal and resets/replays the bounded epoch as needed.
+                cache.end_scan();
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
+                return Ok(true);
+            }
             Err(error) => {
                 if let Some(repair) = error
                     .get_ref()
@@ -4545,6 +4590,221 @@ mod catalog_owner_tests {
             .open(input.full_path(options))
             .unwrap();
         writeln!(file, "{{\"type\":\"event_msg\",\"timestamp\":\"2026-10-01T00:01:00Z\",\"payload\":{{\"type\":\"user_message\",\"message\":\"shared publication\"}}}}").unwrap();
+    }
+
+    #[test]
+    fn late_stat_recovery_cas_preserves_a_new_claim_after_acknowledged_none() {
+        use crate::storage::source_observations::{SourceMutationReceipt, SourceOperation};
+
+        let (root, options, input) = audit_fixture();
+        let initial = NativeEvidence::new(options.clone());
+        drain_catalog(&initial, &std::cell::Cell::new(0));
+        initial.retire();
+        drop(initial);
+
+        let path = input.full_path(&options).to_string_lossy().into_owned();
+        let config = options.source.config(&options.cache).unwrap();
+        let mut journal = config.source_observations().unwrap();
+        assert_eq!(journal.claims(std::slice::from_ref(&path)).unwrap()[0].1, None);
+
+        let evidence = NativeEvidence::new(options.clone());
+        {
+            let mut work = lock(&evidence.work);
+            work.events = Some(EventCache::open_scoped(&options.cache, &options.source).unwrap());
+            assert_eq!(
+                work.events
+                    .as_mut()
+                    .unwrap()
+                    .begin_semantic_stage(
+                        std::slice::from_ref(&path),
+                        &query_runtime_generation(&options).unwrap(),
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+        }
+
+        let database = cold_search_connection(&options);
+        let injected_race = std::cell::Cell::new(false);
+        let raced_revision = std::cell::Cell::new(None);
+        let mut before_build = || {
+            if injected_race.get() {
+                return Ok(());
+            }
+            let phase: String = database
+                .query_row(
+                    "SELECT phase FROM catalog_semantic_stage",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            if !matches!(phase.as_str(), "relations" | "publication") {
+                return Ok(());
+            }
+            assert_eq!(
+                journal.claims(std::slice::from_ref(&path)).unwrap()[0].1,
+                None,
+                "the source claim was acknowledged before this staged replay"
+            );
+            append_audit_record(&options, &input);
+            let expected = vec![(path.clone(), None)];
+            let operation = SourceOperation::capture(
+                config.namespace.as_str(),
+                "invalidate",
+                &serde_json::to_vec(&expected).unwrap(),
+            );
+            assert_eq!(
+                journal.invalidate(&operation, &expected).unwrap(),
+                SourceMutationReceipt::Applied
+            );
+            let claim = journal.claims(std::slice::from_ref(&path)).unwrap()[0].1;
+            assert!(claim.is_some());
+            raced_revision.set(claim);
+            injected_race.set(true);
+            Ok(())
+        };
+
+        let mut yielded_after_cas = false;
+        for _ in 0..8 {
+            let mut work = lock(&evidence.work);
+            if evidence
+                .advance_semantic_stage(&mut work, model::now_ms(), &mut before_build)
+                .unwrap()
+            {
+                yielded_after_cas = injected_race.get();
+            }
+            if injected_race.get() {
+                break;
+            }
+        }
+        drop(before_build);
+        assert!(injected_race.get(), "the staged read never reached a committed phase");
+        assert!(yielded_after_cas, "the terminal CAS conflict must yield");
+        assert_eq!(
+            journal.claims(std::slice::from_ref(&path)).unwrap()[0].1,
+            raced_revision.get(),
+            "the newer concurrent claim must survive the stale None CAS"
+        );
+
+        let epoch_before_reset: i64 = database
+            .query_row(
+                "SELECT epoch FROM catalog_semantic_stage",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        {
+            let mut work = lock(&evidence.work);
+            evidence
+                .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
+                .unwrap();
+        }
+        let reset: (i64, String) = database
+            .query_row(
+                "SELECT epoch,phase FROM catalog_semantic_stage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(reset.0 > epoch_before_reset);
+        assert_eq!(reset.1, "indexing");
+
+        drop(database);
+        drop(journal);
+        evidence.retire();
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_semantic_read_does_not_gain_implicit_raw_ingestion() {
+        use crate::storage::{StoreBackend, native_events::NativeEventStore};
+
+        let (root, mut options, input) = audit_fixture();
+        let raw_path = input.full_path(&options);
+        let config = options
+            .source
+            .store_config(StoreBackend::Sqlite {
+                database: root.join("configured.sqlite3"),
+            })
+            .unwrap();
+        config.create_native_store().unwrap();
+        crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let mut native = config.native_events().unwrap();
+        native
+            .ingest(&"a".repeat(64), &raw_path, "codex")
+            .unwrap();
+        drop(native);
+        options.source = options.source.clone().with_store(config.clone()).unwrap();
+        let path = raw_path.to_string_lossy().into_owned();
+        let runtime = query_runtime_generation(&options).unwrap();
+        let mut staged = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            staged
+                .begin_semantic_stage(std::slice::from_ref(&path), &runtime)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        drop(staged);
+
+        let database = match &config.backend {
+            StoreBackend::Sqlite { database } => rusqlite::Connection::open(database).unwrap(),
+            #[cfg(feature = "postgres")]
+            StoreBackend::Postgres { .. } => unreachable!(),
+        };
+        let before: (i64, i64, i64) = database
+            .query_row(
+                "SELECT f.size,f.resume_at,(SELECT count(*) FROM events e WHERE e.namespace=f.namespace AND e.file_id=f.file_id) FROM files f WHERE f.namespace=?1 AND f.path=?2",
+                rusqlite::params![config.namespace.as_str(), path],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut journal = config.source_observations().unwrap();
+        let claim_before = journal.claims(std::slice::from_ref(&path)).unwrap();
+
+        append_audit_record(&options, &input);
+        let evidence = NativeEvidence::new(options.clone());
+        let mut work = lock(&evidence.work);
+        work.events = Some(
+            EventCache::open_semantic(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap(),
+        );
+        evidence.prepare_events(&mut work, model::now_ms()).unwrap();
+        let error = evidence
+            .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(error.get_ref().is_some_and(|cause| {
+            cause.is::<crate::events::CommittedSourceChanged>()
+        }));
+        assert_eq!(
+            journal.claims(std::slice::from_ref(&path)).unwrap(),
+            claim_before,
+            "configured observation reads do not create Raw claims"
+        );
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT f.size,f.resume_at,(SELECT count(*) FROM events e WHERE e.namespace=f.namespace AND e.file_id=f.file_id) FROM files f WHERE f.namespace=?1 AND f.path=?2",
+                    rusqlite::params![config.namespace.as_str(), path],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap(),
+            before,
+            "only explicit NativeEventStore::ingest may advance configured Raw custody"
+        );
+
+        drop(work);
+        drop(database);
+        drop(journal);
+        evidence.retire();
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

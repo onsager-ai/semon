@@ -3387,6 +3387,7 @@ impl Stage {
                 epoch,
                 phase: Phase::Publication,
                 paths: Vec::new(),
+                source_claims: Vec::new(),
                 base_generation,
                 source_revision,
                 runtime,
@@ -3443,6 +3444,7 @@ impl Stage {
                 epoch: next_epoch,
                 phase: Phase::Indexing,
                 paths: Vec::new(),
+                source_claims: Vec::new(),
                 base_generation,
                 source_revision: revision,
                 runtime,
@@ -3670,6 +3672,7 @@ impl Stage {
                 |r| r.get(0),
             )
             .map_err(error)?;
+        let source_claims = super::source_journal::claims(&tx, ns, &paths).map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_reduction").map_err(error)?;
         tx.commit().map_err(error)?;
@@ -3677,6 +3680,7 @@ impl Stage {
             epoch,
             phase: result_phase,
             paths,
+            source_claims,
             base_generation,
             source_revision,
             runtime,

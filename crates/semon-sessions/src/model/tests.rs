@@ -4080,6 +4080,7 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
         epoch: staged.epoch.unwrap_or_default(),
         phase: relation_stage::Phase::Publication,
         paths: replay.claims.iter().map(|(path, _)| path.clone()).collect(),
+        source_claims: replay.claims.clone(),
         base_generation: replay.base_generation.clone(),
         source_revision: 0,
         runtime: String::new(),
@@ -4579,30 +4580,40 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     let mut appended = false;
     let mut durable_preview_restarted = false;
     let mut complete = false;
+    let root_log = home
+        .options
+        .codex_home
+        .join("sessions/2026/09/24/rollout-root.jsonl");
+    let mut append_epoch = None;
+    let mut reset_epoch = None;
+    let mut saw_late_claim = false;
     for _ in 0..128 {
         let done = evidence
             .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
             .unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
-        let phase: Option<String> = db
-            .query_row("SELECT phase FROM catalog_semantic_stage", [], |row| {
-                row.get(0)
+        let stage: Option<(i64, String)> = db
+            .query_row("SELECT epoch,phase FROM catalog_semantic_stage", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
             })
             .optional()
             .unwrap();
-        if !done {
-            assert!(
-                crate::source_projection_ready(
-                    &home.options,
-                    "codex",
-                    "sessions/2026/09/24/rollout-root.jsonl"
-                )
-                .unwrap()
-                .is_none(),
-                "partial epoch became archive-ready"
-            );
+        if done {
+            complete = true;
+            break;
         }
-        if phase.as_deref() == Some("relations") && !restarted {
+        let (epoch, phase) = stage.expect("the in-flight semantic stage is durable");
+        assert!(
+            crate::source_projection_ready(
+                &home.options,
+                "codex",
+                "sessions/2026/09/24/rollout-root.jsonl"
+            )
+            .unwrap()
+            .is_none(),
+            "partial epoch became archive-ready"
+        );
+        if phase == "relations" && !restarted {
             let relation_id = stable_id("s", "spawn:codex:child-000");
             let metadata: Option<String> = db
                 .query_row(
@@ -4623,20 +4634,28 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
                 durable_preview_restarted = true;
             }
         }
-        if phase.as_deref() == Some("publication") && !appended {
+        if phase == "publication" && !appended {
+            append_epoch = Some(epoch);
             let mut file = fs::OpenOptions::new()
                 .append(true)
-                .open(
-                    home.options
-                        .codex_home
-                        .join("sessions/2026/09/24/rollout-root.jsonl"),
-                )
+                .open(&root_log)
                 .unwrap();
             writeln!(file, "{}", codex_reply(ts(6, 5), "Late native completion")).unwrap();
             appended = true;
-        } else if done {
-            complete = true;
-            break;
+        }
+        if appended {
+            let path = root_log.to_string_lossy();
+            saw_late_claim |= db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                    [path.as_ref()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            if epoch > append_epoch.expect("append captured the active epoch") {
+                assert_eq!(phase, "indexing", "late stat mismatch resets the epoch");
+                reset_epoch = Some(epoch);
+            }
         }
     }
     evidence.retire();
@@ -4644,6 +4663,22 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         complete && restarted && appended && durable_preview_restarted,
         "durable rich family did not qualify after owner loss and append"
     );
+    assert!(saw_late_claim, "late append did not create a dirty source claim");
+    assert!(
+        reset_epoch.is_some_and(|epoch| epoch > append_epoch.unwrap()),
+        "late committed stat mismatch did not reset the semantic epoch"
+    );
+    let late_stat = crate::events::Stat::of(&root_log).unwrap();
+    let work = crate::viewer::lock(&evidence.work);
+    assert_eq!(
+        work.events
+            .as_ref()
+            .unwrap()
+            .indexed_stat(&root_log),
+        Some(late_stat),
+        "the host Index ledger must catch up to the appended source"
+    );
+    drop(work);
     let mut oracle_options = home.options.clone();
     oracle_options.cache = home.root.join("oracle-index.json");
     let oracle = home.build_at(&oracle_options, NOW);

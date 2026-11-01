@@ -87,6 +87,9 @@ pub(crate) struct Batch {
     pub(crate) epoch: i64,
     pub(crate) phase: Phase,
     pub(crate) paths: Vec<String>,
+    /// Current SourceJournal claims read with `paths`, including `None` after
+    /// this stage has acknowledged a source's earlier claim.
+    pub(crate) source_claims: Vec<(String, Option<i64>)>,
     pub(crate) base_generation: Option<String>,
     pub(crate) source_revision: i64,
     pub(crate) runtime: String,
