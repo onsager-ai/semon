@@ -531,10 +531,11 @@ pub(crate) fn advance_catalog_with_retirement_observer(
         )
         .unwrap();
     after_retirement();
+    let retirement_runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
     begin_active_catalog(
         &mut cache,
         &[old_path.to_str().unwrap().to_owned()],
-        "transfer-real-model",
+        &retirement_runtime,
         true,
     );
     assert!(finish_catalog(&mut cache, options, std::slice::from_ref(&old)).is_empty());
@@ -543,10 +544,11 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     std::fs::write(&path, body).unwrap();
     cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
+    let successor_runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
     begin_active_catalog(
         &mut cache,
         &[path.to_str().unwrap().to_owned()],
-        "transfer-real-model",
+        &successor_runtime,
         true,
     );
     finish_catalog(&mut cache, options, std::slice::from_ref(&input))
