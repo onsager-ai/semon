@@ -223,11 +223,21 @@ pub(super) fn publish(
         let mut retained = std::collections::BTreeSet::new();
         if let Some(history) = history {
             if history.len() > 1_048_576 {
+                #[cfg(test)]
+                eprintln!(
+                    "native-history-bound=metadata bytes={} limit=1048576",
+                    history.len()
+                );
                 return Err(StorageError::HistoryRetentionBounds);
             }
             let history: CatalogRow =
                 serde_json::from_str(&history).map_err(|_| StorageError::Unavailable)?;
             if history.sources.len() > 64 {
+                #[cfg(test)]
+                eprintln!(
+                    "native-history-bound=sources count={} limit=64",
+                    history.sources.len()
+                );
                 return Err(StorageError::HistoryRetentionBounds);
             }
             for source in &history.sources {
@@ -236,6 +246,11 @@ pub(super) fn publish(
                 let ids = tx.prepare("SELECT id FROM storage_proof_sources WHERE namespace=?1 AND session_key=?2 AND path=?3 AND ledger=?4 LIMIT 65").map_err(failed)?.query_map(params![namespace, row.key, source.path.to_string_lossy(), digest], |r| r.get::<_, String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
                 retained.extend(ids);
                 if retained.len() > 64 {
+                    #[cfg(test)]
+                    eprintln!(
+                        "native-history-bound=retained-proof-ids count={} limit=64",
+                        retained.len()
+                    );
                     return Err(StorageError::HistoryRetentionBounds);
                 }
             }
