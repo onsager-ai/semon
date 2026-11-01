@@ -16,12 +16,23 @@ use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const RELATION_EVENT_PAGE_LIMIT: usize = 16;
+// Primary source events advanced in one relation batch.
 const RELATION_EVENT_BATCH_LIMIT: usize = 64;
+// Raw metadata reads in one relation batch, including Send/Xsm peers.
+const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
+const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 
 struct RelationPage {
     cursor: RelationCursor,
     locations: Vec<Location>,
-    events: usize,
+    primary_events: usize,
+    budget_blocked: bool,
+}
+
+#[derive(Default)]
+struct RelationPageReadBudget {
+    metadata_reads: usize,
+    metadata_bytes: usize,
 }
 
 struct RelationScope {
@@ -244,27 +255,34 @@ fn relation_page(
     ns: &str,
     path: &str,
     limit: usize,
+    budget: &mut RelationPageReadBudget,
 ) -> rusqlite::Result<RelationPage> {
     let after: String = db.query_row("SELECT relation_after FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get(0))?;
     // A message can produce incident edges in both directions. Select a small
-    // event page, retaining the existing relation and metadata operation caps.
-    let limit = limit.min(RELATION_EVENT_PAGE_LIMIT);
-    let mut query = db.prepare("SELECT event_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT ?4")?;
-    let mut rows = query.query(params![ns, path, after, limit as i64])?;
+    // event page under the batch-wide primary/peer read and raw metadata caps.
+    let limit = limit
+        .min(RELATION_EVENT_PAGE_LIMIT)
+        .min(RELATION_EVENT_READ_BATCH_LIMIT.saturating_sub(budget.metadata_reads));
+    let mut query = db.prepare("SELECT event_key,octet_length(metadata) FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT ?4")?;
+    let rows = query
+        .query_map(params![ns, path, after, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut locations = Vec::new();
-    let mut used = 0usize;
     let mut end = after.clone();
-    let mut events = 0usize;
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let text: Option<String> = row.get(1)?;
-        let mut candidate_used = used;
-        let own: crate::model::relation_stage::NativeEvent =
-            match crate::model::relation_stage::selector_metadata(text, &mut candidate_used) {
-                Ok(event) => event,
-                Err(_) if !locations.is_empty() => break,
-                Err(_) => return Err(rusqlite::Error::InvalidQuery),
-            };
+    let mut primary_events = 0usize;
+    let mut budget_blocked = false;
+    for (key, metadata_bytes) in rows {
+        let own = match relation_metadata_event(db, ns, path, &key, metadata_bytes, budget) {
+            Ok(Some(event)) => event,
+            Ok(None) => {
+                budget_blocked = true;
+                break;
+            }
+            Err(_) if !locations.is_empty() => break,
+            Err(_) => return Err(rusqlite::Error::InvalidQuery),
+        };
         let id = if own.event.k == crate::events::Kind::Xsm {
             own.event.id.as_deref()
         } else if own.event.n.as_deref() == Some("SendMessage") {
@@ -276,19 +294,40 @@ fn relation_page(
         let mut overflow = false;
         if let Some(id) = id {
             for kind in ["send", "xsm"] {
-                let peer: Option<Option<String>> = db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind=?3 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",params![ns,id,kind],|r|r.get(0)).optional()?;
-                if let Some(text) = peer {
-                    match crate::model::relation_stage::selector_metadata::<
-                        crate::model::relation_stage::NativeEvent,
-                    >(text, &mut candidate_used)
-                    {
-                        Ok(event) => selected.push(event.at),
+                if budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT {
+                    overflow = true;
+                    budget_blocked = true;
+                    break;
+                }
+                let peer: Option<(String, String, Option<i64>)> = db
+                    .query_row(
+                        "SELECT source_path,event_key,octet_length(metadata) FROM main.catalog_semantic_events WHERE namespace=?1 AND msg_id=?2 AND kind=?3 AND copied=0 AND qualified=1 ORDER BY source_path,native_seq LIMIT 1",
+                        params![ns, id, kind],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                if let Some((peer_path, peer_key, peer_metadata_bytes)) = peer {
+                    let event = match relation_metadata_event(
+                        db,
+                        ns,
+                        &peer_path,
+                        &peer_key,
+                        peer_metadata_bytes,
+                        budget,
+                    ) {
+                        Ok(Some(event)) => event,
+                        Ok(None) => {
+                            overflow = true;
+                            budget_blocked = true;
+                            break;
+                        }
                         Err(_) if !locations.is_empty() => {
                             overflow = true;
                             break;
                         }
                         Err(_) => return Err(rusqlite::Error::InvalidQuery),
-                    }
+                    };
+                    selected.push(event.at);
                 }
             }
         }
@@ -296,9 +335,8 @@ fn relation_page(
             break;
         }
         locations.extend(selected);
-        used = candidate_used;
         end = key;
-        events += 1;
+        primary_events += 1;
     }
     Ok(RelationPage {
         cursor: RelationCursor {
@@ -307,8 +345,42 @@ fn relation_page(
             end,
         },
         locations,
-        events,
+        primary_events,
+        budget_blocked,
     })
+}
+
+fn relation_metadata_event(
+    db: &Connection,
+    ns: &str,
+    path: &str,
+    event_key: &str,
+    metadata_bytes: Option<i64>,
+    budget: &mut RelationPageReadBudget,
+) -> rusqlite::Result<Option<crate::model::relation_stage::NativeEvent>> {
+    if budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT {
+        return Ok(None);
+    }
+    budget.metadata_reads += 1;
+    let remaining = RELATION_METADATA_BATCH_LIMIT.saturating_sub(budget.metadata_bytes);
+    if metadata_bytes
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .is_some_and(|bytes| bytes > remaining)
+    {
+        return Ok(None);
+    }
+    let text: Option<String> = db.query_row(
+        "SELECT metadata FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key=?3",
+        params![ns, path, event_key],
+        |row| row.get(0),
+    )?;
+    let mut attempted_bytes = budget.metadata_bytes;
+    let event = crate::model::relation_stage::selector_metadata(text, &mut attempted_bytes);
+    budget.metadata_bytes = attempted_bytes;
+    match event {
+        Ok(event) => Ok(Some(event)),
+        Err(_) => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 
 pub(crate) fn validate_owners(db: &Connection) -> Result<(), StorageError> {
@@ -3845,11 +3917,21 @@ impl Stage {
             }
         };
         let mut relation_cursors = Vec::new();
+        let mut relation_read_budget = RelationPageReadBudget::default();
         if result_phase == Phase::Relations && !paths.is_empty() {
             if claude {
                 let selected = paths[0].clone();
-                let page = relation_page(&tx, ns, &selected, RELATION_EVENT_PAGE_LIMIT)
-                    .map_err(error)?;
+                let page = relation_page(
+                    &tx,
+                    ns,
+                    &selected,
+                    RELATION_EVENT_PAGE_LIMIT,
+                    &mut relation_read_budget,
+                )
+                .map_err(error)?;
+                if page.primary_events == 0 && page.budget_blocked {
+                    return Err(refuse("semantic_source_budget"));
+                }
                 context.matching_locations = Some(page.locations);
                 context.matching_header_paths = Some(vec![selected.clone()]);
                 let mut actors = context
@@ -3879,7 +3961,7 @@ impl Stage {
                 paths.extend(companions.into_iter().filter(|path| path != &selected));
                 relation_cursors.push(page.cursor);
             } else {
-                let mut remaining_events = RELATION_EVENT_BATCH_LIMIT;
+                let mut remaining_primary_events = RELATION_EVENT_BATCH_LIMIT;
                 let mut page_paths = Vec::with_capacity(paths.len());
                 for path in &paths {
                     let is_claude: bool = tx
@@ -3896,17 +3978,31 @@ impl Stage {
                     }
                 }
                 for selected in page_paths {
-                    if remaining_events == 0 {
+                    if remaining_primary_events == 0
+                        || relation_read_budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT
+                        || relation_read_budget.metadata_bytes >= RELATION_METADATA_BATCH_LIMIT
+                    {
                         break;
                     }
-                    let page = relation_page(
+                    let RelationPage {
+                        cursor,
+                        locations,
+                        primary_events,
+                        budget_blocked,
+                    } = relation_page(
                         &tx,
                         ns,
                         &selected,
-                        remaining_events.min(RELATION_EVENT_PAGE_LIMIT),
+                        remaining_primary_events.min(RELATION_EVENT_PAGE_LIMIT),
+                        &mut relation_read_budget,
                     )
                     .map_err(error)?;
-                    let page_has_locations = !page.locations.is_empty();
+                    if primary_events == 0 && budget_blocked {
+                        if relation_cursors.is_empty() {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        break;
+                    }
                     let had_locations = context.matching_locations.is_some();
                     let location_count = context
                         .matching_locations
@@ -3920,16 +4016,15 @@ impl Stage {
                     context
                         .matching_locations
                         .get_or_insert_with(Vec::new)
-                        .extend(page.locations);
+                        .extend(locations);
                     context
                         .matching_header_paths
                         .get_or_insert_with(Vec::new)
                         .push(selected);
-                    if page_has_locations
-                        && serde_json::to_vec(&context)
-                            .map_err(|e| StoreError::Data(e.to_string()))?
-                            .len()
-                            > 1048576
+                    if serde_json::to_vec(&context)
+                        .map_err(|e| StoreError::Data(e.to_string()))?
+                        .len()
+                        > 1048576
                     {
                         if let Some(locations) = &mut context.matching_locations {
                             locations.truncate(location_count);
@@ -3944,12 +4039,21 @@ impl Stage {
                             context.matching_header_paths = None;
                         }
                         if relation_cursors.is_empty() {
-                            return Err(refuse("semantic_source_budget"));
+                            continue;
                         }
                         break;
                     }
-                    remaining_events -= page.events;
-                    relation_cursors.push(page.cursor);
+                    remaining_primary_events -= primary_events;
+                    relation_cursors.push(cursor);
+                    if budget_blocked
+                        || relation_read_budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT
+                        || relation_read_budget.metadata_bytes >= RELATION_METADATA_BATCH_LIMIT
+                    {
+                        break;
+                    }
+                }
+                if relation_cursors.is_empty() {
+                    return Err(refuse("semantic_source_budget"));
                 }
             }
             if paths.len() > 64

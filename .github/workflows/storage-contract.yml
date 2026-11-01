@@ -127,6 +127,7 @@ jobs:
             model::tests::catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources \
             events::store::configured::tests::current_recovery::recovery_semantic_index_revision_drift_resets_stale_reduction_witness \
             model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
+            model::tests::semantic_relation_batch_rejects_stale_nonleading_cursor_atomically \
             native_evidence::catalog_owner_tests::late_stat_recovery_cas_preserves_a_new_claim_after_acknowledged_none \
             native_evidence::catalog_owner_tests::configured_semantic_read_does_not_gain_implicit_raw_ingestion \
             events::store::configured::tests::domain52::presentation_capture_overflow::aggregate_overflow_rolls_back_then_halves_and_rebinds_admission \
