@@ -124,21 +124,33 @@ impl Row {
         let mut tuples = Vec::new();
         for row in rows {
             let offset = values.len();
-            let binds = row.binds.iter().enumerate().map(|(at, bind)| {
-                bind.replacen(&format!("${}", at + 1), &format!("${}", offset + at + 1), 1)
-            }).collect::<Vec<_>>();
+            let binds = row
+                .binds
+                .iter()
+                .enumerate()
+                .map(|(at, bind)| {
+                    bind.replacen(&format!("${}", at + 1), &format!("${}", offset + at + 1), 1)
+                })
+                .collect::<Vec<_>>();
             tuples.push(format!("({})", binds.join(",")));
             values.extend(row.values);
         }
-        let refs = values.iter().map(|v| &**v as &(dyn ToSql + Sync)).collect::<Vec<_>>();
+        let refs = values
+            .iter()
+            .map(|v| &**v as &(dyn ToSql + Sync))
+            .collect::<Vec<_>>();
         let sql = format!(
             "INSERT INTO semon_pg_native_usage({}) VALUES {} ON CONFLICT(namespace_digest,file_id,message_id) DO UPDATE SET {}",
-            columns.join(","), tuples.join(","), updates.join(",")
+            columns.join(","),
+            tuples.join(","),
+            updates.join(",")
         );
         if tx.driver.execute(&sql, &refs).map_err(sqlstate::error)? != count as u64 {
             return Err(StorageError::Conflict);
         }
-        for _ in 0..count { after(tx)?; }
+        for _ in 0..count {
+            after(tx)?;
+        }
         Ok(())
     }
     fn put(
@@ -196,7 +208,9 @@ fn delete(
                 &format!("DELETE FROM semon_pg_native_{table} WHERE ctid IN (SELECT ctid FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 {suffix} LIMIT 64)"),
                 &values,
             ).map_err(sqlstate::error)?;
-            if count < 64 { break; }
+            if count < 64 {
+                break;
+            }
         }
     } else {
         tx.driver
@@ -440,7 +454,6 @@ pub(super) fn write(
     Ok(id)
 }
 
-
 // A page contains distinct messages from UsageChanges' original BTree order.
 // Copy triggers only relate the same (message, record) across different files:
 // regrouping a single file's distinct messages cannot change that relation.
@@ -457,8 +470,13 @@ fn write_usage(
     let mut messages = changes.iter();
     loop {
         let page = messages.by_ref().take(64).collect::<Vec<_>>();
-        if page.is_empty() { break; }
-        let keys = page.iter().map(|(message, _)| message.as_bytes().to_vec()).collect::<Vec<_>>();
+        if page.is_empty() {
+            break;
+        }
+        let keys = page
+            .iter()
+            .map(|(message, _)| message.as_bytes().to_vec())
+            .collect::<Vec<_>>();
         #[cfg(test)]
         let started = Instant::now();
         #[cfg(test)]
@@ -471,9 +489,13 @@ fn write_usage(
             let count = tx.driver.execute("DELETE FROM semon_pg_native_usage_identity WHERE ctid IN (SELECT ctid FROM semon_pg_native_usage_identity WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND message_id=ANY($3::bytea[]) LIMIT 64)", &[&ns,&id,&keys]).map_err(sqlstate::error)?;
             #[cfg(test)]
             update_usage_diagnostic(|d| d.identity_delete.sql_completed += 1);
-            if count < 64 { break; }
+            if count < 64 {
+                break;
+            }
         }
-        for _ in &page { after(tx)?; }
+        for _ in &page {
+            after(tx)?;
+        }
         #[cfg(test)]
         update_usage_diagnostic(|d| {
             d.identity_delete.rows_completed += page.len();
@@ -538,17 +560,31 @@ fn write_usage(
         if !removed.is_empty() {
             tx.check()?;
             let count = tx.driver.execute("DELETE FROM semon_pg_native_usage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND message_id=ANY($3::bytea[])", &[&ns,&id,&removed]).map_err(sqlstate::error)?;
-            if count > removed.len() as u64 { return Err(StorageError::Conflict); }
-            for _ in &removed { after(tx)?; }
+            if count > removed.len() as u64 {
+                return Err(StorageError::Conflict);
+            }
+            for _ in &removed {
+                after(tx)?;
+            }
         }
         let mut identities = page.iter().flat_map(|(message, usage)| {
-            usage.iter().flat_map(move |usage| usage.record_ids.iter().map(move |uuid| (*message, uuid)))
+            usage
+                .iter()
+                .flat_map(move |usage| usage.record_ids.iter().map(move |uuid| (*message, uuid)))
         });
         loop {
             let identities = identities.by_ref().take(64).collect::<Vec<_>>();
-            if identities.is_empty() { break; }
-            let keys = identities.iter().map(|(message, _)| message.as_bytes().to_vec()).collect::<Vec<_>>();
-            let records = identities.iter().map(|(_, uuid)| uuid.as_bytes().to_vec()).collect::<Vec<_>>();
+            if identities.is_empty() {
+                break;
+            }
+            let keys = identities
+                .iter()
+                .map(|(message, _)| message.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let records = identities
+                .iter()
+                .map(|(_, uuid)| uuid.as_bytes().to_vec())
+                .collect::<Vec<_>>();
             tx.check()?;
             #[cfg(test)]
             let started = Instant::now();
@@ -558,8 +594,12 @@ fn write_usage(
                 d.identity_insert.sql_attempted += 1;
             });
             let count = tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) SELECT $1,$2,x.message,x.record FROM unnest($3::bytea[],$4::bytea[]) AS x(message,record)", &[&ns,&id,&keys,&records]).map_err(sqlstate::error)?;
-            if count != identities.len() as u64 { return Err(StorageError::Conflict); }
-            for _ in &identities { after(tx)?; }
+            if count != identities.len() as u64 {
+                return Err(StorageError::Conflict);
+            }
+            for _ in &identities {
+                after(tx)?;
+            }
             #[cfg(test)]
             update_usage_diagnostic(|d| {
                 d.identity_insert.rows_completed += identities.len();

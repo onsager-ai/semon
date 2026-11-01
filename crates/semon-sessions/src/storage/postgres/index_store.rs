@@ -10,12 +10,12 @@ use crate::{
     },
     storage::{LogicalSourceNamespace, StorageError, native_events::EventReceipt},
 };
+#[cfg(test)]
+use std::time::Instant;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-#[cfg(test)]
-use std::time::Instant;
 
 #[cfg(test)]
 fn large_fixture_source(path: &str) -> (&'static str, Option<usize>, usize) {

@@ -425,22 +425,30 @@ pub(super) fn batch_snapshot(
     }).unwrap()
 }
 
-
 #[test]
 fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
     let root = std::env::temp_dir().join(format!("pg-usage-batch-native-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("usage.jsonl");
-    let body = (0..130).map(|n| format!("{}\n", serde_json::json!({
-        "type":"assistant", "uuid":format!("record-{n:03}\0🦀"),
-        "message":{"id":format!("message-{n:03}\0🦀"), "role":"assistant",
-        "model":"claude-page", "content":[],
-        "usage":{"input_tokens":n+1,"output_tokens":2}}
-    }))).collect::<String>();
+    let body = (0..130)
+        .map(|n| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant", "uuid":format!("record-{n:03}\0🦀"),
+                    "message":{"id":format!("message-{n:03}\0🦀"), "role":"assistant",
+                    "model":"claude-page", "content":[],
+                    "usage":{"input_tokens":n+1,"output_tokens":2}}
+                })
+            )
+        })
+        .collect::<String>();
     std::fs::write(&path, body).unwrap();
     let namespace = tests::ns("usage-batch-native");
     let config = StoreConfig {
-        backend: StoreBackend::Sqlite { database: root.join("oracle.sqlite3") },
+        backend: StoreBackend::Sqlite {
+            database: root.join("oracle.sqlite3"),
+        },
         namespace: namespace.clone(),
         expected_stream_epoch: Some("a".repeat(64)),
     };
@@ -455,14 +463,20 @@ fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
     let oracle = fingerprint(&index);
     drop(sqlite);
     let (pool, _) = tests::fixture(|_| {});
-    let mut pg = EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default()).unwrap();
+    let mut pg =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default())
+            .unwrap();
     native_core::reset_usage_diagnostic();
     tree_writer::reset_usage_models_diagnostic();
     let actual = pg.ingest(&operation, &path, "claude").unwrap();
     assert_eq!(actual.consumed_bytes, receipt.consumed_bytes);
     let index = crate::events::scan_file(&path, "claude", &mut pg, &mut false).unwrap();
     assert_eq!(fingerprint(&index), oracle);
-    eprintln!("PG_USAGE_BATCH_130 core={:?} tree={:?}", native_core::usage_diagnostic(), tree_writer::usage_models_diagnostic());
+    eprintln!(
+        "PG_USAGE_BATCH_130 core={:?} tree={:?}",
+        native_core::usage_diagnostic(),
+        tree_writer::usage_models_diagnostic()
+    );
     drop(pg);
     let mut pg = EventCache::open_pg_native(pool, namespace, PgCancellation::default()).unwrap();
     assert!(pg.ingest(&operation, &path, "claude").unwrap().replayed);

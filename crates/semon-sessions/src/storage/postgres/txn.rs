@@ -1,8 +1,8 @@
 use super::{PgCancellation, PgPool, pool::Driver, schema, sqlstate};
 use crate::storage::{LogicalSourceNamespace, StorageError};
-use std::time::Instant;
 #[cfg(test)]
 use std::time::Duration;
+use std::time::Instant;
 
 #[cfg(test)]
 thread_local! {
@@ -42,7 +42,11 @@ impl PgTxn<'_> {
                 let request_cancelled = self.control.request_cancelled();
                 eprintln!(
                     "PG_BUSY_DIAGNOSTIC origin=txn_check reason={} elapsed_us={} budget_us={} effective_deadline_us={} deadline_overrun_us={} deadline_expired={} host_cancelled={} request_cancelled={}",
-                    if deadline_expired { "deadline" } else { "cancelled" },
+                    if deadline_expired {
+                        "deadline"
+                    } else {
+                        "cancelled"
+                    },
                     now.saturating_duration_since(self.started).as_micros(),
                     self.budget.as_micros(),
                     self.deadline

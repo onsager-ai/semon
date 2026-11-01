@@ -48,11 +48,10 @@ impl StageTrace {
 
     fn enter(&mut self, stage: &'static str) {
         let now = Instant::now();
-        self.completed
-            .push((
-                self.current.0,
-                now.saturating_duration_since(self.current.1).as_micros(),
-            ));
+        self.completed.push((
+            self.current.0,
+            now.saturating_duration_since(self.current.1).as_micros(),
+        ));
         self.current = (stage, now);
     }
 
