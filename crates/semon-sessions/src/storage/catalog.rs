@@ -159,7 +159,9 @@ mod source_continuation_tests {
 
         let proof =
             VerifiedSourceContinuation::from_scan(&path, &prior, &current, &accepted, &physical)
-                .expect("a qualified append may change mtime/ctime and keep an opaque custody token");
+                .expect(
+                    "a qualified append may change mtime/ctime and keep an opaque custody token",
+                );
         let role = Some(serde_json::json!({"kind": "owner"}));
         let old = source(&prior, &path, "native", role.clone());
         let new = source(&current, &path, "native", role);
@@ -184,14 +186,16 @@ mod source_continuation_tests {
             after: replaced,
             ..accepted.clone()
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &replaced_current,
-            &replaced_evidence,
-            &replaced,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(
+                &path,
+                &prior,
+                &replaced_current,
+                &replaced_evidence,
+                &replaced,
+            )
+            .is_none()
+        );
 
         let truncated = crate::events::Stat {
             size: 8,
@@ -208,14 +212,16 @@ mod source_continuation_tests {
             after: truncated,
             ..accepted.clone()
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &truncated_current,
-            &truncated_evidence,
-            &truncated,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(
+                &path,
+                &prior,
+                &truncated_current,
+                &truncated_evidence,
+                &truncated,
+            )
+            .is_none()
+        );
 
         let incomplete = crate::events::Ledger {
             offset: prior.offset,
@@ -273,14 +279,16 @@ mod source_continuation_tests {
             before: changed_before,
             ..accepted.clone()
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &current,
-            &before_mismatch,
-            &physical,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(
+                &path,
+                &prior,
+                &current,
+                &before_mismatch,
+                &physical,
+            )
+            .is_none()
+        );
 
         let after_mismatch = crate::events::Stat {
             changed_ns: Some(physical.changed_ns.unwrap() + 1),
@@ -290,27 +298,31 @@ mod source_continuation_tests {
             after: after_mismatch,
             ..accepted.clone()
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &current,
-            &after_mismatch_evidence,
-            &physical,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(
+                &path,
+                &prior,
+                &current,
+                &after_mismatch_evidence,
+                &physical,
+            )
+            .is_none()
+        );
 
         let current_mismatch = crate::events::Ledger {
             stat: after_mismatch,
             ..current
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &current_mismatch,
-            &accepted,
-            &physical,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(
+                &path,
+                &prior,
+                &current_mismatch,
+                &accepted,
+                &physical,
+            )
+            .is_none()
+        );
 
         let mut bad_old_identity = old;
         bad_old_identity.native_id.push_str("-other");
@@ -324,14 +336,10 @@ mod source_continuation_tests {
             generation: "untrusted".into(),
             ..accepted
         };
-        assert!(VerifiedSourceContinuation::from_scan(
-            &path,
-            &prior,
-            &current,
-            &malformed,
-            &physical,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_scan(&path, &prior, &current, &malformed, &physical,)
+                .is_none()
+        );
     }
 }
 

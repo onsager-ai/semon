@@ -338,24 +338,28 @@ fn append_plan_requires_a_well_formed_custody_generation() {
         ..before
     };
     assert!(append_plan(None, Some(before), None, 10, after, 20).is_none());
-    assert!(append_plan(
-        Some("not-a-generation".into()),
-        Some(before),
-        None,
-        10,
-        after,
-        20,
-    )
-    .is_none());
-    assert!(append_plan(
-        Some("0123456789abcdef0123456789abcdef".into()),
-        Some(before),
-        None,
-        10,
-        after,
-        20,
-    )
-    .is_some());
+    assert!(
+        append_plan(
+            Some("not-a-generation".into()),
+            Some(before),
+            None,
+            10,
+            after,
+            20,
+        )
+        .is_none()
+    );
+    assert!(
+        append_plan(
+            Some("0123456789abcdef0123456789abcdef".into()),
+            Some(before),
+            None,
+            10,
+            after,
+            20,
+        )
+        .is_some()
+    );
 }
 
 pub(crate) fn lock_key(options: &Options, input: &Input) -> String {
