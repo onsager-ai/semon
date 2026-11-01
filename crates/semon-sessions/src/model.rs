@@ -9491,7 +9491,7 @@ fn build_sources_inner(
                 &builder,
                 published_facts.as_ref(),
                 sender_turns.as_deref().unwrap_or(&turns),
-                rows,
+                catalog.as_deref().expect("source catalog captured"),
             )?;
             if let Some(replay) =
                 staged_relationships.filter(|context| !context.replay_owners.is_empty())

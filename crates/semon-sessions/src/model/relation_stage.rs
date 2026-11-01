@@ -876,7 +876,7 @@ impl Context {
                 (endpoint.row.key.clone(), endpoint)
             })
             .collect();
-        let mut relations = builder
+        let mut relations: BTreeMap<String, Relation> = builder
             .handoffs
             .iter()
             .enumerate()
