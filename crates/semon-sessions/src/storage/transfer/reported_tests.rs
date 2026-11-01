@@ -910,7 +910,25 @@ fn current_transfer225_real_catalog_materializes_and_reverses_without_granting_p
         target.catalog_generation().is_err(),
         "content transfer cannot manufacture publication authority"
     );
+    let no_catalog_authority = |config: &StoreConfig| -> bool {
+        let database = config.backend.sqlite_database().unwrap();
+        let db = rusqlite::Connection::open(database).unwrap();
+        db.query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history')) AND NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key GLOB 'native_transfer_v1:catalog-owner:*')",
+            [config.namespace.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert!(
+        no_catalog_authority(&target),
+        "content transfer leaves Catalog and search publication authority private"
+    );
     let backwards = stage(&target, &reverse, &[119; 32]);
+    assert!(
+        no_catalog_authority(&target),
+        "reverse content capture leaves Catalog and search publication authority private"
+    );
     for category in [
         Category::CatalogCurrent,
         Category::Recipes,
