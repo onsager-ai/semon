@@ -1423,3 +1423,67 @@ fn pg_tree_publish_oversize_scalar_is_unreadable_and_exact_receipt_repairs() {
     );
     std::fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_usage_batch_tree_130_mapping_pages_preserve_logical_rollback() {
+    let data = parser_fixture("claude");
+    let mut summary = input(&data).clone();
+    summary.usage_models = (0..130)
+        .map(|n| (format!("message-{n:03}\0🦀"), "claude-page".to_owned()))
+        .collect();
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("tree-page-130");
+    let control = PgCancellation::default();
+    let projection = pool
+        .transaction(&namespace, TxnKind::Write, &control, |tx| {
+            install_without_tree(tx, &data)?;
+            Ok(stage_fixture(tx, &data)?.0)
+        })
+        .unwrap();
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(state(tx))
+        })
+        .unwrap();
+    let mut prefix = input(&data).clone();
+    prefix.usage_models.clear();
+    // Measure the unchanged scalar/model/tool boundaries without guessing how
+    // many labels this real parser fixture produced.
+    let prefix_boundaries = 1
+        + TreeRows::new(&prefix).unwrap().labels().count()
+        + prefix.models.len()
+        + prefix.tools.len()
+        + prefix.closed_tools.len();
+    for point in [1, 64, 65, 128, 129, 130] {
+        FAIL_AFTER.with(|f| f.set(Some(prefix_boundaries + point)));
+        let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            Writer { tx }.values(projection, &summary)
+        });
+        FAIL_AFTER.with(|f| f.set(None));
+        assert_eq!(
+            result,
+            Err(StorageError::Unavailable),
+            "usage model boundary {point}"
+        );
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| Ok(state(
+                tx
+            )))
+            .unwrap(),
+            before
+        );
+    }
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        reset_usage_model_batch_counts();
+        Writer { tx }.values(projection, &summary)?;
+        let diagnostic = usage_model_batch_counts();
+        assert_eq!(diagnostic[0], 130);
+        assert_eq!(diagnostic[1], 3);
+        let rows = tx.driver.query("SELECT message_id,model FROM semon_pg_native_tree_usage_models WHERE namespace=$1 AND projection_id=$2 ORDER BY message_id", &[&namespace.as_str().as_bytes(), &projection]).map_err(sqlstate::error)?;
+        for (message, model) in &summary.usage_models {
+            assert!(rows.iter().any(|r| r.get::<_, Vec<u8>>(0) == message.as_bytes() && r.get::<_, Vec<u8>>(1) == model.as_bytes()));
+        }
+        Ok(())
+    }).unwrap();
+    std::fs::remove_dir_all(data.root).unwrap();
+}

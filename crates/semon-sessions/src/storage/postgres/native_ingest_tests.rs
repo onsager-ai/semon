@@ -424,3 +424,69 @@ pub(super) fn batch_snapshot(
         Ok(snapshot)
     }).unwrap()
 }
+
+#[test]
+fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
+    let root = std::env::temp_dir().join(format!("pg-usage-batch-native-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("usage.jsonl");
+    let body = (0..130)
+        .map(|n| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant", "uuid":format!("record-{n:03}\0🦀"),
+                    "message":{"id":format!("message-{n:03}\0🦀"), "role":"assistant",
+                    "model":"claude-page", "content":[{"type":"text","text":"sanitized"}],
+                    "usage":{"input_tokens":n+1,"output_tokens":2}}
+                })
+            )
+        })
+        .collect::<String>();
+    std::fs::write(&path, body).unwrap();
+    let namespace = tests::ns("usage-batch-native");
+    let config = StoreConfig {
+        backend: StoreBackend::Sqlite {
+            database: root.join("oracle.sqlite3"),
+        },
+        namespace: namespace.clone(),
+        expected_stream_epoch: Some("a".repeat(64)),
+    };
+    crate::events::store::configured::create_semantic_store(&config).unwrap();
+    let cap = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+    let mut sqlite = EventCache::open_semantic(cap).unwrap();
+    let operation = "1".repeat(64);
+    let receipt = sqlite.ingest(&operation, &path, "claude").unwrap();
+    let index = crate::events::scan_file(&path, "claude", &mut sqlite, &mut false).unwrap();
+    assert_eq!(index.usage().len(), 130);
+    // Restored summaries keep dimensions in their typed checkpoint. Read that
+    // persisted relation explicitly; the compact header has no usage_models.
+    let mut tree = index.tree_summary.as_ref().unwrap().clone();
+    tree.load_shared_usage().unwrap();
+    assert_eq!(tree.usage_models.len(), 130);
+    let oracle = fingerprint(&index);
+    drop(sqlite);
+    let (pool, _) = tests::fixture(|_| {});
+    let mut pg =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default())
+            .unwrap();
+    native_core::reset_usage_batch_statements();
+    tree_writer::reset_usage_model_batch_counts();
+    let actual = pg.ingest(&operation, &path, "claude").unwrap();
+    assert_eq!(actual.consumed_bytes, receipt.consumed_bytes);
+    assert_eq!(native_core::usage_batch_statements(), [3, 3, 3]);
+    assert_eq!(tree_writer::usage_model_batch_counts(), [130, 3]);
+    let index = crate::events::scan_file(&path, "claude", &mut pg, &mut false).unwrap();
+    assert_eq!(fingerprint(&index), oracle);
+    eprintln!(
+        "PG_USAGE_BATCH_130 core={:?} tree={:?}",
+        native_core::usage_batch_statements(),
+        tree_writer::usage_model_batch_counts()
+    );
+    drop(pg);
+    let mut pg = EventCache::open_pg_native(pool, namespace, PgCancellation::default()).unwrap();
+    assert!(pg.ingest(&operation, &path, "claude").unwrap().replayed);
+    let index = crate::events::scan_file(&path, "claude", &mut pg, &mut false).unwrap();
+    assert_eq!(fingerprint(&index), oracle);
+    std::fs::remove_dir_all(root).unwrap();
+}
