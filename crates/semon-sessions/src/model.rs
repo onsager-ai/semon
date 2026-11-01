@@ -8405,6 +8405,8 @@ fn prepare_sources_selected(
     now: i64,
     selection: BuildSelection<'_>,
 ) -> io::Result<PreparedSources> {
+    #[cfg(test)]
+    let current_publication = matches!(&selection, BuildSelection::Current(_));
     if inputs.len() > 64
         || inputs
             .iter()
@@ -8443,6 +8445,13 @@ fn prepare_sources_selected(
             }
             validate_foreign_prompt_source_witnesses(cache, &foreign_sources)?;
             prepared.retain_withdrawal_fence_with_foreign_sources(options, foreign_sources)?;
+            #[cfg(test)]
+            if current_publication {
+                capture_prepared_trace_witnesses(
+                    relation_stage::Phase::Publication,
+                    &prepared.rows,
+                );
+            }
             Ok(*prepared)
         }
         _ => Err(io::Error::other(
