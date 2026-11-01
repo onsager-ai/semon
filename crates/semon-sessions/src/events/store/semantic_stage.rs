@@ -8,7 +8,7 @@ use crate::model::relation_stage::{
 };
 pub(crate) use plan::{
     ContextPort, OwnerClosurePort, PhysicalOwnerSourceBudget, PublicationPlanPort, context_with,
-    owner_closure_with, publication_groups_with,
+    owner_closure_with, publication_group_count_with, publication_groups_with,
 };
 use std::collections::{BTreeSet, HashMap};
 

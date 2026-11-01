@@ -470,11 +470,140 @@ fn refuse(reason: &'static str) -> StoreError {
     StoreError::Data(reason.into())
 }
 
+const PUBLICATION_GROUP_HINT_KEY: &str = "catalog_semantic_group_admission";
+const PRESENTATION_CAPTURE_BUDGET: &str = "semantic_presentation_capture_budget";
+
+#[cfg(test)]
+std::thread_local! {
+    static DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn drop_capture_overflow_receipt_once() {
+    DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.set(true));
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PublicationGroupHint {
+    epoch: i64,
+    runtime: String,
+    source_revision: i64,
+    original_generation: Option<String>,
+    max_groups: usize,
+}
+
+fn read_publication_group_hint(
+    db: &Connection,
+    ns: &str,
+    epoch: i64,
+    runtime: &str,
+    source_revision: i64,
+    original_generation: Option<&str>,
+) -> Result<Option<usize>, StoreError> {
+    let value: Option<String> = db
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
+            params![ns, PUBLICATION_GROUP_HINT_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let hint: PublicationGroupHint =
+        serde_json::from_str(&value).map_err(|error| StoreError::Data(error.to_string()))?;
+    if !(1..=64).contains(&hint.max_groups) {
+        return Err(refuse("semantic_publication_group_hint"));
+    }
+    Ok((hint.epoch == epoch
+        && hint.runtime == runtime
+        && hint.source_revision == source_revision
+        && hint.original_generation.as_deref() == original_generation)
+        .then_some(hint.max_groups))
+}
+
+fn write_publication_group_hint(
+    db: &Connection,
+    ns: &str,
+    hint: &PublicationGroupHint,
+) -> Result<(), StoreError> {
+    let value = serde_json::to_string(hint).map_err(|error| StoreError::Data(error.to_string()))?;
+    db.execute(
+        "INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
+        params![ns, PUBLICATION_GROUP_HINT_KEY, value],
+    )
+    .map_err(error)?;
+    Ok(())
+}
+
+fn clear_publication_group_hint(db: &Connection, ns: &str) -> rusqlite::Result<()> {
+    db.execute(
+        "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
+        params![ns, PUBLICATION_GROUP_HINT_KEY],
+    )?;
+    Ok(())
+}
+
+fn rebind_publication_group_hint(
+    db: &Connection,
+    ns: &str,
+    old_epoch: i64,
+    new_epoch: i64,
+    runtime: &str,
+) -> Result<(), StoreError> {
+    let current: (String, i64, Option<String>, bool) = db
+        .query_row(
+            "SELECT runtime,revision,original_generation,resetting FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2",
+            params![ns, new_epoch],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(error)?;
+    let journal_revision: i64 = db
+        .query_row(
+            "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+            [ns],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    let value: Option<String> = db
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
+            params![ns, PUBLICATION_GROUP_HINT_KEY],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let mut hint: PublicationGroupHint =
+        serde_json::from_str(&value).map_err(|error| StoreError::Data(error.to_string()))?;
+    if !(1..=64).contains(&hint.max_groups) {
+        return Err(refuse("semantic_publication_group_hint"));
+    }
+    if hint.epoch == old_epoch
+        && hint.runtime == runtime
+        && current.0 == runtime
+        && hint.source_revision == current.1
+        && current.1 == journal_revision
+        && hint.original_generation == current.2
+        && !current.3
+    {
+        hint.epoch = new_epoch;
+        write_publication_group_hint(db, ns, &hint)?;
+    } else {
+        clear_publication_group_hint(db, ns).map_err(error)?;
+    }
+    Ok(())
+}
+
 // The admitted transaction has already fenced epoch/generation before these
 // namespace-owned physical operations. Claims are observations, never ACKs.
 fn reset(c: &Connection, ns: &str, runtime: &str) -> rusqlite::Result<()> {
     if c.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,(SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1))+1 WHERE namespace=?1 AND max(epoch,(SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1))<9223372036854775807", [ns])? != 1 { return Err(rusqlite::Error::InvalidQuery); }
     c.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1),phase='indexing',original_generation=generation,runtime=?2,resetting=1,reset_after='',key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1,withdrawal_authority=NULL,validation_after='',validation_revision=NULL,validation_done=0 WHERE namespace=?1", params![ns,runtime])?;
+    clear_publication_group_hint(c, ns)?;
     Ok(())
 }
 
@@ -1746,6 +1875,184 @@ impl Stage {
         batch: &Batch,
         prepared: &PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        match self.publish_transaction(batch, prepared) {
+            Err(StoreError::Data(reason)) if reason == PRESENTATION_CAPTURE_BUDGET => {
+                #[cfg(test)]
+                if DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.replace(false)) {
+                    let paths = serde_json::to_string(&batch.paths)
+                        .map_err(|error| StoreError::Data(error.to_string()))?;
+                    self.db
+                        .execute(
+                            "DELETE FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND paths=?3",
+                            params![self.source.namespace(), batch.epoch, paths],
+                        )
+                        .map_err(error)?;
+                }
+                self.defer_presentation_capture_overflow(batch, prepared)
+            }
+            result => result,
+        }
+    }
+
+    fn defer_presentation_capture_overflow(
+        &mut self,
+        batch: &Batch,
+        prepared: &PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
+        use crate::storage::catalog::CatalogPublicationHead;
+
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(error)?;
+        self.source
+            .validate_publication(&tx)
+            .map_err(StoreError::Configured)?;
+        let ns = self.source.namespace();
+        if batch.phase != Phase::Publication || self.epoch != Some(batch.epoch) {
+            return Ok((Outcome::Conflict, None));
+        }
+        let stage: Option<(String, Option<String>, Option<String>, i64, bool)> = tx
+            .query_row(
+                "SELECT runtime,generation,original_generation,revision,resetting FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication'",
+                params![ns, batch.epoch],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((runtime, generation, original_generation, stage_revision, resetting)) = stage
+        else {
+            return Ok((Outcome::Conflict, None));
+        };
+        if resetting
+            || runtime != batch.runtime
+            || generation != batch.base_generation
+            || stage_revision != batch.source_revision
+            || self.source.generation != batch.base_generation
+            || head(&tx).map_err(error)? != batch.base_generation
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        let publication_head = super::publication::admitted_head(&tx, &self.source)
+            .map_err(StoreError::Configured)?;
+        if publication_head
+            .base_generation()
+            .map_err(StoreError::Configured)?
+            != batch.base_generation
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        let revision: i64 = tx
+            .query_row(
+                "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                [ns],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if revision != batch.source_revision
+            || !lifecycle_current(prepared)
+            || !reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        let pending: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_event_operations WHERE namespace=?1 AND state='intent')",
+                [ns],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if pending {
+            return Ok((Outcome::Conflict, None));
+        }
+        let selected_paths =
+            serde_json::to_string(&batch.paths).map_err(|error| StoreError::Data(error.to_string()))?;
+        let staged: Vec<String> = tx
+            .prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65")
+            .map_err(error)?
+            .query_map(params![ns, selected_paths], |row| row.get(0))
+            .map_err(error)?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(error)?;
+        let mut requested = batch.paths.clone();
+        requested.sort();
+        if staged != requested
+            || !group_current(&tx, ns, batch, prepared)?
+            || !selected_witnesses(&tx, ns, &batch.paths)?
+            || prepared
+                .claims
+                .iter()
+                .map(|(path, _)| path.clone())
+                .collect::<Vec<_>>()
+                != staged
+            || super::source_journal::claims(&tx, ns, &staged).map_err(error)?
+                != prepared.claims
+        {
+            return Ok((Outcome::Conflict, None));
+        }
+        let metadata = prepared
+            .rows
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let metadata =
+            serde_json::to_string(&metadata).map_err(|error| StoreError::Data(error.to_string()))?;
+        let projections = prepared
+            .staged_model_witness()
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let claims = serde_json::to_string(&prepared.claims)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
+        let receipt: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS ?10)",
+                params![ns,batch.epoch,metadata,projections,claims,batch.base_generation,batch.source_revision,batch.runtime,selected_paths,original_generation],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !receipt {
+            return Ok((Outcome::Conflict, None));
+        }
+        let groups = crate::events::store::semantic_stage::publication_group_count_with(
+            &plan::Plan { db: &tx, ns },
+            &batch.paths,
+        )
+        .map_err(error)?;
+        if groups == 0 {
+            return Ok((Outcome::Conflict, None));
+        }
+        if groups == 1 {
+            return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
+        }
+        let removed = tx
+            .execute(
+                "DELETE FROM storage_semantic_model_batches WHERE namespace=?1 AND epoch=?2 AND metadata=?3 AND projections=?4 AND claims=?5 AND base_generation IS ?6 AND source_revision=?7 AND runtime=?8 AND paths=?9 AND original_generation IS ?10",
+                params![ns,batch.epoch,metadata,projections,claims,batch.base_generation,batch.source_revision,batch.runtime,selected_paths,original_generation],
+            )
+            .map_err(error)?;
+        if removed != 1 {
+            return Ok((Outcome::Conflict, None));
+        }
+        write_publication_group_hint(
+            &tx,
+            ns,
+            &PublicationGroupHint {
+                epoch: batch.epoch,
+                runtime: batch.runtime.clone(),
+                source_revision: batch.source_revision,
+                original_generation,
+                max_groups: (groups / 2).max(1),
+            },
+        )?;
+        tx.commit().map_err(error)?;
+        Ok((Outcome::Deferred, None))
+    }
+
+    fn publish_transaction(
+        &mut self,
+        batch: &Batch,
+        prepared: &PreparedSources,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
         use crate::storage::catalog::CatalogPublicationHead;
         use sha2::{Digest, Sha256};
         #[cfg(test)]
@@ -2307,14 +2614,20 @@ impl Stage {
             Some(crate::model::now_ms())
         };
         if let Some(selected_observed_at) = selected_observed_at {
-            let presentations = super::proof_generations::capture_presentations(
-                &tx,
-                ns,
-                &generation,
-                prepared,
-                selected_observed_at,
-            )
-            .map_err(StoreError::Configured)?;
+            let presentations =
+                match super::proof_generations::capture_presentations(
+                    &tx,
+                    ns,
+                    &generation,
+                    prepared,
+                    selected_observed_at,
+                ) {
+                    Err(StorageError::HistoryRetentionBounds) => {
+                        return Err(refuse(PRESENTATION_CAPTURE_BUDGET));
+                    }
+                    Err(error) => return Err(StoreError::Configured(error)),
+                    Ok(presentations) => presentations,
+                };
             let proof_digest = super::proof_generations::bind_presentations(
                 &tx,
                 ns,
@@ -2554,6 +2867,7 @@ impl Stage {
             diagnose_finish(&tx, ns, epoch, "delete_model_batch", failure);
         }
         model_deletion.map_err(error)?;
+        clear_publication_group_hint(&tx, ns).map_err(error)?;
         // A repair stage temporarily publishes a partial head. Once its exact
         // claims are acknowledged, preserve an already completed discovery;
         // otherwise the observer starts recovery and rediscovers unchanged
@@ -2993,6 +3307,15 @@ impl Stage {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=max(epoch,?2)+1 WHERE namespace=?1 AND max(epoch,?2)<9223372036854775807", params![ns,actual_epoch]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
             tx.execute("UPDATE main.catalog_semantic_stage SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
             tx.execute("UPDATE storage_semantic_model_batches SET epoch=(SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1) WHERE namespace=?1",[ns]).map_err(error)?;
+            let old_epoch = actual_epoch.ok_or_else(|| refuse("semantic_resume_epoch"))?;
+            let resumed_epoch: i64 = tx
+                .query_row(
+                    "SELECT epoch FROM storage_semantic_profiles WHERE namespace=?1",
+                    [ns],
+                    |row| row.get(0),
+                )
+                .map_err(error)?;
+            rebind_publication_group_hint(&tx, ns, old_epoch, resumed_epoch, runtime)?;
         }
         if plan == Begin::Create {
             if tx.execute("UPDATE storage_semantic_profiles SET epoch=epoch+1 WHERE namespace=?1 AND epoch<9223372036854775807", [ns]).map_err(error)? != 1 { return Ok(Outcome::Conflict); }
@@ -3031,8 +3354,8 @@ impl Stage {
             .map_err(error)?;
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.config.namespace.as_str();
-        let stage: Option<(i64,String,Option<String>,String)> = tx.query_row("SELECT epoch,phase,generation,runtime FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(error)?;
-        let Some((epoch, mut phase, base_generation, runtime)) = stage else {
+        let stage: Option<(i64,String,Option<String>,String,Option<String>)> = tx.query_row("SELECT epoch,phase,generation,runtime,original_generation FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(error)?;
+        let Some((epoch, mut phase, base_generation, runtime, original_generation)) = stage else {
             return Ok(None);
         };
         if self.epoch != Some(epoch) {
@@ -3221,6 +3544,16 @@ impl Stage {
                                 &physical,
                             )
                             .map_err(error)?;
+                        if let Some(max_groups) = read_publication_group_hint(
+                            &tx,
+                            ns,
+                            epoch,
+                            &runtime,
+                            revision,
+                            original_generation.as_deref(),
+                        )? {
+                            publication_groups.truncate(max_groups);
+                        }
                         paths = publication_groups
                             .iter()
                             .flatten()
