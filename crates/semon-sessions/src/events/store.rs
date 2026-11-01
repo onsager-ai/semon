@@ -9910,7 +9910,7 @@ mod tests {
                 matches!(
                     &error,
                     StoreError::Data(message)
-                        if message == "scoped catalog search metadata exceeds 1 MiB for an affected row"
+                        if message == "catalog search metadata exceeds 1 MiB for an eligible row"
                 ),
                 "oversized affected metadata without an incoming row must refuse explicitly: {error}"
             );
