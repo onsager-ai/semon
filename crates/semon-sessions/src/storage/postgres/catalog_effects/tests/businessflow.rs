@@ -4851,21 +4851,34 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .key
         .clone();
-    assert!(!current.to_string().contains(&removed_key));
-    assert!(
-        query
-            .call_bound_selected_at(
-                "read_transcript",
-                &serde_json::json!({"id":removed_key,"limit":100}),
-                1790812802000,
-                &withdrawn_store,
-                &retained_host,
-                None,
-            )
-            .is_err()
-    );
-    // Later old-generation checks use the immutable captured proof route; the
-    // separate live Current refusal is asserted above.
+    snapshot::with_generation(
+        &pool,
+        &namespace,
+        &control,
+        &withdrawn_generation,
+        |snapshot| {
+            assert!(snapshot.catalog(&removed_key, false)?.is_none());
+            let history = snapshot
+                .catalog(&removed_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(snapshot.history_qualified(&history).unwrap());
+            snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
+        },
+    )
+    .unwrap();
+    let retained_body = query
+        .call_bound_selected_at(
+            "read_transcript",
+            &serde_json::json!({"id":removed_key,"limit":100}),
+            1790812802000,
+            &withdrawn_store,
+            &retained_host,
+            None,
+        )
+        .expect("withdrawn Current remains readable through qualified retained History");
+    assert_eq!(retained_body, expected_bodies[&removed_key]["body"]);
+    // The physical Current row is absent, while the authorized retained route
+    // and the independent immutable captured proof route preserve the body.
     assert_eq!(captured_bodies(&pool), expected_bodies);
     drop(cache);
     let (mut cache, _) = crate::storage::postgres::index_store::open(
