@@ -461,7 +461,12 @@ pub(crate) fn apply(
             }
             install_fence(tx.0)?;
         }
+        let mut verification_bytes = transfer::MAX_PAGE_BYTES-4096;
         for record in &page.records {
+            if matches!(record,transfer::TransferRecord::CatalogRow { .. }) {
+                let size = serde_json::to_vec(record).map_err(|_| StorageError::ScopeChanged)?.len()+1;
+                verification_bytes = verification_bytes.checked_sub(size).ok_or(StorageError::Busy)?;
+            }
             match record {
                 transfer::TransferRecord::SourceJournal(row) => source::apply(tx, row)?,
                 transfer::TransferRecord::ReportedFact(run) => {
@@ -478,7 +483,7 @@ pub(crate) fn apply(
                     tx.put(key, value.as_bytes())?
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
-                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record, &mut verification_bytes)?,
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,

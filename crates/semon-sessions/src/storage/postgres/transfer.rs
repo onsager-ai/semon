@@ -308,7 +308,12 @@ pub(crate) fn apply(
                 return Err(StorageError::Conflict);
             }
         }
+        let mut verification_bytes = transfer::MAX_PAGE_BYTES-4096;
         for record in &page.records {
+            if matches!(record,transfer::TransferRecord::CatalogRow { .. }) {
+                let size = serde_json::to_vec(record).map_err(|_| StorageError::ScopeChanged)?.len()+1;
+                verification_bytes = verification_bytes.checked_sub(size).ok_or(StorageError::Busy)?;
+            }
             match record {
                 transfer::TransferRecord::SourceJournal(row) => source::apply(tx, row)?,
                 transfer::TransferRecord::ReportedFact(run) => {
@@ -321,7 +326,7 @@ pub(crate) fn apply(
                     tx.0.driver.execute("INSERT INTO semon_pg_native_reported_stamp(namespace,singleton,stamp) VALUES($1,true,$2)", &[&ns,&value.as_bytes()]).map_err(sqlstate::error)?;
                 }
                 transfer::TransferRecord::NativeRow { .. } => rows::apply(tx, record)?,
-                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record)?,
+                transfer::TransferRecord::CatalogRow { .. } => catalog::apply(tx, record, &mut verification_bytes)?,
                 transfer::TransferRecord::NativeSource(_)
                 | transfer::TransferRecord::NativePage { .. }
                 | transfer::TransferRecord::NativeMetadata { .. } => pages::apply(tx, record)?,
