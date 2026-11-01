@@ -2296,7 +2296,15 @@ fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
     let mut expected_turns = before["turns"].clone();
     expected_turns[0]["at"] = json!(at(5, 2));
     assert_eq!(after["turns"], expected_turns);
-    assert_eq!(after["sessions"], before["sessions"]);
+    assert!(after["sessions"]["beta"]["content_generation"].is_string());
+    assert_ne!(
+        after["sessions"]["beta"]["content_generation"],
+        before["sessions"]["beta"]["content_generation"]
+    );
+    let mut expected_sessions = before["sessions"].clone();
+    expected_sessions["beta"]["content_generation"] =
+        after["sessions"]["beta"]["content_generation"].clone();
+    assert_eq!(after["sessions"], expected_sessions);
 }
 
 #[test]
@@ -4970,6 +4978,16 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         .is_some()
     );
 
+    let (history_present, overview_present, same_sources, repair_pending): (bool, bool, bool, bool) = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_history_catalog WHERE session_key='child-000'),EXISTS(SELECT 1 FROM session_overview WHERE session_key='child-000'),EXISTS(SELECT 1 FROM session_catalog c JOIN session_history_catalog h USING(namespace,session_key) WHERE c.session_key='child-000' AND json_extract(c.metadata,'$.sources')=json_extract(h.metadata,'$.sources')),EXISTS(SELECT 1 FROM meta WHERE key='overview_needed:child-000')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    eprintln!(
+        "rich_child_overview_state history_present={history_present} overview_present={overview_present} same_sources={same_sources} repair_pending={repair_pending}"
+    );
     let overview: String = db
         .query_row(
             "SELECT summary FROM session_overview WHERE session_key='child-000'",
