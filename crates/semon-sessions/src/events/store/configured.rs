@@ -5039,7 +5039,6 @@ mod tests {
     #[test]
     fn configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority() {
         use crate::storage::catalog::CatalogObservationOwner;
-        use crate::storage::query::QueryRecipeLoadError;
         use crate::storage::sqlite::proof_generations::{
             load_query_recipe, query_recipe_observation,
         };
@@ -5167,12 +5166,10 @@ mod tests {
         );
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
+        assert!(!crate::query_projection::SelectedRecipe::detached(row));
         assert!(
-            matches!(
-                load_query_recipe(&db, &reader, &token),
-                Err(QueryRecipeLoadError::MissingPayload)
-            ),
-            "the real immutable producer authenticates; its payload hook remains unconnected"
+            load_query_recipe(&db, &reader, &token).unwrap().is_none(),
+            "the real inline producer authenticates and owns no detached payload"
         );
         let namespace = fixture.config.namespace.as_str();
         for sql in [
@@ -5190,10 +5187,7 @@ mod tests {
             db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
                 .unwrap();
         }
-        assert!(matches!(
-            load_query_recipe(&db, &reader, &token),
-            Err(QueryRecipeLoadError::MissingPayload)
-        ));
+        assert!(load_query_recipe(&db, &reader, &token).unwrap().is_none());
     }
 
     #[test]
