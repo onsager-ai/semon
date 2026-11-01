@@ -11361,6 +11361,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             Option<bool>,
             Option<bool>,
             Option<bool>,
+            Option<bool>,
         )> = db
             .query_row(
                 "SELECT i.source_path,i.revision,i.reason,s.claim,s.ledger IS NOT NULL,s.index_done,s.events_done,s.identity_done,s.relation_done,s.publication_done,s.ack_done FROM session_catalog_invalidations i LEFT JOIN catalog_semantic_sources s ON s.namespace=i.namespace AND s.source_path=i.source_path ORDER BY i.source_path LIMIT 1",
