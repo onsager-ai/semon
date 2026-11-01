@@ -12,6 +12,8 @@ pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 #[cfg(test)]
 pub(crate) mod presentation_measurement;
+#[cfg(test)]
+mod cohort_measurement;
 pub(crate) mod reported;
 mod source_rows;
 pub use catalog_rows::CatalogRowKind;

@@ -232,6 +232,7 @@ pub(crate) fn qualify(
     config: &StoreConfig,
     prepared: &PreparedSources,
     semantic_bytes: usize,
+    batch: &crate::model::relation_stage::Batch,
 ) -> Result<(), StorageError> {
     let backend = match &config.backend {
         StoreBackend::Sqlite { .. } => "sqlite",
@@ -256,6 +257,9 @@ pub(crate) fn qualify(
         }
     };
     let manifest_bytes = manifest.len();
+    if matches!(&config.backend, StoreBackend::Sqlite { .. }) {
+        super::cohort_measurement::qualify(config,batch,prepared,&rows,&manifest,&base)?;
+    }
     let root = crate::storage::proof_codec::presentation_digest(&base, &manifest)?;
     let root_record = TransferRecord::CatalogRow {
         generation: base.clone(),

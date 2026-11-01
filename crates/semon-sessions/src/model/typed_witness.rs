@@ -15,6 +15,179 @@ use std::{
 const CODEC: &str = "typed-witness-cost-v1";
 const SCRATCH: usize = 4096;
 
+/// Diagnostic inventory of one coherent native cohort. These fixed families
+/// are NOT a persistence API. Exact Query facts share only their native owner
+/// and id inside this cohort; conflicting observed bytes refuse the candidate.
+pub(crate) fn cohort_records(prepared: &PreparedSources) -> io::Result<Vec<(String, String, Value)>> {
+    let witness = Witness::capture(prepared)?;
+    let mut records = Vec::new();
+    let mut turns = BTreeMap::<String, Value>::new();
+    let mut edges = BTreeMap::<String, Value>::new();
+    let mut occurrences = [0usize; 2];
+    let mut cells = Vec::new();
+    for cell in &witness.cells {
+        let recipe = cell.recipe.as_deref().map(|text| -> io::Result<Value> {
+            let recipe: crate::query_projection::SelectedRecipe = serde_json::from_str(text)?;
+            if serde_json::to_string(&recipe)? != text { return Err(invalid()); }
+            let mut membership = Vec::new();
+            for (family, values, facts, owner_field) in [
+                (0, &recipe.turns, &mut turns, "sid"),
+                (1, &recipe.edges, &mut edges, "from"),
+            ] {
+                let mut keys = Vec::new();
+                for value in values {
+                    let owner = value["query"][owner_field].as_str().ok_or_else(invalid)?;
+                    let id = value["id"].as_str().ok_or_else(invalid)?;
+                    let key = serde_json::to_string(&(owner, id))?;
+                    let mut fact = value.clone();
+                    let reference = if family == 0 {
+                        let fields = fact.as_object_mut().ok_or_else(invalid)?;
+                        let at = fields.keys().position(|key| key == "query_order").ok_or_else(invalid)?;
+                        let order = fields.shift_remove("query_order").ok_or_else(invalid)?;
+                        serde_json::json!([key, at, order])
+                    } else { Value::String(key.clone()) };
+                    if let Some(previous) = facts.get(&key) {
+                        if serde_json::to_vec(previous)? != serde_json::to_vec(&fact)? {
+                            return Err(io::Error::other("cohort Query fact conflict"));
+                        }
+                    } else {
+                        facts.insert(key.clone(), fact);
+                    }
+                    keys.push(reference);
+                    occurrences[family] += 1;
+                }
+                membership.push(keys);
+            }
+            Ok(serde_json::json!([recipe.session, membership[0], membership[1]]))
+        }).transpose()?;
+        let value = serde_json::json!([cell.metadata, recipe]);
+        records.push(("cell".into(), cell.key.clone(), value));
+        cells.push(cell.clone());
+    }
+    for (family, facts) in [("query_turn", &turns), ("query_edge", &edges)] {
+        for (key, value) in facts {
+            records.push((family.into(), key.clone(), value.clone()));
+        }
+    }
+    for (key, trace) in &witness.traces {
+        records.push(("trace".into(), key.clone(), serde_json::to_value(trace)?));
+    }
+    for slot in &witness.slots {
+        records.push(("slots".into(), slot[0].as_str().ok_or_else(invalid)?.into(), slot.clone()));
+    }
+    for (key, endpoint) in &witness.endpoints {
+        let metadata: Value = serde_json::from_str(&cells.iter().find(|cell| &cell.key == key).ok_or_else(invalid)?.metadata)?;
+        let mut row = metadata.as_object().ok_or_else(invalid)?.clone();
+        row.shift_remove("query");
+        let mut endpoint = endpoint.as_object().ok_or_else(invalid)?.clone();
+        let at = endpoint.keys().position(|key| key == "row").ok_or_else(invalid)?;
+        if serde_json::to_vec(&endpoint["row"])? != serde_json::to_vec(&row)? {
+            return Err(io::Error::other("cohort endpoint row mismatch"));
+        }
+        endpoint.shift_remove("row");
+        records.push(("endpoint".into(), key.clone(), serde_json::json!([at, endpoint])));
+    }
+    for (key, relation) in &witness.relations {
+        records.push(("relation".into(), key.clone(), relation.clone()));
+    }
+    records.push(("facts".into(), String::new(), serde_json::json!([
+        witness.pids, witness.lineage, witness.parents, witness.withdrawals,
+        witness.messages, witness.retired, witness.lifecycle,
+    ])));
+    records.push(("observations".into(), String::new(), witness.observations.clone()));
+
+    // Every retained record crosses the proposed one-record codec before any
+    // reconstruction. Rebuild the exact original Cell strings and full model.
+    let records = records.into_iter().map(|record| {
+        let bytes = crate::storage::transfer::encode_bounded(&record, 1048576).map_err(io::Error::other)?;
+        serde_json::from_slice::<(String,String,Value)>(&bytes).map_err(io::Error::other)
+    }).collect::<io::Result<Vec<_>>>()?;
+    let lookup = |family: &str, key: &str| records.iter().find(|(f,k,_)| f == family && k == key).map(|(_,_,v)| v).ok_or_else(invalid);
+    let facts = lookup("facts", "")?.as_array().filter(|values| values.len() == 7).ok_or_else(invalid)?;
+    let mut restored = Witness {
+        cells: records.iter().filter(|(family,_,_)| family == "cell").map(|(_,key,value)| {
+            Ok(Cell { key:key.clone(), metadata:value[0].as_str().ok_or_else(invalid)?.into(), recipe:None })
+        }).collect::<io::Result<Vec<_>>>()?,
+        slots: records.iter().filter(|(family,_,_)| family == "slots").map(|(_,_,value)| value.clone()).collect(),
+        traces: records.iter().filter(|(family,_,_)| family == "trace").map(|(_,key,value)| {
+            Ok((key.clone(),serde_json::from_value(value.clone())?))
+        }).collect::<io::Result<Vec<_>>>()?,
+        pids:facts[0].clone(), lineage:facts[1].clone(), parents:facts[2].clone(), withdrawals:facts[3].clone(),
+        endpoints:records.iter().filter(|(family,_,_)| family == "endpoint").map(|(_,key,_)| (key.clone(),Value::Null)).collect(),
+        relations:records.iter().filter(|(family,_,_)| family == "relation").map(|(_,key,value)| (key.clone(),value.clone())).collect(),
+        messages:facts[4].clone(), retired:facts[5].clone(), lifecycle:facts[6].clone(),
+        observations:lookup("observations", "")?.clone(),
+    };
+    for cell in &mut restored.cells {
+        let stored = lookup("cell", &cell.key)?;
+        cell.metadata = stored[0].as_str().ok_or_else(invalid)?.into();
+        cell.recipe = if stored[1].is_null() { None } else {
+            let index = &stored[1];
+            let values = |family: &str, keys: &Value| -> io::Result<Vec<Value>> {
+                keys.as_array().ok_or_else(invalid)?.iter().map(|reference| {
+                    if family != "query_turn" { return lookup(family, reference.as_str().ok_or_else(invalid)?).cloned(); }
+                    let key = reference[0].as_str().ok_or_else(invalid)?;
+                    let at = reference[1].as_u64().ok_or_else(invalid)? as usize;
+                    let fact = lookup(family, key)?.as_object().ok_or_else(invalid)?;
+                    let mut fields = Map::new();
+                    for (i,(key,value)) in fact.iter().enumerate() {
+                        if i == at { fields.insert("query_order".into(), reference[2].clone()); }
+                        fields.insert(key.clone(), value.clone());
+                    }
+                    if at == fact.len() { fields.insert("query_order".into(), reference[2].clone()); }
+                    Ok(Value::Object(fields))
+                }).collect()
+            };
+            Some(serde_json::to_string(&crate::query_projection::SelectedRecipe {
+                session: index[0].clone(), turns: values("query_turn", &index[1])?, edges: values("query_edge", &index[2])?,
+            })?)
+        };
+    }
+    for (key, trace) in &mut restored.traces { *trace = serde_json::from_value(lookup("trace", key)?.clone())?; }
+    for slot in &mut restored.slots { *slot = lookup("slots", slot[0].as_str().ok_or_else(invalid)?)?.clone(); }
+    for (key, endpoint) in &mut restored.endpoints {
+        let stored = lookup("endpoint", key)?;
+        let at = stored[0].as_u64().ok_or_else(invalid)? as usize;
+        let remaining = stored[1].as_object().ok_or_else(invalid)?;
+        let cell = restored.cells.iter().find(|cell| &cell.key == key).ok_or_else(invalid)?;
+        let mut row: Value = serde_json::from_str(&cell.metadata)?;
+        row.as_object_mut().ok_or_else(invalid)?.shift_remove("query");
+        let mut fields = Map::new();
+        for (i,(key,value)) in remaining.iter().enumerate() {
+            if i == at { fields.insert("row".into(), row.clone()); }
+            fields.insert(key.clone(),value.clone());
+        }
+        if at == remaining.len() { fields.insert("row".into(), row); }
+        *endpoint = Value::Object(fields);
+    }
+    for (key, relation) in &mut restored.relations { *relation = lookup("relation",key)?.clone(); }
+    restored.verify(prepared)?;
+    let mut detail_bytes = BTreeMap::<String,usize>::new();
+    for (_, trace) in &restored.traces {
+        if let Some(trace) = trace {
+            for (field, value) in trace.session["details"].as_object().ok_or_else(invalid)? {
+                *detail_bytes.entry(field.clone()).or_default() += serde_json::to_vec(value)?.len();
+            }
+        }
+    }
+    for (field, bytes) in detail_bytes {
+        eprintln!("typed_cohort_trace_detail field={field} bytes={bytes}");
+    }
+    eprintln!("typed_cohort_semantic_query turn_occurrences={} turn_unique={} edge_occurrences={} edge_unique={} conflicts=0 exact_cells_and_model=true", occurrences[0], turns.len(), occurrences[1], edges.len());
+    Ok(records)
+}
+
+pub(crate) fn cohort_session(records: &[(String,String,Value)], owner: &str) -> io::Result<Value> {
+    let lookup = |family: &str| records.iter().find(|(f,k,_)| f == family && k == owner).map(|(_,_,v)| v).ok_or_else(invalid);
+    let trace: Option<Trace> = serde_json::from_value(lookup("trace")?.clone())?;
+    let trace = trace.ok_or_else(invalid)?;
+    let metadata: Value = serde_json::from_str(lookup("cell")?[0].as_str().ok_or_else(invalid)?)?;
+    serde_json::to_value(Session {
+        fields: trace.session.as_object().ok_or_else(invalid)?, cost: metadata.get("cost").ok_or_else(invalid)?,
+        cost_at: trace.session_cost_at, details_cost_at: Some(trace.details_cost_at),
+    }).map_err(io::Error::other)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Cell {
