@@ -124,10 +124,7 @@ impl Fixture {
         drop(work);
         evidence.retire();
     }
-    fn begin_relation_stage(
-        &self,
-        paths: &[String],
-    ) -> crate::model::relation_stage::Batch {
+    fn begin_relation_stage(&self, paths: &[String]) -> crate::model::relation_stage::Batch {
         assert!(!paths.is_empty());
         let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
         cache.prepare_facts_authority(&self.options).unwrap();
@@ -10462,8 +10459,7 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
             |row| row.get(0),
         )
         .unwrap();
-    let _: crate::model::relation_stage::Endpoint =
-        serde_json::from_str(&valid_metadata).unwrap();
+    let _: crate::model::relation_stage::Endpoint = serde_json::from_str(&valid_metadata).unwrap();
     db.execute(
         "UPDATE main.catalog_semantic_endpoints SET metadata='{}' WHERE session_key=?1",
         [&corrupt_owner],
@@ -11710,7 +11706,8 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
             fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2)),
         )
         .unwrap();
-    let mut cache = EventCache::open_scoped(&current.options.cache, &current.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&current.options.cache, &current.options.source).unwrap();
     cache.prepare_facts_authority(&current.options).unwrap();
     let input = crate::native_evidence::catalog_input(&source_path, &current.options).unwrap();
     let prepared = crate::model::prepare_sources(
@@ -11731,10 +11728,8 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
     assert_ne!(row.sources, retained_sources);
     row.query = None;
 
-    let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(
-        &config,
-    )
-    .unwrap();
+    let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&config)
+        .unwrap();
     let stage = current.stage();
     let mut db = stage.into_test_connection();
     let tx = db.transaction().unwrap();
@@ -11752,9 +11747,11 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
         )
         .unwrap();
     let updated_summary: Value = serde_json::from_str(&updated_summary).unwrap();
-    assert!(updated_summary["home"]["content"]
-        .get("foreign_namespace_marker")
-        .is_none());
+    assert!(
+        updated_summary["home"]["content"]
+            .get("foreign_namespace_marker")
+            .is_none()
+    );
     let updated_trace: String = db
         .query_row(
             "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
