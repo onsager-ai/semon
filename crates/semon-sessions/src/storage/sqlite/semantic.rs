@@ -117,16 +117,10 @@ fn relation_sender_context(
                 if !visited.insert(key.clone()) {
                     break;
                 }
-                let endpoint = match endpoints
-                    .get(&key)
-                    .or_else(|| preloaded.get(&key))
-                    .cloned()
-                {
+                let endpoint = match endpoints.get(&key).or_else(|| preloaded.get(&key)).cloned() {
                     Some(endpoint) => Some(endpoint),
                     None => crate::events::store::semantic_stage::ContextPort::endpoint(
-                        physical,
-                        &key,
-                        used,
+                        physical, &key, used,
                     )?,
                 }
                 .ok_or(rusqlite::Error::InvalidQuery)?;

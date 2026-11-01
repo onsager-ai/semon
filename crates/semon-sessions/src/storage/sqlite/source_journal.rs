@@ -2402,9 +2402,7 @@ mod tests {
 
         // Five tickets can each retain 64 distinct pending paths.
         let excluded = (0..5)
-            .flat_map(|ticket| {
-                (0..64).map(move |path| format!("waiting-{ticket:02}-{path:02}"))
-            })
+            .flat_map(|ticket| (0..64).map(move |path| format!("waiting-{ticket:02}-{path:02}")))
             .collect::<Vec<_>>();
         let mut sources = excluded.clone();
         sources.extend(["fifo-a".to_owned(), "hint-z".to_owned()]);
@@ -2441,15 +2439,11 @@ mod tests {
         assert_eq!(batch.fallback, vec!["fifo-a"]);
         assert!(batch.search_checked);
 
-        let exclusion_limit =
-            crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
+        let exclusion_limit = crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
         let maximum = excluded
             .iter()
             .cloned()
-            .chain(
-                (0..(exclusion_limit - excluded.len()))
-                    .map(|index| format!("other-{index:04}")),
-            )
+            .chain((0..(exclusion_limit - excluded.len())).map(|index| format!("other-{index:04}")))
             .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -2487,11 +2481,13 @@ mod tests {
             store.pending_catalog_sources(1, Some(&invalid_path)),
             Err(StorageError::InvalidArguments)
         ));
-        assert!(store
-            .claims(&too_many[..256])
-            .unwrap()
-            .iter()
-            .all(|(_, revision)| revision.is_none()));
+        assert!(
+            store
+                .claims(&too_many[..256])
+                .unwrap()
+                .iter()
+                .all(|(_, revision)| revision.is_none())
+        );
         let overlong_path = ["x".repeat(4097)];
         let invalid_path = CatalogPendingSearch {
             excluded: &overlong_path,
@@ -2515,11 +2511,13 @@ mod tests {
             Err(StorageError::InvalidArguments)
         );
         assert_eq!(store.claims(&known_paths).unwrap(), before);
-        assert!(store
-            .claims(&too_many_mutations[..256])
-            .unwrap()
-            .iter()
-            .all(|(_, revision)| revision.is_none()));
+        assert!(
+            store
+                .claims(&too_many_mutations[..256])
+                .unwrap()
+                .iter()
+                .all(|(_, revision)| revision.is_none())
+        );
     }
 
     #[test]
