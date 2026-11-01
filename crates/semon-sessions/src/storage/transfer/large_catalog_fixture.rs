@@ -380,8 +380,13 @@ fn finish_measured(
             && batch.phase == crate::model::relation_stage::Phase::Publication;
         if typed_publication {
             let semantic_bytes = crate::model::typed_witness::qualify(model.prepared()).unwrap();
-            super::presentation_measurement::qualify(config, model.prepared(), semantic_bytes, &batch)
-                .unwrap();
+            super::presentation_measurement::qualify(
+                config,
+                model.prepared(),
+                semantic_bytes,
+                &batch,
+            )
+            .unwrap();
         }
         let before = cache.session_catalog_generation();
         let pending = if typed_publication {

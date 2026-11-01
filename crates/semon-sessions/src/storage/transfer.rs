@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 pub(crate) mod catalog_rows;
 #[cfg(test)]
+mod cohort_measurement;
+#[cfg(test)]
 pub(crate) mod inventory;
 pub(crate) mod native_pages;
 pub(crate) mod native_rows;
 #[cfg(test)]
 pub(crate) mod presentation_measurement;
-#[cfg(test)]
-mod cohort_measurement;
 pub(crate) mod reported;
 mod source_rows;
 pub use catalog_rows::CatalogRowKind;

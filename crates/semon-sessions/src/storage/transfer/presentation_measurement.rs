@@ -258,7 +258,7 @@ pub(crate) fn qualify(
     };
     let manifest_bytes = manifest.len();
     if matches!(&config.backend, StoreBackend::Sqlite { .. }) {
-        super::cohort_measurement::qualify(config,batch,prepared,&rows,&manifest,&base)?;
+        super::cohort_measurement::qualify(config, batch, prepared, &rows, &manifest, &base)?;
     }
     let root = crate::storage::proof_codec::presentation_digest(&base, &manifest)?;
     let root_record = TransferRecord::CatalogRow {
