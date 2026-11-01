@@ -2206,7 +2206,12 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
     assert_eq!(renamed["participants"]["alpha"], "Updated Alpha");
     assert_ne!(renamed["generation"], before["generation"]);
     assert_eq!(renamed["turns"], before["turns"]);
-    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.selected_store().unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     db.execute(
         "UPDATE session_trace_headers SET source_generation='stale' WHERE session_key='alpha'",
         [],
@@ -2252,10 +2257,6 @@ fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
         json!({}),
         &[codex_user(ts(5, 4), "Synthetic Codex replacement")],
     );
-    home.lines(
-        "codex/session_index.jsonl",
-        &[json!({"id":"alpha","thread_name":"Codex Alpha","updated_at":"2026-09-24T00:02:00Z"})],
-    );
     home.build_query();
 
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
@@ -2268,8 +2269,10 @@ fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
         .unwrap();
     let current: crate::model::summary::CatalogRow =
         serde_json::from_str(&current_metadata).unwrap();
+    assert_eq!(current.key, "alpha");
     assert_eq!(current.harness, "codex");
-    assert_eq!(current.name, "Codex Alpha");
+    assert_eq!(current.name, "Codex run");
+    assert_ne!(current.name, "Alpha");
     let history_metadata: String = db
         .query_row(
             "SELECT metadata FROM session_history_catalog WHERE session_key='alpha'",
