@@ -3081,16 +3081,24 @@ impl Stage {
                 |r| r.get(0),
             )
             .map_err(error)?;
-        if !resetting
-            && stage_revision == revision
-            && !reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        let witnesses_current = if !resetting
+            && (stage_revision == revision || phase == "indexing")
         {
+            reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        } else {
+            true
+        };
+        if !resetting && stage_revision == revision && !witnesses_current {
             #[cfg(test)]
             eprintln!("semantic_batch_conflict reason=reduction");
             return Err(StoreError::Configured(StorageError::Conflict));
         }
         let changed: bool = tx.query_row("SELECT revision<>?2 OR EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0) FROM main.catalog_semantic_stage WHERE namespace=?1", params![ns,revision], |r| r.get(0)).map_err(error)?;
-        if !resetting && phase != "indexing" && changed {
+        let stale_witness_after_revision_drift = !resetting
+            && phase == "indexing"
+            && stage_revision != revision
+            && !witnesses_current;
+        if !resetting && ((phase != "indexing" && changed) || stale_witness_after_revision_drift) {
             reset(&tx, ns, &runtime).map_err(error)?;
             tx.execute(
                 "DELETE FROM storage_semantic_model_batches WHERE namespace=?1",

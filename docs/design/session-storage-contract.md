@@ -302,7 +302,7 @@ import, automatic upgrade or historical runtime compatibility.
 
 Storage contract CI compiles actual production callers and runs the current
 namespace/admission/runtime contracts. The explicit current-owner group executes
-the 13 configured recovery scenarios, five current history-custody scenarios,
+the 14 configured recovery scenarios, five current history-custody scenarios,
 search, navigation and SourceJournal tests before the longer native suite. These
 include lost ACK, exact replay, receipt/cursor/restart, fault rollback, foreign
 namespace invisibility, epoch refusal, retained metadata and indexed budgets.
