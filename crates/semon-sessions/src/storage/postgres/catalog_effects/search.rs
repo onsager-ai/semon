@@ -194,8 +194,12 @@ pub(super) fn publish_retained_history(
 
     tx.check()?;
     let namespace = tx.namespace.as_str().as_bytes();
-    let (receipt_namespace, receipt_generation, composites, receipt_bytes) =
-        receipt.into_parts();
+    let super::history::HistorySearchReceiptParts {
+        namespace: receipt_namespace,
+        generation: receipt_generation,
+        composites,
+        metadata_bytes: receipt_bytes,
+    } = receipt.into_parts();
     if receipt_namespace.as_bytes() != namespace
         || receipt_generation.as_bytes() != generation.as_bytes()
         || composites.len() > keys.len()

@@ -4,6 +4,8 @@ use super::*;
 use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 
 type ProofTuple = (Vec<u8>, i64, bool);
+type ProofTupleKey = (Vec<u8>, Vec<u8>);
+type ProofTuples = std::collections::BTreeMap<ProofTupleKey, ProofTuple>;
 type TraceFamilyHeader = (String, String, Vec<u8>);
 
 struct RecipeContents {
@@ -35,6 +37,13 @@ pub(super) struct HistorySearchReceipt {
     metadata_bytes: usize,
 }
 
+pub(super) struct HistorySearchReceiptParts {
+    pub(super) namespace: String,
+    pub(super) generation: String,
+    pub(super) composites: Vec<(CatalogRow, usize)>,
+    pub(super) metadata_bytes: usize,
+}
+
 impl HistorySearchReceipt {
     fn new(
         namespace: &str,
@@ -54,13 +63,13 @@ impl HistorySearchReceipt {
         self.composites.is_empty()
     }
 
-    pub(super) fn into_parts(self) -> (String, String, Vec<(CatalogRow, usize)>, usize) {
-        (
-            self.namespace,
-            self.generation,
-            self.composites,
-            self.metadata_bytes,
-        )
+    pub(super) fn into_parts(self) -> HistorySearchReceiptParts {
+        HistorySearchReceiptParts {
+            namespace: self.namespace,
+            generation: self.generation,
+            composites: self.composites,
+            metadata_bytes: self.metadata_bytes,
+        }
     }
 }
 
@@ -246,7 +255,7 @@ impl History<'_, '_> {
         &self,
         generations: &[&str],
         sources: &[CatalogSource],
-    ) -> Result<std::collections::BTreeMap<(Vec<u8>, Vec<u8>), ProofTuple>, StorageError> {
+    ) -> Result<ProofTuples, StorageError> {
         if generations.len() > 2 || sources.len() > 64 {
             return Err(StorageError::InvalidArguments);
         }

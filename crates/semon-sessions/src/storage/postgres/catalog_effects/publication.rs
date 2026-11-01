@@ -486,7 +486,9 @@ pub(in crate::storage::postgres) fn publish(
     let refs = refs_result?;
     #[cfg(test)]
     let proof_reference_count = refs.len();
-    for (_reference_index, reference) in refs.into_iter().enumerate() {
+    #[cfg(test)]
+    let mut reference_index = 0usize;
+    for reference in refs {
         let proof_check = tx.check();
         #[cfg(test)]
         if matches!(proof_check.as_ref(), Err(&StorageError::Busy)) {
@@ -498,7 +500,7 @@ pub(in crate::storage::postgres) fn publish(
                 tx.deadline.saturating_duration_since(now).as_millis(),
                 tx.control.is_cancelled(),
                 proof_reference_count,
-                _reference_index,
+                reference_index,
                 publication.rows.len(),
                 publication
                     .rows
@@ -515,6 +517,10 @@ pub(in crate::storage::postgres) fn publish(
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE proof_insert");
         tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
+        #[cfg(test)]
+        {
+            reference_index += 1;
+        }
     }
     #[cfg(test)]
     if expected.is_some() {
