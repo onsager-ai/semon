@@ -4,7 +4,7 @@ use super::*;
 #[path = "semantic_plan.rs"]
 mod plan;
 use crate::model::relation_stage::{
-    Batch, Context, Endpoint, Phase, Relation, Selection, Selector, Withdrawal,
+    Batch, Context, Endpoint, Phase, Relation, RelationCursor, Selection, Selector, Withdrawal,
 };
 pub(crate) use plan::{
     ContextPort, OwnerClosurePort, PhysicalOwnerSourceBudget, PublicationPlanPort, context_with,
@@ -1474,12 +1474,6 @@ impl ReductionStore for UnboundReduction<'_> {
         self.0.query_row("SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints WHERE parent_resolved=0 OR root_key IS NULL OR cost_done=0)",[],|r|r.get(0))
     }
 }
-#[derive(Serialize, Deserialize)]
-struct RelationCursor {
-    path: String,
-    after: String,
-    end: String,
-}
 fn location_key(at: &crate::model::relation_stage::Location) -> rusqlite::Result<String> {
     Ok(format!(
         "{:020}:{:010}:{}:{:020}",
@@ -1489,7 +1483,11 @@ fn location_key(at: &crate::model::relation_stage::Location) -> rusqlite::Result
         at.occurrence
     ))
 }
-fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite::Result<String> {
+fn event_context(
+    c: &Connection,
+    path: &str,
+    context: &mut Context,
+) -> rusqlite::Result<RelationCursor> {
     let after: String = c.query_row(
         "SELECT relation_after FROM catalog_semantic_sources WHERE source_path=?1",
         [path],
@@ -1644,12 +1642,11 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         .collect();
     context.matching_locations = Some(selected);
     context.matching_header_paths = Some(vec![path.to_owned()]);
-    serde_json::to_string(&RelationCursor {
+    Ok(RelationCursor {
         path: path.to_owned(),
         after,
         end,
     })
-    .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 impl ContextPort for OrdinaryOwnerPlan<'_> {
     fn owners(&self, path: &str) -> rusqlite::Result<Vec<String>> {
@@ -1719,7 +1716,16 @@ fn relation_scope(
         owners: BTreeSet::new(),
         companions: std::collections::BTreeMap::new(),
     };
-    for path in &batch.paths {
+    let selected_paths = if batch.relation_cursors.is_empty() {
+        batch.paths.iter().map(String::as_str).collect::<BTreeSet<_>>()
+    } else {
+        batch
+            .relation_cursors
+            .iter()
+            .map(|cursor| cursor.path.as_str())
+            .collect::<BTreeSet<_>>()
+    };
+    for path in selected_paths.iter().copied() {
         let mut owners=c.prepare("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1 ORDER BY session_key LIMIT 65")?;
         for owner in owners.query_map([path], |row| row.get::<_, String>(0))? {
             scope.owners.insert(owner?);
@@ -1737,7 +1743,7 @@ fn relation_scope(
             .entry(path.clone())
             .or_default()
             .insert(location_key(location)?);
-        if !batch.paths.contains(&path) {
+        if !selected_paths.contains(path.as_str()) {
             let mut owners=c.prepare("SELECT session_key FROM catalog_semantic_owner_sources WHERE source_path=?1 ORDER BY session_key LIMIT 65")?;
             for owner in owners.query_map([&path], |row| row.get::<_, String>(0))? {
                 candidates.insert(owner?);
@@ -2085,7 +2091,7 @@ impl SqliteStore {
                 source_revision,
                 runtime,
                 context: Context::default(),
-                relation_cursor: None,
+                relation_cursors: Vec::new(),
             }));
         }
         tx.execute(
@@ -2192,7 +2198,7 @@ impl SqliteStore {
                         source_revision,
                         runtime,
                         context: Context::default(),
-                        relation_cursor: None,
+                        relation_cursors: Vec::new(),
                     }));
                 }
             } else if p == "identity" {
@@ -2208,7 +2214,7 @@ impl SqliteStore {
                         source_revision,
                         runtime,
                         context: Context::default(),
-                        relation_cursor: None,
+                        relation_cursors: Vec::new(),
                     }));
                 }
                 if !reduce(&tx).map_err(failure)? || !qualify_events(&tx).map_err(failure)? {
@@ -2223,7 +2229,7 @@ impl SqliteStore {
                         source_revision,
                         runtime,
                         context: Context::default(),
-                        relation_cursor: None,
+                        relation_cursors: Vec::new(),
                     }));
                 }
                 p = "relations".into();
@@ -2248,7 +2254,7 @@ impl SqliteStore {
         if claude {
             paths.truncate(1);
         }
-        let mut relation_cursor = None;
+        let mut relation_cursors = Vec::new();
         let mut context = if matches!(result_phase, Phase::Identity | Phase::Indexing) {
             Context {
                 epoch: (result_phase == Phase::Identity).then_some(epoch),
@@ -2275,7 +2281,7 @@ impl SqliteStore {
             }
         };
         if claude {
-            relation_cursor = Some(event_context(&tx, &paths[0], &mut context).map_err(failure)?);
+            relation_cursors.push(event_context(&tx, &paths[0], &mut context).map_err(failure)?);
         }
         let source_claims = paths
             .iter()
@@ -2298,7 +2304,7 @@ impl SqliteStore {
             source_revision: revision,
             runtime,
             context,
-            relation_cursor,
+            relation_cursors,
         }))
     }
     pub(super) fn semantic_record(
@@ -2334,6 +2340,40 @@ impl SqliteStore {
             if claim(&tx, path).map_err(failure)? != *expected {
                 self.semantic_rejection = Some("prepared_claim");
                 return Ok(Outcome::Conflict);
+            }
+        }
+        if b.phase == Phase::Relations {
+            let mut seen = BTreeSet::new();
+            for cursor in &b.relation_cursors {
+                if !seen.insert(cursor.path.as_str()) || !b.paths.contains(&cursor.path) {
+                    self.semantic_rejection = Some("relation_cursor_membership");
+                    return Ok(Outcome::Conflict);
+                }
+                let prepared_claim = prepared
+                    .claims
+                    .iter()
+                    .find(|(path, _)| path == &cursor.path)
+                    .map(|(_, claim)| claim);
+                let batch_claim = b
+                    .source_claims
+                    .iter()
+                    .find(|(path, _)| path == &cursor.path)
+                    .map(|(_, claim)| claim);
+                if prepared_claim.is_none() || prepared_claim != batch_claim {
+                    self.semantic_rejection = Some("relation_cursor_claim");
+                    return Ok(Outcome::Conflict);
+                }
+                let current: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources WHERE source_path=?1 AND relation_after=?2 AND relation_done=0)",
+                        params![cursor.path, cursor.after],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)?;
+                if !current {
+                    self.semantic_rejection = Some("relation_cursor");
+                    return Ok(Outcome::Conflict);
+                }
             }
         }
         for row in &prepared.rows {
@@ -2642,26 +2682,13 @@ impl SqliteStore {
                 .map_err(failure)?;
             }
         }
-        let cursor: Option<RelationCursor> = b
-            .relation_cursor
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|error| StoreError::Data(error.to_string()))?;
-        if let Some(cursor) = &cursor {
-            let actual: String = tx
-                .query_row(
-                    "SELECT relation_after FROM catalog_semantic_sources WHERE source_path=?1",
-                    [&cursor.path],
-                    |r| r.get(0),
-                )
-                .map_err(failure)?;
-            if b.paths.as_slice() != [cursor.path.clone()] || actual != cursor.after {
-                self.semantic_rejection = Some("relation_cursor");
-                return Ok(Outcome::Conflict);
-            }
-        }
         for path in &b.paths {
+            if b.phase == Phase::Relations
+                && !b.relation_cursors.is_empty()
+                && !b.relation_cursors.iter().any(|cursor| cursor.path == *path)
+            {
+                continue;
+            }
             let observed = prepared
                 .claims
                 .iter()
@@ -2690,7 +2717,7 @@ impl SqliteStore {
                 }
             }
         }
-        if let Some(cursor) = &cursor {
+        for cursor in &b.relation_cursors {
             let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE source_path=?1 AND event_key>?2 AND copied=0 AND qualified=1)",params![cursor.path,cursor.end],|r|r.get(0)).map_err(failure)?;
             tx.execute("UPDATE catalog_semantic_sources SET relation_after=?2,relation_done=?3 WHERE source_path=?1",params![cursor.path,cursor.end,!pending]).map_err(failure)?;
         }

@@ -4085,7 +4085,7 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
         source_revision: 0,
         runtime: String::new(),
         context: staged.clone(),
-        relation_cursor: None,
+        relation_cursors: Vec::new(),
     };
     assert_eq!(
         cache.publish_semantic_catalog(&batch, &replay).unwrap(),
@@ -4816,6 +4816,165 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
 }
 
 #[test]
+fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
+    let home = Home::new();
+    let mut root_records = vec![codex_user(ts(6, 0), "Coordinate relation pages")];
+    for n in 0..2 {
+        let task = format!("part{n:03}");
+        root_records.push(codex_line(
+            ts(6, 1),
+            "response_item",
+            json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":format!("spawn-{n}"),"arguments":json!({"task_name":task,"message":"Inspect"}).to_string()}),
+        ));
+        home.codex(
+            &format!("child-{n:03}"),
+            json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":format!("root/{task}"),"agent_nickname":format!("worker-{n}")}),
+            &[
+                codex_user(ts(6, 2), "Inspect"),
+                codex_reply(ts(6, 4), "Complete"),
+            ],
+        );
+    }
+    home.codex("root", json!({}), &root_records);
+
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert_eq!(inputs.len(), 3);
+    let paths = inputs
+        .iter()
+        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut relation_batch = None;
+    for _ in 0..128 {
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        if batch.phase == relation_stage::Phase::Relations {
+            relation_batch = Some(batch);
+            break;
+        }
+        if batch.paths.is_empty() {
+            assert!(matches!(
+                batch.phase,
+                relation_stage::Phase::Indexing | relation_stage::Phase::Identity
+            ));
+            continue;
+        }
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Codex,
+                path: Path::new(path)
+                    .strip_prefix(&home.options.codex_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare_semantic_batch(
+            &home.options,
+            &mut cache,
+            &batch_inputs,
+            &batch,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    let batch = relation_batch.expect("fixture did not reach relation staging");
+    assert!(batch.relation_cursors.len() >= 2);
+    let batch_inputs = batch
+        .paths
+        .iter()
+        .map(|path| crate::Input {
+            root: crate::InputRoot::Codex,
+            path: Path::new(path)
+                .strip_prefix(&home.options.codex_home)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        })
+        .collect::<Vec<_>>();
+    let prepared = prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW)
+        .unwrap();
+    assert!(!prepared.prepared().relationships.relations.is_empty());
+    cache.end_scan();
+    cache.release_published_indexes();
+
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let relation_state = |db: &rusqlite::Connection| -> Vec<(String, String, bool)> {
+        let mut statement = db
+            .prepare("SELECT source_path,relation_after,relation_done FROM main.catalog_semantic_sources ORDER BY source_path")
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let endpoint_state = |db: &rusqlite::Connection| -> Vec<(String, String)> {
+        let mut statement = db
+            .prepare("SELECT session_key,metadata FROM main.catalog_semantic_endpoints ORDER BY session_key")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let relation_rows = |db: &rusqlite::Connection| -> Vec<(String, String)> {
+        let mut statement = db
+            .prepare("SELECT relation_id,metadata FROM main.catalog_semantic_relations ORDER BY relation_id")
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+
+    let stale = &batch.relation_cursors[1];
+    assert_ne!(stale.path, batch.relation_cursors[0].path);
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_sources SET relation_after='stale-cursor' WHERE source_path=?1 AND relation_done=0",
+            [&stale.path],
+        )
+        .unwrap(),
+        1
+    );
+    let sources_before = relation_state(&db);
+    let endpoints_before = endpoint_state(&db);
+    let relations_before = relation_rows(&db);
+
+    assert_eq!(
+        cache
+            .record_semantic_batch(&batch, prepared.prepared())
+            .unwrap(),
+        crate::events::Outcome::Conflict,
+        "a stale non-leading cursor must reject the whole relation batch"
+    );
+    assert_eq!(relation_state(&db), sources_before);
+    assert_eq!(endpoint_state(&db), endpoints_before);
+    assert_eq!(relation_rows(&db), relations_before);
+    cache.end_scan();
+    cache.release_published_indexes();
+}
+
+#[test]
 fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
     let home = Home::new();
     let mut sender = vec![human("coordinator", ts(7, 0), "Coordinate peers")];
@@ -5514,7 +5673,11 @@ fn record_selected_companion_batch(
             |row| row.get(0),
         )
         .unwrap();
-    batch.relation_cursor = Some(json!({"path":seed_path,"after":after,"end":end}).to_string());
+    batch.relation_cursors = vec![relation_stage::RelationCursor {
+        path: seed_path.clone(),
+        after,
+        end,
+    }];
     let prepared =
         prepare_staged_sources(&home.options, cache, &inputs, &batch.context, true, NOW).unwrap();
     if trace {
@@ -5528,7 +5691,7 @@ fn record_selected_companion_batch(
             "partial_companion selected phase={:?} path_hashes=[{}] cursor={} inputs={} claims={}",
             batch.phase,
             paths,
-            crate::native_evidence::companion_diag_cursor(batch.relation_cursor.as_deref()),
+            crate::native_evidence::companion_diag_cursors(&batch.relation_cursors),
             inputs.len(),
             prepared.claims.len()
         );

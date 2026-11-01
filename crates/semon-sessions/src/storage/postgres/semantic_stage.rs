@@ -237,7 +237,7 @@ pub(super) fn next(tx: &mut PgTxn<'_>, limit: usize) -> Result<Option<Batch>, St
         source_revision: stage.revision,
         runtime: stage.runtime,
         context: stage.context,
-        relation_cursor: None,
+        relation_cursors: Vec::new(),
     }))
 }
 

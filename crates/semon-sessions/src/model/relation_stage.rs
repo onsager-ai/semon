@@ -94,7 +94,18 @@ pub(crate) struct Batch {
     pub(crate) source_revision: i64,
     pub(crate) runtime: String,
     pub(crate) context: Context,
-    pub(crate) relation_cursor: Option<String>,
+    /// Per-source event pages advanced by this prepared model batch.
+    pub(crate) relation_cursors: Vec<RelationCursor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelationCursor {
+    /// Source whose qualified event page was selected.
+    pub(crate) path: String,
+    /// Persisted page position observed before model preparation.
+    pub(crate) after: String,
+    /// Last event included in the page.
+    pub(crate) end: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

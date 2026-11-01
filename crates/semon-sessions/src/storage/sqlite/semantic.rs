@@ -7,19 +7,21 @@ mod plan;
 use super::source_journal::SourceJournal;
 use super::{failed, namespace};
 use crate::events::{Ledger, Outcome, StoreError};
-use crate::model::relation_stage::OwnerStore;
+use crate::model::relation_stage::{OwnerStore, RelationCursor};
 use crate::model::{
     PreparedSources,
-    relation_stage::{Batch, Context, Phase},
+    relation_stage::{Batch, Context, Location, Phase},
 };
 use crate::storage::{NativeReaderBinding, StorageError, StoreConfig};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct RelationCursor {
-    path: String,
-    after: String,
-    end: String,
+const RELATION_EVENT_PAGE_LIMIT: usize = 16;
+const RELATION_EVENT_BATCH_LIMIT: usize = 64;
+
+struct RelationPage {
+    cursor: RelationCursor,
+    locations: Vec<Location>,
+    events: usize,
 }
 
 struct RelationScope {
@@ -46,7 +48,7 @@ fn relation_location_key(
 fn relation_scope(
     db: &Connection,
     namespace: &str,
-    cursor: &RelationCursor,
+    cursors: &[RelationCursor],
     batch: &Batch,
     prepared: &PreparedSources,
 ) -> rusqlite::Result<RelationScope> {
@@ -57,10 +59,12 @@ fn relation_scope(
     let mut seed_owners = db.prepare(
         "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2 ORDER BY session_key LIMIT 65",
     )?;
-    for owner in seed_owners.query_map(params![namespace, cursor.path], |row| {
-        row.get::<_, String>(0)
-    })? {
-        scope.owners.insert(owner?);
+    for cursor in cursors {
+        for owner in seed_owners.query_map(params![namespace, cursor.path], |row| {
+            row.get::<_, String>(0)
+        })? {
+            scope.owners.insert(owner?);
+        }
     }
     if scope.owners.len() > 64 {
         return Err(rusqlite::Error::InvalidQuery);
@@ -78,7 +82,7 @@ fn relation_scope(
             .entry(path.clone())
             .or_default()
             .insert(relation_location_key(location)?);
-        if path == cursor.path {
+        if cursors.iter().any(|cursor| cursor.path == path) {
             continue;
         }
         let mut owners = db.prepare(
@@ -239,16 +243,18 @@ fn relation_page(
     db: &Connection,
     ns: &str,
     path: &str,
-    context: &mut Context,
-) -> rusqlite::Result<String> {
+    limit: usize,
+) -> rusqlite::Result<RelationPage> {
     let after: String = db.query_row("SELECT relation_after FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get(0))?;
     // A message can produce incident edges in both directions. Select a small
     // event page, retaining the existing relation and metadata operation caps.
-    let mut query = db.prepare("SELECT event_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT 16")?;
-    let mut rows = query.query(params![ns, path, after])?;
+    let limit = limit.min(RELATION_EVENT_PAGE_LIMIT);
+    let mut query = db.prepare("SELECT event_key,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT ?4")?;
+    let mut rows = query.query(params![ns, path, after, limit as i64])?;
     let mut locations = Vec::new();
     let mut used = 0usize;
     let mut end = after.clone();
+    let mut events = 0usize;
     while let Some(row) = rows.next()? {
         let key: String = row.get(0)?;
         let text: Option<String> = row.get(1)?;
@@ -292,15 +298,17 @@ fn relation_page(
         locations.extend(selected);
         used = candidate_used;
         end = key;
+        events += 1;
     }
-    context.matching_locations = Some(locations);
-    context.matching_header_paths = Some(vec![path.to_owned()]);
-    serde_json::to_string(&RelationCursor {
-        path: path.to_owned(),
-        after,
-        end,
+    Ok(RelationPage {
+        cursor: RelationCursor {
+            path: path.to_owned(),
+            after,
+            end,
+        },
+        locations,
+        events,
     })
-    .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 pub(crate) fn validate_owners(db: &Connection) -> Result<(), StorageError> {
@@ -3605,7 +3613,7 @@ impl Stage {
                 source_revision,
                 runtime,
                 context: Context::default(),
-                relation_cursor: None,
+                relation_cursors: Vec::new(),
             }));
         }
         let reset_complete = if resetting {
@@ -3662,7 +3670,7 @@ impl Stage {
                 source_revision: revision,
                 runtime,
                 context: Context::default(),
-                relation_cursor: None,
+                relation_cursors: Vec::new(),
             }));
         }
         let physical = plan::Plan { db: &tx, ns };
@@ -3836,10 +3844,14 @@ impl Stage {
                 }
             }
         };
-        let relation_cursor = if result_phase == Phase::Relations && !paths.is_empty() {
-            let selected = paths[0].clone();
-            let cursor = relation_page(&tx, ns, &selected, &mut context).map_err(error)?;
+        let mut relation_cursors = Vec::new();
+        if result_phase == Phase::Relations && !paths.is_empty() {
             if claude {
+                let selected = paths[0].clone();
+                let page = relation_page(&tx, ns, &selected, RELATION_EVENT_PAGE_LIMIT)
+                    .map_err(error)?;
+                context.matching_locations = Some(page.locations);
+                context.matching_header_paths = Some(vec![selected.clone()]);
                 let mut actors = context
                     .matching_locations
                     .iter()
@@ -3865,6 +3877,80 @@ impl Stage {
                 companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
                 paths = vec![selected.clone()];
                 paths.extend(companions.into_iter().filter(|path| path != &selected));
+                relation_cursors.push(page.cursor);
+            } else {
+                let mut remaining_events = RELATION_EVENT_BATCH_LIMIT;
+                let mut page_paths = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    let is_claude: bool = tx
+                        .query_row(
+                            "SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2",
+                            params![ns, path],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(error)?
+                        .unwrap_or(false);
+                    if !is_claude {
+                        page_paths.push(path.clone());
+                    }
+                }
+                for selected in page_paths {
+                    if remaining_events == 0 {
+                        break;
+                    }
+                    let page = relation_page(
+                        &tx,
+                        ns,
+                        &selected,
+                        remaining_events.min(RELATION_EVENT_PAGE_LIMIT),
+                    )
+                    .map_err(error)?;
+                    let page_has_locations = !page.locations.is_empty();
+                    let had_locations = context.matching_locations.is_some();
+                    let location_count = context
+                        .matching_locations
+                        .as_ref()
+                        .map_or(0, Vec::len);
+                    let had_headers = context.matching_header_paths.is_some();
+                    let header_count = context
+                        .matching_header_paths
+                        .as_ref()
+                        .map_or(0, Vec::len);
+                    context
+                        .matching_locations
+                        .get_or_insert_with(Vec::new)
+                        .extend(page.locations);
+                    context
+                        .matching_header_paths
+                        .get_or_insert_with(Vec::new)
+                        .push(selected);
+                    if page_has_locations
+                        && serde_json::to_vec(&context)
+                            .map_err(|e| StoreError::Data(e.to_string()))?
+                            .len()
+                            > 1048576
+                    {
+                        if let Some(locations) = &mut context.matching_locations {
+                            locations.truncate(location_count);
+                        }
+                        if !had_locations {
+                            context.matching_locations = None;
+                        }
+                        if let Some(headers) = &mut context.matching_header_paths {
+                            headers.truncate(header_count);
+                        }
+                        if !had_headers {
+                            context.matching_header_paths = None;
+                        }
+                        if relation_cursors.is_empty() {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        break;
+                    }
+                    remaining_events -= page.events;
+                    relation_cursors.push(page.cursor);
+                }
             }
             if paths.len() > 64
                 || serde_json::to_vec(&context)
@@ -3874,10 +3960,7 @@ impl Stage {
             {
                 return Err(refuse("semantic_source_budget"));
             }
-            Some(cursor)
-        } else {
-            None
-        };
+        }
         let source_revision = tx
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace=?1",
@@ -3898,7 +3981,7 @@ impl Stage {
             source_revision,
             runtime,
             context,
-            relation_cursor,
+            relation_cursors,
         }))
     }
 
@@ -3951,6 +4034,46 @@ impl Stage {
             #[cfg(test)]
             eprintln!("semantic_record_conflict: source_claims");
             return Ok(Outcome::Conflict);
+        }
+        if batch.phase == Phase::Relations {
+            if batch.relation_cursors.is_empty() {
+                return Err(refuse("semantic_relation_cursor"));
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for cursor in &batch.relation_cursors {
+                if !seen.insert(cursor.path.as_str()) || !batch.paths.contains(&cursor.path) {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: relation_cursor_membership");
+                    return Ok(Outcome::Conflict);
+                }
+                let prepared_claim = prepared
+                    .claims
+                    .iter()
+                    .find(|(path, _)| path == &cursor.path)
+                    .map(|(_, claim)| claim);
+                let batch_claim = batch
+                    .source_claims
+                    .iter()
+                    .find(|(path, _)| path == &cursor.path)
+                    .map(|(_, claim)| claim);
+                if prepared_claim.is_none() || prepared_claim != batch_claim {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: relation_cursor_claim");
+                    return Ok(Outcome::Conflict);
+                }
+                let current: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND relation_after=?3 AND relation_done=0)",
+                        params![ns, cursor.path, cursor.after],
+                        |row| row.get(0),
+                    )
+                    .map_err(error)?;
+                if !current {
+                    #[cfg(test)]
+                    eprintln!("semantic_record_conflict: relation_cursor");
+                    return Ok(Outcome::Conflict);
+                }
+            }
         }
         if batch.phase == Phase::Publication {
             // A new native member can change a previously complete name
@@ -4172,18 +4295,8 @@ impl Stage {
                 }
             }
             if batch.phase == Phase::Relations {
-                let cursor: RelationCursor = serde_json::from_str(
-                    batch
-                        .relation_cursor
-                        .as_deref()
-                        .ok_or_else(|| refuse("semantic_relation_cursor"))?,
-                )
-                .map_err(|e| StoreError::Data(e.to_string()))?;
-                let current: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND relation_after=?3 AND relation_done=0)",params![ns,cursor.path,cursor.after],|r|r.get(0)).map_err(error)?;
-                if batch.paths.first() != Some(&cursor.path) || !current {
-                    return Ok(Outcome::Conflict);
-                }
-                let scope = relation_scope(&tx, ns, &cursor, batch, prepared).map_err(error)?;
+                let scope = relation_scope(&tx, ns, &batch.relation_cursors, batch, prepared)
+                    .map_err(error)?;
                 let effects = owners::Owners {
                     db: &tx,
                     namespace: ns,
@@ -4256,8 +4369,10 @@ impl Stage {
                 #[cfg(test)]
                 crate::events::store::configured::effect("semantic_record_relations")
                     .map_err(error)?;
-                let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",params![ns,cursor.path,cursor.end],|r|r.get(0)).map_err(error)?;
-                tx.execute("UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=?4 WHERE namespace=?1 AND source_path=?2",params![ns,cursor.path,cursor.end,!pending]).map_err(error)?;
+                for cursor in &batch.relation_cursors {
+                    let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",params![ns,cursor.path,cursor.end],|r|r.get(0)).map_err(error)?;
+                    tx.execute("UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=?4 WHERE namespace=?1 AND source_path=?2",params![ns,cursor.path,cursor.end,!pending]).map_err(error)?;
+                }
                 for (path, (end, claim, ledger)) in &scope.companions {
                     tx.execute(
                         "UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=1,claim=?4,ledger=?5 WHERE namespace=?1 AND source_path=?2 AND relation_done=0",

@@ -34,25 +34,30 @@ pub(crate) fn companion_diag_hash(value: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn companion_diag_cursor(cursor: Option<&str>) -> String {
-    let Some(cursor) = cursor else {
+pub(crate) fn companion_diag_cursors(
+    cursors: &[model::relation_stage::RelationCursor],
+) -> String {
+    let Some(first) = cursors.first() else {
         return "none".to_owned();
     };
-    let Ok(cursor) = serde_json::from_str::<serde_json::Value>(cursor) else {
-        return "invalid".to_owned();
+    let summary = |cursor: &model::relation_stage::RelationCursor| {
+        format!(
+            "path={} after={} end={}",
+            companion_diag_hash(&cursor.path),
+            companion_diag_hash(&cursor.after),
+            companion_diag_hash(&cursor.end)
+        )
     };
-    let hash_field = |field: &str| {
-        cursor[field]
-            .as_str()
-            .map(companion_diag_hash)
-            .unwrap_or_else(|| "missing".to_owned())
-    };
-    format!(
-        "path={} after={} end={}",
-        hash_field("path"),
-        hash_field("after"),
-        hash_field("end")
-    )
+    if cursors.len() == 1 {
+        summary(first)
+    } else {
+        format!(
+            "pages={} first=[{}] last=[{}]",
+            cursors.len(),
+            summary(first),
+            summary(cursors.last().expect("nonempty relation cursors"))
+        )
+    }
 }
 
 pub(crate) struct NativeEvidence {
@@ -1173,7 +1178,7 @@ impl NativeEvidence {
                 batch.epoch,
                 batch.source_revision,
                 paths,
-                companion_diag_cursor(batch.relation_cursor.as_deref())
+                companion_diag_cursors(&batch.relation_cursors)
             );
         }
         work.pending_sources = true;
@@ -4309,7 +4314,11 @@ mod catalog_owner_tests {
             base_generation: Some("private-generation-value".into()),
             runtime: "private-runtime-value".into(),
             context: Default::default(),
-            relation_cursor: Some("private-relation-cursor".into()),
+            relation_cursors: vec![model::relation_stage::RelationCursor {
+                path: "private-relation-path".into(),
+                after: "private-relation-after".into(),
+                end: "private-relation-end".into(),
+            }],
         };
         for operation in ["record", "publish", "finish"] {
             if operation != "record" {
