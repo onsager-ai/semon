@@ -130,9 +130,16 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     ).unwrap();
     let mut inline: CatalogRow = serde_json::from_str(&metadata).unwrap();
     assert!(!crate::query_projection::SelectedRecipe::detached(&inline));
-    assert_eq!(crate::storage::sqlite::proof_generations::attach_query_recipe(
-        &tx, &sqlite_reader, Owner::Catalog, &mut inline,
-    ).unwrap(), 0);
+    assert_eq!(
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &sqlite_reader,
+            Owner::Catalog,
+            &mut inline,
+        )
+        .unwrap(),
+        0
+    );
     assert!(inline.query_recipe.is_none());
     assert_eq!(serde_json::to_string(&inline).unwrap(), metadata);
     tx.commit().unwrap();
@@ -141,36 +148,64 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     let inline_namespace = ns("query-recipe-inline-native");
     let inline_config = crate::storage::StoreConfig {
         backend: crate::storage::StoreBackend::Postgres {
-            pool: pool.clone(), control: control.clone(),
+            pool: pool.clone(),
+            control: control.clone(),
         },
         namespace: inline_namespace.clone(),
         expected_stream_epoch: Some("c".repeat(64)),
     };
     inline_config.create_native_store().unwrap();
     let mut inline_options = options.clone();
-    inline_options.source = crate::storage::HostSource::new(inline_namespace.clone(), "c".repeat(64))
-        .unwrap().with_store(inline_config).unwrap();
-    let mut inline_cache = crate::events::EventCache::open_scoped(&inline_options.cache, &inline_options.source).unwrap();
+    inline_options.source =
+        crate::storage::HostSource::new(inline_namespace.clone(), "c".repeat(64))
+            .unwrap()
+            .with_store(inline_config)
+            .unwrap();
+    let mut inline_cache =
+        crate::events::EventCache::open_scoped(&inline_options.cache, &inline_options.source)
+            .unwrap();
     let path = &data.rows[0].sources[0].path;
-    inline_cache.ingest(&"b".repeat(64), path, "claude").unwrap();
+    inline_cache
+        .ingest(&"b".repeat(64), path, "claude")
+        .unwrap();
     let inline_input = crate::native_evidence::catalog_input(path, &inline_options).unwrap();
-    let inline_prepared = crate::model::prepare_sources(&inline_options, &mut inline_cache, &[inline_input], 1790812802000).unwrap();
-    let (outcome, inline_generation) = inline_cache.publish_partial_catalog_fenced(&inline_prepared).unwrap();
+    let inline_prepared = crate::model::prepare_sources(
+        &inline_options,
+        &mut inline_cache,
+        &[inline_input],
+        1790812802000,
+    )
+    .unwrap();
+    let (outcome, inline_generation) = inline_cache
+        .publish_partial_catalog_fenced(&inline_prepared)
+        .unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
     let inline_generation = inline_generation.unwrap();
     let inline_key = &inline_prepared.rows[0].key;
-    snapshot::with_admitted_snapshot(&pool, &inline_namespace, &control, &inline_generation, |view| {
-        let mut selected = view.catalog(inline_key, false)?.unwrap();
-        let metadata = serde_json::to_string(&selected).unwrap();
-        assert!(!crate::query_projection::SelectedRecipe::detached(&selected));
-        assert_eq!(view.attach_query_recipe(&mut selected, false)?, 0);
-        assert!(selected.query_recipe.is_none());
-        assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
-        let paths = vec![path.to_str().unwrap().to_owned()];
-        let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
-        assert_eq!(super::super::super::source_lifecycle::component_paths(&mut tx, &paths, &[], &[])?, Some(paths));
-        Ok(())
-    }).unwrap();
+    snapshot::with_admitted_snapshot(
+        &pool,
+        &inline_namespace,
+        &control,
+        &inline_generation,
+        |view| {
+            let mut selected = view.catalog(inline_key, false)?.unwrap();
+            let metadata = serde_json::to_string(&selected).unwrap();
+            assert!(!crate::query_projection::SelectedRecipe::detached(
+                &selected
+            ));
+            assert_eq!(view.attach_query_recipe(&mut selected, false)?, 0);
+            assert!(selected.query_recipe.is_none());
+            assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
+            let paths = vec![path.to_str().unwrap().to_owned()];
+            let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            assert_eq!(
+                super::super::super::source_lifecycle::component_paths(&mut tx, &paths, &[], &[])?,
+                Some(paths)
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
     for unexpected in ["{".to_owned(), "x".repeat(1048576)] {
         let result = pool.transaction(&inline_namespace, TxnKind::Write, &control, |tx| {
             tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&inline_namespace.as_str().as_bytes(), &inline_generation.as_bytes(), &unexpected.as_bytes()]).map_err(sqlstate::error)?;
@@ -275,7 +310,9 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     // object preserves source/summary fields but invalidates its receipt.
     let mut replaced = row.clone();
     replaced.query.as_mut().unwrap()["selected"] = serde_json::to_value(&expected).unwrap();
-    assert!(!crate::query_projection::SelectedRecipe::detached(&replaced));
+    assert!(!crate::query_projection::SelectedRecipe::detached(
+        &replaced
+    ));
     let replaced_metadata = serde_json::to_vec(&replaced).unwrap();
     for payload in [None, Some(b"{".to_vec()), Some(vec![b'x'; 1048576])] {
         let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
@@ -285,6 +322,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 assert_eq!(selected.sources, row.sources);
                 assert_eq!(selected.query.as_ref().unwrap()["rows"], row.query.as_ref().unwrap()["rows"]);
                 assert!(!crate::query_projection::SelectedRecipe::detached(&selected));
+                assert!(view.query_recipe_observation(Owner::Catalog, &selected).is_err());
                 assert!(view.attach_query_recipe(&mut selected, false).is_err());
                 Ok(())
             })?;
@@ -547,25 +585,49 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     );
     let mut replaced = row.clone();
     replaced.query.as_mut().unwrap()["selected"] = serde_json::to_value(expected).unwrap();
-    assert!(!crate::query_projection::SelectedRecipe::detached(&replaced));
+    assert!(!crate::query_projection::SelectedRecipe::detached(
+        &replaced
+    ));
     let replaced_metadata = serde_json::to_string(&replaced).unwrap();
     for payload in [None, Some("{".to_owned()), Some("x".repeat(1048576))] {
-        tx.execute_batch("SAVEPOINT inline_shape_corruption").unwrap();
+        tx.execute_batch("SAVEPOINT inline_shape_corruption")
+            .unwrap();
         // Corrupt only this fixture's mutable cell, including a pair that a
         // normal SQLite writer rejects at its CHECK constraint.
-        tx.pragma_update(None, "ignore_check_constraints", true).unwrap();
+        tx.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
         tx.execute(
-            "UPDATE session_catalog SET metadata=?3,query_recipe=?4 WHERE namespace=?1 AND session_key=?2",
+            "UPDATE main.session_catalog SET metadata=?3,query_recipe=?4 WHERE namespace=?1 AND session_key=?2",
             rusqlite::params![source.namespace.as_str(), row.key, replaced_metadata, payload],
         ).unwrap();
         let mut selected: CatalogRow = serde_json::from_str(&replaced_metadata).unwrap();
         assert_eq!(selected.sources, row.sources);
-        assert_eq!(selected.query.as_ref().unwrap()["rows"], row.query.as_ref().unwrap()["rows"]);
-        assert!(crate::storage::sqlite::proof_generations::attach_query_recipe(
-            &tx, &reader, Owner::Catalog, &mut selected,
-        ).is_err());
-        tx.execute_batch("ROLLBACK TO inline_shape_corruption; RELEASE inline_shape_corruption").unwrap();
-        tx.pragma_update(None, "ignore_check_constraints", false).unwrap();
+        assert_eq!(
+            selected.query.as_ref().unwrap()["rows"],
+            row.query.as_ref().unwrap()["rows"]
+        );
+        assert!(
+            crate::storage::sqlite::proof_generations::query_recipe_observation(
+                &tx,
+                &binding,
+                Owner::Catalog,
+                &selected,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::storage::sqlite::proof_generations::attach_query_recipe(
+                &tx,
+                &reader,
+                Owner::Catalog,
+                &mut selected,
+            )
+            .is_err()
+        );
+        tx.execute_batch("ROLLBACK TO inline_shape_corruption; RELEASE inline_shape_corruption")
+            .unwrap();
+        tx.pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
     }
     let source_proof = match source_observation.residence {
         QueryRecipeResidence::Immutable { generation, .. } => generation,
