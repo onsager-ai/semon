@@ -11090,7 +11090,38 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
         }
     }
     let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
-    cache.publish_session_catalog(&rows, Some(&generation));
+    let publication = crate::slot_projection::Publication {
+        rows: &rows,
+        transcripts: None,
+        observations: None,
+    };
+    let mut deferrals = 0;
+    let mut next_generation = None;
+    for _ in 0..128 {
+        match cache.publish_catalog_projection_fenced(&publication, Some(&generation)) {
+            Ok(Some(next)) => {
+                next_generation = Some(next);
+                break;
+            }
+            Ok(None) => panic!("successful Catalog publication omitted its generation"),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                assert_eq!(
+                    cache.session_catalog_generation().as_deref(),
+                    Some(generation.as_str()),
+                    "bounded original History custody leaves the Catalog head unchanged"
+                );
+                deferrals += 1;
+            }
+            Err(error) => panic!("Catalog publication failed: {error}"),
+        }
+    }
+    assert!(deferrals > 0, "two changed owners require bounded History custody");
+    let next_generation = next_generation.expect("bounded History custody did not finish");
+    assert_ne!(next_generation, generation);
+    assert_eq!(
+        cache.session_catalog_generation().as_deref(),
+        Some(next_generation.as_str())
+    );
     let owners: Vec<String> = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 ORDER BY session_key").unwrap()
         .query_map(["claude", "ambiguous-native"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
     assert_eq!(owners, ["child", "root"]);
