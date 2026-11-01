@@ -168,6 +168,14 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         );
         assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
         assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
+        // A declared reference cannot evade authentication by also carrying
+        // inline-looking values, even when a typed payload is already attached.
+        let mut mixed = selected.clone();
+        let mixed_query = mixed.query.as_mut().unwrap();
+        mixed_query["selected"]["session"] = expected.session.clone();
+        mixed_query["selected"]["turns"] = serde_json::json!(expected.turns);
+        mixed_query["selected"]["edges"] = serde_json::json!(expected.edges);
+        assert!(view.attach_query_recipe(&mut mixed, false).is_err());
         assert!(
             crate::storage::query::history_window(&selected, None)
                 .unwrap()

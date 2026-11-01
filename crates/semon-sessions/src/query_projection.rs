@@ -35,7 +35,9 @@ pub(crate) struct SelectedRecipePublication {
 impl SelectedRecipe {
     pub(crate) fn detached(row: &CatalogRow) -> bool {
         row.query.as_ref().is_some_and(|query| {
-            !query["selected"]["session"].is_object()
+            query["selected"].get("version").is_some()
+                || query["selected"].get("digest").is_some()
+                || !query["selected"]["session"].is_object()
                 || !query["selected"]["edges"].is_array()
                 || !query["selected"]["turns"].is_array()
         })
