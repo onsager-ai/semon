@@ -946,7 +946,8 @@ mod tests {
         options: &crate::Options,
         imported: bool,
     ) -> serde_json::Value {
-        let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+        let _guard = matches!(&config.backend, crate::storage::StoreBackend::Postgres { .. })
+            .then(crate::storage::postgres::native_ingest_tests::Guard::new);
         let mut options = options.clone();
         options.source = crate::storage::HostSource::new(
             config.namespace.clone(),
