@@ -139,6 +139,7 @@ jobs:
             model::tests::semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog \
             model::tests::semantic_large_native_source_own_index_writes_survive_every_owner_restart \
             model::tests::semantic_index_rejects_source_change_after_producer_preparation \
+            model::tests::semantic_index_rejects_unannounced_physical_change_after_producer_preparation \
             model::tests::semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch; do
             case_result=0
             if [ "$test" = "model::tests::replay_equivalence_seed_from_env" ]; then
