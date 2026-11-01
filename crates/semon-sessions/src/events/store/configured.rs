@@ -11157,37 +11157,147 @@ mod tests {
         }
 
         #[test]
-        fn configured_semantic_domain61_real_ledger_change_remains_conflict() {
+        fn configured_semantic_domain61_announced_ledger_change_restarts_stage() {
             let (f, _, options, inputs) = model_sources();
             let options = &options[0];
             let input = &inputs[0];
+            let source = input.full_path(options);
+            let path = source.to_string_lossy().into_owned();
             let mut cache = open(&f.config);
             cache
                 .ingest(
                     &format!("{:064x}", 6300),
-                    &input.full_path(options),
+                    &source,
                     "codex",
                 )
                 .unwrap();
-            let (_batch, _model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+            let (stale, stale_model) =
+                ready(&mut cache, &f, options, std::slice::from_ref(input));
+            assert_eq!(stale.phase, Phase::Publication);
+            assert_eq!(stale_model.prepared().rows.len(), 1);
+            assert_eq!(stale_model.prepared().rows[0].key, "model-0");
             write(options, input, "changed-ledger", None);
             cache
                 .ingest(
                     &format!("{:064x}", 6301),
-                    &input.full_path(options),
+                    &source,
                     "codex",
                 )
                 .unwrap();
             let before = shared_state(&f);
             assert_eq!(
-                cache.semantic_batch(64).unwrap_err().to_string(),
-                StorageError::Conflict.to_string()
+                cache
+                    .publish_semantic_catalog(&stale, stale_model.prepared())
+                    .unwrap()
+                    .0,
+                Outcome::Conflict,
+                "a stale Publication cannot publish after the announced Index change"
             );
             assert_eq!(
                 shared_state(&f),
                 before,
-                "a genuine ledger/claim conflict has zero effects"
+                "the stale Publication has zero effects"
             );
+
+            let reset = cache.semantic_batch(64).unwrap().unwrap();
+            assert_eq!(reset.phase, Phase::Indexing);
+            assert!(reset.paths.is_empty());
+            assert!(reset.epoch > stale.epoch);
+            assert_eq!(
+                f.db().query_row(
+                    "SELECT count(*) FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                ).unwrap(),
+                0,
+                "the stale prepared model is retired with its epoch"
+            );
+            let reset_progress: (bool, bool, bool, bool, bool, bool) = f.db().query_row(
+                "SELECT index_done,events_done,identity_done,relation_done,publication_done,ack_done FROM catalog_semantic_sources WHERE namespace='source-a' AND source_path=?1",
+                [&path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+            assert_eq!(
+                reset_progress,
+                (false, false, false, false, false, false),
+                "the changed source starts with no stale Index, identity, or readiness"
+            );
+
+            let mut reindexed = false;
+            let mut final_model = None;
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(batch.epoch, reset.epoch);
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|candidate| {
+                        batch.paths.contains(
+                            &candidate.full_path(options).to_string_lossy().into_owned(),
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                if batch.phase == Phase::Indexing {
+                    assert_eq!(batch.paths, vec![path.clone()]);
+                    reindexed = true;
+                }
+                let model = cache
+                    .prepare_semantic_model_batch(
+                        options,
+                        &selected,
+                        &batch,
+                        1_790_000_000_000,
+                    )
+                    .unwrap();
+                if batch.phase == Phase::Publication {
+                    final_model = Some((batch, model));
+                    break;
+                }
+            }
+            assert!(reindexed, "the changed Raw source is indexed in the new epoch");
+            let (batch, model) = final_model.expect("bounded reset reaches Publication");
+            assert_eq!(model.prepared().rows.len(), 1);
+            assert_eq!(model.prepared().rows[0].key, "changed-ledger");
+            assert_eq!(
+                model.prepared().rows[0].native_ids,
+                vec!["changed-ledger".to_owned()]
+            );
+            publish(&mut cache, &f, &batch, &model, &[]);
+            assert_eq!(
+                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                Outcome::Written
+            );
+
+            let current: Vec<(String, String)> = f
+                .db()
+                .prepare(
+                    "SELECT session_key,metadata FROM session_catalog WHERE namespace='source-a' AND lifecycle='current' ORDER BY session_key",
+                )
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(
+                current,
+                vec![(
+                    "changed-ledger".to_owned(),
+                    serde_json::to_string(&model.prepared().rows[0]).unwrap(),
+                )],
+                "only the newly indexed native identity is Current"
+            );
+            let complete_progress: (bool, bool, bool, bool, bool, bool) = f.db().query_row(
+                "SELECT index_done,events_done,identity_done,relation_done,publication_done,ack_done FROM catalog_semantic_sources WHERE namespace='source-a' AND source_path=?1",
+                [&path],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+            assert_eq!(complete_progress, (true, true, true, true, true, true));
         }
 
         fn selector_inputs(options: &crate::Options, duplicate: bool) -> Vec<crate::Input> {
