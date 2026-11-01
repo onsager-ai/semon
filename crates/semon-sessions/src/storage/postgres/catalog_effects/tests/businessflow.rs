@@ -7309,8 +7309,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut final_catchup =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let final_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
+    // B and the related agents were acknowledged by the prior catch-up. Seed
+    // only the newly removed A; the adapter discovers its current owner closure.
+    let final_paths = vec![composite_a.clone()];
     final_catchup
-        .begin_semantic_stage(&connected_paths, &final_runtime)
+        .begin_semantic_stage(&final_paths, &final_runtime)
         .unwrap();
     let (final_batch, final_model) = loop {
         let batch = final_catchup.semantic_batch(64).unwrap().unwrap();
