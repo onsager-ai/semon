@@ -27,6 +27,18 @@ fn cohort_scope_changed(reason: &'static str) -> StorageError {
     StorageError::ScopeChanged
 }
 
+#[cfg(test)]
+fn trace_selected_body_refusal(
+    focused: bool,
+    error: StorageError,
+    generation: &str,
+    stage: &str,
+) {
+    if focused && error == StorageError::ScopeChanged {
+        eprintln!("pg_selected_body_refused generation={generation} stage={stage}");
+    }
+}
+
 fn current_runtime_owner<'a>(
     selected: &crate::model::summary::CatalogRow,
     selected_history: bool,
@@ -358,6 +370,8 @@ impl QueryCatalogStore for QueryCatalog {
         now: i64,
         host: &dyn crate::SessionSourceReader,
     ) -> Result<serde_json::Value, QueryError> {
+        #[cfg(test)]
+        let trace_selected = key == "one";
         if namespace != &self.namespace {
             return Err(unavailable(StorageError::NamespaceUpgradePending));
         }
@@ -365,14 +379,20 @@ impl QueryCatalogStore for QueryCatalog {
             return Err(unavailable(StorageError::InvalidArguments));
         }
         let needs_window = !self.options.all && !self.options.scan_window;
-        let (selected_current, retained_window_data) = with_admitted_snapshot(
+        #[cfg(test)]
+        let preflight_stage = std::cell::Cell::new("preflight_owner");
+        let preflight = with_admitted_snapshot(
             &self.pool,
             &self.namespace,
             &self.control,
             &self.generation,
             |snapshot| {
                 let history = snapshot.owner(key)?.is_some();
+                #[cfg(test)]
+                preflight_stage.set("preflight_selected_catalog");
                 let selected = snapshot.catalog(key, history)?;
+                #[cfg(test)]
+                preflight_stage.set("preflight_current_catalog");
                 let current_row = snapshot.catalog(key, false)?;
                 let current = selected
                     .as_ref()
@@ -380,6 +400,8 @@ impl QueryCatalogStore for QueryCatalog {
                         current_runtime_owner(selected, history, current_row.as_ref())
                     })
                     .is_some();
+                #[cfg(test)]
+                preflight_stage.set("preflight_retained_window");
                 let retained_window_data = if needs_window && !current {
                     snapshot
                         .selected(key, history, 0, 1)?
@@ -422,8 +444,17 @@ impl QueryCatalogStore for QueryCatalog {
                 };
                 Ok((current, retained_window_data))
             },
-        )
-        .map_err(unavailable)?;
+        );
+        let (selected_current, retained_window_data) = preflight.map_err(|error| {
+            #[cfg(test)]
+            trace_selected_body_refusal(
+                trace_selected,
+                error,
+                &self.generation,
+                preflight_stage.get(),
+            );
+            unavailable(error)
+        })?;
         let runtime_observation = if !self.captured && selected_current {
             Some(
                 super::super::super::current_sources::Runtime::open(
@@ -432,7 +463,16 @@ impl QueryCatalogStore for QueryCatalog {
                     &self.control,
                     &self.options,
                 )
-                .map_err(unavailable)?,
+                .map_err(|error| {
+                    #[cfg(test)]
+                    trace_selected_body_refusal(
+                        trace_selected,
+                        error,
+                        &self.generation,
+                        "current_runtime_open",
+                    );
+                    unavailable(error)
+                })?,
             )
         } else {
             None
@@ -445,10 +485,32 @@ impl QueryCatalogStore for QueryCatalog {
         // Current owners use the qualified cohort window. A retained-only
         // owner derives its cutoff from the exact history row admitted above.
         let window = if needs_window && selected_current {
-            let part = self.read_cohort(namespace, now, &mut (8 * 1024 * 1024))?;
+            let part = self
+                .read_cohort(namespace, now, &mut (8 * 1024 * 1024))
+                .map_err(|error| {
+                    #[cfg(test)]
+                    if error.code == "unavailable"
+                        && error.message == StorageError::ScopeChanged.to_string()
+                    {
+                        trace_selected_body_refusal(
+                            trace_selected,
+                            StorageError::ScopeChanged,
+                            &self.generation,
+                            "cohort_read",
+                        );
+                    }
+                    error
+                })?;
             if part.generation != self.generation
                 || Some(part.runtime.as_str()) != runtime.as_deref()
             {
+                #[cfg(test)]
+                trace_selected_body_refusal(
+                    trace_selected,
+                    StorageError::ScopeChanged,
+                    &self.generation,
+                    "cohort_generation_or_runtime",
+                );
                 return Err(unavailable(StorageError::ScopeChanged));
             }
             if !part.rows.contains_key(key) {
@@ -466,7 +528,9 @@ impl QueryCatalogStore for QueryCatalog {
         } else {
             None
         };
-        with_admitted_snapshot(
+        #[cfg(test)]
+        let body_stage = std::cell::Cell::new("selected_owner");
+        let body = with_admitted_snapshot(
             &self.pool,
             &self.namespace,
             &self.control,
@@ -475,6 +539,8 @@ impl QueryCatalogStore for QueryCatalog {
                 // The retained composite wins for the same owner, as in the
                 // SQLite Query reader; live qualification is independent.
                 // Bodies still come only from authorized Raw Source bytes.
+                #[cfg(test)]
+                body_stage.set("selected_row_header");
                 let history = snapshot.owner(key)?.is_some();
                 let (mut row, header, _) = snapshot
                     .selected(key, history, 0, 1)
@@ -488,15 +554,21 @@ impl QueryCatalogStore for QueryCatalog {
                 if args["_session"] == true {
                     snapshot.attach_query_recipe(&mut row, history)?;
                 }
+                #[cfg(test)]
+                body_stage.set("current_catalog_lookup");
                 let current_row = snapshot.catalog(key, false)?;
                 let current_row = current_runtime_owner(&row, history, current_row.as_ref());
                 let current = current_row.is_some();
                 // The admitted generation is immutable. Rechecking the exact
                 // selected owner keeps pre-window classification tied to this
                 // snapshot and does not borrow another harness's runtime.
+                #[cfg(test)]
+                body_stage.set("current_owner_recheck");
                 if current != selected_current {
                     return Err(StorageError::ScopeChanged);
                 }
+                #[cfg(test)]
+                body_stage.set("current_window_runtime");
                 if current
                     && let (Some(window), Some(runtime)) = (&window, runtime.as_deref())
                     && window.runtime != runtime
@@ -506,6 +578,8 @@ impl QueryCatalogStore for QueryCatalog {
                 // History owns the selected source vector and publication
                 // receipt. A still-Current owner supplies the separate live
                 // runtime observation for that same harness identity.
+                #[cfg(test)]
+                body_stage.set("selected_owner_runtime_binding");
                 snapshot
                     .row_runtime_binding_with_observations(
                         &row,
@@ -517,6 +591,8 @@ impl QueryCatalogStore for QueryCatalog {
                     )
                     .map_err(|_| StorageError::ScopeChanged)?
                     .ok_or(StorageError::ScopeChanged)?;
+                #[cfg(test)]
+                body_stage.set("selected_owner_query_observation");
                 let selected_saved = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
                 if !crate::model::summary::query_observation_matches(
                     selected_saved,
@@ -529,6 +605,8 @@ impl QueryCatalogStore for QueryCatalog {
                     return Err(StorageError::ScopeChanged);
                 }
                 if !self.captured && current {
+                    #[cfg(test)]
+                    body_stage.set("current_owner_runtime_observation");
                     let current_row = current_row.ok_or(StorageError::ScopeChanged)?;
                     let runtime = runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
                     let saved = current_row
@@ -544,6 +622,8 @@ impl QueryCatalogStore for QueryCatalog {
                         )
                         .map_err(|_| StorageError::ScopeChanged)?
                         .ok_or(StorageError::ScopeChanged)?;
+                    #[cfg(test)]
+                    body_stage.set("current_owner_query_observation");
                     if !crate::model::summary::query_observation_matches(
                         saved,
                         &current_row.sources,
@@ -555,6 +635,8 @@ impl QueryCatalogStore for QueryCatalog {
                         return Err(StorageError::ScopeChanged);
                     }
                 }
+                #[cfg(test)]
+                body_stage.set("transcript_observation");
                 let total = usize::try_from(header.3).map_err(|_| StorageError::ScopeChanged)?;
                 let observation: crate::slot_projection::QueryObservation = serde_json::from_value(
                     row.query.as_ref().ok_or(StorageError::ScopeChanged)?["transcript_observation"]
@@ -569,6 +651,8 @@ impl QueryCatalogStore for QueryCatalog {
                 } else {
                     vec![row.clone()]
                 };
+                #[cfg(test)]
+                body_stage.set("source_references");
                 let mut sources = Vec::new();
                 let mut paths = BTreeMap::new();
                 for owner in &context {
@@ -675,6 +759,8 @@ impl QueryCatalogStore for QueryCatalog {
                     history,
                     records: &records,
                 };
+                #[cfg(test)]
+                body_stage.set("transcript_render_page");
                 let answer = crate::query::transcript::render_page(
                     &self.options,
                     key,
@@ -695,12 +781,16 @@ impl QueryCatalogStore for QueryCatalog {
                     let _ = error;
                     StorageError::Unavailable
                 })?;
+                #[cfg(test)]
+                body_stage.set("native_proof_finish");
                 records.finish().map_err(|error| {
                     #[cfg(test)]
                     eprintln!("pg_selected_records_finish key={key:?}: {error}");
                     let _ = error;
                     StorageError::ScopeChanged
                 })?;
+                #[cfg(test)]
+                body_stage.set("current_runtime_recheck");
                 if runtime_observation
                     .as_ref()
                     .map(|observation| observation.generation(&self.options))
@@ -710,10 +800,16 @@ impl QueryCatalogStore for QueryCatalog {
                 {
                     return Err(StorageError::ScopeChanged);
                 }
+                #[cfg(test)]
+                body_stage.set("snapshot_finalize");
                 Ok(answer)
             },
-        )
-        .map_err(unavailable)
+        );
+        body.map_err(|error| {
+            #[cfg(test)]
+            trace_selected_body_refusal(trace_selected, error, &self.generation, body_stage.get());
+            unavailable(error)
+        })
     }
     fn read_cohort(
         &self,
