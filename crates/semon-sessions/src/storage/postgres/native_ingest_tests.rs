@@ -459,13 +459,37 @@ fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
     let receipt = sqlite.ingest(&operation, &path, "claude").unwrap();
     let index = crate::events::scan_file(&path, "claude", &mut sqlite, &mut false).unwrap();
     assert_eq!(index.usage().len(), 130);
-    // Restored summaries keep dimensions in their typed checkpoint. Read that
-    // persisted relation explicitly; the compact header has no usage_models.
-    let mut tree = index.tree_summary.as_ref().unwrap().clone();
-    tree.load_shared_usage().unwrap();
-    assert_eq!(tree.usage_models.len(), 130);
     let oracle = fingerprint(&index);
     drop(sqlite);
+    // shared_usage() selects copied identities only. This unique-message
+    // fixture qualifies the complete persisted model map through its admitted
+    // SQLite oracle connection before the PostgreSQL phase begins.
+    {
+        let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let db = crate::storage::sqlite::source_journal::SourceJournal::owned(owner)
+            .connection()
+            .unwrap();
+        let projection: i64 = db
+            .query_row(
+                "SELECT projection_id FROM native_tree_headers WHERE namespace=?1 AND source_path=?2",
+                rusqlite::params![namespace.as_str(), path.to_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let actual = db
+            .prepare("SELECT message_id,model FROM native_tree_usage_models WHERE namespace=?1 AND projection_id=?2 ORDER BY message_id")
+            .unwrap()
+            .query_map(rusqlite::params![namespace.as_str(), projection], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let expected = (0..130)
+            .map(|n| (format!("message-{n:03}\0🦀"), "claude-page".to_owned()))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+    }
     let (pool, _) = tests::fixture(|_| {});
     let mut pg =
         EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default())
