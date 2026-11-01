@@ -164,14 +164,18 @@ pub(in crate::storage::postgres) fn remove(
         .iter()
         .map(|key| digest(key.as_bytes()))
         .collect::<Vec<_>>();
+    let removed_keys = removed
+        .iter()
+        .map(|key| key.as_bytes().to_vec())
+        .collect::<Vec<_>>();
     // A non-original History owner is a composition of prior History and the
     // Current row. Direct withdrawal only captures the Current preimage, so
     // leave these removals to the ordinary producer that can preserve both.
     let needs_composition: bool = tx
         .driver
         .query_one(
-            "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[]) AND NOT original)",
-            &[&ns, &previous.as_bytes(), &removed_digests],
+            "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o JOIN unnest($3::bytea[],$4::bytea[]) AS requested(key_digest,session_key) ON requested.key_digest=o.key_digest AND requested.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT o.original)",
+            &[&ns, &previous.as_bytes(), &removed_digests, &removed_keys],
         )
         .map_err(sqlstate::error)?
         .get(0);
