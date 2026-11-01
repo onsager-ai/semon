@@ -3610,7 +3610,9 @@ impl Stage {
                     namespace: ns,
                 };
                 let mut bytes = 0usize;
-                for endpoint in prepared.relationships.endpoints.values() {
+                #[cfg(test)]
+                let mut max_endpoint_bytes = 0usize;
+                for (_index, endpoint) in prepared.relationships.endpoints.values().enumerate() {
                     let own: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,endpoint.row.key],|r|r.get(0)).map_err(error)?;
                     if !own {
                         #[cfg(test)]
@@ -3620,12 +3622,57 @@ impl Stage {
                     let text = serde_json::to_string(endpoint)
                         .map_err(|e| StoreError::Data(e.to_string()))?;
                     bytes = bytes.saturating_add(text.len());
+                    #[cfg(test)]
+                    {
+                        max_endpoint_bytes = max_endpoint_bytes.max(text.len());
+                    }
                     if bytes > 1048576 {
+                        #[cfg(test)]
+                        {
+                            let mut diagnostic_bytes = bytes;
+                            let mut diagnostic_max = max_endpoint_bytes;
+                            let mut exact = true;
+                            for remaining in prepared
+                                .relationships
+                                .endpoints
+                                .values()
+                                .skip(_index + 1)
+                            {
+                                match serde_json::to_string(remaining) {
+                                    Ok(text) => {
+                                        diagnostic_bytes =
+                                            diagnostic_bytes.saturating_add(text.len());
+                                        diagnostic_max = diagnostic_max.max(text.len());
+                                    }
+                                    Err(_) => {
+                                        exact = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if exact {
+                                eprintln!(
+                                    "semantic_relation_limits: endpoints={} endpoint_bytes={} max_endpoint_bytes={} endpoint_byte_cap=1048576 relations={} relation_cap=64",
+                                    prepared.relationships.endpoints.len(),
+                                    diagnostic_bytes,
+                                    diagnostic_max,
+                                    prepared.relationships.relations.len(),
+                                );
+                            }
+                        }
                         return Err(refuse("semantic_context_budget"));
                     }
                     tx.execute("UPDATE main.catalog_semantic_endpoints SET metadata=?3 WHERE namespace=?1 AND session_key=?2",params![ns,endpoint.row.key,text]).map_err(error)?;
                 }
                 if prepared.relationships.relations.len() > 64 {
+                    #[cfg(test)]
+                    eprintln!(
+                        "semantic_relation_limits: endpoints={} endpoint_bytes={} max_endpoint_bytes={} endpoint_byte_cap=1048576 relations={} relation_cap=64",
+                        prepared.relationships.endpoints.len(),
+                        bytes,
+                        max_endpoint_bytes,
+                        prepared.relationships.relations.len(),
+                    );
                     return Err(refuse("semantic_relation_budget"));
                 }
                 for relation in prepared.relationships.relations.values() {

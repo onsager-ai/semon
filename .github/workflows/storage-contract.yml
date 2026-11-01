@@ -63,6 +63,31 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Live Catalog relation limit diagnostics
+        id: relation_limits
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            model::tests::catalog_runtime_staged_publication_replays_large_incident_relationships \
+            model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/relation-limit-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/relation-limit-case.log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/relation-limit-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/relation-limit-case.log" | tee -a "$RUNNER_TEMP/relation-limit-diagnostic.log"
+            echo "CASE name=$test expected=1 status=$case_result" | tee -a "$RUNNER_TEMP/relation-limit-diagnostic.log"
+            if test "$case_result" -ne 0; then result=1; fi
+          done
+          exit "$result"
+      - name: Retain live Catalog relation limit diagnostics
+        if: ${{ !cancelled() && steps.relation_limits.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: relation-limit-diagnostic
+          path: ${{ runner.temp }}/relation-limit-diagnostic.log
+          if-no-files-found: error
       - name: Archived overview large source offset custody regression
         id: archive_offset_regression
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
