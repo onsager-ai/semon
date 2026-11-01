@@ -2080,6 +2080,7 @@ impl SqliteStore {
                 epoch,
                 phase: Phase::Identity,
                 paths: Vec::new(),
+                source_claims: Vec::new(),
                 base_generation: base,
                 source_revision,
                 runtime,
@@ -2186,6 +2187,7 @@ impl SqliteStore {
                         epoch,
                         phase: Phase::Indexing,
                         paths: Vec::new(),
+                        source_claims: Vec::new(),
                         base_generation: base,
                         source_revision,
                         runtime,
@@ -2201,6 +2203,7 @@ impl SqliteStore {
                         epoch,
                         phase: Phase::Identity,
                         paths: Vec::new(),
+                        source_claims: Vec::new(),
                         base_generation: base,
                         source_revision,
                         runtime,
@@ -2215,6 +2218,7 @@ impl SqliteStore {
                         epoch,
                         phase: Phase::Identity,
                         paths: Vec::new(),
+                        source_claims: Vec::new(),
                         base_generation: base,
                         source_revision,
                         runtime,
@@ -2273,6 +2277,11 @@ impl SqliteStore {
         if claude {
             relation_cursor = Some(event_context(&tx, &paths[0], &mut context).map_err(failure)?);
         }
+        let source_claims = paths
+            .iter()
+            .map(|path| claim(&tx, path).map(|claim| (path.clone(), claim)))
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?;
         let revision = revision(&tx).map_err(failure)?;
         tx.commit().map_err(failure)?;
         // Empty Publication is an explicit epoch-completion request.
@@ -2284,6 +2293,7 @@ impl SqliteStore {
                 result_phase
             },
             paths,
+            source_claims,
             base_generation: base,
             source_revision: revision,
             runtime,

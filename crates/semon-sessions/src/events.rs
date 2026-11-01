@@ -2482,6 +2482,37 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    /// Mark one stale committed source for the ordinary local host scanner.
+    /// Configured stores have no implicit Raw authority and leave recovery to
+    /// their explicit NativeEventStore producer.
+    pub(crate) fn invalidate_stale_host_source(
+        &mut self,
+        path: &str,
+        expected_claim: Option<i64>,
+    ) -> io::Result<Option<crate::storage::source_observations::SourceMutationReceipt>> {
+        if self.host_source.is_none() {
+            return Ok(None);
+        }
+        self.reconcile_pending_source_operation()?;
+        let expected = vec![(path.to_owned(), expected_claim)];
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            &self.observation_namespace,
+            "invalidate",
+            &serde_json::to_vec(&expected).map_err(io::Error::other)?,
+        );
+        let operation = self.persist_source_operation(PendingSourceOperation::Invalidate {
+            operation,
+            expected: expected.clone(),
+        })?;
+        let receipt = self
+            .observation_store_mut()
+            .ok_or_else(|| io::Error::other("source observation producer unavailable"))?
+            .invalidate(&operation, &expected)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.finish_source_operation(&operation)?;
+        Ok(Some(receipt))
+    }
+
     pub(crate) fn catalog_component_paths(
         &self,
         inputs: &[crate::inputs::Input],
@@ -3585,6 +3616,32 @@ pub(crate) struct TreeProjectionRepair {
     harness: String,
 }
 
+/// A committed index no longer describes the source's current physical stat.
+/// The path stays internal to the producer and never appears in diagnostics.
+pub(crate) struct CommittedSourceChanged {
+    path: String,
+}
+
+impl CommittedSourceChanged {
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+impl std::fmt::Debug for CommittedSourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CommittedSourceChanged")
+    }
+}
+
+impl std::fmt::Display for CommittedSourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("committed model source stat changed")
+    }
+}
+
+impl std::error::Error for CommittedSourceChanged {}
+
 impl std::fmt::Display for TreeProjectionRepair {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("native tree projection repair pending")
@@ -3666,10 +3723,11 @@ fn scan_file_with_mode(
             .load_file(&key)
             .map_err(store_io_error)?
             .ok_or_else(|| io::Error::other(crate::storage::StorageError::Conflict))?;
+        let current_stat = Stat::of(path)?;
+        let committed_stat_changed = ledger.stat != current_stat;
         #[cfg(test)]
-        let committed_witness_incomplete = if harness == "codex" {
-            let current_stat = Stat::of(path)?;
-            let stat_matches = ledger.stat == current_stat;
+        let committed_index_incomplete = if harness == "codex" {
+            let stat_matches = !committed_stat_changed;
             let source_chunks_present = index.source_chunks.is_some();
             let source_chunks_valid = index
                 .source_chunks
@@ -3678,12 +3736,11 @@ fn scan_file_with_mode(
             let marker_index_present = index.marker_index.is_some();
             let handoff_index_present = index.handoff_index.is_some();
             let codex_header_present = index.codex_header.is_some();
-            let incomplete = !stat_matches
-                || !source_chunks_valid
+            let incomplete = !source_chunks_valid
                 || !marker_index_present
                 || !handoff_index_present
                 || !codex_header_present;
-            if incomplete {
+            if committed_stat_changed || incomplete {
                 eprintln!(
                     "native_committed_codex_witness_incomplete path_sha256={:x} stat_matches={stat_matches} source_chunks_present={source_chunks_present} source_chunks_valid={source_chunks_valid} marker_index_present={marker_index_present} handoff_index_present={handoff_index_present} codex_header_present={codex_header_present} ledger_offset={} ledger_size={} current_size={}",
                     Sha256::digest(key.as_bytes()),
@@ -3694,11 +3751,10 @@ fn scan_file_with_mode(
             }
             incomplete
         } else {
-            ledger.stat != Stat::of(path)?
-                || !index
-                    .source_chunks
-                    .as_ref()
-                    .is_some_and(|chunks| chunks.valid(ledger.offset))
+            !index
+                .source_chunks
+                .as_ref()
+                .is_some_and(|chunks| chunks.valid(ledger.offset))
                 || (harness != "copilot" && index.marker_index.is_none())
                 || index.handoff_index.is_none()
                 || (harness == "codex" && index.codex_header.is_none())
@@ -3709,8 +3765,7 @@ fn scan_file_with_mode(
                         .is_some_and(|sidecar| sidecar.current(path)))
         };
         #[cfg(not(test))]
-        let committed_witness_incomplete = ledger.stat != Stat::of(path)?
-            || !index
+        let committed_index_incomplete = !index
                 .source_chunks
                 .as_ref()
                 .is_some_and(|chunks| chunks.valid(ledger.offset))
@@ -3722,7 +3777,7 @@ fn scan_file_with_mode(
                     .claude_sidecar
                     .as_ref()
                     .is_some_and(|sidecar| sidecar.current(path)));
-        if committed_witness_incomplete {
+        if committed_index_incomplete {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "committed model source changed or incomplete",
@@ -3737,6 +3792,12 @@ fn scan_file_with_mode(
                     ledger,
                     harness: harness.to_owned(),
                 },
+            ));
+        }
+        if committed_stat_changed {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                CommittedSourceChanged { path: key },
             ));
         }
         let index = Arc::new(index);
