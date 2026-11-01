@@ -117,6 +117,27 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Bounded PostgreSQL usage and Tree publication
+        id: usage_batch
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          for group in native_core::tests:: tree_writer::tests::; do
+            cargo test -p semon-sessions --lib --locked --features postgres-test-tls "storage::postgres::$group" -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
+            grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/usage-batch-case.log"
+          done
+          grep -F 'pg_usage_batch_130_parser_peer_copies_and_each_page_rollback ... ok' "$RUNNER_TEMP/usage-batch.log"
+          grep -F 'pg_usage_batch_tree_130_mapping_pages_preserve_logical_rollback ... ok' "$RUNNER_TEMP/usage-batch.log"
+          cargo test -p semon-sessions --lib --locked --features postgres-test-tls storage::postgres::native_ingest_tests::pg_usage_batch_130_real_native_publication_matches_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/usage-batch-case.log"
+      - name: Retain bounded usage publication results
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.usage_batch.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-usage-batch-${{ github.sha }}
+          path: ${{ runner.temp }}/usage-batch*.log
+          if-no-files-found: error
       - name: Transfer search records and original-authority repricing
         id: transfer_search
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
