@@ -809,6 +809,75 @@ fn diagnose_observation_refusal(stage: &'static str) {
     }
 }
 
+#[cfg(test)]
+fn diagnose_immutable_candidate_probe(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    reference_kind: &str,
+    prefix: &str,
+) {
+    let unavailable = || {
+        eprintln!(
+            "catalog_retained_observation_refused stage=immutable_candidate_probe unavailable=true"
+        );
+    };
+    let Ok(admission) = i64::try_from(current.admission) else {
+        unavailable();
+        return;
+    };
+    let mut normalized = selected.clone();
+    normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let Ok(metadata) = serde_json::to_string(&normalized) else {
+        unavailable();
+        return;
+    };
+    let counts = db.query_row(
+        "WITH bounded_refs AS (SELECT namespace,session_key,kind,id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind=?3 ORDER BY id LIMIT 65), candidates AS (SELECT CASE WHEN g.id IS NOT NULL THEN 1 ELSE 0 END AS generation,CASE WHEN g.id IS NOT NULL AND g.stream=?4 THEN 1 ELSE 0 END AS stream,CASE WHEN g.id IS NOT NULL AND g.admission=?5 THEN 1 ELSE 0 END AS admission,CASE WHEN g.id IS NOT NULL AND g.prefix=?6 THEN 1 ELSE 0 END AS prefix,CASE WHEN g.id IS NOT NULL AND g.metadata=?7 THEN 1 ELSE 0 END AS metadata,CASE WHEN p.generation IS NOT NULL AND r.digest IS NOT NULL AND v.id IS NOT NULL THEN 1 ELSE 0 END AS joins FROM bounded_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key LEFT JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission LEFT JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest LEFT JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key) SELECT count(*),count(CASE WHEN generation=1 THEN 1 END),count(CASE WHEN stream=1 THEN 1 END),count(CASE WHEN admission=1 THEN 1 END),count(CASE WHEN prefix=1 THEN 1 END),count(CASE WHEN metadata=1 THEN 1 END),count(CASE WHEN joins=1 THEN 1 END),count(CASE WHEN stream=1 AND prefix=1 AND joins=1 THEN 1 END),count(CASE WHEN stream=1 AND admission=1 AND prefix=1 AND metadata=1 AND joins=1 THEN 1 END) FROM candidates",
+        params![
+            current.namespace.as_str(),
+            selected.key,
+            reference_kind,
+            current.stream_epoch,
+            admission,
+            prefix,
+            metadata,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        },
+    );
+    match counts {
+        Ok((
+            refs,
+            generation,
+            stream,
+            admission,
+            prefix,
+            metadata,
+            joins,
+            stream_prefix_joins,
+            exact,
+        )) => {
+            eprintln!(
+                "catalog_retained_observation_refused stage=immutable_candidate_probe refs={refs} overflow={} generation={generation} stream={stream} admission={admission} prefix={prefix} metadata={metadata} joins={joins} stream_prefix_joins={stream_prefix_joins} exact={exact}",
+                refs > 64
+            );
+        }
+        Err(_) => unavailable(),
+    }
+}
+
 /// A relevant immutable owner must authenticate before a mutable grant can
 /// authorize its row. Runtime observations remain optional for row authority.
 fn verify_immutable_observation(
@@ -869,6 +938,8 @@ fn verify_immutable_observation(
                 rows.len()
             );
         }
+        #[cfg(test)]
+        diagnose_immutable_candidate_probe(db, current, selected, reference_kind, prefix);
         return Err(StorageError::ScopeChanged.into());
     };
     crate::selected_read::charge(
