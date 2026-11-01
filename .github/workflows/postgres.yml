@@ -2,6 +2,11 @@ name: PostgreSQL foundation
 
 on:
   workflow_dispatch:
+    inputs:
+      focused_only:
+        description: Run only the focused PostgreSQL qualification suite
+        type: boolean
+        default: false
   pull_request:
   push:
     branches:
@@ -29,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [focused, regression-catalog, regression-events, regression-query, regression-other]
+        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused"]') || fromJSON('["focused","regression-catalog","regression-events","regression-query","regression-other"]') }}
     services:
       postgres:
         image: postgres:16
@@ -120,6 +125,8 @@ jobs:
           set -o pipefail
           cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer225_search_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/transfer-search.log"
           cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer_catalog_reprice_preserves_imported_original_authority -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/transfer-search.log"
+          cargo test -p semon-sessions --lib --locked --features postgres-test-tls storage::postgres::transfer::catalog::tests::pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/transfer-search-fixture.log" | tee -a "$RUNNER_TEMP/transfer-search.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/transfer-search-fixture.log"
       - name: Retain transfer search diagnostics
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.transfer_search.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
