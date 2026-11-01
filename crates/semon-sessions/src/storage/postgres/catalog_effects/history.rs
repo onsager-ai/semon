@@ -17,7 +17,7 @@ struct RecipeContents {
 enum WithdrawnComposite {
     NotApplicable,
     Complete {
-        row: CatalogRow,
+        row: Box<CatalogRow>,
         metadata_bytes: usize,
     },
     Staged,
@@ -696,7 +696,7 @@ impl History<'_, '_> {
             self.validate_withdrawn_composite(current, &owner_generation, &metadata)?;
         if self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
             return Ok(WithdrawnComposite::Complete {
-                row: history,
+                row: Box::new(history),
                 metadata_bytes: metadata.len(),
             });
         }
@@ -1232,6 +1232,7 @@ pub(super) fn preserve(
                 row: history,
                 metadata_bytes,
             } => {
+                let history = *history;
                 composite_search_bytes = composite_search_bytes
                     .checked_add(metadata_bytes)
                     .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
