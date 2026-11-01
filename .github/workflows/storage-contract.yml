@@ -124,6 +124,9 @@ jobs:
           result=0
           for test in \
             model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
+            model::tests::matching_codex_relations_follow_selected_calls_and_header_source_pages \
+            model::tests::matching_claude_relations_follow_selected_calls_headers_and_paired_down_messages \
+            events::store::semantic_stage::tests::codex_projection_selects_only_the_supported_relation_tool_names \
             model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
             model::tests::native_handoff_restart_reads_candidates_and_repairs_locations_without_event_replay \
             model::tests::native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_without_event_replay \
