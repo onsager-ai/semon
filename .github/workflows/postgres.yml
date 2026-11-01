@@ -117,6 +117,18 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Reported facts exact writer and snapshot qualification
+        id: reported_facts
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-reported-facts.log"
+      - name: Retain reported facts snapshot diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.reported_facts.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-reported-facts-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-reported-facts.log
+          if-no-files-found: error
       - name: Bounded PostgreSQL usage and Tree publication
         id: usage_batch
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
@@ -296,9 +308,6 @@ jobs:
           name: native-capacity-${{ github.sha }}
           path: ${{ runner.temp }}/native-capacity.log
           if-no-files-found: error
-      - name: Reported facts exact writer and snapshot qualification
-        if: ${{ matrix.suite == 'focused' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture
       - name: Focused actual PG proxy and TLS qualification first
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash

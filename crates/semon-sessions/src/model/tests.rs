@@ -11205,7 +11205,7 @@ fn failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes() {
         metadata.iter().all(|edge| !edge.contains("nobody-9f")),
         "native failed-send aliases remain private to bookmark normalization"
     );
-    let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE target='nobody-9f' ORDER BY session_key LIMIT 3", [], |row| row.get(3)).unwrap();
+    let plan: String = connection.query_row("EXPLAIN QUERY PLAN SELECT DISTINCT session_key FROM session_trace_bookmarks WHERE namespace='fixture' AND target='nobody-9f' ORDER BY session_key LIMIT 3", [], |row| row.get(3)).unwrap();
     assert!(
         plan.contains("SEARCH") && plan.contains("session_trace_bookmarks"),
         "{plan}"

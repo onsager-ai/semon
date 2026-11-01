@@ -128,6 +128,8 @@ jobs:
             model::tests::native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_without_event_replay \
             model::tests::incompatible_or_damaged_description_rebuilds_without_losing_observations \
             model::tests::persisted_descriptions_reuse_restart_and_revalidate_changed_sources \
+            model::tests::reported_cost_checks_keep_overwritten_runs_and_drop_account_values \
+            model::tests::failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes \
             model::tests::cold_semantic_family_discovers_older_disconnected_native_key_collisions \
             model::tests::staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle \
             model::tests::cold_codex_family_qualifies_pending_copilot_native_collision \
