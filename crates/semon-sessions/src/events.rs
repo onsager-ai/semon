@@ -49,6 +49,27 @@ thread_local! {
 }
 
 #[cfg(test)]
+fn diagnose_staged_method_refusal(
+    operation: &'static str,
+    phase: Option<crate::model::relation_stage::Phase>,
+    error: &io::Error,
+) {
+    if !crate::storage::sqlite::staged_failure_probe_enabled() {
+        return;
+    }
+    let phase = phase.map_or("unavailable", |phase| match phase {
+        crate::model::relation_stage::Phase::Indexing => "indexing",
+        crate::model::relation_stage::Phase::Identity => "identity",
+        crate::model::relation_stage::Phase::Relations => "relations",
+        crate::model::relation_stage::Phase::Publication => "publication",
+    });
+    eprintln!(
+        "staged_method_refusal operation={operation} phase={phase} io_kind={:?}",
+        error.kind()
+    );
+}
+
+#[cfg(test)]
 pub(crate) fn set_codex_header_hook(hook: impl FnOnce() + 'static) {
     AFTER_CODEX_HEADER.with(|value| *value.borrow_mut() = Some(Box::new(hook)));
 }
@@ -2553,11 +2574,17 @@ impl EventCache {
         epoch: i64,
         selector: &crate::model::relation_stage::Selector,
     ) -> io::Result<crate::model::relation_stage::Selection> {
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .semantic_select(epoch, selector)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("semantic_select", None, error);
+        }
+        result
     }
 
     pub(crate) fn semantic_replay_page(
@@ -2566,11 +2593,17 @@ impl EventCache {
         owners: &[String],
         after: &str,
     ) -> io::Result<crate::model::relation_stage::Context> {
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .semantic_replay_page(epoch, owners, after)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("semantic_replay_page", None, error);
+        }
+        result
     }
 
     pub(crate) fn begin_semantic_stage(
@@ -2587,22 +2620,34 @@ impl EventCache {
         runtime: &str,
         journaled_runtime: bool,
     ) -> io::Result<Outcome> {
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .begin_semantic_stage(paths, runtime, journaled_runtime)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("begin_semantic_stage", None, error);
+        }
+        result
     }
 
     pub(crate) fn semantic_batch(
         &mut self,
         limit: usize,
     ) -> io::Result<Option<crate::model::relation_stage::Batch>> {
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .semantic_batch(limit)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("semantic_batch", None, error);
+        }
+        result
     }
 
     pub(crate) fn record_semantic_batch(
@@ -2615,11 +2660,17 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .record_semantic_batch(batch, prepared)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("record_semantic_batch", Some(batch.phase), error);
+        }
+        result
     }
 
     pub(crate) fn semantic_rejection(&self) -> Option<&'static str> {
@@ -2638,9 +2689,27 @@ impl EventCache {
         batch: &crate::model::relation_stage::Batch,
         now: i64,
     ) -> io::Result<crate::model::SemanticModelBatch> {
-        let model = crate::model::prepare_semantic_batch(options, self, inputs, batch, now)?;
+        let model = match crate::model::prepare_semantic_batch(options, self, inputs, batch, now) {
+            Ok(model) => model,
+            Err(error) => {
+                #[cfg(test)]
+                diagnose_staged_method_refusal(
+                    "prepare_semantic_model_batch",
+                    Some(batch.phase),
+                    &error,
+                );
+                return Err(error);
+            }
+        };
         if self.record_semantic_batch(batch, model.prepared())? != Outcome::Written {
-            return Err(io::Error::other("semantic model stage changed"));
+            let error = io::Error::other("semantic model stage changed");
+            #[cfg(test)]
+            diagnose_staged_method_refusal(
+                "prepare_semantic_model_batch",
+                Some(batch.phase),
+                &error,
+            );
+            return Err(error);
         }
         Ok(model)
     }
@@ -2667,7 +2736,12 @@ impl EventCache {
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .publish_semantic_catalog(batch, prepared)
-            .map_err(|error| io::Error::other(error.to_string()))?;
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal("publish_semantic_catalog", Some(batch.phase), error);
+        }
+        let result = result?;
         #[cfg(test)]
         if result.0 == Outcome::Written {
             CATALOG_PUBLISHED_ROWS
@@ -2680,11 +2754,21 @@ impl EventCache {
     }
 
     pub(crate) fn finish_semantic_stage(&mut self, epoch: i64) -> io::Result<Outcome> {
-        self.store
+        let result = self
+            .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .finish_semantic_stage(epoch)
-            .map_err(|error| io::Error::other(error.to_string()))
+            .map_err(|error| io::Error::other(error.to_string()));
+        #[cfg(test)]
+        if let Err(error) = &result {
+            diagnose_staged_method_refusal(
+                "finish_semantic_stage",
+                Some(crate::model::relation_stage::Phase::Publication),
+                error,
+            );
+        }
+        result
     }
 
     #[cfg(test)]

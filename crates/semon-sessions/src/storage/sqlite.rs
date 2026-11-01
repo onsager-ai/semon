@@ -28,6 +28,73 @@ use crate::{CatalogChangeCompaction, CatalogChangePage, CatalogReadScope};
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::time::Duration;
 
+#[cfg(test)]
+thread_local! {
+    static STAGED_FAILURE_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) struct StagedFailureProbe {
+    previous: bool,
+    enabled: bool,
+}
+
+#[cfg(test)]
+impl StagedFailureProbe {
+    pub(crate) fn new(enabled: bool) -> Self {
+        let previous = STAGED_FAILURE_PROBE.with(|probe| probe.replace(enabled));
+        Self { previous, enabled }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+#[cfg(test)]
+impl Drop for StagedFailureProbe {
+    fn drop(&mut self) {
+        STAGED_FAILURE_PROBE.with(|probe| probe.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn staged_failure_probe_enabled() -> bool {
+    STAGED_FAILURE_PROBE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn rusqlite_variant(error: &rusqlite::Error) -> &'static str {
+    use rusqlite::Error;
+
+    match error {
+        Error::SqliteFailure(..) => "SqliteFailure",
+        Error::SqliteSingleThreadedMode => "SqliteSingleThreadedMode",
+        Error::FromSqlConversionFailure(..) => "FromSqlConversionFailure",
+        Error::IntegralValueOutOfRange(..) => "IntegralValueOutOfRange",
+        Error::Utf8Error(..) => "Utf8Error",
+        Error::NulError(..) => "NulError",
+        Error::InvalidParameterName(..) => "InvalidParameterName",
+        Error::InvalidPath(..) => "InvalidPath",
+        Error::ExecuteReturnedResults => "ExecuteReturnedResults",
+        Error::QueryReturnedNoRows => "QueryReturnedNoRows",
+        Error::QueryReturnedMoreThanOneRow => "QueryReturnedMoreThanOneRow",
+        Error::InvalidColumnIndex(..) => "InvalidColumnIndex",
+        Error::InvalidColumnName(..) => "InvalidColumnName",
+        Error::InvalidColumnType(..) => "InvalidColumnType",
+        Error::StatementChangedRows(..) => "StatementChangedRows",
+        Error::InvalidFunctionParameterType(..) => "InvalidFunctionParameterType",
+        Error::UserFunctionError(..) => "UserFunctionError",
+        Error::ToSqlConversionFailure(..) => "ToSqlConversionFailure",
+        Error::InvalidQuery => "InvalidQuery",
+        Error::UnwindingPanic => "UnwindingPanic",
+        Error::GetAuxWrongType => "GetAuxWrongType",
+        Error::MultipleStatement => "MultipleStatement",
+        Error::InvalidParameterCount(..) => "InvalidParameterCount",
+        _ => "Other",
+    }
+}
+
 fn error_class(error: &rusqlite::Error) -> (&'static str, Option<i32>) {
     let kind = match error {
         rusqlite::Error::SqliteFailure(..) => "sqlite_failure",
@@ -51,6 +118,18 @@ pub(super) fn failed(error: rusqlite::Error) -> StorageError {
             "storage_sqlite_failure kind={kind} sqlite_extended_code={:?}",
             extended_code
         );
+        if staged_failure_probe_enabled() {
+            let (sqlite_code, sqlite_extended_code) = match &error {
+                rusqlite::Error::SqliteFailure(code, _) => {
+                    (Some(code.code as i32), Some(code.extended_code))
+                }
+                _ => (None, None),
+            };
+            eprintln!(
+                "staged_sqlite_refusal rusqlite_variant={} sqlite_code={sqlite_code:?} sqlite_extended_code={sqlite_extended_code:?}",
+                rusqlite_variant(&error),
+            );
+        }
     }
     match error.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => StorageError::Busy,
