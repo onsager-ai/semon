@@ -102,17 +102,162 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
 
 // These are the actual published values, not values inferred from a Catalog head.
 const SEARCH_PUBLICATION: &str = "(SELECT v.namespace,c.read_scope,v.value AS version,g.value AS search_generation,CAST(b.value AS INTEGER) AS backfill_complete,CAST(i.value AS INTEGER) AS incomplete FROM main.session_search_coverage c JOIN main.meta v ON v.namespace=c.namespace AND v.key='search_version' JOIN main.meta g ON g.namespace=c.namespace AND g.key='search_generation_'||c.read_scope JOIN main.meta b ON b.namespace=c.namespace AND b.key='search_backfill_complete' JOIN main.meta i ON i.namespace=c.namespace AND i.key='search_incomplete_'||c.read_scope)";
+const STAGED_SEARCH_PUBLICATION: &str = "(SELECT namespace,json_extract(value,'$[0]') AS read_scope,json_extract(value,'$[1]') AS version,json_extract(value,'$[2]') AS search_generation,json_extract(value,'$[3]') AS backfill_complete,json_extract(value,'$[4]') AS incomplete FROM main.meta WHERE key IN ('native_transfer_v1:search-publication:current','native_transfer_v1:search-publication:retained_history'))";
 
-pub(super) fn verify_search_state(tx: &Inbox<'_>, generation: &str) -> Result<(), StorageError> {
-    let valid: bool = tx.0.query_row("SELECT (SELECT count(*) FROM main.session_search_coverage WHERE namespace=?1)=2 AND (SELECT count(*) FROM main.meta WHERE namespace=?1 AND key IN ('search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history'))=6 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_version' AND value=?3) AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_backfill_complete' AND value='1') AND NOT EXISTS(SELECT 1 FROM main.session_search_coverage c WHERE c.namespace=?1 AND (c.incomplete<>(SELECT count(*) FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.read_scope=c.read_scope AND NOT d.complete) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_incomplete_'||c.read_scope AND m.value=CAST(c.incomplete AS TEXT)) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_generation_'||c.read_scope AND m.value=?2))) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND (c.lifecycle='current' OR EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key)) AND (NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='retained_history') OR (c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='current')))) AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=d.namespace AND c.session_key=d.session_key AND (c.lifecycle='current' OR (d.read_scope='retained_history' AND EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key))))) AND NOT EXISTS(SELECT 1 FROM main.session_search_memberships m WHERE m.namespace=?1 AND (m.history_last_ms IS NULL OR (m.current_last_ms IS NOT NULL AND m.current_last_ms<>m.history_last_ms) OR NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='retained_history' AND d.complete) OR ((m.current_last_ms IS NOT NULL) <> EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='current'))))", params![tx.1,generation,crate::catalog_search::VERSION], |r| r.get(0)).map_err(failed)?;
+#[derive(Debug)]
+struct SearchPublication {
+    scope: String,
+    version: String,
+    generation: String,
+    backfill_complete: bool,
+    incomplete: i64,
+}
+
+fn verify_search_publications(
+    tx: &Inbox<'_>,
+    generation: &str,
+    publications: &[SearchPublication],
+) -> Result<(), StorageError> {
+    if publications.len() != 2
+        || publications[0].scope != "current"
+        || publications[1].scope != "retained_history"
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let coverage_count: i64 = tx
+        .0
+        .query_row(
+            "SELECT count(*) FROM main.session_search_coverage WHERE namespace=?1",
+            [tx.1],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if coverage_count != 2 {
+        return Err(StorageError::ScopeChanged);
+    }
+    for publication in publications {
+        if publication.version != crate::catalog_search::VERSION
+            || publication.generation != generation
+            || !publication.backfill_complete
+            || publication.incomplete < 0
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let coverage: Option<(i64, i64)> = tx
+            .0
+            .query_row(
+                "SELECT incomplete,(SELECT count(*) FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.read_scope=c.read_scope AND NOT d.complete) FROM main.session_search_coverage c WHERE c.namespace=?1 AND c.read_scope=?2",
+                params![tx.1, publication.scope],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(failed)?;
+        if coverage != Some((publication.incomplete, publication.incomplete)) {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    Ok(())
+}
+
+fn verify_search_content(tx: &Inbox<'_>) -> Result<(), StorageError> {
+    let valid: bool = tx
+        .0
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND (c.lifecycle='current' OR EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key)) AND (NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='retained_history') OR (c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='current')))) AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=d.namespace AND c.session_key=d.session_key AND (c.lifecycle='current' OR (d.read_scope='retained_history' AND EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key))))) AND NOT EXISTS(SELECT 1 FROM main.session_search_memberships m WHERE m.namespace=?1 AND (m.history_last_ms IS NULL OR (m.current_last_ms IS NOT NULL AND m.current_last_ms<>m.history_last_ms) OR NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='retained_history' AND d.complete) OR ((m.current_last_ms IS NOT NULL) <> EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='current'))))",
+            [tx.1],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
     if !valid {
         return Err(StorageError::ScopeChanged);
     }
-    let mismatch: bool = tx.0.query_row("WITH physical AS (SELECT 'current' AS read_scope,gram,count(*) AS members FROM main.session_search_memberships WHERE namespace=?1 AND current_last_ms IS NOT NULL GROUP BY gram UNION ALL SELECT 'retained_history',gram,count(*) FROM main.session_search_memberships WHERE namespace=?1 AND history_last_ms IS NOT NULL GROUP BY gram), stored AS (SELECT read_scope,gram,members FROM main.session_search_counts WHERE namespace=?1) SELECT EXISTS(SELECT * FROM physical EXCEPT SELECT * FROM stored) OR EXISTS(SELECT * FROM stored EXCEPT SELECT * FROM physical)", [tx.1], |r| r.get(0)).map_err(failed)?;
+    let mismatch: bool = tx
+        .0
+        .query_row(
+            "WITH physical AS (SELECT 'current' AS read_scope,gram,count(*) AS members FROM main.session_search_memberships WHERE namespace=?1 AND current_last_ms IS NOT NULL GROUP BY gram UNION ALL SELECT 'retained_history',gram,count(*) FROM main.session_search_memberships WHERE namespace=?1 AND history_last_ms IS NOT NULL GROUP BY gram), stored AS (SELECT read_scope,gram,members FROM main.session_search_counts WHERE namespace=?1) SELECT EXISTS(SELECT * FROM physical EXCEPT SELECT * FROM stored) OR EXISTS(SELECT * FROM stored EXCEPT SELECT * FROM physical)",
+            [tx.1],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
     if mismatch {
         return Err(StorageError::ScopeChanged);
     }
     Ok(())
+}
+
+pub(super) fn verify_search_state(tx: &Inbox<'_>, generation: &str) -> Result<(), StorageError> {
+    let valid: bool = tx.0.query_row("SELECT (SELECT count(*) FROM main.session_search_coverage WHERE namespace=?1)=2 AND (SELECT count(*) FROM main.meta WHERE namespace=?1 AND key IN ('search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history'))=6 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_version' AND value=?3) AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_backfill_complete' AND value='1') AND NOT EXISTS(SELECT 1 FROM main.session_search_coverage c WHERE c.namespace=?1 AND (c.incomplete<>(SELECT count(*) FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.read_scope=c.read_scope AND NOT d.complete) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_incomplete_'||c.read_scope AND m.value=CAST(c.incomplete AS TEXT)) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_generation_'||c.read_scope AND m.value=?2)))", params![tx.1,generation,crate::catalog_search::VERSION], |row| row.get(0)).map_err(failed)?;
+    if !valid {
+        return Err(StorageError::ScopeChanged);
+    }
+    let publications = tx
+        .0
+        .prepare(&format!(
+            "SELECT read_scope,version,search_generation,backfill_complete,incomplete FROM {SEARCH_PUBLICATION} WHERE namespace=?1 ORDER BY read_scope"
+        ))
+        .map_err(failed)?
+        .query_map([tx.1], |row| {
+            Ok(SearchPublication {
+                scope: row.get(0)?,
+                version: row.get(1)?,
+                generation: row.get(2)?,
+                backfill_complete: row.get(3)?,
+                incomplete: row.get(4)?,
+            })
+        })
+        .map_err(failed)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failed)?;
+    verify_search_publications(tx, generation, &publications)?;
+    verify_search_content(tx)
+}
+
+fn verify_imported_search_state(
+    tx: &mut Inbox<'_>,
+    generation: &str,
+) -> Result<(), StorageError> {
+    let staged_count: i64 = tx
+        .0
+        .query_row(
+            "SELECT count(*) FROM main.meta WHERE namespace=?1 AND key GLOB 'native_transfer_v1:search-publication:*'",
+            [tx.1],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if staged_count != 2 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut publications = Vec::with_capacity(2);
+    for scope in ["current", "retained_history"] {
+        let bytes = tx
+            .get(&format!("native_transfer_v1:search-publication:{scope}"), 4096)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let values: Vec<serde_json::Value> =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        catalog_rows::validate(&TransferRecord::CatalogRow {
+            generation: generation.to_owned(),
+            kind: CatalogRowKind::SearchPublication,
+            values: values.clone(),
+        })?;
+        if values.first().and_then(serde_json::Value::as_str) != Some(scope) {
+            return Err(StorageError::ScopeChanged);
+        }
+        publications.push(SearchPublication {
+            scope: scope.to_owned(),
+            version: values[1]
+                .as_str()
+                .ok_or(StorageError::ScopeChanged)?
+                .to_owned(),
+            generation: values[2]
+                .as_str()
+                .ok_or(StorageError::ScopeChanged)?
+                .to_owned(),
+            backfill_complete: values[3].as_bool().ok_or(StorageError::ScopeChanged)?,
+            incomplete: values[4].as_i64().ok_or(StorageError::ScopeChanged)?,
+        });
+    }
+    verify_search_publications(tx, generation, &publications)?;
+    verify_search_content(tx)
 }
 
 /// Keep incoming readiness private until the same transaction publishes its head.
@@ -295,11 +440,13 @@ pub(super) fn capture(
 ) -> Result<transfer::CaptureProgress, StorageError> {
     let index = usize::from(state.native_family - 32);
     let Some(kind) = CatalogRowKind::ALL.get(index).copied() else {
-        if let Some(generation) = tx
-            .get("catalog_generation", 64)?
-            .or(tx.get(catalog_rows::IMPORTED_GENERATION, 64)?)
-        {
+        if let Some(generation) = tx.get("catalog_generation", 64)? {
             verify_search_state(
+                tx,
+                std::str::from_utf8(&generation).map_err(|_| StorageError::ScopeChanged)?,
+            )?;
+        } else if let Some(generation) = tx.get(catalog_rows::IMPORTED_GENERATION, 64)? {
+            verify_imported_search_state(
                 tx,
                 std::str::from_utf8(&generation).map_err(|_| StorageError::ScopeChanged)?,
             )?;
@@ -307,7 +454,7 @@ pub(super) fn capture(
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
-    let generation: Option<String> =
+    let published_generation: Option<String> =
         tx.0.query_row(
             "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
             [tx.1],
@@ -315,7 +462,8 @@ pub(super) fn capture(
         )
         .optional()
         .map_err(failed)?;
-    let generation = match generation {
+    let imported_source = published_generation.is_none();
+    let generation = match published_generation {
         Some(generation) => Some(generation),
         None => tx
             .get(catalog_rows::IMPORTED_GENERATION, 64)?
@@ -331,6 +479,10 @@ pub(super) fn capture(
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
+    let imported_search_publication = kind == CatalogRowKind::SearchPublication && imported_source;
+    if imported_search_publication {
+        verify_imported_search_state(tx, &generation)?;
+    }
     let (table, columns, bools) = spec(kind);
     let names = columns.split(',').collect::<Vec<_>>();
     let keys = kind
@@ -364,7 +516,9 @@ pub(super) fn capture(
     } else {
         ""
     };
-    let table = if table.starts_with('(') {
+    let table = if imported_search_publication {
+        STAGED_SEARCH_PUBLICATION.to_owned()
+    } else if table.starts_with('(') {
         table.to_owned()
     } else {
         format!("main.{table}")
@@ -648,6 +802,71 @@ mod tests {
             let mut budget = transfer::MAX_PAGE_BYTES;
             apply(&mut inbox, &record, &mut budget).unwrap();
         }
+        let current_publication_key = "native_transfer_v1:search-publication:current";
+        let current_publication = inbox
+            .get(current_publication_key, 4096)
+            .unwrap()
+            .unwrap();
+        verify_imported_search_state(&mut inbox, &generation).unwrap();
+        let assert_no_authority = || {
+            let clean: bool = tx
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key IN ('catalog_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history')) AND NOT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key GLOB 'native_transfer_v1:catalog-owner:*')",
+                    ["ns"],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(clean, "search validation changed publication authority");
+        };
+        assert_no_authority();
+        tx.execute(
+            "DELETE FROM main.meta WHERE namespace='ns' AND key=?1",
+            [current_publication_key],
+        )
+        .unwrap();
+        assert!(verify_imported_search_state(&mut inbox, &generation).is_err());
+        assert_no_authority();
+        inbox
+            .put(current_publication_key, &current_publication)
+            .unwrap();
+        tx.execute(
+            "UPDATE main.meta SET value='not-json' WHERE namespace='ns' AND key=?1",
+            [current_publication_key],
+        )
+        .unwrap();
+        assert!(verify_imported_search_state(&mut inbox, &generation).is_err());
+        assert_no_authority();
+        inbox
+            .put(current_publication_key, &current_publication)
+            .unwrap();
+        let mut mismatched: Vec<serde_json::Value> =
+            serde_json::from_slice(&current_publication).unwrap();
+        mismatched[2] = "b".repeat(64).into();
+        inbox
+            .put(
+                current_publication_key,
+                &serde_json::to_vec(&mismatched).unwrap(),
+            )
+            .unwrap();
+        assert!(verify_imported_search_state(&mut inbox, &generation).is_err());
+        assert_no_authority();
+        inbox
+            .put(current_publication_key, &current_publication)
+            .unwrap();
+        tx.execute(
+            "UPDATE main.session_search_coverage SET incomplete=1 WHERE namespace='ns' AND read_scope='current'",
+            [],
+        )
+        .unwrap();
+        assert!(verify_imported_search_state(&mut inbox, &generation).is_err());
+        assert_no_authority();
+        tx.execute(
+            "UPDATE main.session_search_coverage SET incomplete=0 WHERE namespace='ns' AND read_scope='current'",
+            [],
+        )
+        .unwrap();
+        verify_imported_search_state(&mut inbox, &generation).unwrap();
+        assert_no_authority();
         assert!(
             inbox.get("search_version", 64).unwrap().is_none(),
             "incoming records do not expose readiness"
