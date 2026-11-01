@@ -234,51 +234,75 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         owner: CatalogObservationOwner,
         runtime: &str,
     ) -> io::Result<Option<String>> {
-        let Some((binding, Some(observations))) =
-            self.row_runtime_binding_with_observations(row, Some(owner))?
-        else {
-            return Err(failed(StorageError::ScopeChanged));
-        };
-        let captured = observations
-            .runtime_for(row)
-            .ok_or_else(|| failed(StorageError::ScopeChanged))?;
-        let mut tx = self
-            .tx
-            .lock()
-            .map_err(|_| failed(StorageError::Unavailable))?;
-        match super::super::super::native_reader::runtime_source_cwds_if_current(
-            &mut tx,
-            &row.sources,
-        )
-        .map_err(failed)?
-        {
-            Some(cwds) => {
-                let scoped = if options.facts.is_some() {
-                    super::super::super::current_sources::runtime_scope(
-                        &mut tx, options, row, runtime, &cwds,
-                    )
-                    .map_err(failed)?
-                } else {
-                    self.runtime_local
-                        .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
-                        .scope(row, &cwds)?
-                };
-                let fresh = binding.witness(&scoped)?;
-                if fresh != captured {
-                    return Err(failed(StorageError::ScopeChanged));
+        #[cfg(test)]
+        let stage = std::cell::Cell::new("row_binding");
+        let result = (|| {
+            let Some((binding, Some(observations))) =
+                self.row_runtime_binding_with_observations(row, Some(owner))?
+            else {
+                return Err(failed(StorageError::ScopeChanged));
+            };
+            #[cfg(test)]
+            stage.set("captured_row");
+            let captured = observations
+                .runtime_for(row)
+                .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+            #[cfg(test)]
+            stage.set("current_source_cwds");
+            let mut tx = self
+                .tx
+                .lock()
+                .map_err(|_| failed(StorageError::Unavailable))?;
+            match super::super::super::native_reader::runtime_source_cwds_if_current(
+                &mut tx,
+                &row.sources,
+            )
+            .map_err(failed)?
+            {
+                Some(cwds) => {
+                    #[cfg(test)]
+                    stage.set("fresh_scope");
+                    let scoped = if options.facts.is_some() {
+                        super::super::super::current_sources::runtime_scope(
+                            &mut tx, options, row, runtime, &cwds,
+                        )
+                        .map_err(failed)?
+                    } else {
+                        self.runtime_local
+                            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                            .scope(row, &cwds)?
+                    };
+                    #[cfg(test)]
+                    stage.set("scoped_witness");
+                    let fresh = binding.witness(&scoped)?;
+                    #[cfg(test)]
+                    stage.set("scoped_witness_match");
+                    if fresh != captured {
+                        return Err(failed(StorageError::ScopeChanged));
+                    }
+                    Ok(Some(fresh))
                 }
-                Ok(Some(fresh))
-            }
-            None => {
-                // `runtime` is the live raw global input. The saved global
-                // witness is already qualified by this publication's binding.
-                let current_global = binding.witness(runtime)?;
-                if observations.runtime.as_deref() != Some(current_global.as_str()) {
-                    return Err(failed(StorageError::ScopeChanged));
+                None => {
+                    // `runtime` is the live raw global input. The saved global
+                    // witness is already qualified by this publication's binding.
+                    #[cfg(test)]
+                    stage.set("global_witness");
+                    let current_global = binding.witness(runtime)?;
+                    #[cfg(test)]
+                    stage.set("global_witness_match");
+                    if observations.runtime.as_deref() != Some(current_global.as_str()) {
+                        return Err(failed(StorageError::ScopeChanged));
+                    }
+                    Ok(Some(captured))
                 }
-                Ok(Some(captured))
             }
-        }
+        })();
+        result.inspect_err(|_| {
+            #[cfg(test)]
+            if row.key == "one" {
+                eprintln!("pg_runtime_observation_refused stage={}", stage.get());
+            }
+        })
     }
     fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
         super::super::super::current_sources::runtime_in_snapshot(self, options).map_err(failed)
