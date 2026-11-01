@@ -5422,14 +5422,10 @@ impl<'a> Builder<'a> {
                     .then_some(*at)
             })
         };
-        let origin = |turn: &Turn, edge: &str| {
-            canonical_origins
-                .and_then(|origins| origins.get(edge).copied())
-                .or_else(|| {
-                    turn.start
-                        .as_deref()
-                        .and_then(|start| placed(start, Place::In))
-                })
+        let origin = |turn: &Turn| {
+            turn.start
+                .as_deref()
+                .and_then(|start| placed(start, Place::In))
                 .map(|at| recipe(at, "prompt"))
                 .or_else(|| {
                     tx.slots
@@ -5570,11 +5566,15 @@ impl<'a> Builder<'a> {
                     "skip": preview.skip,
                 }));
             }
-            if let Some(turn) = turns
+            if let Some(at) = canonical_origins
+                .and_then(|origins| origins.get(&h.out.id).copied())
+            {
+                fields["origin"] = recipe(at, "prompt");
+            } else if let Some(turn) = turns
                 .iter()
                 .find(|turn| turn.sid == key && turn.sent.contains(&h.out.id))
             {
-                fields["origin"] = origin(turn, &h.out.id).unwrap_or(Value::Null);
+                fields["origin"] = origin(turn).unwrap_or(Value::Null);
             }
             events.insert(h.out.id.clone(), fields);
         }
