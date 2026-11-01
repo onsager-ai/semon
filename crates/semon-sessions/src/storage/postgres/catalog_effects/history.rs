@@ -1234,9 +1234,7 @@ pub(super) fn preserve(
             } => {
                 composite_search_bytes = composite_search_bytes
                     .checked_add(metadata_bytes)
-                    .filter(|total| {
-                        *total <= crate::catalog_search::MAX_PUBLICATION_BYTES
-                    })
+                    .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
                     .ok_or(StorageError::Busy)?;
                 completed_composites.insert(history.key.clone());
                 composite_search_rows.push((history, metadata_bytes));

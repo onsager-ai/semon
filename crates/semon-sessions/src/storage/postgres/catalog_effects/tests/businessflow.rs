@@ -7920,11 +7920,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(retained_search.status, 200);
     let retained_search_page: serde_json::Value =
         serde_json::from_slice(&retained_search.body).unwrap();
-    assert!(retained_search_page["items"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|item| item["key"] == composite_key));
+    assert!(
+        retained_search_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["key"] == composite_key)
+    );
 
     // A retained-only owner remains readable from its publication proof when
     // the configured current Facts file has moved on. The same change refuses
