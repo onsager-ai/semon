@@ -351,6 +351,7 @@ impl History<'_, '_> {
         &self,
         key: &str,
         source_generation: &str,
+        staged_current_source_generation: Option<&str>,
     ) -> Result<bool, StorageError> {
         let previous = self.trace_header_at(self.previous, key)?;
         let target = self.trace_header_at(self.effects.generation, key)?;
@@ -358,6 +359,16 @@ impl History<'_, '_> {
             || self.trace_members_without_header(self.effects.generation, key)?
         {
             return Ok(false);
+        }
+        // `stage` already wrote this same-key Current family and fenced its
+        // header and children. Its strict-subset source cohort stays distinct
+        // from the retained composite family carried below.
+        if let Some(staged_current_source_generation) = staged_current_source_generation
+            .filter(|staged| *staged != source_generation)
+        {
+            return Ok(target
+                .as_ref()
+                .is_some_and(|header| header.1 == staged_current_source_generation));
         }
         let previous_composite = previous
             .as_ref()
@@ -367,12 +378,8 @@ impl History<'_, '_> {
             .filter(|header| header.1 == source_generation);
         match (previous_composite, target_composite) {
             (Some(previous), Some(target)) if previous == target => {}
-            (Some(_), Some(_)) | (None, Some(_)) => return Ok(false),
-            // A staged Current family may already own the key in the target
-            // generation. The source filter leaves that distinct family alone.
-            (Some(_), None) if target.is_some() => return Ok(true),
-            (Some(_), None) => return Ok(false),
-            (None, None) => return Ok(true),
+            (None, None) if target.is_none() => return Ok(true),
+            _ => return Ok(false),
         }
         let tx = self.effects.tx.borrow_mut();
         tx.check()?;
@@ -559,6 +566,7 @@ impl History<'_, '_> {
         metadata: &str,
         history: &CatalogRow,
         recipe: &RecipeContents,
+        staged_current_source_generation: Option<&str>,
     ) -> Result<bool, StorageError> {
         let generation = self.effects.generation;
         if self.owner_at(generation, key)? != Some((generation.to_owned(), false))
@@ -613,7 +621,11 @@ impl History<'_, '_> {
         }
         let source_generation = crate::retention::source_generation(&history.sources)
             .map_err(|_| StorageError::ScopeChanged)?;
-        if !self.trace_family_matches(key, &source_generation)? {
+        if !self.trace_family_matches(
+            key,
+            &source_generation,
+            staged_current_source_generation,
+        )? {
             return Ok(false);
         }
         Ok(true)
@@ -622,6 +634,7 @@ impl History<'_, '_> {
     fn preserve_withdrawn_composite(
         &self,
         current: &CatalogRow,
+        staged_current_source_generation: Option<&str>,
     ) -> Result<WithdrawnComposite, StorageError> {
         // `stage` writes the Current projection before `preserve`, and the
         // shared composer builds each non-original owner from that same row
@@ -639,7 +652,13 @@ impl History<'_, '_> {
             .ok_or(StorageError::ScopeChanged)?;
         let (history, recipe) =
             self.validate_withdrawn_composite(current, &owner_generation, &metadata)?;
-        if self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
+        if self.withdrawn_composite_complete(
+            &current.key,
+            &metadata,
+            &history,
+            &recipe,
+            staged_current_source_generation,
+        )? {
             return Ok(WithdrawnComposite::Complete);
         }
         for source in &history.sources {
@@ -666,7 +685,13 @@ impl History<'_, '_> {
                 Some(&source_generation),
             )?;
         }
-        if !self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
+        if !self.withdrawn_composite_complete(
+            &current.key,
+            &metadata,
+            &history,
+            &recipe,
+            staged_current_source_generation,
+        )? {
             return Err(StorageError::ScopeChanged);
         }
         Ok(WithdrawnComposite::Staged)
@@ -1163,7 +1188,19 @@ pub(super) fn preserve(
         .unwrap_or(&[]);
     let mut completed_composites = std::collections::BTreeSet::new();
     for row in &old {
-        match store.preserve_withdrawn_composite(row)? {
+        let staged_current_source_generation = publication
+            .rows
+            .iter()
+            .find(|staged| staged.key == row.key && staged.trace.is_some())
+            .map(|staged| {
+                crate::retention::source_generation(&staged.sources)
+                    .map_err(|_| StorageError::ScopeChanged)
+            })
+            .transpose()?;
+        match store.preserve_withdrawn_composite(
+            row,
+            staged_current_source_generation.as_deref(),
+        )? {
             WithdrawnComposite::NotApplicable => {}
             WithdrawnComposite::Complete => {
                 completed_composites.insert(row.key.as_str());

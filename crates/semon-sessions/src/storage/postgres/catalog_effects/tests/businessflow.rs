@@ -6633,6 +6633,122 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         history_b_proof, current_a_proof,
         "Current Source A's proof cannot substitute for retained Source B"
     );
+    type TraceFamilyBytes = (
+        (Vec<u8>, Vec<u8>, Vec<u8>),
+        Vec<(Vec<u8>, Vec<u8>, Option<Vec<u8>>, Vec<u8>)>,
+        Vec<(Vec<u8>, Vec<u8>, Vec<u8>)>,
+        Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)>,
+    );
+    fn trace_family_bytes(
+        tx: &mut PgTxn<'_>,
+        generation: &str,
+        key: &str,
+    ) -> Result<TraceFamilyBytes, StorageError> {
+        let ns = tx.namespace.as_str().as_bytes();
+        let header = tx
+            .driver
+            .query(
+                "SELECT trace_generation,source_generation,metadata FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 LIMIT 2",
+                &[&ns, &generation.as_bytes(), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        if header.len() != 1 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let turns = tx
+            .driver
+            .query(
+                "SELECT turn_digest,turn_id,start_id,metadata FROM semon_pg_native_catalog_trace_turns WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY turn_digest LIMIT 129",
+                &[&ns, &generation.as_bytes(), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        let edges = tx
+            .driver
+            .query(
+                "SELECT edge_digest,edge_id,metadata FROM semon_pg_native_catalog_trace_edges WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY edge_digest LIMIT 129",
+                &[&ns, &generation.as_bytes(), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        let bookmarks = tx
+            .driver
+            .query(
+                "SELECT target_digest,target,edge_digest,edge_id FROM semon_pg_native_catalog_trace_bookmarks WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY target_digest,edge_digest LIMIT 129",
+                &[&ns, &generation.as_bytes(), &key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        if turns.len() > 128 || edges.len() > 128 || bookmarks.len() > 128 {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok((
+            (
+                header[0].get(0),
+                header[0].get(1),
+                header[0].get(2),
+            ),
+            turns
+                .iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+                .collect(),
+            edges
+                .iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2)))
+                .collect(),
+            bookmarks
+                .iter()
+                .map(|row| (row.get(0), row.get(1), row.get(2), row.get(3)))
+                .collect(),
+        ))
+    }
+    let staged_current = model
+        .prepared()
+        .rows
+        .iter()
+        .find(|row| row.key == composite_key)
+        .expect("the retained composite has a staged Current A row");
+    assert_eq!(staged_current.sources, vec![composite_current_source.clone()]);
+    assert!(staged_current.trace.is_some());
+    let staged_source_generation =
+        crate::retention::source_generation(&staged_current.sources).unwrap();
+    let history_source_generation = crate::retention::source_generation(&[
+        composite_current_source.clone(),
+        composite_withdrawn_source.clone(),
+    ])
+    .unwrap();
+    assert_ne!(staged_source_generation, history_source_generation);
+    let trace_probe_generation = format!(
+        "{:x}",
+        sha2::Sha256::digest(format!("withdrawn-composite-current-trace:{caught}").as_bytes())
+    );
+    let trace_probe_publication = crate::slot_projection::Publication {
+        rows: &model.prepared().rows,
+        transcripts: Some(&model.prepared().transcripts),
+        observations: None,
+    };
+    let withdrawn_composite_key =
+        vec![sha2::Sha256::digest(composite_key.as_bytes()).to_vec()];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        super::super::stage(tx, &trace_probe_generation, &trace_probe_publication)?;
+        let before = trace_family_bytes(tx, &trace_probe_generation, composite_key)?;
+        assert_eq!(
+            before.0.1.as_slice(),
+            staged_source_generation.as_bytes(),
+            "the staged Current trace keeps its own source cohort"
+        );
+        assert!(!super::super::history::preserve(
+            tx,
+            &trace_probe_generation,
+            &caught,
+            &trace_probe_publication,
+            &withdrawn_composite_key,
+        )?);
+        assert_eq!(
+            trace_family_bytes(tx, &trace_probe_generation, composite_key)?,
+            before,
+            "composite History preservation leaves the staged Current family intact"
+        );
+        Ok(())
+    })
+    .unwrap();
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
