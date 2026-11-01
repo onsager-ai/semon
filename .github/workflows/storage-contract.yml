@@ -153,6 +153,14 @@ jobs:
           grep -F 'test result: ok. 4 passed; 0 failed;' "$proof_log"
           cargo test --locked -p semon-sessions --lib source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture 2>&1 | tee "$plan_log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$plan_log"
+      - name: Shared Claude selector metadata and event-read budgets
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          selector_log="$RUNNER_TEMP/477-focused-selector-budget.log"
+          cargo test --locked -p semon-sessions --lib model::relation_stage::selector_metadata_tests:: -- --nocapture 2>&1 | tee "$selector_log"
+          grep -F 'test result: ok. 2 passed; 0 failed;' "$selector_log"
       - name: Retain focused correctness diagnostics
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
