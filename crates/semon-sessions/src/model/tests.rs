@@ -6519,7 +6519,12 @@ fn native_handoff_restart_reads_candidates_and_repairs_locations_without_event_r
             "native evidence reads must not scan the unrelated parent prefix"
         );
     }
-    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let indexed = crate::events::PARSED.with(std::cell::Cell::get);
     let rows: Vec<(String, String)> = connection
         .prepare("SELECT key,value FROM meta WHERE key GLOB 'native_launch_calls:*' ORDER BY key")
@@ -6612,7 +6617,12 @@ fn native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_wit
         );
         assert_eq!(crate::FIRST_MARKER_READS.with(std::cell::Cell::get), raw);
     }
-    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let key = format!("native_parent_marker:{}", path.display());
     let encoded: String = connection
         .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
@@ -9889,8 +9899,12 @@ fn incompatible_or_damaged_description_rebuilds_without_losing_observations() {
     let home = Home::new();
     home.top("root", &[human("root", ts(0, 0), "prompt")]);
     let first = home.build_query();
-    let connection =
-        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     connection
         .execute("UPDATE session_descriptions SET version = version + 1", [])
         .unwrap();
