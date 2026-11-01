@@ -668,6 +668,34 @@ impl Relation {
                             shared_equal += 1;
                         } else {
                             shared_different += 1;
+                            let recipe_fields = [
+                                "path", "offset", "block", "kind", "tool", "cwd", "source", "field",
+                                "arg",
+                            ]
+                            .into_iter()
+                            .filter(|key| old.get(*key) != recipe.get(*key))
+                            .collect::<Vec<_>>();
+                            let source_fields = [
+                                "path",
+                                "native_id",
+                                "dev",
+                                "ino",
+                                "size",
+                                "modified_ns",
+                                "changed_ns",
+                                "offset",
+                                "prefix_sha256",
+                                "tail_sha256",
+                                "native_role",
+                            ]
+                            .into_iter()
+                            .filter(|key| old["source"].get(*key) != recipe["source"].get(*key))
+                            .collect::<Vec<_>>();
+                            eprintln!(
+                                "semantic_relation_recipe_difference field={field} recipe_fields={} source_fields={}",
+                                recipe_fields.join(","),
+                                source_fields.join(","),
+                            );
                         }
                     }
                 }
