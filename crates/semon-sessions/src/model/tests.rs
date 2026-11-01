@@ -2206,9 +2206,9 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
     assert_eq!(renamed["participants"]["alpha"], "Updated Alpha");
     assert_ne!(renamed["generation"], before["generation"]);
     assert_eq!(renamed["turns"], before["turns"]);
-    let config = home.options.source.selected_store().unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
-        crate::storage::sqlite::semantic::SemanticStaging::admit(config).unwrap(),
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
     )
     .unwrap()
     .into_test_connection();
