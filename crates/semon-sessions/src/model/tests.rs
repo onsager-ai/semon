@@ -5244,11 +5244,7 @@ fn complete_companion_scoped_baseline(home: &Home) {
 
 fn invalidate_companion_fixture_sources(home: &Home, paths: &[String]) {
     let namespace = home.options.source.namespace().unwrap();
-    let config = home
-        .options
-        .source
-        .config(&home.options.cache)
-        .unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
     let mut observations = config.source_observations().unwrap();
     let expected = observations.claims(paths).unwrap();
     assert_eq!(expected.len(), paths.len());
