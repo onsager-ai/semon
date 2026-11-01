@@ -10611,19 +10611,12 @@ fn claude_continuation_relation_batch(
         crate::events::Outcome::Written
     );
 
+    let mut stage = fixture.stage();
     for _ in 0..128 {
-        let batch = match cache.semantic_batch(64) {
+        let batch = match stage.batch(64) {
             Ok(Some(batch)) => batch,
             Ok(None) => panic!("the seeded Claude stage disappeared before Relations"),
-            Err(_) => {
-                drop(cache);
-                return Err(
-                    fixture
-                        .stage()
-                        .batch(64)
-                        .expect_err("the bounded owner closure refusal must remain typed"),
-                );
-            }
+            Err(error) => return Err(error),
         };
         if batch.phase == crate::model::relation_stage::Phase::Relations {
             return Ok(batch);
