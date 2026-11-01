@@ -3460,6 +3460,8 @@ impl Stage {
             if self.source.owner.is_some() {
                 retirement_plan(&tx, &self.source, prepared)?;
             }
+            #[cfg(test)]
+            let max_row_metadata_bytes = metadata.iter().map(String::len).max().unwrap_or(0);
             let metadata =
                 serde_json::to_string(&metadata).map_err(|e| StoreError::Data(e.to_string()))?;
             let projections = prepared
@@ -3468,6 +3470,14 @@ impl Stage {
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
+                #[cfg(test)]
+                eprintln!(
+                    "semantic_publication_model_limits: rows={} metadata_bytes={} max_row_metadata_bytes={} witness_bytes={} combined_byte_cap=2097152",
+                    prepared.rows.len(),
+                    metadata.len(),
+                    max_row_metadata_bytes,
+                    projections.len(),
+                );
                 return Err(refuse("semantic_context_budget"));
             }
             let paths =
@@ -3632,11 +3642,8 @@ impl Stage {
                             let mut diagnostic_bytes = bytes;
                             let mut diagnostic_max = max_endpoint_bytes;
                             let mut exact = true;
-                            for remaining in prepared
-                                .relationships
-                                .endpoints
-                                .values()
-                                .skip(_index + 1)
+                            for remaining in
+                                prepared.relationships.endpoints.values().skip(_index + 1)
                             {
                                 match serde_json::to_string(remaining) {
                                     Ok(text) => {
