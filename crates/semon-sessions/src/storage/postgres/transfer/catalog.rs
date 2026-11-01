@@ -1003,6 +1003,9 @@ mod tests {
         serde_json::Value::Array(observations)
     }
 
+    // These are the independent source/destination fixture coordinates used
+    // by every refusal case; keep the assertions explicit at each call site.
+    #[allow(clippy::too_many_arguments)]
     fn search_admission_corruption_refusals(
         config: &StoreConfig,
         pool: &PgPool,
