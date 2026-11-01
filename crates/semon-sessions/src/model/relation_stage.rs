@@ -322,6 +322,7 @@ pub(crate) struct Selection {
 pub(crate) trait SelectorLookup {
     type Error;
     fn invalid(&self, message: &'static str) -> Self::Error;
+    fn metadata_budget(&self) -> Self::Error;
     fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
     fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
     fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
@@ -385,17 +386,40 @@ pub(crate) fn native_name_hints_with<E>(
 
 pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<String>);
 
+#[derive(Debug)]
+pub(crate) struct SelectorMetadataBudget;
+
+impl std::fmt::Display for SelectorMetadataBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("semantic_selector_metadata_budget")
+    }
+}
+
+impl std::error::Error for SelectorMetadataBudget {}
+
+fn selector_metadata_error<P: SelectorLookup>(port: &P, error: io::Error) -> P::Error {
+    if error
+        .get_ref()
+        .is_some_and(|cause| cause.is::<SelectorMetadataBudget>())
+    {
+        port.metadata_budget()
+    } else {
+        port.invalid("semantic_selector_metadata_budget")
+    }
+}
+
 pub(crate) fn selector_metadata<T: serde::de::DeserializeOwned>(
     text: Option<String>,
     used: &mut usize,
 ) -> io::Result<T> {
     let text = text.ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
-    *used = used
+    let Some(next_used) = (*used)
         .checked_add(text.len())
-        .ok_or_else(|| io::Error::other("semantic_selector_metadata_budget"))?;
-    if *used > 1048576 {
-        return Err(io::Error::other("semantic_selector_metadata_budget"));
-    }
+        .filter(|next| *next <= 1048576)
+    else {
+        return Err(io::Error::other(SelectorMetadataBudget));
+    };
+    *used = next_used;
     serde_json::from_str(&text).map_err(io::Error::other)
 }
 
@@ -405,7 +429,7 @@ pub(crate) fn selector_event<P: SelectorLookup>(
     used: &mut usize,
 ) -> Result<NativeEvent, P::Error> {
     let mut native: NativeEvent = selector_metadata(text, used)
-        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+        .map_err(|error| selector_metadata_error(port, error))?;
     native.owner = port.event_owner(native.at.source.path.to_string_lossy().as_ref())?;
     Ok(native)
 }
@@ -421,7 +445,7 @@ pub(crate) fn selector_endpoint<P: SelectorLookup>(
         return Err(port.invalid("semantic_selector_root_missing"));
     }
     let mut endpoint: Endpoint = selector_metadata(text, used)
-        .map_err(|_| port.invalid("semantic_selector_metadata_budget"))?;
+        .map_err(|error| selector_metadata_error(port, error))?;
     endpoint.parent = parent.clone();
     endpoint.row.parent = parent;
     endpoint.root = root.unwrap_or_else(|| key.to_owned());
@@ -432,6 +456,7 @@ pub(crate) fn selector_endpoint<P: SelectorLookup>(
 pub(crate) fn select_with<P: SelectorLookup>(
     port: &mut P,
     selector: &Selector,
+    used: &mut usize,
 ) -> Result<Selection, P::Error> {
     let (keys, endpoint) = match selector {
         Selector::NativeKey { native, harness } => return port.native_key(native, harness),
@@ -439,7 +464,7 @@ pub(crate) fn select_with<P: SelectorLookup>(
             let Some(text) = port.receipt_first(id)? else {
                 return Ok(Selection::default());
             };
-            let native = selector_event(port, text, &mut 0)?;
+            let native = selector_event(port, text, used)?;
             return Ok(Selection {
                 count: 1,
                 location: Some(native.at),
@@ -455,9 +480,8 @@ pub(crate) fn select_with<P: SelectorLookup>(
                 });
             }
             let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
-            let mut used = 0;
-            let native = selector_event(port, text, &mut used)?;
-            let endpoint = selector_endpoint(port, &native.owner, &mut used, false)?;
+            let native = selector_event(port, text, used)?;
+            let endpoint = selector_endpoint(port, &native.owner, used, false)?;
             return Ok(Selection {
                 count: 1,
                 endpoint: Some(endpoint),
@@ -482,7 +506,7 @@ pub(crate) fn select_with<P: SelectorLookup>(
         } => (port.codex_wait(root, target, exclude)?, true),
     };
     let found = if endpoint && keys.len() == 1 {
-        Some(selector_endpoint(port, &keys[0], &mut 0, true)?)
+        Some(selector_endpoint(port, &keys[0], used, true)?)
     } else {
         None
     };
@@ -1560,5 +1584,35 @@ mod origin_turn_tests {
         assert_eq!(Unavailable.merge(&recorded), None);
         assert_eq!(recorded.merge(&Known("another-turn".into())), None);
         assert_eq!(recorded.merge(&recorded), Some(recorded.clone()));
+    }
+}
+
+#[cfg(test)]
+mod selector_metadata_tests {
+    use super::{SelectorMetadataBudget, selector_metadata};
+
+    #[test]
+    fn selector_metadata_shares_the_byte_meter_and_keeps_decode_errors_fatal() {
+        let mut used = 1048574;
+        let _: serde_json::Value = selector_metadata(Some("{}".into()), &mut used).unwrap();
+        assert_eq!(used, 1048576);
+
+        let error = selector_metadata::<serde_json::Value>(Some("{}".into()), &mut used)
+            .unwrap_err();
+        assert!(error
+            .get_ref()
+            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
+        assert_eq!(used, 1048576);
+
+        used = 0;
+        let error = selector_metadata::<serde_json::Value>(None, &mut used).unwrap_err();
+        assert!(!error
+            .get_ref()
+            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
+        let error = selector_metadata::<serde_json::Value>(Some("not-json".into()), &mut used)
+            .unwrap_err();
+        assert!(!error
+            .get_ref()
+            .is_some_and(|cause| cause.is::<SelectorMetadataBudget>()));
     }
 }
