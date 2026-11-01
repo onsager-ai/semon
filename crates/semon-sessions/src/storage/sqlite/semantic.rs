@@ -441,7 +441,12 @@ fn indexing_physical_stat_matches(
     ledger: &crate::events::Ledger,
 ) -> bool {
     let mut expected = ledger.stat;
-    if ledger.offset == ledger.stat.size && physical.size >= ledger.offset {
+    // Bounded scans clip the stored size to their consumed prefix. Only a
+    // change-time witness can bind that prefix to a larger physical file.
+    if ledger.offset == ledger.stat.size
+        && physical.size >= ledger.offset
+        && ledger.stat.changed_ns.is_some()
+    {
         expected.size = physical.size;
     }
     physical == &expected
