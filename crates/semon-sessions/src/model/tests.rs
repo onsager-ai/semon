@@ -5848,6 +5848,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
         assert!(cache.pending_catalog_sources(1).unwrap().is_empty());
     }
     let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    let namespace = options.source.namespace().unwrap();
     for (key, session) in &oracle.sessions {
         if session.stub {
             continue;
@@ -5904,8 +5905,8 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
             }
             let present: bool = db
                 .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2)",
-                    rusqlite::params![&expected.sid, &expected.id],
+                    "SELECT EXISTS(SELECT 1 FROM session_trace_turns WHERE namespace=?1 AND session_key=?2 AND turn_id=?3)",
+                    rusqlite::params![namespace.as_str(), &expected.sid, &expected.id],
                     |row| row.get(0),
                 )
                 .unwrap();
@@ -5917,15 +5918,19 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
                 .iter()
                 .filter(|candidate| candidate.sid == missing.sid)
                 .count();
-            let (header_count, persisted_turn_row_count): (i64, i64) = db
+            let (header_count, header_details_turns, persisted_turn_row_count): (
+                i64,
+                Option<i64>,
+                i64,
+            ) = db
                 .query_row(
-                    "SELECT (SELECT count(*) FROM session_trace_headers WHERE session_key=?1), (SELECT count(*) FROM session_trace_turns WHERE session_key=?1)",
-                    [&missing.sid],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+                    "SELECT (SELECT count(*) FROM session_trace_headers WHERE namespace=?1 AND session_key=?2), (SELECT json_extract(metadata,'$.details.turns') FROM session_trace_headers WHERE namespace=?1 AND session_key=?2), (SELECT count(*) FROM session_trace_turns WHERE namespace=?1 AND session_key=?2)",
+                    rusqlite::params![namespace.as_str(), &missing.sid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .unwrap();
             eprintln!(
-                "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} persisted_turn_row_count={persisted_turn_row_count}",
+                "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} header_details_turns={header_details_turns:?} persisted_turn_row_count={persisted_turn_row_count}",
                 header_count > 0,
             );
         }
