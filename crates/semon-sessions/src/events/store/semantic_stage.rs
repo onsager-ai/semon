@@ -1818,15 +1818,6 @@ fn relation_scope(
 }
 
 impl SqliteStore {
-    #[cfg(test)]
-    pub(super) fn semantic_begin(
-        &mut self,
-        paths: &[String],
-        runtime: &str,
-    ) -> Result<Outcome, StoreError> {
-        self.semantic_begin_with_journal(paths, runtime, false)
-    }
-
     pub(super) fn semantic_begin_with_journal(
         &mut self,
         paths: &[String],

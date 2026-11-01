@@ -744,6 +744,7 @@ pub(crate) trait CatalogSnapshot {
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool>;
     /// Read only the payload belonging to the store-issued exact observation.
     /// This never selects a cohort from a display lifecycle or latest header.
+    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     fn selected_query_recipe(
         &self,
         _observation: &super::query::QueryRecipeObservation,

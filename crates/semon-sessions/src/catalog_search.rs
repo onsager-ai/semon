@@ -419,7 +419,7 @@ pub(crate) fn publish_current_rows_effects<
     store: &P,
     rows: &[&CatalogRow],
     owners: usize,
-    #[cfg(test)] mut probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
+    #[cfg(test)] probe: Option<&mut Option<crate::native_timing::SearchTraversalProbe>>,
 ) -> rusqlite::Result<()> {
     let keys = rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
     let scoped = rows
@@ -644,19 +644,6 @@ fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite
             "DELETE FROM main.session_search_documents WHERE namespace=semon_namespace() AND read_scope=?1 AND session_key=?2",
         )?
         .execute(params![scope, key])?;
-    Ok(())
-}
-
-#[cfg(test)]
-pub(crate) fn retire_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
-    let current: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')",
-        [key],
-        |row| row.get(0),
-    )?;
-    if !current {
-        remove_row(transaction, "current", key)?;
-    }
     Ok(())
 }
 

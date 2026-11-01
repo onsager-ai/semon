@@ -543,6 +543,7 @@ pub(crate) fn history_window(
 
 pub(crate) trait QueryCatalogStore {
     /// Load only the exact store-issued observation; this grants no source access.
+    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     fn selected_recipe(
         &self,
         _observation: &QueryRecipeObservation,

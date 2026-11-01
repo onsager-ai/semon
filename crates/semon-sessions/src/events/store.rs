@@ -11163,13 +11163,12 @@ mod tests {
                     generation,
                     "both search scopes advance to the published Catalog generation",
                 );
-                assert_eq!(
+                assert!(
                     store.connection.query_row(
                         "SELECT value=(SELECT CAST(incomplete AS TEXT) FROM main.session_search_coverage WHERE namespace=semon_namespace() AND read_scope=?1) FROM main.meta WHERE namespace=semon_meta_scope(?2) AND key=?2",
                         rusqlite::params![scope, format!("search_incomplete_{scope}")],
                         |row| row.get::<_, bool>(0),
                     ).unwrap(),
-                    true,
                     "scope coverage markers agree with their records",
                 );
             }
