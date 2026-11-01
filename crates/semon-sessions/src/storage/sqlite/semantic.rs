@@ -3669,10 +3669,13 @@ impl Stage {
                         let mut to_other = 0usize;
                         let mut to_none = 0usize;
                         for relation in prepared.relationships.relations.values() {
-                            let is_stub = |key: &String| {
-                                relation.stubs.iter().any(|stub| &stub.key == key)
-                            };
-                            if prepared.relationships.endpoints.contains_key(&relation.from) {
+                            let is_stub =
+                                |key: &String| relation.stubs.iter().any(|stub| &stub.key == key);
+                            if prepared
+                                .relationships
+                                .endpoints
+                                .contains_key(&relation.from)
+                            {
                                 from_real += 1;
                             } else if is_stub(&relation.from) {
                                 from_stub += 1;
@@ -3680,9 +3683,7 @@ impl Stage {
                                 from_other += 1;
                             }
                             match relation.to.as_ref() {
-                                Some(to)
-                                    if prepared.relationships.endpoints.contains_key(to) =>
-                                {
+                                Some(to) if prepared.relationships.endpoints.contains_key(to) => {
                                     to_real += 1;
                                 }
                                 Some(to) if is_stub(to) => to_stub += 1,
