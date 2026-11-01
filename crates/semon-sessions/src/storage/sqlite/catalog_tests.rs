@@ -10294,6 +10294,8 @@ fn codex_child_page_keeps_a_done_parent_context_only() {
 
 #[test]
 fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
+    use crate::storage::native_events::NativeEventStore;
+
     let mut fixture = Fixture::new();
     fixture.options.claude_home = fixture.root.join("zzz-claude");
     let mut parent_relatives = Vec::new();
@@ -10328,7 +10330,6 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
     codex_paths.extend(child_relatives.iter().cloned());
     facts.codex_rollouts = Some(codex_paths);
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
-    fixture.publish_existing();
 
     let parent_paths = parent_relatives
         .iter()
@@ -10359,8 +10360,111 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         .chain(child_paths.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(expected_paths.len(), 64);
+    let seed_paths = expected_paths.iter().cloned().collect::<Vec<_>>();
+    let unrelated_input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/project/unrelated.jsonl".into(),
+    };
+    let mut inputs = parent_relatives
+        .iter()
+        .chain(child_relatives.iter())
+        .map(|relative| crate::Input {
+            root: crate::InputRoot::Codex,
+            path: relative.clone().into(),
+        })
+        .collect::<Vec<_>>();
+    inputs.push(unrelated_input);
+
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    cache.prepare_facts_authority(&fixture.options).unwrap();
+    for (n, input) in inputs.iter().enumerate() {
+        cache
+            .ingest(
+                &format!("{:064x}", 4700 + n),
+                &input.full_path(&fixture.options),
+                if n < 64 { "codex" } else { "claude" },
+            )
+            .unwrap();
+    }
+    let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(&seed_paths, &runtime, true)
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        cache
+            .begin_semantic_stage_with_journal(
+                std::slice::from_ref(&unrelated_path),
+                &runtime,
+                true,
+            )
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut reached_relations = false;
+    for _ in 0..128 {
+        let batch = cache.semantic_batch(64).unwrap().unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Relations {
+            reached_relations = true;
+            break;
+        }
+        assert!(matches!(
+            batch.phase,
+            crate::model::relation_stage::Phase::Indexing
+                | crate::model::relation_stage::Phase::Identity
+        ));
+        if batch.paths.is_empty() {
+            continue;
+        }
+        let batch_paths = batch.paths.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let selected = inputs
+            .iter()
+            .filter(|input| {
+                batch_paths
+                    .contains(&input.full_path(&fixture.options).to_string_lossy().into_owned())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(selected.len(), batch.paths.len());
+        let prepared = crate::model::prepare_semantic_batch(
+            &fixture.options,
+            &mut cache,
+            &selected,
+            &batch,
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    assert!(reached_relations, "real staged inputs did not reach Relations");
+    drop(cache);
 
     let db = fixture.db();
+    let semantic_sources: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(semantic_sources, 65);
+    let identity_complete: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources WHERE index_done=1 AND events_done=1 AND identity_done=1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(identity_complete, 65);
     db.execute(
         "UPDATE main.catalog_semantic_sources SET relation_done=1,relation_after=''",
         [],
