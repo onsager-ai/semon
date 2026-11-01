@@ -212,9 +212,67 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         .unwrap()
     };
 
+    let original_history_metadata = updated_authority.4.clone();
+    let mut tampered_history: CatalogRow =
+        serde_json::from_slice(&original_history_metadata).unwrap();
+    tampered_history.repo = Some("tampered-history-repo".into());
+    let tampered_history_metadata = serde_json::to_vec(&tampered_history).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_history_headers SET metadata=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND metadata=$5",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &updated_generation.as_bytes(),
+                    &key.as_bytes(),
+                    &tampered_history_metadata,
+                    &original_history_metadata,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
     let archived = source_path.with_file_name("republished-original.withdrawn.jsonl");
     fs::rename(&source_path, &archived).unwrap();
     let seen = BTreeSet::new();
+    let before_tampered_withdrawal = catalog_snapshot();
+    let mut dirty = false;
+    let error = cache
+        .retain(&seen, &mut dirty)
+        .expect_err("withdrawal must reject History metadata that disagrees with its mirrors");
+    assert_eq!(
+        error.to_string(),
+        crate::storage::StorageError::ScopeChanged.to_string()
+    );
+    let head = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            super::super::super::model_cache::generation(tx)
+        })
+        .unwrap();
+    assert_eq!(head.as_deref(), Some(updated_generation.as_str()));
+    assert_eq!(catalog_snapshot(), before_tampered_withdrawal);
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_history_headers SET metadata=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND metadata=$5",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &updated_generation.as_bytes(),
+                    &key.as_bytes(),
+                    &original_history_metadata,
+                    &tampered_history_metadata,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
+
     let mut attempts = 0;
     let withdrawn_generation = loop {
         attempts += 1;

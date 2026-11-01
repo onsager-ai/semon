@@ -201,7 +201,7 @@ pub(super) fn publish_retained_history(
     let lengths = tx
         .driver
         .query(
-            "SELECT o.key_digest,octet_length(h.metadata)::bigint FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
+            "SELECT o.key_digest,octet_length(h.metadata)::bigint,octet_length(h.original_header)::bigint FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
             &[&namespace, &generation.as_bytes(), &keys],
         )
         .map_err(sqlstate::error)?;
@@ -210,26 +210,32 @@ pub(super) fn publish_retained_history(
         return Err(StorageError::ScopeChanged);
     }
     let mut total_bytes = 0usize;
-    let mut header_lengths = Vec::with_capacity(lengths.len());
+    let mut payload_lengths = Vec::with_capacity(lengths.len());
     for (index, row) in lengths.iter().enumerate() {
         let key: Vec<u8> = row.get(0);
-        let length = usize::try_from(row.get::<_, i64>(1))
+        let metadata_length = usize::try_from(row.get::<_, i64>(1))
             .map_err(|_| StorageError::ScopeChanged)?;
+        let original_header_length = usize::try_from(
+            row.get::<_, Option<i64>>(2)
+                .ok_or(StorageError::ScopeChanged)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
         if key.as_slice() != keys[index].as_slice() {
             return Err(StorageError::ScopeChanged);
         }
         total_bytes = total_bytes
-            .checked_add(length)
+            .checked_add(metadata_length)
+            .and_then(|total| total.checked_add(original_header_length))
             .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
             .ok_or(StorageError::Busy)?;
-        header_lengths.push(length);
+        payload_lengths.push((metadata_length, original_header_length));
     }
     tx.check()?;
 
     let headers = tx
         .driver
         .query(
-            "SELECT o.key_digest,o.session_key,o.owner_generation,o.original,o.last_ms,h.last_ms,h.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
+            "SELECT o.key_digest,o.session_key,o.owner_generation,o.original,o.last_ms,o.harness,o.repo,o.model,o.query_activity,o.query_active,o.parent_key,h.last_ms,h.harness,h.repo,h.model,h.query_activity,h.query_active,h.parent_key,h.metadata,h.original_header,h.recipe_generation,h.source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
             &[&namespace, &generation.as_bytes(), &keys],
         )
         .map_err(sqlstate::error)?;
@@ -245,29 +251,94 @@ pub(super) fn publish_retained_history(
         let owner_generation: Vec<u8> = header.get(2);
         let original: bool = header.get(3);
         let owner_last: i64 = header.get(4);
-        let header_last: i64 = header.get(5);
-        let metadata: Vec<u8> = header.get(6);
+        let owner_harness: Vec<u8> = header.get(5);
+        let owner_repo: Vec<u8> = header.get(6);
+        let owner_model: Vec<u8> = header.get(7);
+        let owner_activity: Option<i64> = header.get(8);
+        let owner_active: bool = header.get(9);
+        let owner_parent: Option<Vec<u8>> = header.get(10);
+        let header_last: i64 = header.get(11);
+        let header_harness: Vec<u8> = header.get(12);
+        let header_repo: Vec<u8> = header.get(13);
+        let header_model: Vec<u8> = header.get(14);
+        let header_activity: Option<i64> = header.get(15);
+        let header_active: bool = header.get(16);
+        let header_parent: Option<Vec<u8>> = header.get(17);
+        let metadata: Vec<u8> = header.get(18);
+        let original_header: Vec<u8> = header
+            .get::<_, Option<Vec<u8>>>(19)
+            .ok_or(StorageError::ScopeChanged)?;
+        let recipe_generation: Vec<u8> = header.get(20);
+        let source_generation: Option<Vec<u8>> = header.get(21);
+        let version = u32::try_from(header.get::<_, i64>(22))
+            .map_err(|_| StorageError::ScopeChanged)?;
+        let total: i64 = header.get(23);
+        let incomplete: bool = header.get(24);
         if key_digest.as_slice() != keys[index].as_slice()
             || owner_generation.len() != 64
             || !owner_generation
                 .iter()
                 .all(|byte| byte.is_ascii_hexdigit())
             || !original
-            || metadata.len() != header_lengths[index]
+            || metadata.len() != payload_lengths[index].0
+            || original_header.len() != payload_lengths[index].1
         {
             return Err(StorageError::ScopeChanged);
         }
         let row: CatalogRow =
             serde_json::from_slice(&metadata).map_err(|_| StorageError::ScopeChanged)?;
         let last = row.last.unwrap_or(0);
+        let (activity, active) = crate::storage::query::history_activity(&row);
+        let parent = row.parent.as_deref().map(str::as_bytes);
+        let expected_source_generation = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        let source_generation = source_generation
+            .as_deref()
+            .filter(|source| {
+                source.len() == 64 && source.iter().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or(StorageError::ScopeChanged)?;
+        let original_header: Option<crate::storage::catalog::OriginalHeader> =
+            serde_json::from_slice(&original_header).map_err(|_| StorageError::ScopeChanged)?;
+        let original_header = original_header.ok_or(StorageError::ScopeChanged)?;
+        let recorded_source_generation = std::str::from_utf8(source_generation)
+            .map_err(|_| StorageError::ScopeChanged)?;
         if digest(row.key.as_bytes()).as_slice() != key_digest.as_slice()
             || row.key.as_bytes() != session_key.as_slice()
             || last != owner_last
             || last != header_last
             || row.lifecycle != crate::model::summary::CatalogLifecycle::Retained
+            || row.harness.as_bytes() != owner_harness.as_slice()
+            || row.harness.as_bytes() != header_harness.as_slice()
+            || row.repo.as_deref().unwrap_or("").as_bytes() != owner_repo.as_slice()
+            || row.repo.as_deref().unwrap_or("").as_bytes() != header_repo.as_slice()
+            || row.model.as_bytes() != owner_model.as_slice()
+            || row.model.as_bytes() != header_model.as_slice()
+            || activity != owner_activity
+            || activity != header_activity
+            || active != owner_active
+            || active != header_active
+            || parent != owner_parent.as_deref()
+            || parent != header_parent.as_deref()
+            || !crate::history_projection::qualified_header(
+                &expected_source_generation,
+                version,
+                recorded_source_generation,
+                incomplete,
+            )
+            || total < 0
+            || recipe_generation.len() != 64
+            || !recipe_generation.iter().all(|byte| byte.is_ascii_hexdigit())
+            || original_header.0.as_bytes() != recipe_generation.as_slice()
+            || original_header.1 != version
+            || original_header.2.as_deref() != Some(recorded_source_generation)
+            || original_header.3 != total
         {
             return Err(StorageError::ScopeChanged);
         }
+        // `name` and `branch` have no SQL mirrors and remain authoritative in
+        // this admitted History metadata. This admission mirrors only the
+        // indexed owner/header fields above; it does not claim whole-row integrity.
         catalog_rows.push(row);
     }
     tx.check()?;
