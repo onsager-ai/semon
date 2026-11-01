@@ -92,7 +92,7 @@ jobs:
             catalog::tests::codex_child_page_keeps_a_done_multisource_parent_as_context_only \
             catalog::tests::codex_relation_closure_excludes_unrelated_pending_claude_source \
             catalog::tests::codex_relation_corrupt_context_after_prefix_is_fatal \
-            catalog::tests::codex_relation_closure_over_budget_refuses_without_advancing_sources \
+            catalog::tests::claude_owner_closure_accepts_64_and_refuses_65_during_identity \
             model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
             model::tests::catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages \
             model::tests::catalog_runtime_staged_publication_replays_large_incident_relationships \
