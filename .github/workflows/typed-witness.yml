@@ -93,6 +93,14 @@ jobs:
       - name: Production library compiles without prototype
         if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
         run: cargo check --locked -p semon-sessions --lib
+      - name: Bounded usage batching and existing core and Tree qualification
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::native_core::tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-core.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::tree_writer::tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-tree.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::native_ingest_tests::pg_usage_batch_130_real_native_publication_matches_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-native.log"
       - name: Genuine SQLite and private PG reconstruction and refusal
         id: reconstruction
         if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
@@ -116,6 +124,9 @@ jobs:
           path: |
             ${{ runner.temp }}/typed-witness-tests.log
             ${{ runner.temp }}/typed-witness-rustfmt.patch
+            ${{ runner.temp }}/usage-batch-core.log
+            ${{ runner.temp }}/usage-batch-tree.log
+            ${{ runner.temp }}/usage-batch-native.log
           if-no-files-found: error
       - name: Require formatting
         if: ${{ !cancelled() && !inputs.pg_busy_diagnostic && steps.formatting.outcome != 'success' }}
