@@ -10663,7 +10663,10 @@ fn claude_continuation_relation_batch(
             .unwrap();
     }
     let runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
-    let seed = inputs[0].full_path(&fixture.options).to_string_lossy().into_owned();
+    let seed = inputs[0]
+        .full_path(&fixture.options)
+        .to_string_lossy()
+        .into_owned();
     // All native inputs are durable before the stage starts from one seed.
     assert_eq!(
         cache
@@ -10698,8 +10701,12 @@ fn claude_continuation_relation_batch(
         let selected = inputs
             .iter()
             .filter(|input| {
-                batch_paths
-                    .contains(&input.full_path(&fixture.options).to_string_lossy().into_owned())
+                batch_paths.contains(
+                    &input
+                        .full_path(&fixture.options)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             })
             .cloned()
             .collect::<Vec<_>>();
