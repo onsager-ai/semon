@@ -87,6 +87,8 @@ pub(in crate::storage::postgres) fn remove(
     let mut removed = Vec::new();
     let mut connected = false;
     let mut after = None;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE source_owner_scan_begin");
     while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))? {
         for (_, value) in &page {
             let hits = value
@@ -111,9 +113,13 @@ pub(in crate::storage::postgres) fn remove(
         }
         after = page.last().map(|(digest, _)| digest.clone());
     }
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE source_owner_scan_complete");
     // Preserve relationship semantics: withdrawal of one endpoint requires the
     // connected ordinary producer, rather than a stale surviving edge.
     let mut after = None;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE relationship_owner_scan_begin");
     while !connected
         && !removed.is_empty()
         && let Some(page) = owners(tx, &previous, &after, None)?
@@ -143,6 +149,8 @@ pub(in crate::storage::postgres) fn remove(
         }
         after = page.last().map(|(digest, _)| digest.clone());
     }
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE relationship_owner_scan_complete");
     if connected {
         return defer(tx, files, &deferred);
     }
@@ -171,14 +179,24 @@ pub(in crate::storage::postgres) fn remove(
         .iter()
         .map(|k| digest(k.as_bytes()))
         .collect::<Vec<_>>();
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE carry_unmentioned_begin");
     super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE carry_unmentioned_complete");
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE retained_search_begin");
     super::carry::retained_search(tx, &generation, &previous, &removed_digests)?;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE retained_search_complete");
     let effects = Effects {
         tx: RefCell::new(tx),
         generation: &generation,
     };
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE search_counts_begin");
     {
         use crate::storage::catalog::SearchPublicationStore;
         for scope in [
@@ -188,8 +206,14 @@ pub(in crate::storage::postgres) fn remove(
             effects.counts(scope)?;
         }
     }
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE search_counts_complete");
     let tx = effects.tx.into_inner();
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE search_state_begin");
     super::search::publish_state(tx, &generation)?;
+    #[cfg(test)]
+    eprintln!("PG_WITHDRAWAL_STAGE search_state_complete");
     if tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation=$3", &[&ns,&generation,&previous]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     if tx.driver.execute("UPDATE semon_pg_native_catalog_stage SET stage_epoch=$2,runtime=$3,generation=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton AND stage_epoch=$5", &[&ns,&epoch,&runtime,&generation.as_bytes(),&prior_epoch]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns,&operation,&request,&generation.as_bytes(),&epoch]).map_err(sqlstate::error)?;
