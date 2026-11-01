@@ -223,7 +223,7 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         if let Err(error) = cache.retain(&seen, &mut dirty) {
             let head = pool
                 .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-                    super::super::model_cache::generation(tx)
+                    super::super::super::model_cache::generation(tx)
                 })
                 .unwrap();
             let after_attempt = catalog_snapshot();
@@ -239,7 +239,7 @@ fn pg_catalog127_republish_then_withdraw_preserves_original_search_authority() {
         }
         let head = pool
             .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-                super::super::model_cache::generation(tx)
+                super::super::super::model_cache::generation(tx)
             })
             .unwrap();
         if head.as_deref() != Some(updated_generation.as_str()) {
