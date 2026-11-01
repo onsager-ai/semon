@@ -13904,13 +13904,54 @@ mod tests {
                 }
             }
 
+            fn aggregate_inputs(options: &crate::Options) -> Vec<crate::Input> {
+                let mut inputs = claude_inputs(options, 2, 0);
+                let first = inputs[0].full_path(options);
+                let mut raw = fs::read_to_string(&first).unwrap();
+                raw.push_str(&format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "type": "continued-in",
+                        "sessionId": "claude72-0",
+                        "continuedInSessionId": "claude72-1",
+                        "timestamp": "2026-10-01T00:03:00Z"
+                    })
+                ));
+                fs::write(first, raw).unwrap();
+
+                for index in 2..4 {
+                    let session_id = format!("capture-overflow-independent-{index}");
+                    let input = crate::Input {
+                        root: crate::InputRoot::Claude,
+                        path: format!("projects/sanitized/zz-capture-overflow-{index}.jsonl"),
+                    };
+                    fs::write(
+                        input.full_path(options),
+                        format!(
+                            "{}\n",
+                            serde_json::json!({
+                                "type": "user",
+                                "sessionId": session_id,
+                                "uuid": format!("first-{index}"),
+                                "timestamp": "2026-10-01T00:00:00Z",
+                                "cwd": "/sanitized",
+                                "message": {"role": "user", "content": "native work"}
+                            })
+                        ),
+                    )
+                    .unwrap();
+                    inputs.push(input);
+                }
+                inputs
+            }
+
             #[test]
             fn aggregate_overflow_rolls_back_then_halves_and_rebinds_admission() {
                 let (f, _, options, _) = model_sources();
                 let options = &options[0];
-                let inputs = inputs(4);
+                let inputs = aggregate_inputs(options);
                 let mut cache = open(&f.config);
-                admit_inputs_with_alias_group(&mut cache, options, &inputs, 2);
+                claude_ingest(&mut cache, options, &inputs);
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
                 assert_eq!(batch.phase, Phase::Publication);
                 assert_eq!(batch.paths.len(), 4);
@@ -13977,7 +14018,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(retry_paths, expected_alias_paths);
                 let selected = selected_inputs(&inputs, options, &retry);
-                assert_eq!(selected.len(), 2, "the two aliases stay in one group");
+                assert_eq!(selected.len(), 2, "the continued Claude sources stay grouped");
                 let retry_model = cache
                     .prepare_semantic_model_batch(options, &selected, &retry, 1_790_000_000_000)
                     .unwrap();
