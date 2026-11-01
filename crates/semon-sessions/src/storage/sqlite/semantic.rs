@@ -1216,44 +1216,122 @@ fn event_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError>
         .map_err(error)
 }
 
+fn scoped_native_identity_hint(c: &Connection, ns: &str, id: &str) -> rusqlite::Result<bool> {
+    use crate::events::store::semantic_stage::NativeFrontierPort;
+
+    let frontier = ScopedNativeFrontier { db: c, ns };
+    let mut unseen = false;
+    let basename = format!("{id}.jsonl");
+    if frontier.needed_filename(false, &basename)? {
+        frontier.queue("claudeid", &basename, "")?;
+        unseen = true;
+    }
+    if frontier.needed_filename(true, id)? {
+        frontier.queue("copilotid", id, "")?;
+        unseen = true;
+    }
+    if frontier.needed_nativeall(id)? {
+        frontier.queue("nativeall", id, "")?;
+        unseen = true;
+    }
+    if frontier.needed_header(false, false, id)? {
+        frontier.queue("headerid", id, "")?;
+        unseen = true;
+    }
+    Ok(unseen)
+}
+
+fn scoped_native_key_collision(
+    c: &Connection,
+    ns: &str,
+    harness: &str,
+    native: &str,
+) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs input WHERE input.namespace=?1 AND input.native_id=?2 AND input.harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources existing JOIN main.session_catalog owner ON owner.namespace=existing.namespace AND owner.session_key=existing.session_key WHERE existing.namespace=?1 AND existing.native_id=?2 AND existing.harness<>?3 AND owner.lifecycle='current' AND existing.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources observed WHERE observed.namespace=existing.namespace AND observed.source_path=existing.source_path AND observed.index_done=1))",
+        params![ns, native, harness],
+        |r| r.get(0),
+    )
+}
+
+fn scoped_native_key_occupied(c: &Connection, ns: &str, key: &str) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 UNION ALL SELECT 1 FROM main.session_catalog_sources existing JOIN main.session_catalog owner ON owner.namespace=existing.namespace AND owner.session_key=existing.session_key WHERE existing.namespace=?1 AND existing.native_id=?2 AND owner.lifecycle='current' AND existing.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources observed WHERE observed.namespace=existing.namespace AND observed.source_path=existing.source_path AND observed.index_done=1))",
+        params![ns, key],
+        |r| r.get(0),
+    )
+}
+
 fn native_keys_page(c: &Connection, ns: &str) -> Result<bool, StoreError> {
-    let (after_harness, after_native, done): (String,String,bool) = c.query_row("SELECT key_after_harness,key_after_native,keys_done FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(error)?;
+    const PAGE_BYTES: usize = 1_048_576;
+    let (after_harness, after_native, done, mut candidate): (String,String,bool,String) = c.query_row("SELECT key_after_harness,key_after_native,keys_done,key_candidate FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).map_err(error)?;
     if done {
         return Ok(true);
     }
-    let mut query=c.prepare("SELECT harness,native_id FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness,native_id)>(?2,?3) GROUP BY harness,native_id ORDER BY harness,native_id LIMIT 64").map_err(error)?;
+    let mut query=c.prepare("SELECT input.harness,input.native_id FROM main.catalog_semantic_inputs input WHERE input.namespace=?1 AND (input.harness,input.native_id)>(?2,?3) GROUP BY input.harness,input.native_id ORDER BY input.harness,input.native_id LIMIT 64").map_err(error)?;
     let mut rows = query
         .query(params![ns, after_harness, after_native])
         .map_err(error)?;
     let mut after = (after_harness, after_native);
     let mut used = 0usize;
-    while let Some(row) = rows.next().map_err(error)? {
+    let mut budget = 64usize;
+    let mut complete = true;
+    'pairs: while let Some(row) = rows.next().map_err(error)? {
         let harness: String = row.get(0).map_err(error)?;
         let native: String = row.get(1).map_err(error)?;
-        let length = harness.len().saturating_add(native.len());
-        if length > 1048576 {
+        let source_bytes = harness.len().saturating_add(native.len());
+        if source_bytes > PAGE_BYTES {
             return Err(refuse("semantic_native_key_metadata_budget"));
         }
-        if used.saturating_add(length) > 1048576 {
-            break;
+        if candidate.is_empty() {
+            if !scoped_native_key_collision(c, ns, &harness, &native).map_err(error)? {
+                if used.saturating_add(source_bytes) > PAGE_BYTES {
+                    complete = false;
+                    break;
+                }
+                used += source_bytes;
+                let key = crate::events::store::configured::primitive_native_key(&native);
+                c.execute("INSERT INTO main.catalog_semantic_keys(namespace,harness,native_id,session_key,key_epoch) SELECT ?1,?2,?3,?4,key_epoch FROM main.catalog_semantic_stage WHERE namespace=?1 ON CONFLICT(namespace,harness,native_id) DO UPDATE SET session_key=excluded.session_key,key_epoch=excluded.key_epoch",params![ns,harness,native,key]).map_err(error)?;
+                after = (harness, native);
+                continue;
+            }
+            candidate = format!("{harness}:{native}");
         }
-        used += length;
-        // An outgoing source already observed in this epoch is replaced by
-        // the staged input cohort. Its old Current row is custody, not a live
-        // collision. The publication CAS still owns its history transfer.
-        let collision: bool=c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND native_id=?2 AND harness<>?3 UNION ALL SELECT 1 FROM main.session_catalog_sources existing WHERE existing.namespace=?1 AND existing.native_id=?2 AND existing.harness<>?3 AND existing.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.catalog_semantic_sources observed WHERE observed.namespace=existing.namespace AND observed.source_path=existing.source_path AND observed.index_done=1))",params![ns,native,harness],|r|r.get(0)).map_err(error)?;
-        if collision {
-            return Err(refuse("semantic_cross_harness_native_key_pending"));
+        loop {
+            if candidate.len() > PAGE_BYTES {
+                return Err(refuse("semantic_native_key_metadata_budget"));
+            }
+            if budget == 0 || used.saturating_add(candidate.len()) > PAGE_BYTES {
+                complete = false;
+                break 'pairs;
+            }
+            budget -= 1;
+            used += candidate.len();
+            // Resolve every prefix against qualified evidence before reserving
+            // the key, including candidates skipped by the ordinary ID index.
+            if scoped_native_identity_hint(c, ns, &candidate).map_err(error)? {
+                complete = false;
+                break 'pairs;
+            }
+            if !scoped_native_key_occupied(c, ns, &candidate).map_err(error)? {
+                c.execute("INSERT INTO main.catalog_semantic_keys(namespace,harness,native_id,session_key,key_epoch) SELECT ?1,?2,?3,?4,key_epoch FROM main.catalog_semantic_stage WHERE namespace=?1 ON CONFLICT(namespace,harness,native_id) DO UPDATE SET session_key=excluded.session_key,key_epoch=excluded.key_epoch",params![ns,harness,native,candidate]).map_err(error)?;
+                after = (harness, native);
+                candidate.clear();
+                break;
+            }
+            candidate.insert(0, ':');
         }
-        let key = crate::events::store::configured::primitive_native_key(&native);
-        c.execute("INSERT INTO main.catalog_semantic_keys(namespace,harness,native_id,session_key,key_epoch) SELECT ?1,?2,?3,?4,key_epoch FROM main.catalog_semantic_stage WHERE namespace=?1 ON CONFLICT(namespace,harness,native_id) DO UPDATE SET session_key=excluded.session_key,key_epoch=excluded.key_epoch",params![ns,harness,native,key]).map_err(error)?;
-        after = (harness, native);
     }
     drop(rows);
     drop(query);
-    let pending: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness,native_id)>(?2,?3))", params![ns,after.0,after.1], |r| r.get(0)).map_err(error)?;
-    c.execute("UPDATE main.catalog_semantic_stage SET key_after_harness=?2,key_after_native=?3,keys_done=?4 WHERE namespace=?1", params![ns,after.0,after.1,!pending]).map_err(error)?;
-    Ok(!pending)
+    if budget == 0 {
+        complete = false;
+    }
+    let pending_inputs: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_inputs WHERE namespace=?1 AND (harness,native_id)>(?2,?3))", params![ns,after.0,after.1], |r| r.get(0)).map_err(error)?;
+    let pending_frontier: bool = c.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_frontier WHERE namespace=?1 AND done=0)", [ns], |r| r.get(0)).map_err(error)?;
+    complete &= !pending_inputs && !pending_frontier;
+    c.execute("UPDATE main.catalog_semantic_stage SET key_after_harness=?2,key_after_native=?3,keys_done=?4,key_candidate=?5 WHERE namespace=?1", params![ns,after.0,after.1,complete,candidate]).map_err(error)?;
+    Ok(complete)
 }
 
 fn frontier_page(layout: &FrontierLayout<'_>, ns: &str) -> Result<bool, StoreError> {
@@ -1476,7 +1554,15 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
         native: &str,
         harness: &str,
     ) -> rusqlite::Result<crate::model::relation_stage::Selection> {
-        let key: Option<String> = self.db.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND native_id=?3", params![self.ns,harness,native], |r| r.get(0)).optional()?;
+        let ready: bool = self.db.query_row(
+            "SELECT keys_done=1 AND resetting=0 FROM main.catalog_semantic_stage WHERE namespace=?1",
+            [self.ns],
+            |r| r.get(0),
+        )?;
+        if !ready {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let key: Option<String> = self.db.query_row("SELECT keys.session_key FROM main.catalog_semantic_keys keys JOIN main.catalog_semantic_stage stage ON stage.namespace=keys.namespace AND stage.key_epoch=keys.key_epoch WHERE keys.namespace=?1 AND keys.harness=?2 AND keys.native_id=?3 AND stage.keys_done=1 AND stage.resetting=0", params![self.ns,harness,native], |r| r.get(0)).optional()?;
         Ok(crate::model::relation_stage::Selection {
             count: usize::from(key.is_some()),
             key,
@@ -3458,7 +3544,7 @@ impl Stage {
                         let observed: crate::model::summary::CatalogSource =
                             serde_json::from_str(&stored)
                                 .map_err(|e| StoreError::Data(e.to_string()))?;
-                        let key: String=tx.query_row("SELECT session_key FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?3 AND native_id=?2",params![ns,source.native_id,endpoint.row.harness],|r|r.get(0)).map_err(error)?;
+                        let key: String=tx.query_row("SELECT keys.session_key FROM main.catalog_semantic_keys keys JOIN main.catalog_semantic_stage stage ON stage.namespace=keys.namespace AND stage.key_epoch=keys.key_epoch WHERE keys.namespace=?1 AND keys.harness=?3 AND keys.native_id=?2 AND stage.keys_done=1 AND stage.resetting=0",params![ns,source.native_id,endpoint.row.harness],|r|r.get(0)).map_err(error)?;
                         if observed != *source
                             || (endpoint.row.harness != "claude" && key != endpoint.row.key)
                             || !endpoint.row.native_ids.contains(&source.native_id)
@@ -3469,7 +3555,7 @@ impl Stage {
                         }
                         covered.insert(path);
                     }
-                    let canonical: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_keys WHERE namespace=?1 AND harness=?2 AND session_key=?3 AND native_id IN (SELECT json_each.value FROM json_each(?4)))",params![ns,endpoint.row.harness,endpoint.row.key,serde_json::to_string(&endpoint.row.native_ids).map_err(|e|StoreError::Data(e.to_string()))?],|r|r.get(0)).map_err(error)?;
+                    let canonical: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_keys keys JOIN main.catalog_semantic_stage stage ON stage.namespace=keys.namespace AND stage.key_epoch=keys.key_epoch WHERE keys.namespace=?1 AND keys.harness=?2 AND keys.session_key=?3 AND keys.native_id IN (SELECT json_each.value FROM json_each(?4)) AND stage.keys_done=1 AND stage.resetting=0)",params![ns,endpoint.row.harness,endpoint.row.key,serde_json::to_string(&endpoint.row.native_ids).map_err(|e|StoreError::Data(e.to_string()))?],|r|r.get(0)).map_err(error)?;
                     if !canonical {
                         #[cfg(test)]
                         eprintln!("semantic_record_conflict: identity_canonical_key");
@@ -3755,6 +3841,9 @@ impl Stage {
                 "native"
             };
             tx.execute("INSERT OR IGNORE INTO main.catalog_semantic_frontier(namespace,kind,value,harness) VALUES(?1,?2,?3,?4)",params![ns,kind,native,harness]).map_err(error)?;
+        }
+        if !prepared.indexed_sources.is_empty() {
+            tx.execute("UPDATE main.catalog_semantic_stage SET key_after_harness='',key_after_native='',keys_done=0,key_candidate='',key_epoch=key_epoch+1 WHERE namespace=?1", [ns]).map_err(error)?;
         }
         for (harness, source) in &prepared.indexed_sources {
             if self.reduction && !matches!(harness.as_str(), "codex" | "claude") {
