@@ -4729,8 +4729,17 @@ mod catalog_owner_tests {
             .unwrap();
         config.create_native_store().unwrap();
         crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
-        let mut native = config.native_events().unwrap();
-        native.ingest(&"a".repeat(64), &raw_path, "codex").unwrap();
+        let mut native = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap();
+        crate::storage::native_events::NativeEventStore::ingest(
+            &mut native,
+            &"a".repeat(64),
+            &raw_path,
+            "codex",
+        )
+        .unwrap();
         drop(native);
         options.source = options.source.clone().with_store(config.clone()).unwrap();
         let path = raw_path.to_string_lossy().into_owned();
