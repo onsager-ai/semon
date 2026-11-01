@@ -30,7 +30,9 @@ pub(crate) fn measure_mode(
     let typed_refusal = typed.then(|| match &config.backend {
         crate::storage::StoreBackend::Sqlite { .. } => "semantic_context_budget".to_owned(),
         #[cfg(feature = "postgres")]
-        crate::storage::StoreBackend::Postgres { .. } => crate::storage::StorageError::Busy.to_string(),
+        crate::storage::StoreBackend::Postgres { .. } => {
+            crate::storage::StorageError::Busy.to_string()
+        }
     });
     let (options, initial_input) = seed_catalog_input(config, root);
     let initial_path = initial_input.full_path(&options);
