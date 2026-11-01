@@ -69,6 +69,7 @@ fn relation_sender_context(
 )> {
     let mut paths = std::collections::BTreeSet::new();
     let mut endpoints = std::collections::BTreeMap::new();
+    let mut visited = std::collections::BTreeSet::new();
     for (peer, task) in sender_candidates {
         let mut previous = None;
         for native in peer.iter().chain(task.iter()) {
@@ -109,11 +110,36 @@ fn relation_sender_context(
             if endpoint.row.sources.is_empty() {
                 return Err(rusqlite::Error::InvalidQuery);
             }
-            endpoints.insert(key, endpoint.clone());
-            for source in endpoint.row.sources {
-                paths.insert(source.path.to_string_lossy().into_owned());
-                if paths.len() > RELATION_OUTPUT_LIMIT {
-                    return Err(crate::events::store::semantic_stage::context_budget());
+
+            endpoints.insert(key.clone(), endpoint);
+            let mut ancestor = Some(key);
+            while let Some(key) = ancestor {
+                if !visited.insert(key.clone()) {
+                    break;
+                }
+                let endpoint = match endpoints
+                    .get(&key)
+                    .or_else(|| preloaded.get(&key))
+                    .cloned()
+                {
+                    Some(endpoint) => Some(endpoint),
+                    None => crate::events::store::semantic_stage::ContextPort::endpoint(
+                        physical,
+                        &key,
+                        used,
+                    )?,
+                }
+                .ok_or(rusqlite::Error::InvalidQuery)?;
+                if endpoint.row.sources.is_empty() {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+                ancestor = endpoint.parent.clone();
+                endpoints.insert(key, endpoint.clone());
+                for source in endpoint.row.sources {
+                    paths.insert(source.path.to_string_lossy().into_owned());
+                    if paths.len() > RELATION_OUTPUT_LIMIT {
+                        return Err(crate::events::store::semantic_stage::context_budget());
+                    }
                 }
             }
             break;
@@ -4316,6 +4342,9 @@ impl Stage {
                 // this receipt page remains the only relation cursor.
                 paths = vec![selected.clone()];
                 paths.extend(companions.into_iter().filter(|path| path != &selected));
+                if paths.len() > RELATION_OUTPUT_LIMIT {
+                    return Err(refuse("semantic_source_budget"));
+                }
                 relation_cursors.push(page.cursor);
             } else {
                 let mut remaining_primary_events = RELATION_EVENT_PAGE_LIMIT;
