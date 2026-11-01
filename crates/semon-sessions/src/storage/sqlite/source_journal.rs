@@ -2443,9 +2443,17 @@ mod tests {
 
         let exclusion_limit =
             crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
-        let maximum = (0..exclusion_limit)
-            .map(|index| format!("other-{index:04}"))
+        let maximum = excluded
+            .iter()
+            .cloned()
+            .chain(
+                (0..(exclusion_limit - excluded.len()))
+                    .map(|index| format!("other-{index:04}")),
+            )
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
             .collect::<Vec<_>>();
+        assert_eq!(maximum.len(), exclusion_limit);
         let maximum_search = CatalogPendingSearch {
             excluded: &maximum,
             ..hint_search
