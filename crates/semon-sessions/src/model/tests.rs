@@ -6001,8 +6001,15 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
                 .unwrap();
+            let (catalog_source_count, catalog_current_source_count): (i64, i64) = db
+                .query_row(
+                    "SELECT count(*), count(*) FILTER (WHERE lifecycle='current') FROM session_catalog_sources WHERE namespace=?1 AND session_key=?2",
+                    rusqlite::params![namespace.as_str(), &missing.sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
             eprintln!(
-                "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} header_details_turns={header_details_turns:?} persisted_turn_row_count={persisted_turn_row_count}",
+                "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} header_details_turns={header_details_turns:?} persisted_turn_row_count={persisted_turn_row_count} catalog_source_count={catalog_source_count} catalog_current_source_count={catalog_current_source_count}",
                 header_count > 0,
             );
         }
