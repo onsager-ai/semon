@@ -43,8 +43,11 @@ pub(crate) fn qualified_header(
     recorded_source_generation: &str,
     incomplete: bool,
 ) -> bool {
-    source_qualified_header(expected_source_generation, version, recorded_source_generation)
-        && !incomplete
+    source_qualified_header(
+        expected_source_generation,
+        version,
+        recorded_source_generation,
+    ) && !incomplete
 }
 
 /// A supported, exact History source cohort can expose compact identity even
@@ -56,8 +59,11 @@ pub(crate) fn incomplete_composite_identity_header(
     recorded_source_generation: &str,
     incomplete: bool,
 ) -> bool {
-    source_qualified_header(expected_source_generation, version, recorded_source_generation)
-        && incomplete
+    source_qualified_header(
+        expected_source_generation,
+        version,
+        recorded_source_generation,
+    ) && incomplete
 }
 
 fn source_qualified_header(

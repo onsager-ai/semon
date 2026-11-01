@@ -4298,8 +4298,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     assert_eq!(current.harness, history.harness);
                     Ok((
                         snapshot
-                        .history_qualified(&history)
-                        .map_err(|_| StorageError::ScopeChanged)?,
+                            .history_qualified(&history)
+                            .map_err(|_| StorageError::ScopeChanged)?,
                         snapshot
                             .composite_history_identity_qualified(&current, &history)
                             .map_err(|_| StorageError::ScopeChanged)?,
@@ -4314,13 +4314,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .expect("restore exact admitted History header");
             let (qualified, composite_qualified) =
                 qualification.expect("History header uses the admitted snapshot");
-            assert!(
-                !qualified,
-                "{reason}"
-            );
+            assert!(!qualified, "{reason}");
             assert_eq!(
-                composite_qualified,
-                composite_expected,
+                composite_qualified, composite_expected,
                 "{reason}: incomplete composite identity qualification"
             );
         };

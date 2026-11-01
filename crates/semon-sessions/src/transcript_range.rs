@@ -1023,11 +1023,13 @@ fn read_inner(
         &row,
         observation_owner,
     )
-        .inspect_err(|_| {
-            if crate::native_timing::enabled() {
-                eprintln!("semon sessions native: selected_row_authority_refused boundary=observation_binding");
-            }
-        })?;
+    .inspect_err(|_| {
+        if crate::native_timing::enabled() {
+            eprintln!(
+                "semon sessions native: selected_row_authority_refused boundary=observation_binding"
+            );
+        }
+    })?;
     // A current captured runtime must still qualify when the Index has moved
     // beyond this row. Optional Query metadata grants no substitute authority.
     if row.lifecycle == crate::model::summary::CatalogLifecycle::Current

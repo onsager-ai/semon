@@ -595,15 +595,12 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             )
             .optional()
             .map_err(io::Error::other)?;
-        let expected = crate::retention::source_generation(&history.sources)
-            .map_err(io::Error::other)?;
+        let expected =
+            crate::retention::source_generation(&history.sources).map_err(io::Error::other)?;
         Ok(header.is_some_and(|(version, recorded, incomplete)| {
             recorded.as_deref().is_some_and(|recorded| {
                 crate::history_projection::incomplete_composite_identity_header(
-                    &expected,
-                    version,
-                    recorded,
-                    incomplete,
+                    &expected, version, recorded, incomplete,
                 )
             })
         }))

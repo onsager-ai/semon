@@ -12509,7 +12509,10 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(original_marker, "fixture must retain original History custody");
+    assert!(
+        original_marker,
+        "fixture must retain original History custody"
+    );
     let history_metadata: String = connection
         .query_row(
             "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='root'",
@@ -12558,7 +12561,10 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
         "fixture",
         "sid=root&scope=retained_history&limit=1",
     );
-    assert_eq!(page.status, 503, "original History cannot use composite identity qualification");
+    assert_eq!(
+        page.status, 503,
+        "original History cannot use composite identity qualification"
+    );
     let transcript = crate::session_transcript_range_with_mode(
         &home.options,
         "fixture",
