@@ -5224,7 +5224,50 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     oracle
 }
 
+fn complete_companion_scoped_baseline(home: &Home) {
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        complete,
+        "ordinary scoped producer did not complete the companion fixture baseline"
+    );
+}
+
+fn invalidate_companion_fixture_sources(home: &Home, paths: &[String]) {
+    let namespace = home.options.source.namespace().unwrap();
+    let config = home
+        .options
+        .source
+        .config(EventCache::path(&home.options.cache))
+        .unwrap();
+    let mut observations = config.source_observations().unwrap();
+    let expected = observations.claims(paths).unwrap();
+    assert_eq!(expected.len(), paths.len());
+    for page in expected.chunks(64) {
+        let operation = crate::storage::source_observations::SourceOperation::capture(
+            namespace.as_str(),
+            "invalidate",
+            &serde_json::to_vec(page).unwrap(),
+        );
+        assert_eq!(
+            observations.invalidate(&operation, page).unwrap(),
+            crate::storage::source_observations::SourceMutationReceipt::Applied
+        );
+    }
+}
+
 fn companion_fixture_before_relations(home: &Home) -> (EventCache, relation_stage::Batch) {
+    complete_companion_scoped_baseline(home);
     let inputs = crate::inputs(&home.options).unwrap();
     assert!(inputs.len() > 64);
     let paths = inputs
@@ -5236,6 +5279,7 @@ fn companion_fixture_before_relations(home: &Home) -> (EventCache, relation_stag
                 .into_owned()
         })
         .collect::<Vec<_>>();
+    invalidate_companion_fixture_sources(home, &paths);
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for paths in paths.chunks(64) {
@@ -5457,6 +5501,13 @@ fn record_selected_companion_batch(
     );
     batch.context = context;
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let namespace = home.options.source.namespace().unwrap();
+    batch.source_claims = crate::storage::sqlite::source_journal::claims(
+        &db,
+        namespace.as_str(),
+        &batch.paths,
+    )
+    .unwrap();
     let after: String = db
         .query_row(
             "SELECT relation_after FROM catalog_semantic_sources WHERE source_path=?1",

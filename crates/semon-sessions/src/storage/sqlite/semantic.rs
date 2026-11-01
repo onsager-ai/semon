@@ -22,6 +22,220 @@ struct RelationCursor {
     end: String,
 }
 
+struct RelationScope {
+    owners: std::collections::BTreeSet<String>,
+    companions: std::collections::BTreeMap<String, (String, Option<i64>, String)>,
+}
+
+fn relation_location_key(
+    location: &crate::model::relation_stage::Location,
+) -> rusqlite::Result<String> {
+    let kind = serde_json::to_value(&location.kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    Ok(format!(
+        "{:020}:{:010}:{}:{:020}",
+        location.offset, location.block, kind, location.occurrence
+    ))
+}
+
+/// A selected relation page may refine its seed owner directly. It consumes
+/// another owner's frontier only when the complete indexed event roster for
+/// every source in that owner was selected from current source observations.
+fn relation_scope(
+    db: &Connection,
+    namespace: &str,
+    cursor: &RelationCursor,
+    batch: &Batch,
+    prepared: &PreparedSources,
+) -> rusqlite::Result<RelationScope> {
+    let mut scope = RelationScope {
+        owners: std::collections::BTreeSet::new(),
+        companions: std::collections::BTreeMap::new(),
+    };
+    let mut seed_owners = db.prepare(
+        "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2 ORDER BY session_key LIMIT 65",
+    )?;
+    for owner in seed_owners.query_map(params![namespace, cursor.path], |row| {
+        row.get::<_, String>(0)
+    })? {
+        scope.owners.insert(owner?);
+    }
+    if scope.owners.len() > 64 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    let Some(locations) = batch.context.matching_locations.as_ref() else {
+        return Ok(scope);
+    };
+    let mut roster: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut candidates = std::collections::BTreeSet::new();
+    for location in locations {
+        let path = location.source.path.to_string_lossy().into_owned();
+        roster
+            .entry(path.clone())
+            .or_default()
+            .insert(relation_location_key(location)?);
+        if path == cursor.path {
+            continue;
+        }
+        let mut owners = db.prepare(
+            "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2 ORDER BY session_key LIMIT 65",
+        )?;
+        for owner in owners.query_map(params![namespace, path], |row| {
+            row.get::<_, String>(0)
+        })? {
+            candidates.insert(owner?);
+        }
+    }
+    if roster.len() > 64 || candidates.len() > 64 {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+
+    let mut budget = 64usize;
+    for owner in candidates {
+        if scope.owners.contains(&owner) {
+            continue;
+        }
+        let Some(endpoint) = prepared.relationships.endpoints.get(&owner) else {
+            continue;
+        };
+        if endpoint.row.harness != "claude" {
+            continue;
+        }
+        let paths = db
+            .prepare(
+                "SELECT source_path FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND session_key=?2 ORDER BY source_path LIMIT 65",
+            )?
+            .query_map(params![namespace, owner], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if paths.len() > 64 || paths.len() != endpoint.row.sources.len() {
+            continue;
+        }
+
+        let mut covered = std::collections::BTreeMap::new();
+        let mut complete = true;
+        let mut pending = false;
+        for path in paths {
+            let Some((_, observed)) = prepared
+                .claims
+                .iter()
+                .find(|(selected, _)| selected == &path)
+            else {
+                complete = false;
+                break;
+            };
+            let Some(source) = endpoint
+                .row
+                .sources
+                .iter()
+                .find(|source| source.path == std::path::Path::new(&path))
+            else {
+                complete = false;
+                break;
+            };
+            let current_claims = super::source_journal::claims(
+                db,
+                namespace,
+                std::slice::from_ref(&path),
+            )?;
+            if current_claims.first().is_none_or(|(selected, claim)| {
+                selected != &path || claim != observed
+            }) {
+                complete = false;
+                break;
+            }
+            let stage: Option<(bool, bool, bool, Option<i64>, Option<String>, bool)> = db
+                .query_row(
+                    "SELECT index_done=1,events_done=1,identity_done=1,claim,ledger,relation_done=1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2",
+                    params![namespace, path],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((index_done, events_done, identity_done, claim, staged_ledger, done)) = stage
+            else {
+                complete = false;
+                break;
+            };
+            let Some((_, ledger)) = crate::events::store::ledger_row(db, &path)? else {
+                complete = false;
+                break;
+            };
+            let ledger = serde_json::to_string(&ledger)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if !index_done
+                || !events_done
+                || !identity_done
+                || claim != *observed
+                || staged_ledger.as_deref() != Some(ledger.as_str())
+                || !crate::events::selected_roles_current(db, std::slice::from_ref(source))?
+                || locations.iter().any(|location| {
+                    location.source.path == source.path && location.source != *source
+                })
+            {
+                complete = false;
+                break;
+            }
+            pending |= !done;
+
+            if budget == 0 {
+                complete = false;
+                break;
+            }
+            let mut events = db.prepare(
+                "SELECT event_key FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND copied=0 AND qualified=1 ORDER BY event_key LIMIT ?3",
+            )?;
+            let mut rows = events.query(params![namespace, path, budget as i64])?;
+            let mut end = String::new();
+            while let Some(row) = rows.next()? {
+                let key: String = row.get(0)?;
+                budget -= 1;
+                if !roster
+                    .get(&path)
+                    .is_some_and(|selected| selected.contains(&key))
+                {
+                    complete = false;
+                    break;
+                }
+                end = key;
+            }
+            drop(rows);
+            drop(events);
+            if !complete {
+                break;
+            }
+            let more: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND copied=0 AND qualified=1 AND event_key>?3)",
+                params![namespace, path, end],
+                |row| row.get(0),
+            )?;
+            if more {
+                complete = false;
+                break;
+            }
+            if !done {
+                covered.insert(path, (end, *observed, ledger));
+            }
+        }
+        if complete && pending {
+            scope.owners.insert(owner);
+            scope.companions.extend(covered);
+        }
+    }
+    Ok(scope)
+}
+
 fn relation_page(
     db: &Connection,
     ns: &str,
@@ -3732,7 +3946,7 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         let claims = super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)?;
-        if claims != prepared.claims {
+        if claims != batch.source_claims || claims != prepared.claims {
             #[cfg(test)]
             eprintln!("semantic_record_conflict: source_claims");
             return Ok(Outcome::Conflict);
@@ -3968,12 +4182,16 @@ impl Stage {
                 if batch.paths.first() != Some(&cursor.path) || !current {
                     return Ok(Outcome::Conflict);
                 }
+                let scope = relation_scope(&tx, ns, &cursor, batch, prepared).map_err(error)?;
                 let effects = owners::Owners {
                     db: &tx,
                     namespace: ns,
                 };
                 let mut bytes = 0usize;
                 for endpoint in prepared.relationships.endpoints.values() {
+                    if !scope.owners.contains(&endpoint.row.key) {
+                        continue;
+                    }
                     let own: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,endpoint.row.key],|r|r.get(0)).map_err(error)?;
                     if !own {
                         #[cfg(test)]
@@ -3992,6 +4210,14 @@ impl Stage {
                     return Err(refuse("semantic_relation_budget"));
                 }
                 for relation in prepared.relationships.relations.values() {
+                    if !scope.owners.contains(&relation.from)
+                        && !relation
+                            .to
+                            .as_ref()
+                            .is_some_and(|to| scope.owners.contains(to))
+                    {
+                        continue;
+                    }
                     // The shared native model represents unmatched calls and
                     // receipts with explicit trace stubs. They carry no Raw
                     // membership, just as in Owners::replay. Every relation
@@ -4031,6 +4257,13 @@ impl Stage {
                     .map_err(error)?;
                 let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",params![ns,cursor.path,cursor.end],|r|r.get(0)).map_err(error)?;
                 tx.execute("UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=?4 WHERE namespace=?1 AND source_path=?2",params![ns,cursor.path,cursor.end,!pending]).map_err(error)?;
+                for (path, (end, claim, ledger)) in &scope.companions {
+                    tx.execute(
+                        "UPDATE main.catalog_semantic_sources SET relation_after=?3,relation_done=1,claim=?4,ledger=?5 WHERE namespace=?1 AND source_path=?2 AND relation_done=0",
+                        params![ns, path, end, claim, ledger],
+                    )
+                    .map_err(error)?;
+                }
             }
             for path in &batch.paths {
                 if batch.phase == Phase::Relations {
