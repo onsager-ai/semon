@@ -1,6 +1,6 @@
 //! Test-only representation experiment. No persistence or reader consumes it.
 use super::PreparedSources;
-use serde::{Serialize, Serializer, ser::{SerializeMap, SerializeSeq, SerializeTuple}};
+use serde::{Deserialize, Serialize, Serializer, de::DeserializeOwned, ser::{SerializeMap, SerializeSeq, SerializeTuple}};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::{BTreeMap, BTreeSet}, io::{self, Write}};
@@ -8,14 +8,16 @@ use std::{collections::{BTreeMap, BTreeSet}, io::{self, Write}};
 const CODEC: &str = "typed-witness-cost-v1";
 const SCRATCH: usize = 4096;
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Cell {
     key: String,
     metadata: String,
     recipe: Option<String>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Trace {
     session: Value,
     turns: Value,
@@ -257,6 +259,27 @@ pub(crate) fn measure(value: &impl Serialize) -> io::Result<usize> {
     Ok(sink.bytes)
 }
 
+#[derive(Default)]
+struct Rows { bytes: usize, count: usize, buffer_max: usize }
+impl Rows {
+    fn record<T: Serialize + DeserializeOwned>(&mut self, kind: &str, key: &str, value: &T) -> io::Result<T> {
+        let record = (CODEC, kind, key, value);
+        let bytes = measure(&record)?;
+        if bytes > 1048576 { return Err(io::Error::other("typed row exceeds unchanged request budget")); }
+        // Decode one bounded record at a time. This output buffer belongs to
+        // the round-trip test, separately from the fixed streaming sink.
+        let encoded = serde_json::to_vec(&record)?;
+        assert_eq!(encoded.len(), bytes);
+        let (codec, family, owner, decoded): (String, String, String, T) = serde_json::from_slice(&encoded)?;
+        if codec != CODEC || family != kind || owner != key { return Err(invalid()); }
+        self.bytes += bytes;
+        self.count += 1;
+        self.buffer_max = self.buffer_max.max(encoded.len());
+        eprintln!("typed_witness_row kind={kind} key={key} bytes={bytes}");
+        Ok(decoded)
+    }
+}
+
 pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
     let witness = Witness::capture(prepared)?;
     witness.verify(prepared)?;
@@ -267,27 +290,26 @@ pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
     let original = measure(&Model { witness: &witness, reconstruct: true })?;
     let aggregate = coordinator + normalized;
     eprintln!("typed_witness_memory sink_scratch={} reconstruct_metadata_input_max={} reconstruction_output_buffer=0 full_source_model_retained=true allocator_peak_measured=false", SCRATCH, witness.cells.iter().map(|c| c.metadata.len()).max().unwrap_or(0));
-    let mut typed_bytes = 0usize;
-    let mut row_count = 0usize;
-    let mut row = |kind: &str, key: &str, value: &dyn Fn() -> io::Result<usize>| -> io::Result<()> {
-        let bytes = value()?;
-        eprintln!("typed_witness_row kind={kind} key={key} bytes={bytes}");
-        if bytes > 1048576 { return Err(io::Error::other("typed row exceeds unchanged request budget")); }
-        typed_bytes += bytes;
-        row_count += 1;
-        Ok(())
-    };
-    for cell in &witness.cells { row("cell", &cell.key, &|| measure(&(CODEC, "cell", &cell.key, &cell.metadata, &cell.recipe)))?; }
-    for (key, trace) in &witness.traces { row("trace", key, &|| measure(&(CODEC, "trace", key, trace)))?; }
+    let mut rows = Rows::default();
+    let mut cells = Vec::new();
+    for cell in &witness.cells { cells.push(rows.record("cell", &cell.key, cell)?); }
+    let mut traces = Vec::new();
+    for (key, trace) in &witness.traces { traces.push((key.clone(), rows.record("trace", key, trace)?)); }
+    let mut slots = Vec::new();
     for slot in &witness.slots {
         let key = slot[0].as_str().ok_or_else(invalid)?;
-        row("slots", key, &|| measure(&(CODEC, "slots", slot)))?;
+        slots.push(rows.record("slots", key, slot)?);
     }
-    for (key, value) in &witness.endpoints { row("endpoint", key, &|| measure(&(CODEC, "endpoint", key, value)))?; }
-    for (key, value) in &witness.relations { row("relation", key, &|| measure(&(CODEC, "relation", key, value)))?; }
-    row("facts", "", &|| measure(&(CODEC, "facts", (&witness.pids, &witness.lineage, &witness.parents, &witness.withdrawals, &witness.messages, &witness.retired, &witness.lifecycle))))?;
-    row("observations", "", &|| measure(&(CODEC, "observations", &witness.observations)))?;
-    eprintln!("typed_witness_totals owners={} coordinator={} original_witness={} normalized_witness={} sqlite_aggregate={} sqlite_headroom={} typed_rows={} typed_bytes={} typed_framing_delta={}", witness.cells.len(), coordinator, original, normalized, aggregate, 2097152_i64 - aggregate as i64, row_count, typed_bytes, typed_bytes as i64 - aggregate as i64);
+    let mut endpoints = BTreeMap::new();
+    for (key, value) in &witness.endpoints { endpoints.insert(key.clone(), rows.record("endpoint", key, value)?); }
+    let mut relations = BTreeMap::new();
+    for (key, value) in &witness.relations { relations.insert(key.clone(), rows.record("relation", key, value)?); }
+    let [pids, lineage, parents, withdrawals, messages, retired, lifecycle] = rows.record("facts", "", &[witness.pids.clone(), witness.lineage.clone(), witness.parents.clone(), witness.withdrawals.clone(), witness.messages.clone(), witness.retired.clone(), witness.lifecycle.clone()])?;
+    let observations = rows.record("observations", "", &witness.observations)?;
+    let decoded = Witness { cells, slots, traces, pids, lineage, parents, withdrawals, endpoints, relations, messages, retired, lifecycle, observations };
+    decoded.verify(prepared)?;
+    eprintln!("typed_witness_case name=typed_row_roundtrip status=pass");
+    eprintln!("typed_witness_totals owners={} coordinator={} original_witness={} normalized_witness={} sqlite_aggregate={} sqlite_headroom={} typed_rows={} typed_bytes={} typed_framing_delta={} roundtrip_row_buffer_max={}", witness.cells.len(), coordinator, original, normalized, aggregate, 2097152_i64 - aggregate as i64, rows.count, rows.bytes, rows.bytes as i64 - aggregate as i64, rows.buffer_max);
     if aggregate > 2097152 { return Err(io::Error::other("normalized witness exceeds unchanged SQLite coordinator budget")); }
 
     // Each mutation starts from the genuine shared producer result. These
@@ -303,7 +325,12 @@ pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
             "recipe_bytes" => changed.cells.iter_mut().find(|c| c.recipe.is_some()).ok_or_else(invalid)?.recipe.as_mut().unwrap().push(' '),
             "trace_cost_copy" => changed.traces.iter_mut().find_map(|(_, t)| t.as_mut()).ok_or_else(invalid)?.session["cost"] = Value::Null,
             "trace_semantics" => changed.traces.iter_mut().find_map(|(_, t)| t.as_mut()).ok_or_else(invalid)?.session["state"] = Value::String("tampered".into()),
-            "slot_evidence" => changed.slots[0][1][0]["offset"] = Value::from(u64::MAX),
+            "slot_evidence" => {
+                let slot = changed.slots[0][1][0].as_object_mut().ok_or_else(invalid)?;
+                let offset = slot.get_mut("offset").ok_or_else(invalid)?;
+                let original = offset.as_u64().ok_or_else(invalid)?;
+                *offset = Value::from(original.checked_add(1).ok_or_else(invalid)?);
+            }
             "relationship_evidence" => { changed.relations.pop_first(); }
             _ => unreachable!(),
         }
@@ -317,6 +344,6 @@ pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
     wrong_cost.rows[0].cost.usd = Some(999.0);
     if Witness::capture(&wrong_cost).is_ok() { return Err(invalid()); }
     eprintln!("typed_witness_case name=producer_cost_copy_mismatch status=refused");
-    eprintln!("typed_witness_cases positive=1 negative=10");
+    eprintln!("typed_witness_cases positive=2 negative=10");
     Ok(())
 }

@@ -93,6 +93,10 @@ fn save(tx: &mut PgTxn<'_>, stage: &Stage, insert: bool) -> Result<(), StorageEr
         );
     }
     if bytes.len() > MAX || stage.paths.len() > 64 || stage.context.endpoints.len() > 64 {
+        #[cfg(test)]
+        if stage.paths.len() == 17 && stage.phase == Phase::Publication && bytes.len() > MAX {
+            eprintln!("typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget bytes={} max={MAX}", bytes.len());
+        }
         return Err(StorageError::Busy);
     }
     let hash = Sha256::digest(&bytes).to_vec();
@@ -399,7 +403,10 @@ pub(super) fn record(
         if batch.paths.len() == 17 {
             let header = crate::model::typed_witness::measure(&stage)
                 .map_err(|_| StorageError::ScopeChanged)?;
-            eprintln!("typed_witness_pg_header bytes={header} model_present={}", stage.model.is_some());
+            eprintln!(
+                "typed_witness_pg_header bytes={header} model_present={}",
+                stage.model.is_some()
+            );
         }
         stage.model = Some(
             prepared

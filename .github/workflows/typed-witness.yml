@@ -71,8 +71,9 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls typed_witness_genuine_fixture_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/typed-witness-tests.log"
           grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/typed-witness-tests.log"
-          test "$(grep -c 'typed_witness_cases positive=1 negative=10' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
+          test "$(grep -c 'typed_witness_cases positive=2 negative=10' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
           test "$(grep -c 'typed_witness_production_refusal unchanged_head=true pending_claim_paths_unchanged=true publication_not_activated=true' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
+          test "$(grep -c 'typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 1
       - name: Focused library lint
         if: ${{ !cancelled() && steps.reconstruction.outcome == 'success' }}
         run: cargo clippy --locked -p semon-sessions --lib --tests --features postgres-test-tls -- --no-deps -D warnings

@@ -82,7 +82,15 @@ pub(crate) fn measure_mode(
             &runtime,
             true,
         );
-        assert!(finish_measured(&mut cache, &options, std::slice::from_ref(&old_input), typed).is_empty());
+        assert!(
+            finish_measured(
+                &mut cache,
+                &options,
+                std::slice::from_ref(&old_input),
+                typed
+            )
+            .is_empty()
+        );
     }
     let mut inputs = vec![input];
     let children = (0..CHILDREN)
@@ -351,13 +359,18 @@ fn finish_measured(
                 );
             }
         }
-        let typed_publication = typed && batch.paths.len() == 17
+        let typed_publication = typed
+            && batch.paths.len() == 17
             && batch.phase == crate::model::relation_stage::Phase::Publication;
         if typed_publication {
             crate::model::typed_witness::qualify(model.prepared()).unwrap();
         }
         let before = cache.session_catalog_generation();
-        let pending = if typed_publication { Some(cache.pending_catalog_sources(64).unwrap()) } else { None };
+        let pending = if typed_publication {
+            Some(cache.pending_catalog_sources(64).unwrap())
+        } else {
+            None
+        };
         let recorded = cache.record_semantic_batch(&batch, model.prepared());
         if batch.paths.len() == 17 {
             eprintln!(
@@ -369,13 +382,15 @@ fn finish_measured(
         if typed_publication {
             match cache.semantic_rejection() {
                 Some("semantic_context_budget") => assert!(recorded.is_err()),
-                None => assert!(matches!(recorded, Err(crate::events::StoreError::Configured(crate::storage::StorageError::Busy)))),
+                None => assert_eq!(recorded.unwrap_err().to_string(), crate::storage::StorageError::Busy.to_string()),
                 other => panic!("unexpected production record refusal: {other:?}"),
             }
             assert_eq!(cache.session_catalog_generation(), before);
             assert_eq!(before, batch.base_generation);
             assert_eq!(cache.pending_catalog_sources(64).unwrap(), pending.unwrap());
-            eprintln!("typed_witness_production_refusal unchanged_head=true pending_claim_paths_unchanged=true publication_not_activated=true");
+            eprintln!(
+                "typed_witness_production_refusal unchanged_head=true pending_claim_paths_unchanged=true publication_not_activated=true"
+            );
             return model.prepared().rows.clone();
         }
         assert_eq!(recorded.unwrap(), crate::events::Outcome::Written);
