@@ -10180,15 +10180,14 @@ fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
 }
 
 #[test]
-fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
+fn codex_child_page_keeps_a_done_parent_context_only() {
     let fixture = Fixture::new();
     let spawn = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});
     let parent =
         fixture.codex_source_with_records("parent-a", "family-parent", None, None, 1, &[spawn]);
-    let parent_copy =
-        fixture.codex_source_with_records("parent-b", "family-parent", None, None, 1, &[]);
     let child_records = [
         json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}}),
+        json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"child-spawn-0","arguments":json!({"task_name":"nested-task"}).to_string()}}),
     ];
     let child = fixture.codex_source_with_records(
         "child-0",
@@ -10200,25 +10199,16 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
     );
     let facts_path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(facts_path).unwrap();
-    facts.codex_rollouts = Some(
-        [parent.clone(), parent_copy.clone(), child.clone()]
-            .into_iter()
-            .collect(),
-    );
+    facts.codex_rollouts = Some([parent.clone(), child.clone()].into_iter().collect());
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
     fixture.publish_existing();
 
-    let parent_paths = [parent, parent_copy]
-        .into_iter()
-        .map(|path| {
-            fixture
-                .options
-                .codex_home
-                .join(path)
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect::<Vec<_>>();
+    let parent_path = fixture
+        .options
+        .codex_home
+        .join(parent)
+        .to_string_lossy()
+        .into_owned();
     let child_path = fixture
         .options
         .codex_home
@@ -10241,40 +10231,53 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
         [],
     )
     .unwrap();
+    let parent_cursor: (bool, String) = db
+        .query_row(
+            "SELECT relation_done=1,relation_after FROM main.catalog_semantic_sources WHERE source_path=?1",
+            [&parent_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(parent_cursor, (true, String::new()));
     drop(db);
 
     let mut stage = fixture.stage();
     let batch = stage.batch(64).unwrap().unwrap();
+    let expected_paths =
+        std::collections::BTreeSet::from([parent_path.clone(), child_path.clone()]);
+    let batch_paths = batch
+        .paths
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(batch_paths, expected_paths);
+    assert_eq!(batch.paths.len(), 2);
     assert!(batch.paths.contains(&child_path));
-    for parent in &parent_paths {
-        assert!(batch.paths.contains(parent));
-        assert!(
-            !batch
-                .context
-                .matching_header_paths
-                .as_ref()
-                .unwrap()
-                .contains(parent)
-        );
-        assert!(
-            !batch
-                .relation_cursors
-                .iter()
-                .any(|cursor| &cursor.path == parent)
-        );
-    }
+    assert!(batch.paths.contains(&parent_path));
     assert_eq!(
         batch.context.matching_header_paths,
         Some(vec![child_path.clone()])
     );
+    assert!(
+        !batch
+            .context
+            .matching_header_paths
+            .as_ref()
+            .unwrap()
+            .contains(&parent_path)
+    );
     assert_eq!(batch.relation_cursors.len(), 1);
     assert_eq!(batch.relation_cursors[0].path, child_path);
     assert!(
-        batch
-            .context
-            .matching_locations
-            .as_ref()
-            .unwrap()
+        !batch
+            .relation_cursors
+            .iter()
+            .any(|cursor| cursor.path == parent_path)
+    );
+    let locations = batch.context.matching_locations.as_ref().unwrap();
+    assert!(!locations.is_empty(), "the child has a projected semantic event");
+    assert!(
+        locations
             .iter()
             .all(|location| location.source.path.to_string_lossy().as_ref() == child_path)
     );
@@ -10284,8 +10287,9 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
             .iter()
             .map(|(path, _)| path.clone())
             .collect::<std::collections::BTreeSet<_>>(),
-        batch.paths.iter().cloned().collect()
+        expected_paths
     );
+    assert_eq!(batch.source_claims.len(), 2);
 }
 
 #[test]
