@@ -4,12 +4,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io;
 
+/// Accepted custody token plus its exact before and after filesystem Stats.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppendEvidence {
     pub(crate) generation: String,
     pub(crate) before: Stat,
     pub(crate) after: Stat,
+}
+
+fn valid_generation(generation: &str) -> bool {
+    generation.len() == 32 && generation.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub(crate) fn stat_generation(stat: &Stat) -> io::Result<String> {
@@ -20,8 +25,7 @@ pub(crate) fn stat_generation(stat: &Stat) -> io::Result<String> {
 
 impl AppendEvidence {
     pub(crate) fn qualifies(&self, before: &Stat, after: &Stat) -> bool {
-        self.generation.len() == 32
-            && self.generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+        valid_generation(&self.generation)
             && self.before == *before
             && self.after == *after
             && before.dev == after.dev
@@ -297,7 +301,8 @@ pub(crate) fn append_plan(
 ) -> Option<AppendEvidence> {
     match (generation, before) {
         (Some(generation), Some(before))
-            if before.size == from
+            if valid_generation(&generation)
+                && before.size == from
                 && after.size == to
                 && before.dev == after.dev
                 && before.ino == after.ino
@@ -314,6 +319,43 @@ pub(crate) fn append_plan(
         }
         _ => None,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn append_plan_requires_a_well_formed_custody_generation() {
+    let before = Stat {
+        dev: 1,
+        ino: 2,
+        size: 10,
+        modified_ns: 3,
+        changed_ns: Some(4),
+    };
+    let after = Stat {
+        size: 20,
+        modified_ns: 30,
+        changed_ns: Some(40),
+        ..before
+    };
+    assert!(append_plan(None, Some(before), None, 10, after, 20).is_none());
+    assert!(append_plan(
+        Some("not-a-generation".into()),
+        Some(before),
+        None,
+        10,
+        after,
+        20,
+    )
+    .is_none());
+    assert!(append_plan(
+        Some("0123456789abcdef0123456789abcdef".into()),
+        Some(before),
+        None,
+        10,
+        after,
+        20,
+    )
+    .is_some());
 }
 
 pub(crate) fn lock_key(options: &Options, input: &Input) -> String {
