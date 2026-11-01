@@ -1796,6 +1796,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             (key.to_owned(), keys)
         })
         .collect::<std::collections::BTreeMap<_, _>>();
+    let oracle_parent_retained_search = sqlite_scoped("scope=retained_history&q=one&", 50)
+        .iter()
+        .map(stable)
+        .collect::<Vec<_>>();
     for (from, to) in &parked {
         fs::rename(to, from).unwrap();
     }
@@ -6964,10 +6968,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .map(stable)
             .collect::<Vec<_>>(),
-        sqlite_scoped("scope=retained_history&q=one&", 50)
-            .iter()
-            .map(stable)
-            .collect::<Vec<_>>(),
+        oracle_parent_retained_search,
         "retained search uses the latest Catalog index fields"
     );
     // P3 search: metadata search over the published PG projection. A key
