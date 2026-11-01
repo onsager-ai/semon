@@ -168,11 +168,8 @@ impl Fixture {
                 .paths
                 .iter()
                 .map(|path| {
-                    crate::native_evidence::catalog_input(
-                        std::path::Path::new(path),
-                        &self.options,
-                    )
-                    .unwrap()
+                    crate::native_evidence::catalog_input(std::path::Path::new(path), &self.options)
+                        .unwrap()
                 })
                 .collect::<Vec<_>>();
             let prepared = crate::model::prepare_semantic_batch(
