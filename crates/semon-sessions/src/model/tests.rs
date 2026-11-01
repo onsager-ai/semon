@@ -11536,9 +11536,8 @@ fn semantic_index_rejects_unannounced_physical_change_after_producer_preparation
 
     let before = crate::events::Stat::of(&source_path).unwrap();
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
-    let (_, ledger) = crate::events::store::ledger_row(&db, &path)
-        .unwrap()
-        .unwrap();
+    let ledgers = cache.host_scan_ledger_batch(&paths).unwrap().unwrap();
+    let ledger = ledgers[0].as_ref().unwrap();
     assert_eq!(ledger.offset, ledger.stat.size);
     assert!(ledger.stat.changed_ns.is_some());
     let from = fs::metadata(&path).unwrap().len();
