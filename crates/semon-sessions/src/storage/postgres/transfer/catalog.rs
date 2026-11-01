@@ -153,10 +153,11 @@ fn verify_authority(
             let generation = super::super::model_cache::generation(tx.0)?.or(tx.get(catalog_rows::IMPORTED_GENERATION,64)?.map(|b| String::from_utf8(b).map_err(|_| StorageError::ScopeChanged)).transpose()?).ok_or(StorageError::ScopeChanged)?;
             let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
+            *verification_bytes = verification_bytes.checked_sub(metadata.len()).ok_or(StorageError::Busy)?;
+            let posting_bytes: i64 = tx.0.driver.query_one("SELECT coalesce(sum(octet_length(gram)+8),0)::bigint FROM (SELECT gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY gram LIMIT 1025) p", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            *verification_bytes = verification_bytes.checked_sub(usize::try_from(posting_bytes).map_err(|_| StorageError::ScopeChanged)?).ok_or(StorageError::Busy)?;
             let rows = tx.0.driver.query("SELECT gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY gram LIMIT 1025", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
             let postings = rows.into_iter().map(|r| Ok((decode(r.get(0))?,r.get(1)))).collect::<Result<Vec<_>,StorageError>>()?;
-            let work = metadata.len() + postings.iter().map(|(gram,_)| gram.len()+8).sum::<usize>();
-            *verification_bytes = verification_bytes.checked_sub(work).ok_or(StorageError::Busy)?;
             catalog_rows::verify_search_document(&metadata,text(1)?,text(2)?,values[3].as_bool().ok_or(StorageError::ScopeChanged)?,postings)?;
         }
         _ => {}
