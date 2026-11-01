@@ -677,7 +677,8 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                                 value.lifecycle = lifecycle;
                                 let projected =
                                     serde_json::to_vec(&value).map_err(io::Error::other)?;
-                                length = i64::try_from(projected.len()).map_err(io::Error::other)?;
+                                length =
+                                    i64::try_from(projected.len()).map_err(io::Error::other)?;
                                 encoded = (length <= budget as i64).then_some(projected);
                             } else {
                                 encoded = Some(bytes);
