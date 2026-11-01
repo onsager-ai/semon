@@ -791,7 +791,8 @@ fn read_inner(
             crate::storage::catalog::CatalogObservationOwner::Catalog
         },
         &mut row,
-    ).map_err(unavailable)?;
+    )
+    .map_err(unavailable)?;
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
     }) {

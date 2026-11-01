@@ -1583,10 +1583,11 @@ pub(crate) fn attach_query_recipe(
     }
     let current = reader.runtime_binding_at(db)?;
     let observation = query_recipe_observation(db, &current, owner, row)?;
-    let (recipe, bytes) = load_query_recipe_with_bytes(db, reader, &observation).map_err(|error| match error {
-        Error::Storage(error) => error,
-        _ => StorageError::ScopeChanged,
-    })?;
+    let (recipe, bytes) =
+        load_query_recipe_with_bytes(db, reader, &observation).map_err(|error| match error {
+            Error::Storage(error) => error,
+            _ => StorageError::ScopeChanged,
+        })?;
     row.query_recipe = Some(recipe.ok_or(StorageError::ScopeChanged)?);
     Ok(bytes)
 }
@@ -1608,7 +1609,10 @@ fn load_query_recipe_with_bytes(
     db: &Connection,
     reader: &NativeReaderBinding,
     observation: &crate::storage::query::QueryRecipeObservation,
-) -> Result<(Option<crate::query_projection::SelectedRecipe>, usize), crate::storage::query::QueryRecipeLoadError> {
+) -> Result<
+    (Option<crate::query_projection::SelectedRecipe>, usize),
+    crate::storage::query::QueryRecipeLoadError,
+> {
     use crate::storage::query::{
         QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
     };

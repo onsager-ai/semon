@@ -32,10 +32,10 @@ pub(super) fn component_paths(
         charged_owners: RefCell::new(BTreeSet::new()),
     };
     let mut seeds = paths.to_vec();
-    let mut seeded = Vec::new();
+    let mut seeded = BTreeSet::new();
     for key in keys {
         if lookup.exists(key)? {
-            seeded.push(key.clone());
+            seeded.insert(key.clone());
         }
     }
     for (harness, id) in native {

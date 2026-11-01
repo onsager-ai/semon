@@ -396,8 +396,12 @@ fn read(
             && let Some(mut row) = load_catalog_row(db, &key, true, bytes_left)?
         {
             let bytes = super::proof_generations::attach_query_recipe(
-                db, reader, crate::storage::catalog::CatalogObservationOwner::History, &mut row,
-            ).map_err(unavailable)?;
+                db,
+                reader,
+                crate::storage::catalog::CatalogObservationOwner::History,
+                &mut row,
+            )
+            .map_err(unavailable)?;
             spend(bytes_left, bytes)?;
             let member = history_window(&row, cutoff).map_err(unavailable)?.member;
             if select_history(cutoff, current_eligible, true, member) {
