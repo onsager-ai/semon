@@ -4593,9 +4593,11 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
             .unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
         let stage: Option<(i64, String)> = db
-            .query_row("SELECT epoch,phase FROM catalog_semantic_stage", [], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT epoch,phase FROM catalog_semantic_stage",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .optional()
             .unwrap();
         if done {
@@ -4638,10 +4640,7 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         }
         if phase == "publication" && !appended {
             append_epoch = Some(epoch);
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&root_log)
-                .unwrap();
+            let mut file = fs::OpenOptions::new().append(true).open(&root_log).unwrap();
             writeln!(file, "{}", codex_reply(ts(6, 5), "Late native completion")).unwrap();
             appended = true;
         }
@@ -4667,7 +4666,10 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         complete && restarted && appended && durable_preview_restarted,
         "durable rich family did not qualify after owner loss and append"
     );
-    assert!(saw_late_claim, "late append did not create a dirty source claim");
+    assert!(
+        saw_late_claim,
+        "late append did not create a dirty source claim"
+    );
     assert!(
         reset_epoch.is_some_and(|epoch| epoch > append_epoch.unwrap()),
         "late committed stat mismatch did not reset the semantic epoch"
@@ -4675,10 +4677,7 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     let late_stat = crate::events::Stat::of(&root_log).unwrap();
     let work = crate::viewer::lock(&evidence.work);
     assert_eq!(
-        work.events
-            .as_ref()
-            .unwrap()
-            .indexed_stat(&root_log),
+        work.events.as_ref().unwrap().indexed_stat(&root_log),
         Some(late_stat),
         "the host Index ledger must catch up to the appended source"
     );
@@ -5502,12 +5501,9 @@ fn record_selected_companion_batch(
     batch.context = context;
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let namespace = home.options.source.namespace().unwrap();
-    batch.source_claims = crate::storage::sqlite::source_journal::claims(
-        &db,
-        namespace.as_str(),
-        &batch.paths,
-    )
-    .unwrap();
+    batch.source_claims =
+        crate::storage::sqlite::source_journal::claims(&db, namespace.as_str(), &batch.paths)
+            .unwrap();
     let after: String = db
         .query_row(
             "SELECT relation_after FROM catalog_semantic_sources WHERE source_path=?1",

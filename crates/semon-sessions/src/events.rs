@@ -3766,9 +3766,9 @@ fn scan_file_with_mode(
         };
         #[cfg(not(test))]
         let committed_index_incomplete = !index
-                .source_chunks
-                .as_ref()
-                .is_some_and(|chunks| chunks.valid(ledger.offset))
+            .source_chunks
+            .as_ref()
+            .is_some_and(|chunks| chunks.valid(ledger.offset))
             || (harness != "copilot" && index.marker_index.is_none())
             || index.handoff_index.is_none()
             || (harness == "codex" && index.codex_header.is_none())

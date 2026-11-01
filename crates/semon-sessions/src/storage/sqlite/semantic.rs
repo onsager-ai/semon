@@ -84,9 +84,7 @@ fn relation_scope(
         let mut owners = db.prepare(
             "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE namespace=?1 AND source_path=?2 ORDER BY session_key LIMIT 65",
         )?;
-        for owner in owners.query_map(params![namespace, path], |row| {
-            row.get::<_, String>(0)
-        })? {
+        for owner in owners.query_map(params![namespace, path], |row| row.get::<_, String>(0))? {
             candidates.insert(owner?);
         }
     }
@@ -136,14 +134,12 @@ fn relation_scope(
                 complete = false;
                 break;
             };
-            let current_claims = super::source_journal::claims(
-                db,
-                namespace,
-                std::slice::from_ref(&path),
-            )?;
-            if current_claims.first().is_none_or(|(selected, claim)| {
-                selected != &path || claim != observed
-            }) {
+            let current_claims =
+                super::source_journal::claims(db, namespace, std::slice::from_ref(&path))?;
+            if current_claims
+                .first()
+                .is_none_or(|(selected, claim)| selected != &path || claim != observed)
+            {
                 complete = false;
                 break;
             }
@@ -172,8 +168,8 @@ fn relation_scope(
                 complete = false;
                 break;
             };
-            let ledger = serde_json::to_string(&ledger)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            let ledger =
+                serde_json::to_string(&ledger).map_err(|_| rusqlite::Error::InvalidQuery)?;
             if !index_done
                 || !events_done
                 || !identity_done

@@ -1235,16 +1235,12 @@ impl NativeEvidence {
             Err(error)
                 if error
                     .get_ref()
-                    .and_then(|cause| {
-                        cause.downcast_ref::<crate::events::CommittedSourceChanged>()
-                    })
+                    .and_then(|cause| cause.downcast_ref::<crate::events::CommittedSourceChanged>())
                     .is_some() =>
             {
                 let path = error
                     .get_ref()
-                    .and_then(|cause| {
-                        cause.downcast_ref::<crate::events::CommittedSourceChanged>()
-                    })
+                    .and_then(|cause| cause.downcast_ref::<crate::events::CommittedSourceChanged>())
                     .expect("matched committed source stat change")
                     .path()
                     .to_owned();
@@ -4605,7 +4601,10 @@ mod catalog_owner_tests {
         let path = input.full_path(&options).to_string_lossy().into_owned();
         let config = options.source.config(&options.cache).unwrap();
         let mut journal = config.source_observations().unwrap();
-        assert_eq!(journal.claims(std::slice::from_ref(&path)).unwrap()[0].1, None);
+        assert_eq!(
+            journal.claims(std::slice::from_ref(&path)).unwrap()[0].1,
+            None
+        );
 
         let evidence = NativeEvidence::new(options.clone());
         {
@@ -4632,11 +4631,9 @@ mod catalog_owner_tests {
                 return Ok(());
             }
             let phase: String = database
-                .query_row(
-                    "SELECT phase FROM catalog_semantic_stage",
-                    [],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT phase FROM catalog_semantic_stage", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             if !matches!(phase.as_str(), "relations" | "publication") {
                 return Ok(());
@@ -4678,7 +4675,10 @@ mod catalog_owner_tests {
             }
         }
         drop(before_build);
-        assert!(injected_race.get(), "the staged read never reached a committed phase");
+        assert!(
+            injected_race.get(),
+            "the staged read never reached a committed phase"
+        );
         assert!(yielded_after_cas, "the terminal CAS conflict must yield");
         assert_eq!(
             journal.claims(std::slice::from_ref(&path)).unwrap()[0].1,
@@ -4687,11 +4687,9 @@ mod catalog_owner_tests {
         );
 
         let epoch_before_reset: i64 = database
-            .query_row(
-                "SELECT epoch FROM catalog_semantic_stage",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT epoch FROM catalog_semantic_stage", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         {
             let mut work = lock(&evidence.work);
@@ -4731,9 +4729,7 @@ mod catalog_owner_tests {
         config.create_native_store().unwrap();
         crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
         let mut native = config.native_events().unwrap();
-        native
-            .ingest(&"a".repeat(64), &raw_path, "codex")
-            .unwrap();
+        native.ingest(&"a".repeat(64), &raw_path, "codex").unwrap();
         drop(native);
         options.source = options.source.clone().with_store(config.clone()).unwrap();
         let path = raw_path.to_string_lossy().into_owned();
@@ -4779,9 +4775,11 @@ mod catalog_owner_tests {
             .advance_semantic_stage(&mut work, model::now_ms(), &mut || Ok(()))
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
-        assert!(error.get_ref().is_some_and(|cause| {
-            cause.is::<crate::events::CommittedSourceChanged>()
-        }));
+        assert!(
+            error
+                .get_ref()
+                .is_some_and(|cause| { cause.is::<crate::events::CommittedSourceChanged>() })
+        );
         assert_eq!(
             journal.claims(std::slice::from_ref(&path)).unwrap(),
             claim_before,
