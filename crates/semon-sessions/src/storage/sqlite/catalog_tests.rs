@@ -10222,6 +10222,97 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
 }
 
 #[test]
+fn codex_relation_corrupt_context_after_prefix_is_fatal() {
+    let fixture = Fixture::new();
+    let first = fixture.codex_source("000-valid", None, 1);
+    let first_path = fixture
+        .options
+        .codex_home
+        .join(&first)
+        .to_string_lossy()
+        .into_owned();
+    let corrupt = fixture.codex_source("999-corrupt", None, 1);
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.codex_rollouts = Some([first.clone(), corrupt.clone()].into_iter().collect());
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    fixture.publish_existing();
+
+    let corrupt_path = fixture
+        .options
+        .codex_home
+        .join(corrupt)
+        .to_string_lossy()
+        .into_owned();
+    let db = fixture.db();
+    db.execute(
+        "UPDATE main.catalog_semantic_sources SET relation_done=0,relation_after=''",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.catalog_semantic_stage SET phase='relations'",
+        [],
+    )
+    .unwrap();
+    let corrupt_owner: String = db
+        .query_row(
+            "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE source_path=?1",
+            [&corrupt_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ordered_paths = db
+        .prepare(
+            "SELECT source_path FROM main.catalog_semantic_sources WHERE relation_done=0 ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(ordered_paths, vec![first_path.clone(), corrupt_path.clone()]);
+    db.execute(
+        "UPDATE main.catalog_semantic_endpoints SET root_key='missing-root' WHERE session_key=?1",
+        [&corrupt_owner],
+    )
+    .unwrap();
+    let relations_before: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_relations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+
+    let mut stage = fixture.stage();
+    let result = stage.batch(64);
+    assert!(
+        result.is_err(),
+        "corrupt context after a valid primary must fail the batch"
+    );
+
+    let db = fixture.db();
+    let advanced: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources WHERE relation_done=1 OR relation_after<>''",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(advanced, 0);
+    let relations_after: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_relations",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(relations_after, relations_before);
+}
+
+#[test]
 fn codex_relation_closure_over_budget_refuses_without_advancing_sources() {
     let fixture = Fixture::new();
     let parent_call = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});

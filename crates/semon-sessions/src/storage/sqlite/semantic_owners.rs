@@ -407,10 +407,26 @@ impl Owners<'_> {
         key: &str,
         used: &mut usize,
     ) -> rusqlite::Result<Endpoint> {
-        let (text,parent,root):(String,Option<String>,Option<String>) = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",params![self.namespace,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (metadata_bytes, text, parent, root): (
+            Option<i64>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = self.db.query_row(
+            "SELECT octet_length(metadata),CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,parent_key,root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2",
+            params![self.namespace,key],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        )?;
+        let text = match (metadata_bytes, text) {
+            (Some(bytes), _) if bytes > 1048576 => {
+                return Err(crate::events::store::semantic_stage::context_budget());
+            }
+            (Some(_), Some(text)) => text,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        };
         *used = used.saturating_add(text.len());
         if *used > 1048576 {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(crate::events::store::semantic_stage::context_budget());
         }
         let mut endpoint: Endpoint = serde_json::from_str(&text).map_err(invalid)?;
         endpoint.parent = parent.clone();
