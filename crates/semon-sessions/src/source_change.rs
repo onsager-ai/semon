@@ -351,7 +351,7 @@ impl SourceLock {
         };
         Self::acquire_cache_with(cache, path, operation)
     }
-    #[cfg(all(test, unix, feature = "postgres"))]
+    #[cfg(all(test, unix))]
     pub(crate) fn try_exclusive_cache(cache: &std::path::Path, path: &str) -> io::Result<Self> {
         Self::acquire_cache_with(cache, path, libc::LOCK_EX | libc::LOCK_NB)
     }

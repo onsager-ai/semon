@@ -7749,8 +7749,15 @@ impl PreparedSources {
             _sources: sources,
         };
         for withdrawal in &self.withdrawals {
-            if !withdrawal.current()? {
-                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            match withdrawal.current() {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+                }
+                Err(error) => return Err(error),
             }
         }
         validate_foreign_prompt_source_witnesses(cache, &fence.foreign_sources)?;
