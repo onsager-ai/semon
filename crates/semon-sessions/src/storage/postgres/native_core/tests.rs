@@ -139,7 +139,7 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
 fn assert_rows(tx: &mut PgTxn<'_>, phase: &Phase) -> Result<(), StorageError> {
     for (family, expected) in &phase.rows {
         let table = format!("semon_pg_native_{family}");
-        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id','path_digest','cwd_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
+        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id','path_digest','cwd_digest','message_id_digest','record_uuid_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
         let select = columns
             .iter()
             .map(|c| {

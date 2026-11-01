@@ -498,19 +498,6 @@ fn remove_row(transaction: &Transaction<'_>, scope: &str, key: &str) -> rusqlite
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) fn retire_key(transaction: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
-    let current: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')",
-        [key],
-        |row| row.get(0),
-    )?;
-    if !current {
-        remove_row(transaction, "current", key)?;
-    }
-    Ok(())
-}
-
 /// Pick a selective gram using persisted exact member counts. This performs at
 /// most query-length primary-key reads; it never counts/scans postings on reads.
 fn anchor(

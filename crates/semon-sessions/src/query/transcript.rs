@@ -265,15 +265,6 @@ fn edge_timed(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError
     db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_trace_edges WHERE namespace=semon_namespace() AND edge_id=?1 AND (json_extract(metadata,'$.at')>=?2 OR json_extract(metadata,'$.done')>=?2 OR json_extract(metadata,'$.status') IN ('work','wait','new')))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
 }
 #[cfg(test)]
-fn turn_kept(db: &Connection, turn: &Value, cutoff: i64) -> Result<bool, QueryError> {
-    Ok(turn["last"] == true
-        || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
-        || match turn["start"].as_str() {
-            Some(id) => edge_timed(db, id, cutoff)?,
-            None => false,
-        })
-}
-#[cfg(test)]
 fn edge_kept(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError> {
     if edge_timed(db, id, cutoff)? {
         return Ok(true);
