@@ -12559,6 +12559,17 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
         "sid=root&scope=retained_history&limit=1",
     );
     assert_eq!(page.status, 503, "original History cannot use composite identity qualification");
+    let transcript = crate::session_transcript_range_with_mode(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&after=0&limit=100",
+        None,
+        crate::SessionSourceReadMode::LocalThenProvider,
+    );
+    assert_eq!(
+        transcript.status, 503,
+        "original History with Current metadata cannot borrow Current transcript authority"
+    );
 }
 
 #[test]
