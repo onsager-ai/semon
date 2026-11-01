@@ -125,24 +125,29 @@ impl Writer<'_, '_> {
         for id in rows.closed_tools {
             self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id_digest) DO UPDATE SET closed=true WHERE semon_pg_native_tree_tools.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_tools.tool_id,sha256(excluded.tool_id),excluded.tool_id)", &[&ns,&projection,&id.as_bytes()])?;
         }
-        for (id, model) in rows.usage_models {
+        let mut usage_models = rows.usage_models.iter();
+        loop {
+            let page = usage_models.by_ref().take(64).collect::<Vec<_>>();
+            if page.is_empty() { break; }
+            let ids = page.iter().map(|(id, _)| id.as_bytes().to_vec()).collect::<Vec<_>>();
+            let models = page.iter().map(|(_, model)| model.as_bytes().to_vec()).collect::<Vec<_>>();
+            self.tx.check()?;
             #[cfg(test)]
             let started = Instant::now();
             #[cfg(test)]
             update_usage_models_diagnostic(|diagnostic| {
-                diagnostic.rows_attempted += 1;
+                diagnostic.rows_attempted += page.len();
                 diagnostic.sql_attempted += 1;
             });
-            let result = self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()]);
+            let affected = self.tx.driver.execute("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) SELECT $1,$2,x.id,x.model FROM unnest($3::bytea[],$4::bytea[]) AS x(id,model) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&ids,&models]).map_err(sqlstate::error)?;
+            if affected != page.len() as u64 { return Err(StorageError::Conflict); }
+            for _ in &page { self.boundary()?; }
             #[cfg(test)]
             update_usage_models_diagnostic(|diagnostic| {
                 diagnostic.elapsed_us += started.elapsed().as_micros();
-                if result.is_ok() {
-                    diagnostic.rows_completed += 1;
-                    diagnostic.sql_completed += 1;
-                }
+                diagnostic.rows_completed += page.len();
+                diagnostic.sql_completed += 1;
             });
-            result?;
         }
         Ok(())
     }
