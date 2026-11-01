@@ -512,7 +512,7 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     };
     let input = crate::Input {
         root: crate::InputRoot::Claude,
-        path: "projects/sanitized/successor.jsonl".into(),
+        path: "projects/successor/catalog.jsonl".into(),
     };
     let old_path = old.full_path(options);
     let path = input.full_path(options);
@@ -541,6 +541,7 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     assert!(finish_catalog(&mut cache, options, std::slice::from_ref(&old)).is_empty());
     // Complete the ordinary withdrawal before the same native identity returns.
     // This retains the paged original recipe rather than composing a short one.
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, body).unwrap();
     cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();
