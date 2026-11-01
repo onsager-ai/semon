@@ -86,6 +86,28 @@ not protection against inspecting the HTML source. Synthetic CI browser checks
 exercise both local and bundled versions, including script injection safety,
 downloads, all seven views, and delayed reading of embedded results.
 
+## Phone-first review
+
+The phone layout prioritizes one event card with the frozen reference and rare
+class flags. Context is collapsed until expanded, wraps at the screen width, and
+uses readable monospace. Decision buttons stay at the bottom; previous/next and
+progress preserve the current event. Browser drafts remain keyed to the same
+review packet, including when moving from the earlier desktop layout.
+
+Download the review file and confirm that you saved it before revealing results.
+On browsers with native file sharing, the Share option can send the same JSONL
+file to Files or another destination. A cancelled share is not a completed export.
+The site cannot verify the OS save location. Browser-engine checks include WebKit
+with an iPhone viewport; these do not replace testing the native iOS share sheet
+on an actual device.
+
+The current mobile requirements intentionally replace the previous dense
+desktop layout on phones: stacked data cards, vertical condition comparisons,
+tap details on confusion cells, a vertical event timeline, and filter sheets.
+The existing palette, experiment data and review/reveal semantics are preserved.
+Synthetic screenshots cover every view at 375×812, 414×896 and desktop. No
+personal session text is needed in visual verification or CI artifacts.
+
 The generator bounds each input read below 10 MB and checks actual CPU
 temperature before and after work. It stops at 85°C or unavailable telemetry.
 Synthetic generator and browser checks run in CI, with no private inputs.

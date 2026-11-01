@@ -20,9 +20,18 @@ jobs:
       - name: Install browser tooling for synthetic viewer checks
         run: |
           python3 -m pip install playwright==1.55.0
-          python3 -m playwright install --with-deps chromium
+          python3 -m playwright install --with-deps chromium webkit
       - name: Check the local viewer without private inputs
         run: python3 experiments/asi-jev/viewer_browser_check.py
+      - name: Verify phone layouts and file export in Chromium and WebKit
+        run: python3 experiments/asi-jev/mobile_browser_check.py --output-dir "$RUNNER_TEMP/asi-jev-mobile-qa" --mock-thermal
+      - name: Retain synthetic mobile screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: asi-jev-mobile-synthetic
+          path: ${{ runner.temp }}/asi-jev-mobile-qa/screens
+          if-no-files-found: warn
   offline:
     runs-on: ubuntu-latest
     timeout-minutes: 10

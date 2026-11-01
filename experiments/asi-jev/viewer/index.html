@@ -2,10 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; font-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
-    <title>ASI / Jev · local evaluation viewer</title>
+    <title>ASI / Jev · evaluation viewer</title>
     <link rel="stylesheet" href="./style.css">
     <script src="./app.js" defer></script>
   </head>
@@ -16,7 +16,7 @@
         <span>ASI <span class="wordmark-slash">/</span> Jev</span>
       </a>
       <div class="header-meta">
-        <span class="local-badge"><span class="status-dot"></span>Local evaluation</span>
+        <span class="local-badge"><span class="status-dot"></span>Private evaluation</span>
         <span class="header-date">30 Oct 2026</span>
       </div>
     </header>
@@ -25,7 +25,7 @@
       <section class="intro">
         <p class="eyebrow">REAL SESSION STUDY <span>·</span> REVIEW BEFORE RESULTS</p>
         <h1>Read the evidence<br><em>in the right order.</em></h1>
-        <p class="intro-copy">A local, blind spot-check followed by a clear view of classifier quality, operating cost and limits.</p>
+        <p class="intro-copy"><span class="intro-desktop-copy">A local, blind spot-check followed by a clear view of classifier quality, operating cost and limits.</span><span class="intro-mobile-copy">Review each event, then save your choices before opening results.</span></p>
       </section>
 
       <section id="load-error" class="notice notice-error" role="alert" hidden>
@@ -51,30 +51,34 @@
               </div>
               <span id="spot-harness" class="tag"></span>
             </div>
-            <div class="context-frame">
-              <div class="frame-label"><span>Context</span><span id="spot-context-count"></span></div>
-              <pre id="spot-context" class="context-text"></pre>
+            <div id="context-frame" class="context-frame">
+              <button id="context-toggle" class="frame-label context-toggle" type="button" aria-expanded="false" aria-controls="spot-context">
+                <span>Sanitized context</span><span id="spot-context-count"></span>
+              </button>
+              <pre id="spot-context" class="context-text" aria-hidden="true"></pre>
             </div>
             <div class="reference-frame">
               <div class="frame-label"><span>Frozen causal reference</span><span class="reference-lock">LOCKED</span></div>
               <dl id="spot-reference" class="reference-list"></dl>
             </div>
-            <div class="decision-block">
-              <div class="decision-heading">
-                <span>Does this reference fit the context?</span>
-                <span class="quiet">Choose one</span>
+            <div class="mobile-dock" role="group" aria-label="Event review controls">
+              <div class="review-card-footer">
+                <button id="previous-event" class="button button-quiet" type="button">← Previous</button>
+                <span id="spot-position" class="position-label"></span>
+                <button id="next-event" class="button button-quiet" type="button">Next →</button>
               </div>
-              <div id="decision-options" class="decision-options" role="group" aria-label="Your spot-check decision"></div>
+              <div class="decision-block">
+                <div class="decision-heading">
+                  <span>Does this reference fit?</span>
+                  <span class="quiet">Choose one</span>
+                </div>
+                <div id="decision-options" class="decision-options" role="group" aria-label="Your spot-check decision"></div>
+              </div>
             </div>
             <label class="note-field" for="spot-note">
               <span>Optional note <span class="quiet">· kept in your local review file</span></span>
               <textarea id="spot-note" rows="3" maxlength="2000" placeholder="Add a short note if you want to remember why…"></textarea>
             </label>
-            <div class="review-card-footer">
-              <button id="previous-event" class="button button-quiet" type="button">← Previous</button>
-              <span id="spot-position" class="position-label"></span>
-              <button id="next-event" class="button button-quiet" type="button">Next →</button>
-            </div>
           </article>
 
           <aside class="review-rail">
@@ -92,16 +96,17 @@
             <div class="rail-card export-card">
               <p class="eyebrow">PORTABLE COPY</p>
               <h3>Keep a file you control.</h3>
-              <p class="small-copy">Download JSONL to save or move your choices. Import it later to resume. The browser cannot confirm where a download was saved.</p>
+              <p class="small-copy">Download JSONL or share it where supported. Import a file later to resume. The browser cannot confirm where it was saved.</p>
               <div class="file-actions">
                 <button id="download-review" class="button button-dark" type="button">↓ Download JSONL</button>
+                <button id="share-review" class="button button-outline" type="button" hidden>Share JSONL file</button>
                 <label for="import-review" class="button button-outline">↑ Import JSONL</label>
                 <input id="import-review" type="file" accept=".jsonl,.txt,application/jsonl,text/plain" hidden>
               </div>
               <p id="export-status" class="micro-copy" aria-live="polite">No review file generated in this tab.</p>
               <label id="saved-file-confirm-wrap" class="check-row" hidden>
                 <input id="saved-file-confirm" type="checkbox">
-                <span>I saved the downloaded JSONL file somewhere I can find it.</span>
+                <span>I saved the JSONL file somewhere I can find it.</span>
               </label>
             </div>
 
@@ -144,6 +149,7 @@
           <div><p class="eyebrow">02 <span>·</span> AGGREGATE RESULTS</p><h2>What the study shows.</h2></div>
           <p id="result-counts" class="results-counts"></p>
         </div>
+        <label class="mobile-view-nav" for="result-view-select"><span>Results view</span><select id="result-view-select"></select></label>
         <nav id="results-nav" class="results-nav" aria-label="Result views"></nav>
         <div id="results-content" class="results-content">
           <section id="view-criteria" class="result-view" aria-labelledby="title-criteria"></section>
@@ -167,6 +173,6 @@
       <div id="dialog-body" class="dialog-body"></div>
     </dialog>
 
-    <footer class="site-footer"><span>Local data stays in this browser or in a file you download.</span><span>ASI / JEV <span aria-hidden="true">·</span> Evaluation viewer</span></footer>
+    <footer class="site-footer"><span>Review drafts stay in this browser. Download a file to keep them.</span><span>ASI / JEV <span aria-hidden="true">·</span> Evaluation viewer</span></footer>
   </body>
 </html>

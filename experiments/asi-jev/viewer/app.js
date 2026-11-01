@@ -19,6 +19,7 @@
   const FIELD_LABELS = {
     activity: "Activity",
     failure_category: "Failure category",
+    failure_detection: "Failure detection",
     retry_loop: "Retry / loop",
     anomaly: "Anomaly",
     phase: "Phase",
@@ -50,7 +51,7 @@
     ["classes", "Per-class"],
     ["sessions", "Sessions"],
     ["failures", "Failure explorer"],
-    ["methodology", "58 vs 436"],
+    ["methodology", "Cohorts"],
     ["caveats", "Caveats"],
   ];
 
@@ -172,6 +173,56 @@
     return { wrap, select };
   };
 
+  function makeFilterSheet({ id, title, openId, closeId, applyId, controls, note = null }) {
+    const openButton = make("button", "button button-outline filter-open", title);
+    openButton.id = openId;
+    openButton.type = "button";
+    openButton.setAttribute("aria-controls", id);
+    openButton.setAttribute("aria-expanded", "false");
+    const dialog = make("dialog", "filter-sheet");
+    dialog.id = id;
+    const heading = make("div", "filter-sheet-heading");
+    heading.append(make("h4", "", title));
+    const closeButton = make("button", "button button-quiet filter-close", "Close");
+    closeButton.id = closeId;
+    closeButton.type = "button";
+    heading.append(closeButton);
+    const actions = make("div", "filter-sheet-actions");
+    const applyButton = make("button", "button button-dark", "Apply filters");
+    applyButton.id = applyId;
+    applyButton.type = "button";
+    actions.append(applyButton);
+    dialog.append(heading, controls);
+    if (note) dialog.append(note);
+    dialog.append(actions);
+    const mobile = window.matchMedia("(max-width: 680px)");
+    const sync = () => {
+      openButton.hidden = !mobile.matches;
+      if (mobile.matches) {
+        if (dialog.open) dialog.close();
+      } else if (!dialog.hasAttribute("open")) {
+        dialog.setAttribute("open", "");
+      }
+    };
+    openButton.addEventListener("click", () => {
+      if (!dialog.open) dialog.showModal();
+      openButton.setAttribute("aria-expanded", "true");
+    });
+    const close = () => {
+      if (dialog.open) dialog.close();
+      openButton.focus();
+    };
+    closeButton.addEventListener("click", close);
+    applyButton.addEventListener("click", close);
+    dialog.addEventListener("close", () => openButton.setAttribute("aria-expanded", "false"));
+    dialog.addEventListener("click", (event) => {
+      if (event.target === dialog && mobile.matches) close();
+    });
+    mobile.addEventListener("change", sync);
+    sync();
+    return { openButton, dialog };
+  }
+
   const state = {
     review: null,
     events: [],
@@ -212,7 +263,7 @@
       state.savedFileConfirmed = false;
       $("#saved-file-confirm").checked = false;
       setVisible($("#saved-file-confirm-wrap"), false);
-      $("#export-status").textContent = "Choices changed since the last download. Download a fresh copy before revealing.";
+      $("#export-status").textContent = "Choices changed since the last export. Save a fresh JSONL file before revealing.";
     }
     renderReviewProgress();
     updateRevealButton();
@@ -275,7 +326,7 @@
     $("#review-progress-copy").textContent = answered === state.events.length
       ? "Every event has a choice. Add a note only when it helps."
       : `${state.events.length - answered} event${state.events.length - answered === 1 ? "" : "s"} still need a choice.`;
-    $("#spot-position").textContent = `Event ${state.currentIndex + 1} of ${state.events.length}`;
+    $("#spot-position").textContent = `${answered}/${state.events.length} reviewed · Event ${state.currentIndex + 1}`;
     $("#previous-event").disabled = state.currentIndex <= 0;
     $("#next-event").disabled = state.currentIndex >= state.events.length - 1;
     if (state.events.length !== EXPECTED_SPOTCHECK_SIZE) {
@@ -283,9 +334,9 @@
     } else if (answered !== EXPECTED_SPOTCHECK_SIZE) {
       $("#reveal-requirements").textContent = `Complete all 50 choices (${answered} of 50 complete).`;
     } else if (!state.downloadGenerated || state.exportSignature !== draftSignature()) {
-      $("#reveal-requirements").textContent = "Download a fresh JSONL file and confirm that you saved it.";
+      $("#reveal-requirements").textContent = "Export a fresh JSONL file and confirm that it is saved.";
     } else if (!state.savedFileConfirmed) {
-      $("#reveal-requirements").textContent = "Confirm that the downloaded JSONL file is saved somewhere you can find it.";
+      $("#reveal-requirements").textContent = "Confirm that the JSONL file is saved somewhere you can find it.";
     } else if (!$("#reveal-ack").checked) {
       $("#reveal-requirements").textContent = "Acknowledge that the reveal cannot be made blind again in this browser.";
     } else {
@@ -303,19 +354,26 @@
     const event = state.events[state.currentIndex];
     if (!event) return;
     const ref = eventReference(event);
-    $("#spot-event-title").textContent = `Event ${String(event.id ?? state.currentIndex + 1)}`;
+    $("#spot-event-title").textContent = `Event ${state.currentIndex + 1} of ${state.events.length}`;
     $("#spot-harness").textContent = humanize(event.harness || "Harness not supplied");
     $("#spot-context").textContent = safeJson(event.context);
     $("#spot-context-count").textContent = Array.isArray(event.context) ? `${event.context.length} context rows` : "sanitized";
+    $("#context-frame").classList.remove("is-open");
+    $("#context-toggle").setAttribute("aria-expanded", "false");
+    $("#spot-context").setAttribute("aria-hidden", "true");
     const reference = $("#spot-reference");
     clear(reference);
     const keys = ["activity", "failure_category", "retry_loop", "anomaly", "phase"];
+    if (Object.prototype.hasOwnProperty.call(ref, "failure_detection")) keys.splice(2, 0, "failure_detection");
     keys.forEach((key) => {
       const item = make("div");
       const value = ref[key];
       item.append(make("dt", "", FIELD_LABELS[key] || humanize(key)));
       const dd = make("dd", "", value === undefined || value === null ? "Not recorded" : humanize(value));
       if (value === true || value === false) dd.dataset.value = String(value);
+      if (value === true || (key === "activity" && String(value).toLowerCase() === "failure") || ((key === "failure_category" || key === "retry_loop") && value && String(value).toLowerCase() !== "none")) {
+        dd.classList.add("reference-flag");
+      }
       item.append(dd);
       reference.append(item);
     });
@@ -348,30 +406,78 @@
     renderReviewProgress();
   }
 
-  function downloadReview() {
-    if (!state.events.length || state.revealed) return;
+  function currentReviewFile() {
     const rows = currentAnswersForExport(state.importedStage);
     if (!rows.length) {
-      $("#export-status").textContent = "Choose at least one decision before downloading a review file.";
-      return;
+      $("#export-status").textContent = "Choose at least one decision before exporting a review file.";
+      return null;
     }
     const content = `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
-    const blob = new Blob([content], { type: "application/x-ndjson;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = make("a");
-    link.href = url;
-    link.download = `asi-jev-review-${new Date().toISOString().replaceAll(":", "-")}.jsonl`;
-    document.body.append(link);
-    link.click();
-    link.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-    state.exportSignature = draftSignature();
+    const name = `asi-jev-review-${new Date().toISOString().replaceAll(":", "-")}.jsonl`;
+    return { rows, content, name, signature: draftSignature() };
+  }
+
+  function supportsNativeFileShare() {
+    if (typeof File !== "function" || typeof navigator.share !== "function" || typeof navigator.canShare !== "function") return false;
+    try {
+      return navigator.canShare({ files: [new File([""], "review.jsonl", { type: "application/json" })] });
+    } catch {
+      return false;
+    }
+  }
+
+  function recordReviewExport(count, method, signature) {
+    state.exportSignature = signature;
     state.downloadGenerated = true;
     state.savedFileConfirmed = false;
     $("#saved-file-confirm").checked = false;
     setVisible($("#saved-file-confirm-wrap"), true);
-    $("#export-status").textContent = `${rows.length} choices sent to a browser download. The browser cannot verify the saved file or its location.`;
+    $("#export-status").textContent = method === "share"
+      ? `${count} choices shared. If you chose Save to Files, confirm the copy is saved; the browser cannot verify it.`
+      : `${count} choices sent to a browser download. The browser cannot verify the saved file or its location.`;
     updateExportState();
+  }
+
+  function downloadReview() {
+    if (!state.events.length || state.revealed) return;
+    const file = currentReviewFile();
+    if (!file) return;
+    const url = URL.createObjectURL(new Blob([file.content], { type: "application/x-ndjson;charset=utf-8" }));
+    const link = make("a");
+    link.href = url;
+    link.download = file.name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    recordReviewExport(file.rows.length, "download", file.signature);
+  }
+
+  async function shareReview() {
+    if (!state.events.length || state.revealed) return;
+    const fileData = currentReviewFile();
+    if (!fileData) return;
+    const file = new File([fileData.content], fileData.name, { type: "application/json" });
+    let canShare = false;
+    try {
+      canShare = typeof navigator.share === "function" && typeof navigator.canShare === "function" && navigator.canShare({ files: [file] });
+    } catch {
+      canShare = false;
+    }
+    if (!canShare) {
+      $("#export-status").textContent = "Native file sharing is unavailable here. Use Download JSONL instead.";
+      return;
+    }
+    try {
+      await navigator.share({ files: [file], title: "ASI / Jev review file" });
+      recordReviewExport(fileData.rows.length, "share", fileData.signature);
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        $("#export-status").textContent = "Sharing was canceled. No saved copy was confirmed; you can download JSONL instead.";
+      } else {
+        $("#export-status").textContent = `The file could not be shared: ${error.message}. You can download JSONL instead.`;
+      }
+    }
   }
 
   function validateImportRows(text) {
@@ -496,8 +602,38 @@
     readDraft();
     if (state.importedStage === "post_reveal") state.revealedViaImport = true;
     $("#download-review").addEventListener("click", downloadReview);
+    const shareButton = $("#share-review");
+    shareButton.hidden = !supportsNativeFileShare();
+    if (!shareButton.hidden) shareButton.addEventListener("click", shareReview);
+    $("#context-toggle").addEventListener("click", () => {
+      const expanded = $("#context-toggle").getAttribute("aria-expanded") !== "true";
+      $("#context-frame").classList.toggle("is-open", expanded);
+      $("#context-toggle").setAttribute("aria-expanded", String(expanded));
+      $("#spot-context").setAttribute("aria-hidden", String(!expanded));
+    });
     $("#previous-event").addEventListener("click", () => { state.currentIndex = Math.max(0, state.currentIndex - 1); renderSpotcheck(); });
     $("#next-event").addEventListener("click", () => { state.currentIndex = Math.min(state.events.length - 1, state.currentIndex + 1); renderSpotcheck(); });
+    let swipeStart = null;
+    $("#spotcheck-workspace").addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (event.pointerType !== "touch" || target.closest("button, a, input, textarea, select, #context-frame")) {
+        swipeStart = null;
+        return;
+      }
+      swipeStart = { x: event.clientX, y: event.clientY };
+    }, { passive: true });
+    $("#spotcheck-workspace").addEventListener("pointerup", (event) => {
+      if (!swipeStart) return;
+      const dx = event.clientX - swipeStart.x;
+      const dy = event.clientY - swipeStart.y;
+      swipeStart = null;
+      if (Math.abs(dx) < 56 || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+      state.currentIndex = dx < 0
+        ? Math.min(state.events.length - 1, state.currentIndex + 1)
+        : Math.max(0, state.currentIndex - 1);
+      renderSpotcheck();
+    }, { passive: true });
+    $("#spotcheck-workspace").addEventListener("pointercancel", () => { swipeStart = null; });
     $("#import-review").addEventListener("change", (event) => {
       const file = event.target.files?.[0];
       importReviewFile(file);
@@ -635,6 +771,27 @@
     return [min, max + Math.max(max * .12, .15)];
   }
 
+  function criterionComparisonDomain(meta) {
+    if (meta.unit === "ratio") return [0, 1];
+    const values = state.results.conditions.flatMap((condition) => {
+      const criterion = normalizeCriteria(condition)[meta.key] || {};
+      const metric = getCriterionMetric(condition, meta, criterion);
+      const ci = meta.operational ? null : metricInterval(metric, meta.source === "false_alerts");
+      return [metricEstimate(metric), criterion.threshold, criterion.bound, ci?.lower, ci?.upper]
+        .map(numeric)
+        .filter((value) => value !== null);
+    });
+    if (meta.unit === "difference") {
+      const min = Math.min(-0.2, ...values);
+      const max = Math.max(0.2, ...values);
+      const padding = Math.max((max - min) * .1, .025);
+      return [min - padding, max + padding];
+    }
+    const min = Math.min(0, ...values);
+    const max = Math.max(1, ...values);
+    return [min, max + Math.max(max * .12, .15)];
+  }
+
   function svgNode(tag, attrs = {}, text = null) {
     const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
     Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, String(value)));
@@ -642,12 +799,12 @@
     return node;
   }
 
-  function buildCriterionChart(metric, threshold, status, meta, decisionBound) {
+  function buildCriterionChart(metric, threshold, status, meta, decisionBound, sharedDomain = null) {
     const svg = svgNode("svg", { viewBox: "0 0 410 54", class: "criterion-chart", role: "img", "aria-label": `${meta.title} estimate and confidence interval` });
     const x1 = 20;
     const x2 = 390;
     const y = 23;
-    const [min, max] = criterionDomain(metric, threshold, meta);
+    const [min, max] = sharedDomain || criterionDomain(metric, threshold, meta);
     const point = metricEstimate(metric) ?? numeric(decisionBound);
     const ci = meta.operational ? null : metricInterval(metric, meta.source === "false_alerts");
     const scale = (value) => x1 + ((Math.min(max, Math.max(min, value)) - min) / Math.max(max - min, .000001)) * (x2 - x1);
@@ -691,6 +848,7 @@
   }
 
   function renderResults() {
+    document.body.classList.add("results-open");
     const results = state.results;
     $("#incomplete-banner").hidden = results.complete !== false;
     const counts = results.counts || {};
@@ -710,7 +868,9 @@
 
   function buildNavigation() {
     const nav = $("#results-nav");
+    const picker = $("#result-view-select");
     clear(nav);
+    clear(picker);
     VIEW_NAMES.forEach(([id, label]) => {
       const button = make("button", "nav-button", label);
       button.type = "button";
@@ -718,11 +878,16 @@
       button.setAttribute("aria-current", String(state.activeView === id ? "page" : "false"));
       button.addEventListener("click", () => showView(id));
       nav.append(button);
+      const option = make("option", "", label);
+      option.value = id;
+      picker.append(option);
     });
+    picker.onchange = () => showView(picker.value);
   }
 
   function showView(id) {
     state.activeView = id;
+    $("#result-view-select").value = id;
     VIEW_NAMES.forEach(([view]) => {
       const section = $(`#view-${view}`);
       if (section) section.hidden = view !== id;
@@ -735,7 +900,7 @@
   function renderCriteriaView() {
     const section = $("#view-criteria");
     clear(section);
-    appendSectionHeading(section, "title-criteria", "01 · ACCEPTANCE", "Does any condition qualify?", "The frozen gates are shown as recorded. The chart uses the underlying metric and its measured 95% interval where one exists.");
+    appendSectionHeading(section, "title-criteria", "01 · ACCEPTANCE", "Does the evidence pass?", "The frozen gates are shown as recorded. The chart uses the underlying metric and its measured 95% interval where one exists.");
     const overview = make("div", "panel");
     addPanelTitle(overview, "Condition acceptance", "Each row summarizes the frozen gate result.");
     const list = make("div", "condition-list");
@@ -749,6 +914,41 @@
       list.append(row);
     });
     overview.append(list);
+    const comparisonPanel = make("div", "panel");
+    addPanelTitle(comparisonPanel, "Compare conditions", "Each row shows the estimate, 95% interval and recorded threshold.");
+    const comparisonControls = make("div", "control-row");
+    const metricControl = selector("Metric", "criteria-metric", CRITERIA.map((meta) => [meta.key, meta.title]));
+    comparisonControls.append(metricControl.wrap);
+    const comparisonList = make("div", "condition-comparison-list");
+    const renderComparison = () => {
+      clear(comparisonList);
+      const meta = CRITERIA.find((item) => item.key === metricControl.select.value) || CRITERIA[0];
+      const sharedDomain = criterionComparisonDomain(meta);
+      state.results.conditions.forEach((condition) => {
+        const criterion = normalizeCriteria(condition)[meta.key] || {};
+        const metric = getCriterionMetric(condition, meta, criterion);
+        const point = metricEstimate(metric);
+        const ci = meta.operational ? null : metricInterval(metric, meta.source === "false_alerts");
+        const value = point !== null ? formatCriterionValue(point, meta.unit) : criterion.bound !== undefined ? `Bound ${formatCriterionValue(criterion.bound, meta.unit)}` : "No estimate";
+        const interval = ci ? `95% CI ${formatCriterionValue(ci.lower, meta.unit)}–${formatCriterionValue(ci.upper, meta.unit)}` : meta.operational ? "CI not estimated" : "95% CI not available";
+        const threshold = `Threshold ${formatCriterionValue(criterion.threshold, meta.unit)}`;
+        const row = make("article", "condition-comparison-row");
+        const identity = make("div", "comparison-condition");
+        addFamilyMark(identity, condition);
+        identity.append(make("strong", "", conditionLabel(condition)));
+        const chart = buildCriterionChart(metric, criterion.threshold, criterion.status, meta, criterion.bound, sharedDomain);
+        chart.setAttribute("role", "img");
+        chart.setAttribute("aria-label", `${conditionLabel(condition)}. ${meta.title}: ${value}; ${interval}; ${threshold}.`);
+        const result = make("div", "comparison-result");
+        result.append(make("strong", "", value), make("span", "", interval), make("span", "", threshold));
+        addStatus(result, criterion.status || criteriaStatus(condition), "status-text");
+        row.append(identity, chart, result);
+        comparisonList.append(row);
+      });
+    };
+    metricControl.select.addEventListener("change", renderComparison);
+    renderComparison();
+    comparisonPanel.append(comparisonControls, comparisonList);
     const selectorPanel = make("div", "panel");
     const selectorRow = make("div", "control-row");
     const defaultCondition = state.results.conditions.find((item) => item.acceptance)?.id || state.results.conditions[0]?.id || "";
@@ -805,7 +1005,7 @@
     conditionSelect.addEventListener("change", renderSelected);
     renderSelected();
     selectorPanel.append(charts);
-    section.append(overview, selectorPanel);
+    section.append(overview, comparisonPanel, selectorPanel);
   }
 
   function getActivityMetric(condition, name) {
@@ -859,26 +1059,33 @@
   function renderTradeoffView() {
     const section = $("#view-tradeoff");
     clear(section);
-    appendSectionHeading(section, "title-tradeoff", "02 · QUALITY / OPERATIONS", "Quality comes with a runtime shape.", "Compare activity macro F1 with observed P95 latency. The cost panel keeps unknown and non-applicable values explicit.");
+    appendSectionHeading(section, "title-tradeoff", "02 · QUALITY / OPERATIONS", "Quality, latency, and cost", "Compare activity macro F1 with observed P95 latency. The cost panel keeps unknown and non-applicable values explicit.");
     const layout = make("div", "tradeoff-layout");
     const plotPanel = make("div", "panel");
     addPanelTitle(plotPanel, "Activity macro F1 vs P95 latency", "One point per condition · shape and color identify family.");
     const wrap = make("div", "plot-wrap");
-    const svg = svgNode("svg", { viewBox: "0 0 620 350", class: "scatter-svg", role: "img", "aria-label": "Scatter plot of activity macro F1 against P95 latency" });
-    const left = 62, right = 595, top = 20, bottom = 292;
+    const mobilePlot = window.matchMedia("(max-width: 680px)").matches;
+    const viewWidth = mobilePlot ? 360 : 620;
+    const viewHeight = mobilePlot ? 380 : 350;
+    const svg = svgNode("svg", { viewBox: `0 0 ${viewWidth} ${viewHeight}`, class: "scatter-svg", role: "img", "aria-label": "Scatter plot of activity macro F1 against P95 latency" });
+    const left = mobilePlot ? 48 : 62;
+    const right = mobilePlot ? 348 : 595;
+    const top = mobilePlot ? 22 : 20;
+    const bottom = mobilePlot ? 322 : 292;
     const latencies = state.results.conditions.map(conditionLatency).filter((value) => value !== null);
     const maxLatency = Math.max(1500, 10000, ...latencies) * 1.08;
     const px = (value) => left + Math.max(0, Math.min(1, value)) * (right - left);
     const py = (value) => bottom - Math.max(0, Math.min(maxLatency, value)) / maxLatency * (bottom - top);
-    [0, .25, .5, .75, 1].forEach((tick) => {
+    (mobilePlot ? [0, .5, 1] : [0, .25, .5, .75, 1]).forEach((tick) => {
       const x = px(tick);
       svg.append(svgNode("line", { x1: x, x2: x, y1: top, y2: bottom, class: "plot-grid" }));
       svg.append(svgNode("text", { x, y: bottom + 19, class: "plot-label", "text-anchor": "middle" }, formatPercent(tick, 0)));
     });
-    [0, 2500, 5000, 7500, 10000, 15000].filter((tick) => tick <= maxLatency).forEach((tick) => {
+    (mobilePlot ? [0, maxLatency / 2, maxLatency] : [0, 2500, 5000, 7500, 10000, 15000].filter((tick) => tick <= maxLatency)).forEach((tick) => {
       const y = py(tick);
       svg.append(svgNode("line", { x1: left, x2: right, y1: y, y2: y, class: "plot-grid" }));
-      svg.append(svgNode("text", { x: left - 8, y: y + 3, class: "plot-label", "text-anchor": "end" }, formatNumber(tick, 0)));
+      const tickLabel = mobilePlot && tick >= 1000 ? `${formatNumber(tick / 1000, 1)}k` : formatNumber(tick, 0);
+      svg.append(svgNode("text", { x: left - 8, y: y + 3, class: "plot-label", "text-anchor": "end" }, tickLabel));
     });
     [1500, 10000].forEach((target) => {
       if (target <= maxLatency) {
@@ -887,8 +1094,8 @@
         svg.append(svgNode("text", { x: right - 3, y: y - 4, class: "plot-label", "text-anchor": "end" }, `${formatNumber(target, 0)} ms target`));
       }
     });
-    svg.append(svgNode("text", { x: (left + right) / 2, y: 340, class: "plot-axis-label", "text-anchor": "middle" }, "Activity macro F1 (higher is better)"));
-    const yTitle = svgNode("text", { x: 15, y: (top + bottom) / 2, class: "plot-axis-label", transform: `rotate(-90 15 ${(top + bottom) / 2})`, "text-anchor": "middle" }, "Provider HTTP / rules compute P95 (ms · lower is faster)");
+    svg.append(svgNode("text", { x: (left + right) / 2, y: mobilePlot ? 369 : 340, class: "plot-axis-label", "text-anchor": "middle" }, mobilePlot ? "Activity macro F1" : "Activity macro F1 (higher is better)"));
+    const yTitle = svgNode("text", { x: mobilePlot ? 12 : 15, y: (top + bottom) / 2, class: "plot-axis-label", transform: `rotate(-90 ${mobilePlot ? 12 : 15} ${(top + bottom) / 2})`, "text-anchor": "middle" }, mobilePlot ? "P95 ms" : "Provider HTTP / rules compute P95 (ms · lower is faster)");
     svg.append(yTitle);
     state.results.conditions.forEach((condition) => {
       const quality = metricEstimate(getActivityMetric(condition, "macro_f1"));
@@ -897,6 +1104,28 @@
       addSvgFamilyPoint(svg, condition, px(quality), py(latency), `${conditionLabel(condition)} · activity macro F1 ${formatPercent(quality)} · P95 ${formatMs(latency)}`);
     });
     wrap.append(svg);
+    const mobileCompare = make("div", "tradeoff-mobile-list");
+    state.results.conditions.forEach((condition) => {
+      const row = make("article", "tradeoff-mobile-row");
+      const identity = make("div", "tradeoff-mobile-condition");
+      addFamilyMark(identity, condition);
+      identity.append(make("strong", "", conditionLabel(condition)));
+      const values = make("dl", "tradeoff-mobile-values");
+      const qualityMetric = getActivityMetric(condition, "macro_f1");
+      const quality = metricEstimate(qualityMetric);
+      const qualityCi = metricInterval(qualityMetric);
+      const qualityValue = quality === null ? "Unavailable" : formatPercent(quality);
+      const qualityDetail = qualityCi ? ` · 95% CI ${formatPercent(qualityCi.lower)}–${formatPercent(qualityCi.upper)}` : "";
+      const latency = conditionLatency(condition);
+      const cost = conditionCost(condition);
+      [["Activity macro F1", `${qualityValue}${qualityDetail}`], ["P95 latency", formatMs(latency)], ["Reported cost", cost.value === null ? humanize(cost.status) : `${formatUsd(cost.value)} · ${humanize(cost.status)}`]].forEach(([label, value]) => {
+        const item = make("div", "tradeoff-mobile-metric");
+        item.append(make("dt", "", label), make("dd", "", value));
+        values.append(item);
+      });
+      row.append(identity, values);
+      mobileCompare.append(row);
+    });
     const legend = make("div", "legend-row");
     state.results.conditions.forEach((condition) => {
       const item = make("span", "legend-condition");
@@ -904,7 +1133,7 @@
       item.append(document.createTextNode(conditionLabel(condition)));
       legend.append(item);
     });
-    plotPanel.append(wrap, legend, make("p", "tiny-note", "Provider points use pooled request RTT P95; rules points use local compute P95. The 1,500 ms Jev and 10,000 ms Haiku lines are provider targets; the projected async P95 gate is separate and appears in Acceptance."));
+    plotPanel.append(wrap, mobileCompare, legend, make("p", "tiny-note", "Provider P95 uses pooled request RTT; rules P95 uses local compute. The 1,500 ms Jev and 10,000 ms Haiku values are provider targets; projected async P95 is a separate gate in Acceptance."));
 
     const costPanel = make("div", "panel");
     addPanelTitle(costPanel, "Reported cost per condition", "Dollar values may be estimates, not invoices.");
@@ -936,7 +1165,7 @@
   function renderClassesView() {
     const section = $("#view-classes");
     clear(section);
-    appendSectionHeading(section, "title-classes", "03 · LABEL DETAIL", "See where each label holds.", "Precision and recall intervals are event-bootstrap intervals. Small positive classes are flagged because their estimates are unstable.");
+    appendSectionHeading(section, "title-classes", "03 · LABEL DETAIL", "Where do labels hold?", "Precision and recall intervals are event-bootstrap intervals. Small positive classes are flagged because their estimates are unstable.");
     const panel = make("div", "panel");
     const controls = make("div", "control-row");
     const conditionSelect = makeConditionSelector(controls, "classes-condition", state.results.conditions[0]?.id || "");
@@ -976,16 +1205,20 @@
     const table = make("table", "data-table");
     const head = make("thead");
     const headerRow = make("tr");
-    ["Class", "Positive events", "Precision", "Recall"].forEach((text) => headerRow.append(make("th", "", text)));
+    const columns = ["Class", "Positive events", "Precision", "Recall"];
+    columns.forEach((text) => headerRow.append(make("th", "", text)));
     head.append(headerRow);
     const body = make("tbody");
     entries.forEach(([label, item]) => {
       const row = make("tr");
-      row.append(make("td", "class-label", humanize(label)));
+      const classCell = make("td", "class-label", humanize(label));
+      classCell.dataset.label = "Class";
+      row.append(classCell);
       const positive = numeric(item.positive_events);
       const supportCell = make("td", positive !== null && positive < 10 ? "low-support" : "", positive === null ? "—" : formatNumber(positive, 0));
+      supportCell.dataset.label = "Positive events";
       row.append(supportCell);
-      row.append(metricCell(item.precision), metricCell(item.recall));
+      row.append(metricCell(item.precision, "Precision"), metricCell(item.recall, "Recall"));
       body.append(row);
     });
     table.append(head, body);
@@ -993,8 +1226,9 @@
     panel.append(wrap, make("p", "tiny-note", "Values are mean-over-repetitions event-level estimates. Fewer than 10 unique positive events is insufficient evidence for primary-class acceptance."));
   }
 
-  function metricCell(metric) {
+  function metricCell(metric, label) {
     const cell = make("td");
+    cell.dataset.label = label;
     const estimate = metricEstimate(metric);
     cell.append(make("span", "", estimate === null ? "—" : formatPercent(estimate)));
     const ci = metricInterval(metric);
@@ -1015,35 +1249,78 @@
     const max = Math.max(1, ...data.matrix.flat().map((value) => numeric(value) ?? 0));
     const grid = make("div", "table-wrap");
     const heat = make("div", "heatmap-grid");
+    heat.style.setProperty("--heatmap-column-count", String(data.labels.length));
+    const mobileRows = make("div", "heatmap-mobile-list");
+    mobileRows.style.setProperty("--heatmap-column-count", String(data.labels.length));
+    const mobileLegend = make("div", "heatmap-mobile-legend");
+    data.labels.forEach((label, index) => {
+      const item = make("span", "heatmap-mobile-key");
+      item.append(make("span", "heatmap-mobile-index", String(index + 1)), document.createTextNode(humanize(label)));
+      mobileLegend.append(item);
+    });
     const columns = `82px repeat(${data.labels.length}, 34px)`;
+    const detail = make("p", "heatmap-detail", "Tap a cell or reference row to inspect prediction counts.");
+    detail.setAttribute("role", "status");
+    detail.setAttribute("aria-live", "polite");
     const headRow = make("div", "heatmap-row");
     headRow.style.gridTemplateColumns = columns;
     headRow.append(make("div", "heatmap-cell is-label", "Reference"));
     data.labels.forEach((label) => headRow.append(make("div", "heatmap-cell is-head", humanize(label))));
     heat.append(headRow);
     data.matrix.forEach((row, rowIndex) => {
+      const referenceLabel = humanize(rowLabels[rowIndex] ?? `Row ${rowIndex + 1}`);
       const line = make("div", "heatmap-row");
       line.style.gridTemplateColumns = columns;
-      line.append(make("div", "heatmap-cell is-label", humanize(rowLabels[rowIndex] ?? `Row ${rowIndex + 1}`)));
+      line.append(make("div", "heatmap-cell is-label", referenceLabel));
+      const distribution = data.labels.map((label, index) => `${humanize(label)}: ${formatNumber(numeric(row[index]) ?? 0, 2)}`);
+      const maxIndex = row.reduce((best, value, index) => (numeric(value) ?? 0) > (numeric(row[best]) ?? 0) ? index : best, 0);
+      const mobileRow = make("button", "heatmap-mobile-row");
+      mobileRow.type = "button";
+      mobileRow.append(make("strong", "heatmap-mobile-reference", `Reference: ${referenceLabel}`));
+      const strip = make("span", "heatmap-mobile-strip");
+      strip.setAttribute("aria-hidden", "true");
       row.forEach((value, columnIndex) => {
         const count = numeric(value) ?? 0;
         const alpha = .06 + (count / max) * .72;
         const isCorrect = rowLabels[rowIndex] === data.labels[columnIndex];
-        const cell = make("div", `heatmap-cell${isCorrect ? " is-correct" : ""}`, formatNumber(count, 2));
+        const cell = make("i", "heatmap-mobile-cell");
+        cell.style.backgroundColor = `${isCorrect ? "rgba(0, 158, 115" : "rgba(0, 114, 178"}, ${alpha.toFixed(3)})`;
+        if (isCorrect) cell.classList.add("is-correct");
+        cell.title = `${humanize(data.labels[columnIndex])}: ${formatNumber(count, 2)}`;
+        strip.append(cell);
+      });
+      mobileRow.append(strip);
+      mobileRow.append(make("span", "heatmap-mobile-hint", `Most: ${humanize(data.labels[maxIndex])} · ${formatNumber(numeric(row[maxIndex]) ?? 0, 2)} · tap for all counts`));
+      mobileRow.setAttribute("aria-label", `Reference ${referenceLabel}. Tap to inspect all ${data.labels.length} prediction counts.`);
+      mobileRow.addEventListener("click", () => {
+        detail.textContent = `Reference: ${referenceLabel} · Predictions: ${distribution.join(" · ")}`;
+      });
+      mobileRows.append(mobileRow);
+      row.forEach((value, columnIndex) => {
+        const count = numeric(value) ?? 0;
+        const alpha = .06 + (count / max) * .72;
+        const isCorrect = rowLabels[rowIndex] === data.labels[columnIndex];
+        const cell = make("button", `heatmap-cell${isCorrect ? " is-correct" : ""}`, formatNumber(count, 2));
+        cell.type = "button";
+        cell.setAttribute("aria-label", `Reference ${humanize(rowLabels[rowIndex] ?? `Row ${rowIndex + 1}`)}, prediction ${humanize(data.labels[columnIndex])}: ${formatNumber(count, 2)} mean predictions`);
         cell.style.backgroundColor = `${isCorrect ? "rgba(0, 158, 115" : "rgba(0, 114, 178"}, ${alpha.toFixed(3)})`;
         cell.title = `${formatNumber(count, 2)} mean predictions${isCorrect ? " · reference and prediction labels match" : ""}`;
+        cell.addEventListener("click", () => {
+          const match = isCorrect ? "This matches the reference label." : "This differs from the reference label.";
+          detail.textContent = `Reference: ${humanize(rowLabels[rowIndex] ?? `Row ${rowIndex + 1}`)} · prediction: ${humanize(data.labels[columnIndex])} · ${formatNumber(count, 2)} mean predictions across repetitions. ${match}`;
+        });
         line.append(cell);
       });
       heat.append(line);
     });
     grid.append(heat);
-    panel.append(grid, make("p", "heatmap-note", "Darker cells contain higher mean counts across repetitions. Cells with matching reference and prediction labels have a green outline; other cells show disagreements."));
+    panel.append(grid, mobileLegend, mobileRows, detail, make("p", "heatmap-note", "Darker cells contain higher mean counts across repetitions. Cells with matching reference and prediction labels have a green outline; other cells show disagreements."));
   }
 
   function renderSessionsView() {
     const section = $("#view-sessions");
     clear(section);
-    appendSectionHeading(section, "title-sessions", "04 · SESSION SEQUENCE", "Follow the phase changes.", "Select a captured session. Each row shows the reference or one condition across event order; click any event to inspect its context and labels.");
+    appendSectionHeading(section, "title-sessions", "04 · SESSION SEQUENCE", "Follow each event", "Select a captured session. Compare the frozen reference with each condition, then open an event to inspect its context and labels.");
     const panel = make("div", "panel");
     const controls = make("div", "control-row session-controls");
     const sessions = Array.isArray(state.results.sessions) ? state.results.sessions : [];
@@ -1051,8 +1328,16 @@
     const trialControl = selector("Prediction trial", "session-trial", [["1", "Trial 1"], ["2", "Trial 2"], ["3", "Trial 3"]]);
     controls.append(sessionControl.wrap, trialControl.wrap);
     const trialNote = make("p", "tiny-note", "Choose trial 1, 2 or 3. Rules conditions use their sole saved trial for each view and label that source trial explicitly.");
-    panel.append(controls, trialNote);
-    panel.append(controls);
+    const filterSheet = makeFilterSheet({
+      id: "session-filter-sheet",
+      title: "Choose session and trial",
+      openId: "session-filters-open",
+      closeId: "session-filters-close",
+      applyId: "session-filters-apply",
+      controls,
+      note: trialNote,
+    });
+    panel.append(filterSheet.openButton, filterSheet.dialog);
     const phaseLegend = make("div", "phase-legend");
     PHASES.forEach((phase) => {
       const item = make("span", "phase-key");
@@ -1065,7 +1350,8 @@
     const timelineScroll = make("div", "timeline-scroll");
     const timeline = make("div", "timeline");
     timelineScroll.append(timeline);
-    panel.append(timelineScroll);
+    const mobileTimeline = make("ol", "timeline-events");
+    panel.append(timelineScroll, mobileTimeline);
     const markerLegend = make("div", "marker-legend");
     [["anomaly", "Anomaly"], ["retry", "Retry"], ["loop", "Loop"], ["failure", "Failure"]].forEach(([kind, label]) => {
       const item = make("span");
@@ -1073,7 +1359,7 @@
       markerLegend.append(item);
     });
     panel.append(markerLegend);
-    const redraw = () => drawSessionTimeline(timeline, sessions.find((session) => session.key === sessionControl.select.value), Number(trialControl.select.value));
+    const redraw = () => drawSessionTimeline(timeline, mobileTimeline, sessions.find((session) => session.key === sessionControl.select.value), Number(trialControl.select.value));
     sessionControl.select.addEventListener("change", redraw);
     trialControl.select.addEventListener("change", redraw);
     redraw();
@@ -1091,10 +1377,12 @@
     return markers;
   }
 
-  function drawSessionTimeline(root, session, requestedTrial = 1) {
+  function drawSessionTimeline(root, mobileRoot, session, requestedTrial = 1) {
     clear(root);
+    clear(mobileRoot);
     if (!session || !Array.isArray(session.events) || !session.events.length) {
       root.append(make("div", "timeline-empty", "No session sequence is available in this results build."));
+      mobileRoot.append(make("li", "timeline-empty", "No session sequence is available in this results build."));
       return;
     }
     const events = [...session.events].sort((a, b) => (numeric(a.order) ?? 0) - (numeric(b.order) ?? 0));
@@ -1133,6 +1421,49 @@
       row.append(rowLabel, track);
       root.append(row);
     });
+    events.forEach((event, index) => {
+      const order = numeric(event.order) ?? index + 1;
+      const card = make("li", "timeline-event");
+      const heading = make("div", "timeline-event-heading");
+      heading.append(make("strong", "", `Event ${formatNumber(order, 0)}`));
+      const open = make("button", "button button-quiet timeline-event-open", "Open details");
+      open.type = "button";
+      open.addEventListener("click", () => openEventDialog(session, event));
+      heading.append(open);
+      card.append(heading);
+      appendTimelineSummary(card, "Frozen reference", eventReference(event));
+      state.results.conditions.forEach((condition) => {
+        const rows = predictionRows(event, condition.id);
+        const selected = rows.find((item) => Number(item.repetition ?? 1) === requestedTrial) || (rows.length === 1 ? rows[0] : null);
+        const labels = {};
+        ["activity", "failure_category", "retry_loop", "anomaly", "phase"].forEach((key) => {
+          labels[key] = selected ? labelValue(selected.labels, key) : null;
+        });
+        const actualTrial = selected?.repetition ?? (rows.length === 1 ? rows[0].repetition ?? 1 : requestedTrial);
+        const trialNote = rows.length === 1 && requestedTrial !== Number(actualTrial) ? ` · saved trial ${actualTrial}` : ` · trial ${actualTrial}`;
+        appendTimelineSummary(card, `${conditionLabel(condition)}${trialNote}`, labels, condition.context);
+      });
+      mobileRoot.append(card);
+    });
+  }
+
+  function appendTimelineSummary(parent, label, labels, context = "") {
+    const row = make("div", "timeline-event-row");
+    row.append(make("strong", "timeline-event-label", label));
+    const detail = make("div", "timeline-event-detail");
+    const phase = String(labels?.phase || "unknown").toLowerCase();
+    const phaseLabel = make("span", "timeline-phase", humanize(phase));
+    phaseLabel.style.setProperty("--phase-color", PHASE_COLORS[phase] || PHASE_COLORS.unknown);
+    detail.append(phaseLabel);
+    const markers = markersFor(labels);
+    if (markers.length) {
+      markers.forEach((marker) => detail.append(make("span", `timeline-flag flag-${marker}`, humanize(marker))));
+    } else {
+      detail.append(make("span", "timeline-no-flags", "No flags"));
+    }
+    if (context === "offline") detail.append(make("span", "timeline-offline", "Offline"));
+    row.append(detail);
+    parent.append(row);
   }
 
   function timelineCell(event, session, conditionId, displayOrder, labels, context = "") {
@@ -1186,7 +1517,7 @@
   function renderFailureView() {
     const section = $("#view-failures");
     clear(section);
-    appendSectionHeading(section, "title-failures", "05 · DISAGREEMENTS", "Inspect the misses and false alarms.", "Filters run across every scored event and every saved repetition. The context opens as sanitized text; no model output is hidden behind a summary.");
+    appendSectionHeading(section, "title-failures", "05 · DISAGREEMENTS", "Review disagreements", "Filters run across every scored event and every saved repetition. The context opens as sanitized text; no model output is hidden behind a summary.");
     const panel = make("div", "panel");
     const controls = make("div", "control-row");
     const conditionControl = selector("Condition", "failure-condition", [["__all__", "All conditions"], ...state.results.conditions.map((condition) => [condition.id, conditionLabel(condition)])]);
@@ -1195,9 +1526,17 @@
     const dimensionControl = selector("Dimension", "failure-dimension", []);
     const classControl = selector("Class", "failure-class", []);
     controls.append(conditionControl.wrap, dimensionControl.wrap, classControl.wrap);
+    const filterSheet = makeFilterSheet({
+      id: "failure-filter-sheet",
+      title: "Filter disagreements",
+      openId: "failure-filters-open",
+      closeId: "failure-filters-close",
+      applyId: "failure-filters-apply",
+      controls,
+    });
     const summary = make("p", "failure-summary");
     const list = make("div", "failure-list");
-    panel.append(controls, summary, list);
+    panel.append(filterSheet.openButton, filterSheet.dialog, summary, list);
     section.append(panel);
     const render = () => {
       const oldDimension = dimensionControl.select.value;
@@ -1266,7 +1605,7 @@
   function renderMethodologyView() {
     const section = $("#view-methodology");
     clear(section);
-    appendSectionHeading(section, "title-methodology", "06 · COHORTS", "58 fixture events beside 436 real-session events.", "The first experiment checked feasibility. The second replayed a purposive, error-enriched local cohort. These samples answer different questions.");
+    appendSectionHeading(section, "title-methodology", "06 · COHORTS", "Two cohorts, two questions", "The first experiment checked feasibility. The second replayed a purposive, error-enriched local cohort. These samples answer different questions.");
     const first = state.results.first_run || {};
     const counts = state.results.counts || {};
     const firstEvents = numeric(first.events);
@@ -1287,7 +1626,8 @@
     const table = make("table", "data-table");
     const head = make("thead");
     const hr = make("tr");
-    ["Condition", "Fixture accuracy", "Fixture macro F1", "Real accuracy", "Real macro F1"].forEach((label) => hr.append(make("th", "", label)));
+    const metricColumns = ["Condition", "Fixture accuracy", "Fixture macro F1", "Real accuracy", "Real macro F1"];
+    metricColumns.forEach((label) => hr.append(make("th", "", label)));
     head.append(hr);
     const body = make("tbody");
     (first.conditions || []).forEach((fixture) => {
@@ -1295,11 +1635,17 @@
       const acc = metricEstimate(getActivityMetric(real, "accuracy"));
       const f1 = metricEstimate(getActivityMetric(real, "macro_f1"));
       const row = make("tr");
-      row.append(make("td", "class-label", real ? conditionLabel(real) : fixture.label || fixture.id || "Condition"));
-      row.append(make("td", "", fixture.activity_accuracy === undefined ? "—" : formatPercent(fixture.activity_accuracy)));
-      row.append(make("td", "", fixture.activity_macro_f1 === undefined ? "—" : formatPercent(fixture.activity_macro_f1)));
-      row.append(make("td", "", acc === null ? "—" : formatPercent(acc)));
-      row.append(make("td", "", f1 === null ? "—" : formatPercent(f1)));
+      const cells = [
+        make("td", "class-label", real ? conditionLabel(real) : fixture.label || fixture.id || "Condition"),
+        make("td", "", fixture.activity_accuracy === undefined ? "—" : formatPercent(fixture.activity_accuracy)),
+        make("td", "", fixture.activity_macro_f1 === undefined ? "—" : formatPercent(fixture.activity_macro_f1)),
+        make("td", "", acc === null ? "—" : formatPercent(acc)),
+        make("td", "", f1 === null ? "—" : formatPercent(f1)),
+      ];
+      cells.forEach((cell, index) => {
+        cell.dataset.label = metricColumns[index];
+        row.append(cell);
+      });
       body.append(row);
     });
     table.append(head, body);
@@ -1327,7 +1673,7 @@
   function renderCaveatsView() {
     const section = $("#view-caveats");
     clear(section);
-    appendSectionHeading(section, "title-caveats", "07 · HOW TO READ THIS", "Useful evidence, with boundaries.", "These results describe one frozen cohort and one scoring reference. They do not establish general deployment performance.");
+    appendSectionHeading(section, "title-caveats", "07 · HOW TO READ THIS", "What this study cannot show", "These results describe one frozen cohort and one scoring reference. They do not establish general deployment performance.");
     const conclusion = make("div", "overall-conclusion");
     conclusion.append(make("p", "eyebrow", "STUDY CONCLUSION"), make("h4", "", "The measured conditions did not qualify for production ASI integration."), make("p", "", "The evaluation report recommends a separate asynchronous shadow experiment as the next step. No production parser, runtime or storage contract is changed by this result viewer."));
     const caveats = [

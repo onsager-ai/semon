@@ -84,12 +84,13 @@ def _assemble(files: dict[str, str]) -> str:
     html = html.replace(app_tag, "", 1)
 
     cloud_copy = (
-        '<p class="intro-copy">Account-private blind review. Your review draft stays in this browser only. '
-        "Download JSONL for a durable copy; answers do not sync to a server.</p>"
+        '<p class="intro-copy"><span class="intro-desktop-copy">Account-private blind review. Your review draft stays in this browser only. '
+        'Download JSONL for a durable copy; answers do not sync to a server.</span><span class="intro-mobile-copy">Private review; your draft stays in this browser. '
+        "Save a JSONL file before opening results.</span></p>"
     )
     source_copy = (
-        '<p class="intro-copy">A local, blind spot-check followed by a clear view of classifier quality, '
-        "operating cost and limits.</p>"
+        '<p class="intro-copy"><span class="intro-desktop-copy">A local, blind spot-check followed by a clear view of classifier quality, '
+        'operating cost and limits.</span><span class="intro-mobile-copy">Review each event, then save your choices before opening results.</span></p>'
     )
     if html.count(source_copy) != 1:
         raise BundleError("viewer_intro_invalid")
