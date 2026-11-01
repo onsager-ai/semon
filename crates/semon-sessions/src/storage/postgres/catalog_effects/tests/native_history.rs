@@ -218,9 +218,11 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
         row: &CatalogRow,
     ) -> Result<Option<serde_json::Value>, StorageError> {
         snapshot
-            .selected_details(&row.key, &row.sources, &mut |_, _| {
-                serde_json::json!({"state":null,"observation":"unavailable"})
-            })
+            .selected_details(
+                &row.key,
+                &row.sources,
+                &mut |_, _| serde_json::json!({"state":null,"observation":"unavailable"}),
+            )
             .map_err(|error| {
                 error
                     .get_ref()
@@ -397,9 +399,7 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
         &namespace,
         &control,
         &original_generation,
-        |snapshot| {
-            selected_details(snapshot, original)?.ok_or(StorageError::ScopeChanged)
-        },
+        |snapshot| selected_details(snapshot, original)?.ok_or(StorageError::ScopeChanged),
     )
     .unwrap();
     let content_generation = original_details["content_generation"]
@@ -577,8 +577,8 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
             .history_display_catalog(&original.key)?
             .ok_or(StorageError::ScopeChanged)?;
         assert_eq!(retained.sources, original.sources);
-        let retained_details = selected_details(snapshot, &retained)?
-            .ok_or(StorageError::ScopeChanged)?;
+        let retained_details =
+            selected_details(snapshot, &retained)?.ok_or(StorageError::ScopeChanged)?;
         assert_eq!(retained_details["content_generation"], content_generation);
         assert!(
             selected_details(snapshot, &changed)?.is_none(),
