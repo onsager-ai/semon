@@ -1,6 +1,8 @@
 use super::{PgCancellation, PgPool, pool::Driver, schema, sqlstate};
 use crate::storage::{LogicalSourceNamespace, StorageError};
 use std::time::Instant;
+#[cfg(test)]
+use std::time::Duration;
 
 #[cfg(test)]
 thread_local! {
@@ -21,12 +23,37 @@ pub(super) enum TxnKind {
 pub(super) struct PgTxn<'a> {
     pub(super) driver: &'a mut Driver,
     pub(super) namespace: &'a LogicalSourceNamespace,
+    #[cfg(test)]
+    pub(super) started: Instant,
     pub(super) deadline: Instant,
+    #[cfg(test)]
+    pub(super) budget: Duration,
     pub(super) control: &'a PgCancellation,
 }
 impl PgTxn<'_> {
     pub(super) fn check(&self) -> Result<(), StorageError> {
-        if self.control.is_cancelled() || Instant::now() >= self.deadline {
+        let now = Instant::now();
+        let deadline_expired = now >= self.deadline;
+        let cancelled = self.control.is_cancelled();
+        if deadline_expired || cancelled {
+            #[cfg(test)]
+            {
+                let host_cancelled = self.control.host_cancelled();
+                let request_cancelled = self.control.request_cancelled();
+                eprintln!(
+                    "PG_BUSY_DIAGNOSTIC origin=txn_check reason={} elapsed_us={} budget_us={} effective_deadline_us={} deadline_overrun_us={} deadline_expired={} host_cancelled={} request_cancelled={}",
+                    if deadline_expired { "deadline" } else { "cancelled" },
+                    now.saturating_duration_since(self.started).as_micros(),
+                    self.budget.as_micros(),
+                    self.deadline
+                        .saturating_duration_since(self.started)
+                        .as_micros(),
+                    now.saturating_duration_since(self.deadline).as_micros(),
+                    deadline_expired,
+                    host_cancelled,
+                    request_cancelled,
+                );
+            }
             Err(StorageError::Busy)
         } else {
             Ok(())
@@ -70,7 +97,8 @@ impl PgPool {
         }
         let mut lease = self.acquire(control)?;
         let limits = self.inner.limits;
-        let deadline = control.deadline(Instant::now() + limits.txn_deadline);
+        let started = Instant::now();
+        let deadline = control.deadline(started + limits.txn_deadline);
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
         connection.client.context(deadline, control, limits);
         let exclusive_admission = matches!(kind, TxnKind::StoreWrite);
@@ -78,7 +106,11 @@ impl PgPool {
             let mut admission = PgTxn {
                 driver: &mut connection.client,
                 namespace,
+                #[cfg(test)]
+                started,
                 deadline,
+                #[cfg(test)]
+                budget: limits.txn_deadline,
                 control,
             };
             // Acquire before BEGIN so a REPEATABLE READ transaction cannot
@@ -102,7 +134,11 @@ impl PgPool {
             let mut tx = PgTxn {
                 driver: &mut connection.client,
                 namespace,
+                #[cfg(test)]
+                started,
                 deadline,
+                #[cfg(test)]
+                budget: limits.txn_deadline,
                 control,
             };
             for (key, value) in [

@@ -88,16 +88,53 @@ impl Driver {
         future: impl Future<Output = Result<T, tokio_postgres::Error>>,
     ) -> Result<T, DriverError> {
         if self.interrupted.get() {
+            #[cfg(test)]
+            eprintln!("PG_BUSY_DIAGNOSTIC origin=driver_preexisting_interrupted");
             return Err(DriverError::Interrupted);
         }
+        #[cfg(test)]
+        let started = Instant::now();
         self.handle.block_on(async {
             tokio::pin!(future);
-            tokio::select! {
+            let reason = tokio::select! {
                 biased;
-                result = &mut future => return result.map_err(DriverError::Pg),
-                _ = tokio::time::sleep_until(self.deadline.into()) => (),
-                _ = self.control.cancelled() => (),
+                result = &mut future => {
+                    let result = result.map_err(DriverError::Pg);
+                    #[cfg(test)]
+                    if let Err(DriverError::Pg(error)) = &result
+                        && error.code().is_some_and(|code| {
+                            matches!(code.code(), "40001" | "40P01" | "55P03" | "57014")
+                        })
+                    {
+                        eprintln!(
+                            "PG_BUSY_DIAGNOSTIC origin=driver_sqlstate query_elapsed_us={} sqlstate={} deadline_remaining_us={} host_cancelled={} request_cancelled={}",
+                            started.elapsed().as_micros(),
+                            error.code().map_or("unknown", |code| code.code()),
+                            self.deadline
+                                .saturating_duration_since(Instant::now())
+                                .as_micros(),
+                            self.control.host_cancelled(),
+                            self.control.request_cancelled(),
+                        );
+                    }
+                    return result;
+                }
+                _ = tokio::time::sleep_until(self.deadline.into()) => "deadline",
+                _ = self.control.cancelled() => "cancelled",
             };
+            #[cfg(not(test))]
+            let _ = reason;
+            #[cfg(test)]
+            eprintln!(
+                "PG_BUSY_DIAGNOSTIC origin=driver_timeout reason={} query_elapsed_us={} deadline_remaining_us={} host_cancelled={} request_cancelled={}",
+                reason,
+                started.elapsed().as_micros(),
+                self.deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_micros(),
+                self.control.host_cancelled(),
+                self.control.request_cancelled(),
+            );
             self.tainted.set(true);
             // Inline, owned cancel future: dropping timeout closes its transport.
             // Even if the query finishes first, await/drop cancellation before
@@ -113,9 +150,35 @@ impl Driver {
             };
             let (_, reply) = tokio::join!(cancel, grace);
             match reply {
-                Ok(result) => result.map_err(DriverError::Pg),
+                Ok(result) => {
+                    let result = result.map_err(DriverError::Pg);
+                    #[cfg(test)]
+                    if let Err(DriverError::Pg(error)) = &result
+                        && error.code().is_some_and(|code| {
+                            matches!(code.code(), "40001" | "40P01" | "55P03" | "57014")
+                        })
+                    {
+                        eprintln!(
+                            "PG_BUSY_DIAGNOSTIC origin=driver_timeout_reply reason={} query_elapsed_us={} sqlstate={} host_cancelled={} request_cancelled={}",
+                            reason,
+                            started.elapsed().as_micros(),
+                            error.code().map_or("unknown", |code| code.code()),
+                            self.control.host_cancelled(),
+                            self.control.request_cancelled(),
+                        );
+                    }
+                    result
+                }
                 Err(_) => {
                     self.interrupted.set(true);
+                    #[cfg(test)]
+                    eprintln!(
+                        "PG_BUSY_DIAGNOSTIC origin=driver_interrupted reason={} query_elapsed_us={} host_cancelled={} request_cancelled={}",
+                        reason,
+                        started.elapsed().as_micros(),
+                        self.control.host_cancelled(),
+                        self.control.request_cancelled(),
+                    );
                     Err(DriverError::Interrupted)
                 }
             }

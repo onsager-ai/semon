@@ -20,6 +20,16 @@ impl PgCancellation {
                 .as_ref()
                 .is_some_and(|(cancelled, _)| cancelled.load(Ordering::Acquire))
     }
+    #[cfg(test)]
+    pub(super) fn host_cancelled(&self) -> bool {
+        self.host.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    pub(super) fn request_cancelled(&self) -> bool {
+        self.request
+            .as_ref()
+            .is_some_and(|(cancelled, _)| cancelled.load(Ordering::Acquire))
+    }
     /// Bind only at a read call, never in a retained checkpoint. Nested scopes
     /// already resolve to their outer request in selected_read.
     pub(crate) fn for_selected_read(&self) -> Self {

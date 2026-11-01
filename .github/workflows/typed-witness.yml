@@ -1,6 +1,12 @@
 name: Typed native witness measurement
 on:
   workflow_dispatch:
+    inputs:
+      pg_busy_diagnostic:
+        description: Run only the genuine PostgreSQL ingest Busy diagnostic
+        required: false
+        type: boolean
+        default: false
   push:
     branches:
       - task/477-typed-witness-measurement-20261101
@@ -50,10 +56,32 @@ jobs:
           CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
           SQL
+      - name: One genuine PostgreSQL ingest Busy diagnostic
+        id: pg_busy_diagnostic
+        if: ${{ !cancelled() && inputs.pg_busy_diagnostic }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::query_recipe::typed_witness_genuine_fixture_pg_reconstruction_and_refusal -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/typed-witness-tests.log"
+      - name: Verify the single PG diagnostic result
+        if: ${{ always() && inputs.pg_busy_diagnostic }}
+        shell: bash
+        run: |
+          test -f "$RUNNER_TEMP/typed-witness-tests.log"
+          test "$(grep -Fc 'running 1 test' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 1
+          test "$(grep -Fc 'test storage::postgres::catalog_effects::tests::query_recipe::typed_witness_genuine_fixture_pg_reconstruction_and_refusal ...' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 1
+          if grep -Fq 'test result: FAILED. 0 passed; 1 failed;' "$RUNNER_TEMP/typed-witness-tests.log"; then
+            grep -F 'PG_INDEX_DIAGNOSTIC result=error' "$RUNNER_TEMP/typed-witness-tests.log"
+            grep -E 'PG_BUSY_DIAGNOSTIC|PG_NATIVE_BUNDLE_DIAGNOSTIC' "$RUNNER_TEMP/typed-witness-tests.log"
+          else
+            grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/typed-witness-tests.log"
+          fi
       - name: Inventory native boundary
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
         run: python3 scripts/check-native-storage-boundary.py
       - name: Check formatting
         id: formatting
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
         continue-on-error: true
         run: cargo fmt --all --check
       - name: Retain exact formatting patch
@@ -63,9 +91,11 @@ jobs:
           git -c gc.auto=0 -c maintenance.auto=false diff --binary -- '*.rs' > "$RUNNER_TEMP/typed-witness-rustfmt.patch"
           git -c gc.auto=0 -c maintenance.auto=false apply --reverse "$RUNNER_TEMP/typed-witness-rustfmt.patch"
       - name: Production library compiles without prototype
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
         run: cargo check --locked -p semon-sessions --lib
       - name: Genuine SQLite and private PG reconstruction and refusal
         id: reconstruction
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic }}
         shell: bash
         run: |
           set -o pipefail
@@ -76,7 +106,7 @@ jobs:
           test "$(grep -c 'typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 1
           test "$(grep -c 'typed_presentation_cases backend=.* exact_roundtrip=17 immutable_entry_checks=17 negative=103 publication_activated=false' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
       - name: Focused library lint
-        if: ${{ !cancelled() && steps.reconstruction.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic && steps.reconstruction.outcome == 'success' }}
         run: cargo clippy --locked -p semon-sessions --all-targets --features postgres-test-tls -- --no-deps -D warnings
       - name: Retain measurements and formatting evidence
         if: ${{ !cancelled() }}
@@ -88,5 +118,5 @@ jobs:
             ${{ runner.temp }}/typed-witness-rustfmt.patch
           if-no-files-found: error
       - name: Require formatting
-        if: ${{ !cancelled() && steps.formatting.outcome != 'success' }}
+        if: ${{ !cancelled() && !inputs.pg_busy_diagnostic && steps.formatting.outcome != 'success' }}
         run: exit 1

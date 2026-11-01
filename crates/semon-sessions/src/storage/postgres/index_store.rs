@@ -14,6 +14,27 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
+#[cfg(test)]
+use std::time::Instant;
+
+#[cfg(test)]
+fn large_fixture_source(path: &str) -> (&'static str, Option<usize>, usize) {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    if filename == "catalog.jsonl" && path.contains("/projects/resumed/") {
+        return ("parent", Some(1), 17);
+    }
+    if let Some(child) = filename
+        .strip_prefix("agent-large-child-")
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .and_then(|ordinal| ordinal.parse::<usize>().ok())
+    {
+        return ("child", Some(child + 2), 17);
+    }
+    ("other", None, 0)
+}
 
 pub(crate) struct NativeIndex {
     pool: PgPool,
@@ -450,7 +471,9 @@ impl IndexStore for NativeIndex {
             .intents
             .get(path)
             .ok_or_else(|| err(StorageError::InvalidArguments))?;
-        native_ingest::commit(
+        #[cfg(test)]
+        let started = Instant::now();
+        let result = native_ingest::commit(
             &self.pool,
             &self.namespace,
             &self.control,
@@ -461,12 +484,42 @@ impl IndexStore for NativeIndex {
             ledger,
             physical_stat,
             index,
-        )
-        .inspect_err(|_error| {
+        );
+        if let Err(error) = result {
             #[cfg(test)]
-            eprintln!("PG_INDEX_REFUSED commit_file error={_error:?}");
-        })
-        .map_err(err)?;
+            {
+                let (source_kind, source_ordinal, fixture_total) = large_fixture_source(path);
+                let source_ordinal = source_ordinal
+                    .map(|ordinal| ordinal.to_string())
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let dirty = changes;
+                eprintln!(
+                    "PG_INDEX_DIAGNOSTIC result=error error={error:?} source_kind={source_kind} source_ordinal={source_ordinal} fixture_total={fixture_total} physical_bytes={} ledger_offset={} index_events={} index_extras={} index_signals={} usage_observations={} chunk_hashes={} tree_summary={} handoff_index={} marker_index={} dirty_rows_present={} dirty_events={} dirty_extras={} dirty_signals={} dirty_codex_usage={} dirty_usage={} commit_elapsed_us={}",
+                    physical_stat.size,
+                    ledger.offset,
+                    index.events.len(),
+                    index.extras.len(),
+                    index.signals.len(),
+                    index.native_usage_observations.as_ref().map_or(0, Vec::len),
+                    index
+                        .source_chunks
+                        .as_ref()
+                        .map_or(0, |chunks| chunks.hashes.len()),
+                    index.tree_summary.is_some(),
+                    index.handoff_index.is_some(),
+                    index.marker_index.is_some(),
+                    dirty.is_some(),
+                    dirty.map_or(0, |rows| rows.events.len()),
+                    dirty.map_or(0, |rows| rows.extras.len()),
+                    dirty.map_or(0, |rows| rows.signals.len()),
+                    dirty.map_or(0, |rows| rows.codex_usage.len()),
+                    dirty.map_or(0, |rows| rows.usage.len()),
+                    started.elapsed().as_micros(),
+                );
+                eprintln!("PG_INDEX_REFUSED commit_file error={error:?}");
+            }
+            return Err(err(error));
+        }
         Ok(Outcome::Written)
     }
     fn commit_initial_files(

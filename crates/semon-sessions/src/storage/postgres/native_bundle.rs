@@ -10,6 +10,8 @@ use crate::{
     },
     storage::StorageError,
 };
+#[cfg(test)]
+use std::time::Instant;
 
 /// Deliberately cannot be converted into an EventReceipt or operation ACK.
 #[derive(Debug)]
@@ -23,6 +25,47 @@ struct Writer<'a, 'tx> {
     source: i64,
     pages: Option<super::native_pages::Prepared>,
     pending: Option<super::native_pages::Pending>,
+    #[cfg(test)]
+    trace: StageTrace,
+}
+
+#[cfg(test)]
+struct StageTrace {
+    started: Instant,
+    current: (&'static str, Instant),
+    completed: Vec<(&'static str, u128)>,
+}
+
+#[cfg(test)]
+impl StageTrace {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            current: ("prepare", started),
+            completed: Vec::new(),
+        }
+    }
+
+    fn enter(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        self.completed
+            .push((
+                self.current.0,
+                now.saturating_duration_since(self.current.1).as_micros(),
+            ));
+        self.current = (stage, now);
+    }
+
+    fn report_failure(&self, txn_elapsed_us: u128) {
+        eprintln!(
+            "PG_NATIVE_BUNDLE_DIAGNOSTIC txn_elapsed_us={} bundle_elapsed_us={} completed_stage_us={:?} failing_stage={} failing_stage_elapsed_us={}",
+            txn_elapsed_us,
+            self.started.elapsed().as_micros(),
+            self.completed,
+            self.current.0,
+            self.current.1.elapsed().as_micros(),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -81,6 +124,8 @@ impl Effects for Writer<'_, '_> {
     fn planning_finished(&mut self) {}
     fn begin(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
+        self.trace.enter("begin");
+        #[cfg(test)]
         eprintln!("BUNDLE_STAGE begin");
         // Existing transaction admission owns the store-shared lock before
         // SourceState. Reject the exact core CAS before any family effects.
@@ -138,6 +183,8 @@ impl Effects for Writer<'_, '_> {
     }
     fn file(&mut self, input: &Input<'_>, changes: &DirtyRows) -> Result<(), StorageError> {
         #[cfg(test)]
+        self.trace.enter("core");
+        #[cfg(test)]
         eprintln!("BUNDLE_STAGE core");
         native_core::write(
             self.tx,
@@ -156,6 +203,14 @@ impl Effects for Writer<'_, '_> {
         stage: shared::Auxiliary,
     ) -> Result<(), StorageError> {
         use shared::Auxiliary;
+        #[cfg(test)]
+        self.trace.enter(match stage {
+            Auxiliary::Header => "header",
+            Auxiliary::Sidecar => "sidecar",
+            Auxiliary::Chunks => "chunks",
+            Auxiliary::Parent => "parent",
+            Auxiliary::Launch => "launch",
+        });
         match stage {
             Auxiliary::Header => self.metadata(
                 &format!("native_codex_header:{}", input.path),
@@ -202,6 +257,8 @@ impl Effects for Writer<'_, '_> {
     }
     fn usage(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
+        self.trace.enter("usage");
+        #[cfg(test)]
         eprintln!("BUNDLE_STAGE usage_write");
         algorithm::write(
             &mut Usage::new(self.tx)?,
@@ -213,6 +270,8 @@ impl Effects for Writer<'_, '_> {
         Ok(())
     }
     fn tree(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
+        #[cfg(test)]
+        self.trace.enter("tree");
         #[cfg(test)]
         eprintln!("BUNDLE_STAGE tree_publish");
         if let Some(summary) = &input.index.tree_summary
@@ -233,20 +292,28 @@ impl Effects for Writer<'_, '_> {
     }
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
         #[cfg(test)]
+        self.trace.enter("relationships");
+        #[cfg(test)]
         eprintln!("BUNDLE_STAGE relationships");
         super::native_commit::relationships(self.tx, input.path, input.index, false)?;
         self.boundary()
     }
     fn archive(&mut self, path: &str) -> Result<(), StorageError> {
+        #[cfg(test)]
+        self.trace.enter("archive");
         self.metadata(&format!("archive_event_index:{path}"), None)
     }
     fn invalidate(&mut self, path: &str, changed: bool) -> Result<(), StorageError> {
+        #[cfg(test)]
+        self.trace.enter("invalidation");
         if changed {
             super::source_journal::invalidate(self.tx, path)?;
         }
         self.boundary()
     }
     fn retire_mutation(&mut self, path: &str) -> Result<(), StorageError> {
+        #[cfg(test)]
+        self.trace.enter("retire_mutation");
         super::native_keys::delete_meta(self.tx, format!("source-retired:{path}").as_bytes())?;
         self.tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace=$1 AND source_path=$2", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
         self.boundary()
@@ -276,16 +343,24 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
             return Err(StorageError::NamespaceUpgradePending);
         }
     }
+    #[cfg(test)]
+    let started = Instant::now();
     let pages = super::native_pages::prepare(input.ledger, input.index)?;
-    shared::write(
-        &mut Writer {
-            tx,
-            source: 0,
-            pages: Some(pages),
-            pending: None,
-        },
-        input,
-    )?;
+    let mut writer = Writer {
+        tx,
+        source: 0,
+        pages: Some(pages),
+        pending: None,
+        #[cfg(test)]
+        trace: StageTrace::new(started),
+    };
+    let result = shared::write(&mut writer, input);
+    #[cfg(test)]
+    if result.is_err() {
+        let txn_elapsed_us = writer.tx.started.elapsed().as_micros();
+        writer.trace.report_failure(txn_elapsed_us);
+    }
+    result?;
     Ok(PartialFile {
         missing: &[
             "Catalog proof references, reader leases and GC",
