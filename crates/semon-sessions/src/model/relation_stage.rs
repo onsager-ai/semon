@@ -636,14 +636,11 @@ pub(crate) trait OwnerStore {
 impl Relation {
     /// Same exact comparison and physical-sender witness merge for every store.
     pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
-        let witness = prior
-            .source_turn
-            .merge(&self.source_turn)
-            .ok_or_else(|| {
-                #[cfg(test)]
-                eprintln!("semantic_relation_merge_refusal stage=source_turn");
-                io::Error::other("conflicting staged parent turn")
-            })?;
+        let witness = prior.source_turn.merge(&self.source_turn).ok_or_else(|| {
+            #[cfg(test)]
+            eprintln!("semantic_relation_merge_refusal stage=source_turn");
+            io::Error::other("conflicting staged parent turn")
+        })?;
         let mut before = prior.clone();
         let mut merged = self.clone();
         before.source_turn = OriginTurn::default();
