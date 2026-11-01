@@ -17,6 +17,21 @@ fn source_budget() -> rusqlite::Error {
     rusqlite::Error::ToSqlConversionFailure(Box::new(PhysicalOwnerSourceBudget))
 }
 
+#[derive(Debug)]
+pub(crate) struct PhysicalContextBudget;
+
+impl std::fmt::Display for PhysicalContextBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("semantic_physical_context_budget")
+    }
+}
+
+impl std::error::Error for PhysicalContextBudget {}
+
+pub(crate) fn context_budget() -> rusqlite::Error {
+    rusqlite::Error::ToSqlConversionFailure(Box::new(PhysicalContextBudget))
+}
+
 pub(crate) trait OwnerClosurePort {
     fn input(&self, path: &str) -> rusqlite::Result<Option<(String, bool, String)>>;
     fn links(&self, path: &str) -> rusqlite::Result<(String, Option<String>)>;
@@ -183,7 +198,7 @@ pub(crate) fn context_with(
     for path in paths {
         owners.extend(port.owners(path)?);
         if owners.len() > 64 {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(context_budget());
         }
     }
     let mut selected = owners.clone();

@@ -45,7 +45,7 @@ impl ContextPort for Plan<'_> {
             let child = child?;
             *used = used.saturating_add(child.len());
             if *used > 1048576 {
-                return Err(rusqlite::Error::InvalidQuery);
+                return Err(crate::events::store::semantic_stage::context_budget());
             }
             children.push(child);
         }

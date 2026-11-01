@@ -46,12 +46,12 @@ fn relation_owner_source_paths(
 }
 
 fn relation_context_budget_error(error: &rusqlite::Error) -> bool {
-    matches!(error, rusqlite::Error::InvalidQuery)
-        || matches!(
-            error,
-            rusqlite::Error::ToSqlConversionFailure(cause)
-                if cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
-        )
+    matches!(
+        error,
+        rusqlite::Error::ToSqlConversionFailure(cause)
+            if cause.is::<crate::events::store::semantic_stage::PhysicalContextBudget>()
+                || cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
+    )
 }
 
 struct RelationPage {
@@ -3948,7 +3948,7 @@ impl Stage {
                         .len()
                         > 1048576
                     {
-                        return Err(rusqlite::Error::InvalidQuery);
+                        return Err(crate::events::store::semantic_stage::context_budget());
                     }
                     Ok(context)
                 })();
@@ -3966,7 +3966,11 @@ impl Stage {
                             .into_iter()
                             .collect();
                     }
-                    Err(_) if result_phase == Phase::Relations && paths.len() > 1 => {
+                    Err(e)
+                        if result_phase == Phase::Relations
+                            && paths.len() > 1
+                            && relation_context_budget_error(&e) =>
+                    {
                         paths.truncate(1);
                     }
                     Err(e) => return Err(error(e)),
