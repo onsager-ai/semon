@@ -10649,6 +10649,8 @@ fn claude_continuation_relation_batch(
     fixture: &Fixture,
     inputs: &[crate::Input],
 ) -> Result<crate::model::relation_stage::Batch, crate::events::StoreError> {
+    use crate::storage::native_events::NativeEventStore;
+
     assert!(!inputs.is_empty());
     let mut cache =
         EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
