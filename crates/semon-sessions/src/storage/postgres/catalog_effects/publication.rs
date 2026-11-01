@@ -459,9 +459,57 @@ pub(in crate::storage::postgres) fn publish(
     }
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE binding_stage_bound");
-    let refs = admission::stage_bound(tx, &generation, publication, &fence)?;
+    #[cfg(test)]
+    let stage_bound_started = std::time::Instant::now();
+    let refs_result = admission::stage_bound(tx, &generation, publication, &fence);
+    #[cfg(test)]
+    if matches!(refs_result.as_ref(), Err(&StorageError::Busy)) {
+        let now = std::time::Instant::now();
+        eprintln!(
+            "PG_PUBLISH_DIAG boundary=stage_bound result=busy elapsed_ms={} deadline_expired={} deadline_remaining_ms={} cancelled={} row_count={} source_reference_count={} unique_source_count={} claim_count={} payload_bytes={} source_path_bytes={}",
+            stage_bound_started.elapsed().as_millis(),
+            now >= tx.deadline,
+            tx.deadline.saturating_duration_since(now).as_millis(),
+            tx.control.is_cancelled(),
+            publication.rows.len(),
+            publication.rows.iter().map(|row| row.sources.len()).sum::<usize>(),
+            paths.len(),
+            claims.len(),
+            payload.len(),
+            paths.iter().map(String::len).sum::<usize>(),
+        );
+    }
+    let refs = refs_result?;
+    #[cfg(test)]
+    let proof_reference_count = refs.len();
+    #[cfg(test)]
+    let mut reference_index = 0;
     for reference in refs {
-        tx.check()?;
+        let proof_check = tx.check();
+        #[cfg(test)]
+        if matches!(proof_check.as_ref(), Err(&StorageError::Busy)) {
+            let now = std::time::Instant::now();
+            eprintln!(
+                "PG_PUBLISH_DIAG boundary=post_stage_bound_check result=busy elapsed_ms={} deadline_expired={} deadline_remaining_ms={} cancelled={} proof_reference_count={} failing_reference_index={} row_count={} source_reference_count={} unique_source_count={} claim_count={} payload_bytes={} source_path_bytes={}",
+                stage_bound_started.elapsed().as_millis(),
+                now >= tx.deadline,
+                tx.deadline.saturating_duration_since(now).as_millis(),
+                tx.control.is_cancelled(),
+                proof_reference_count,
+                reference_index,
+                publication.rows.len(),
+                publication.rows.iter().map(|row| row.sources.len()).sum::<usize>(),
+                paths.len(),
+                claims.len(),
+                payload.len(),
+                paths.iter().map(String::len).sum::<usize>(),
+            );
+        }
+        proof_check?;
+        #[cfg(test)]
+        {
+            reference_index += 1;
+        }
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE proof_insert");
         tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
