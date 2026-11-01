@@ -183,9 +183,7 @@ impl History<'_, '_> {
                 return Err(StorageError::ScopeChanged);
             }
             let path = text(row.get(1))?;
-            let bytes = row
-                .get::<_, Option<Vec<u8>>>(2)
-                .ok_or(StorageError::Busy)?;
+            let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
             let source: CatalogSource =
                 serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
             if source.path.to_str() != Some(path.as_str())
@@ -221,9 +219,8 @@ impl History<'_, '_> {
             .iter()
             .map(|source| {
                 let path = path(source)?.as_bytes().to_vec();
-                let receipt = crate::events::store::header_ledger(
-                    &crate::source_carrier::ledger(source),
-                );
+                let receipt =
+                    crate::events::store::header_ledger(&crate::source_carrier::ledger(source));
                 Ok((path, receipt.into_bytes()))
             })
             .collect::<Result<std::collections::BTreeMap<_, _>, StorageError>>()?;
@@ -289,22 +286,24 @@ impl History<'_, '_> {
         let model = row.model.as_bytes();
         let (activity, active) = crate::storage::query::history_activity(row);
         let parent = row.parent.as_deref().map(str::as_bytes);
-        Ok(rows[0].get::<_, Vec<u8>>(9).as_slice() == header_generation.as_bytes()
-            && !rows[0].get::<_, bool>(10)
-            && rows[0].get::<_, i64>(1) == last
-            && rows[0].get::<_, Option<Vec<u8>>>(2).as_deref() == Some(harness)
-            && rows[0].get::<_, Option<Vec<u8>>>(3).as_deref() == Some(repo)
-            && rows[0].get::<_, Option<Vec<u8>>>(4).as_deref() == Some(model)
-            && rows[0].get::<_, Option<i64>>(5) == activity
-            && rows[0].get::<_, bool>(6) == active
-            && rows[0].get::<_, Option<Vec<u8>>>(7).as_deref() == parent
-            && rows[0].get::<_, i64>(11) == last
-            && rows[0].get::<_, Option<Vec<u8>>>(12).as_deref() == Some(harness)
-            && rows[0].get::<_, Option<Vec<u8>>>(13).as_deref() == Some(repo)
-            && rows[0].get::<_, Option<Vec<u8>>>(14).as_deref() == Some(model)
-            && rows[0].get::<_, Option<i64>>(15) == activity
-            && rows[0].get::<_, bool>(16) == active
-            && rows[0].get::<_, Option<Vec<u8>>>(17).as_deref() == parent)
+        Ok(
+            rows[0].get::<_, Vec<u8>>(9).as_slice() == header_generation.as_bytes()
+                && !rows[0].get::<_, bool>(10)
+                && rows[0].get::<_, i64>(1) == last
+                && rows[0].get::<_, Option<Vec<u8>>>(2).as_deref() == Some(harness)
+                && rows[0].get::<_, Option<Vec<u8>>>(3).as_deref() == Some(repo)
+                && rows[0].get::<_, Option<Vec<u8>>>(4).as_deref() == Some(model)
+                && rows[0].get::<_, Option<i64>>(5) == activity
+                && rows[0].get::<_, bool>(6) == active
+                && rows[0].get::<_, Option<Vec<u8>>>(7).as_deref() == parent
+                && rows[0].get::<_, i64>(11) == last
+                && rows[0].get::<_, Option<Vec<u8>>>(12).as_deref() == Some(harness)
+                && rows[0].get::<_, Option<Vec<u8>>>(13).as_deref() == Some(repo)
+                && rows[0].get::<_, Option<Vec<u8>>>(14).as_deref() == Some(model)
+                && rows[0].get::<_, Option<i64>>(15) == activity
+                && rows[0].get::<_, bool>(16) == active
+                && rows[0].get::<_, Option<Vec<u8>>>(17).as_deref() == parent,
+        )
     }
 
     fn trace_header_at(
@@ -333,7 +332,11 @@ impl History<'_, '_> {
             .transpose()
     }
 
-    fn trace_members_without_header(&self, generation: &str, key: &str) -> Result<bool, StorageError> {
+    fn trace_members_without_header(
+        &self,
+        generation: &str,
+        key: &str,
+    ) -> Result<bool, StorageError> {
         let tx = self.effects.tx.borrow_mut();
         tx.check()?;
         let ns = tx.namespace.as_str().as_bytes();
@@ -401,7 +404,10 @@ impl History<'_, '_> {
         for text in slots {
             let slot: crate::slot_projection::SavedSlot =
                 serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
-            if slot.source_paths().iter().any(|path| !paths.contains(*path))
+            if slot
+                .source_paths()
+                .iter()
+                .any(|path| !paths.contains(*path))
                 || by_identity.insert(slot.identity(), text.clone()).is_some()
             {
                 return Err(StorageError::ScopeChanged);
@@ -416,8 +422,8 @@ impl History<'_, '_> {
         owner_generation: &str,
         metadata: &str,
     ) -> Result<(CatalogRow, RecipeContents), StorageError> {
-        use std::collections::{BTreeMap, BTreeSet};
         use sha2::{Digest, Sha256};
+        use std::collections::{BTreeMap, BTreeSet};
 
         let history: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
@@ -470,9 +476,8 @@ impl History<'_, '_> {
         }
 
         let current_recipe = self.recipe_contents(self.previous, &current.key, false)?;
-        let current_source_generation =
-            crate::retention::source_generation(&current.sources)
-                .map_err(|_| StorageError::ScopeChanged)?;
+        let current_source_generation = crate::retention::source_generation(&current.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
         if current_recipe.incomplete
             || current_recipe.header.1 != crate::slot_projection::VERSION
             || current_recipe.header.2.as_deref() != Some(current_source_generation.as_str())
@@ -485,9 +490,8 @@ impl History<'_, '_> {
         let current_slots = Self::validate_saved_slots(&current_recipe.slots, &current.sources)?;
 
         let history_recipe = self.recipe_contents(owner_generation, &current.key, true)?;
-        let history_source_generation =
-            crate::retention::source_generation(&history.sources)
-                .map_err(|_| StorageError::ScopeChanged)?;
+        let history_source_generation = crate::retention::source_generation(&history.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
         let expected_history_generation = format!(
             "{:x}",
             Sha256::digest(
@@ -522,7 +526,9 @@ impl History<'_, '_> {
             .map(|source| (source.path.to_string_lossy().into_owned(), source))
             .collect::<BTreeMap<_, _>>();
         if previous_sources.iter().any(|(path, source)| {
-            history_by_path.get(path).is_none_or(|expected| *expected != source)
+            history_by_path
+                .get(path)
+                .is_none_or(|expected| *expected != source)
         }) {
             return Err(StorageError::ScopeChanged);
         }
@@ -553,7 +559,8 @@ impl History<'_, '_> {
     ) -> Result<bool, StorageError> {
         let generation = self.effects.generation;
         if self.owner_at(generation, key)? != Some((generation.to_owned(), false))
-            || self.metadata("semon_pg_native_catalog_history_headers", generation, key)?
+            || self
+                .metadata("semon_pg_native_catalog_history_headers", generation, key)?
                 .as_deref()
                 != Some(metadata)
             || !self.denormalized_history_matches(generation, generation, key, history)?
@@ -585,9 +592,11 @@ impl History<'_, '_> {
             .collect::<std::collections::BTreeMap<_, _>>();
         let actual_sources = self.history_sources_at(generation, key)?;
         if actual_sources.len() != expected_sources.len()
-            || expected_sources
-                .iter()
-                .any(|(path, source)| actual_sources.get(path).is_none_or(|actual| actual != *source))
+            || expected_sources.iter().any(|(path, source)| {
+                actual_sources
+                    .get(path)
+                    .is_none_or(|actual| actual != *source)
+            })
         {
             return Ok(false);
         }
@@ -648,7 +657,10 @@ impl History<'_, '_> {
         )?;
         {
             let mut tx = self.effects.tx.borrow_mut();
-            let owner = vec![(digest(current.key.as_bytes()), current.key.as_bytes().to_vec())];
+            let owner = vec![(
+                digest(current.key.as_bytes()),
+                current.key.as_bytes().to_vec(),
+            )];
             super::carry::trace_families(
                 &mut tx,
                 self.effects.generation,
@@ -1172,12 +1184,7 @@ pub(super) fn preserve(
         .filter(|row| !completed_composites.contains(row.key.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    if !catalog::preserve_rows(
-        &store,
-        publication.rows,
-        &original_withdrawn,
-        continuations,
-    )? {
+    if !catalog::preserve_rows(&store, publication.rows, &original_withdrawn, continuations)? {
         return Ok(false);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;

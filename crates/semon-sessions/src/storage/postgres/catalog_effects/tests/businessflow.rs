@@ -7388,7 +7388,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
-        Some(upgraded.clone())
+        upgraded.clone()
     );
     let staged_generation = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -7414,7 +7414,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
-        Some(upgraded.clone()),
+        upgraded.clone(),
         "a private composite receipt does not advance the head"
     );
     let trace_source_generation = crate::retention::source_generation(&[
@@ -7463,7 +7463,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
-        Some(upgraded.clone())
+        upgraded.clone()
     );
     let operation_count: i64 = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -7678,7 +7678,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
-        Some(upgraded.clone())
+        upgraded.clone()
     );
     let operation_count: i64 = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
@@ -7744,7 +7744,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         final_catchup.session_catalog_generation().unwrap(),
-        Some(upgraded.clone())
+        upgraded.clone()
     );
     let operation_count: i64 = pool
         .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
