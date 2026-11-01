@@ -117,6 +117,27 @@ jobs:
           name: pg-foundation-review-focused-${{ github.sha }}
           path: ${{ runner.temp }}/pg-foundation-review/
           if-no-files-found: error
+      - name: Private Catalog original custody shared-producer qualification
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog127.log"
+      - name: Retain private Catalog custody diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-catalog127-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-catalog127.log
+      - name: Ordinary PG model producer without SQLite fallback
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-vertical140.log"
+      - name: Retain ordinary PG model diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-vertical140-${{ github.sha }}
+          path: ${{ runner.temp }}/pg-vertical140.log
+          if-no-files-found: error
       - name: Bounded PostgreSQL usage and Tree publication
         id: usage_batch
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
@@ -196,17 +217,6 @@ jobs:
         with:
           name: current-transfer225-${{ github.sha }}
           path: ${{ runner.temp }}/current-transfer225.log
-      - name: Ordinary PG model producer without SQLite fallback
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-vertical140.log"
-      - name: Retain ordinary PG model diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-vertical140-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-vertical140.log
-          if-no-files-found: error
       - name: Catalog native proof binding before physical effects
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash
@@ -232,10 +242,6 @@ jobs:
       - name: Private immutable Catalog Current and recipe producer qualification
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog124 -- --nocapture
-      - name: Private Catalog original custody shared-producer qualification
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog127.log"
       - name: Borrowed immutable Catalog metadata snapshot qualification
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash
@@ -246,12 +252,6 @@ jobs:
         with:
           name: pg-catalog131-${{ github.sha }}
           path: ${{ runner.temp }}/pg-catalog131.log
-      - name: Retain private Catalog custody diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-catalog127-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-catalog127.log
       - name: Native keys125 long file and metadata producer oracle
         if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
         shell: bash
