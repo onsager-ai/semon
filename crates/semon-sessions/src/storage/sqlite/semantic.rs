@@ -1546,6 +1546,16 @@ fn defer_oversized_publication_record(
     if groups == 1 {
         return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
     }
+    let narrowed_groups = (groups / 2).max(1);
+    let max_groups = read_publication_group_hint(
+        &tx,
+        ns,
+        batch.epoch,
+        &runtime,
+        batch.source_revision,
+        original_generation.as_deref(),
+    )?
+    .map_or(narrowed_groups, |current| current.min(narrowed_groups));
     write_publication_group_hint(
         &tx,
         ns,
@@ -1554,7 +1564,7 @@ fn defer_oversized_publication_record(
             runtime: batch.runtime.clone(),
             source_revision: batch.source_revision,
             original_generation,
-            max_groups: (groups / 2).max(1),
+            max_groups,
         },
     )?;
     tx.commit().map_err(error)?;

@@ -14136,6 +14136,110 @@ mod tests {
             }
 
             #[test]
+            fn stale_wider_oversized_retry_preserves_narrower_hint_and_prior_receipt() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(68);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (first, first_model) = ready(&mut cache, &f, options, &inputs);
+                assert_eq!(first.phase, Phase::Publication);
+                assert_eq!(first.paths.len(), 64);
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&first, first_model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Written
+                );
+
+                let prior_receipt: (i64, String) = f
+                    .db()
+                    .query_row(
+                        "SELECT epoch,paths FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(prior_receipt.0, first.epoch);
+                let mut prior_paths: Vec<String> =
+                    serde_json::from_str(&prior_receipt.1).unwrap();
+                prior_paths.sort();
+                let mut first_paths = first.paths.clone();
+                first_paths.sort();
+                assert_eq!(prior_paths, first_paths);
+
+                let wider = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(wider.phase, Phase::Publication);
+                assert_eq!(wider.epoch, first.epoch);
+                assert_eq!(wider.paths.len(), 4);
+                let wider_inputs = selected_inputs(&inputs, options, &wider);
+                let mut wider_model = crate::model::prepare_semantic_batch(
+                    options,
+                    &mut cache,
+                    &wider_inputs,
+                    &wider,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                oversized_query(wider_model.prepared_mut_for_test(), 1_100_000);
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&wider, wider_model.prepared())
+                        .unwrap(),
+                    Outcome::Deferred
+                );
+                assert_eq!(hint(&f, "source-a"), Some((first.epoch, 2)));
+
+                let narrower = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(narrower.phase, Phase::Publication);
+                assert_eq!(narrower.epoch, first.epoch);
+                assert_eq!(narrower.paths.len(), 2);
+                let narrower_inputs = selected_inputs(&inputs, options, &narrower);
+                let mut narrower_model = crate::model::prepare_semantic_batch(
+                    options,
+                    &mut cache,
+                    &narrower_inputs,
+                    &narrower,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                oversized_query(narrower_model.prepared_mut_for_test(), 1_100_000);
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&narrower, narrower_model.prepared())
+                        .unwrap(),
+                    Outcome::Deferred
+                );
+                assert_eq!(hint(&f, "source-a"), Some((first.epoch, 1)));
+
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&wider, wider_model.prepared())
+                        .unwrap(),
+                    Outcome::Deferred,
+                    "retrying an in-flight wider batch preserves the narrowed hint"
+                );
+                assert_eq!(hint(&f, "source-a"), Some((first.epoch, 1)));
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT epoch,paths FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                            [],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .unwrap(),
+                    prior_receipt,
+                    "deferring the stale wider batch preserves the earlier group's receipt"
+                );
+
+                let next = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(next.phase, Phase::Publication);
+                assert_eq!(next.epoch, first.epoch);
+                assert_eq!(next.paths.len(), 1);
+            }
+
+            #[test]
             fn later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch() {
                 let (f, _, options, _) = model_sources();
                 let options = &options[0];
