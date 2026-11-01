@@ -14,6 +14,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let namespace = ns("withdrawal-current-only-custody");
     let source = data.rows[0].sources[0].path.clone();
     let second_source = source.with_file_name("two.jsonl");
+    let third_source = source.with_file_name("three.jsonl");
     let mut options = Options {
         source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
         claude_home: data.root.join("claude"),
@@ -53,15 +54,20 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         .unwrap()
         .replace("\"sessionId\":\"one\"", "\"sessionId\":\"two\"");
     fs::write(&second_source, second_contents).unwrap();
+    let third_contents = fs::read_to_string(&source)
+        .unwrap()
+        .replace("\"sessionId\":\"one\"", "\"sessionId\":\"three\"");
+    fs::write(&third_source, third_contents).unwrap();
 
     let mut source_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let inputs = [
         crate::native_evidence::catalog_input(&source, &options).unwrap(),
         crate::native_evidence::catalog_input(&second_source, &options).unwrap(),
+        crate::native_evidence::catalog_input(&third_source, &options).unwrap(),
     ];
     let prepared =
         crate::model::prepare_sources(&options, &mut source_cache, &inputs, 1790812802000).unwrap();
-    assert_eq!(prepared.rows.len(), 2);
+    assert_eq!(prepared.rows.len(), 3);
     assert!(
         prepared
             .transcripts
@@ -120,20 +126,34 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
             )
             .unwrap();
     }
-    let archives = rows
+    let paths = rows
         .iter()
-        .map(|row| {
-            let path = &row.sources[0].path;
-            let archived = path.with_file_name(format!(
-                "{}.withdrawn",
-                path.file_name().unwrap().to_string_lossy()
-            ));
-            fs::rename(path, &archived).unwrap();
-            (row.key.clone(), archived)
-        })
+        .map(|row| (row.key.clone(), row.sources[0].path.clone()))
         .collect::<BTreeMap<_, _>>();
+    let untouched_key = rows
+        .iter()
+        .find(|row| row.sources[0].path.as_path() == third_source.as_path())
+        .unwrap()
+        .key
+        .clone();
+    let removed_keys = rows
+        .iter()
+        .filter(|row| row.key.as_str() != untouched_key.as_str())
+        .map(|row| row.key.clone())
+        .collect::<BTreeSet<_>>();
+    let mut archives = BTreeMap::new();
+    for row in rows.iter().filter(|row| removed_keys.contains(&row.key)) {
+        let path = &row.sources[0].path;
+        let archived = path.with_file_name(format!(
+            "{}.withdrawn",
+            path.file_name().unwrap().to_string_lossy()
+        ));
+        fs::rename(path, &archived).unwrap();
+        archives.insert(row.key.clone(), archived);
+    }
 
-    let seen = BTreeSet::new();
+    let untouched_source = &paths[&untouched_key];
+    let seen = BTreeSet::from([untouched_source.to_str().unwrap().to_owned()]);
     let mut dirty = false;
     cache.retain(&seen, &mut dirty).unwrap();
     assert!(
@@ -145,12 +165,9 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         Some(before.as_str()),
         "partial custody leaves Current and its head in place"
     );
-    let paths = rows
-        .iter()
-        .map(|row| (row.key.clone(), row.sources[0].path.clone()))
-        .collect::<BTreeMap<_, _>>();
     let source_paths = rows
         .iter()
+        .filter(|row| removed_keys.contains(&row.key))
         .map(|row| row.sources[0].path.to_str().unwrap().as_bytes().to_vec())
         .collect::<Vec<_>>();
     let (progress, has_partial_owner, has_removal_claim) = pool
@@ -186,20 +203,28 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let resumed_key = &progress[0];
     let later_key = rows
         .iter()
-        .find(|row| &row.key != resumed_key)
+        .find(|row| {
+            row.key.as_str() != resumed_key.as_str()
+                && row.key.as_str() != untouched_key.as_str()
+        })
         .unwrap()
         .key
         .clone();
     let resumed_source = &paths[resumed_key];
-    let later_source = &paths[&later_key];
     let seen_resumed = BTreeSet::from([resumed_source.to_str().unwrap().to_owned()]);
+    let seen_resumed_and_untouched = BTreeSet::from([
+        resumed_source.to_str().unwrap().to_owned(),
+        untouched_source.to_str().unwrap().to_owned(),
+    ]);
 
     fs::rename(&archives[resumed_key], resumed_source).unwrap();
     cache
         .ingest(&"a".repeat(64), resumed_source, "claude")
         .unwrap();
     let mut dirty = false;
-    cache.retain(&seen_resumed, &mut dirty).unwrap();
+    cache
+        .retain(&seen_resumed_and_untouched, &mut dirty)
+        .unwrap();
     assert!(
         dirty,
         "the still-missing owner remains queued after reappearance"
@@ -213,7 +238,9 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let mut attempts = 1;
     let later_generation = loop {
         let mut dirty = false;
-        cache.retain(&seen_resumed, &mut dirty).unwrap();
+        cache
+            .retain(&seen_resumed_and_untouched, &mut dirty)
+            .unwrap();
         attempts += 1;
         let generation = cache.session_catalog_generation().unwrap();
         if generation != before {
@@ -266,10 +293,18 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         "the qualified History owner is searchable in retained scope"
     );
 
-    fs::rename(resumed_source, &archives[resumed_key]).unwrap();
-    let no_sources_seen = BTreeSet::new();
+    // Re-ingesting the reappeared source observes its new ctime. Until the
+    // ordinary producer publishes that changed source witness, a direct
+    // withdrawal of this old Current row must conflict. Use an untouched
+    // Current owner to exercise a second fresh bounded custody advance.
+    let untouched_archive = untouched_source.with_file_name(format!(
+        "{}.withdrawn",
+        untouched_source.file_name().unwrap().to_string_lossy()
+    ));
+    fs::rename(untouched_source, &untouched_archive).unwrap();
+    archives.insert(untouched_key.clone(), untouched_archive);
     let mut dirty = false;
-    cache.retain(&no_sources_seen, &mut dirty).unwrap();
+    cache.retain(&seen_resumed, &mut dirty).unwrap();
     assert!(
         dirty,
         "a later removal starts another bounded custody advance"
@@ -281,7 +316,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let mut attempts = 1;
     let generation = loop {
         let mut dirty = false;
-        cache.retain(&no_sources_seen, &mut dirty).unwrap();
+        cache.retain(&seen_resumed, &mut dirty).unwrap();
         attempts += 1;
         let generation = cache.session_catalog_generation().unwrap();
         if generation != later_generation {
@@ -293,16 +328,54 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     assert!(attempts > 1, "later removal resumes bounded custody");
     for row in &rows {
         snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
-            assert!(snapshot.catalog(&row.key, false)?.is_none());
-            let history = snapshot
-                .catalog(&row.key, true)?
-                .ok_or(StorageError::ScopeChanged)?;
-            assert!(snapshot.history_qualified(&history).unwrap());
-            snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)
+            if row.key.as_str() == resumed_key.as_str() {
+                assert!(snapshot.catalog(&row.key, false)?.is_some());
+            } else {
+                assert!(snapshot.catalog(&row.key, false)?.is_none());
+                let history = snapshot
+                    .catalog(&row.key, true)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(snapshot.history_qualified(&history).unwrap());
+                snapshot::query::qualify_context_candidate(snapshot, &options, &history, true)?;
+            }
+            Ok(())
         })
         .unwrap();
-        assert_eq!(fs::read(&archives[&row.key]).unwrap(), bytes[&row.key]);
+        let actual = if row.key.as_str() == resumed_key.as_str() {
+            fs::read(&paths[&row.key]).unwrap()
+        } else {
+            fs::read(&archives[&row.key]).unwrap()
+        };
+        assert_eq!(actual, bytes[&row.key]);
     }
+
+    let retired_paths = [&paths[&later_key], &paths[&untouched_key]]
+        .iter()
+        .map(|path| path.to_str().unwrap().as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let (resumed_changed, resumed_removed, retired_pending) = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let row = tx
+                .driver
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='changed'), EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'), EXISTS(SELECT 1 FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=ANY($3::bytea[]))",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &resumed_source.to_str().unwrap().as_bytes(),
+                        &retired_paths,
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            Ok((
+                row.get::<_, bool>(0),
+                row.get::<_, bool>(1),
+                row.get::<_, bool>(2),
+            ))
+        })
+        .unwrap();
+    assert!(resumed_changed, "reappeared source keeps its changed claim");
+    assert!(!resumed_removed, "reappeared source is not claimed as removed");
+    assert!(!retired_pending, "withdrawn sources have no pending claim");
 
     drop(cache);
     drop(source_cache);
