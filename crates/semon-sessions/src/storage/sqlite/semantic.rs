@@ -94,9 +94,7 @@ fn relation_sender_context(
             let endpoint = match preloaded.get(&key) {
                 Some(endpoint) => Some(endpoint.clone()),
                 None => crate::events::store::semantic_stage::ContextPort::endpoint(
-                    physical,
-                    &key,
-                    used,
+                    physical, &key, used,
                 )?,
             };
             let Some(endpoint) = endpoint else {
@@ -4179,15 +4177,14 @@ impl Stage {
             loop {
                 relation_context_bytes = 0;
                 let loaded = (|| -> rusqlite::Result<Context> {
-                    let mut context =
-                        crate::events::store::semantic_stage::context_with_budget(
-                            &physical,
-                            &paths,
-                            result_phase,
-                            epoch,
-                            &mut relation_context_bytes,
-                            &std::collections::BTreeMap::new(),
-                        )?;
+                    let mut context = crate::events::store::semantic_stage::context_with_budget(
+                        &physical,
+                        &paths,
+                        result_phase,
+                        epoch,
+                        &mut relation_context_bytes,
+                        &std::collections::BTreeMap::new(),
+                    )?;
                     if result_phase == Phase::Publication {
                         context.prior_owners = owners::Owners {
                             db: &tx,
@@ -4280,9 +4277,8 @@ impl Stage {
                 }
                 let mut companions = std::collections::BTreeSet::new();
                 for actor in &actors {
-                    match crate::events::store::semantic_stage::owner_closure_with(
-                        &physical, actor,
-                    ) {
+                    match crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
+                    {
                         Ok(paths) => companions.extend(paths),
                         Err(source_error)
                             if sender_paths.contains(actor)
@@ -4304,8 +4300,7 @@ impl Stage {
                         epoch,
                         &mut relation_context_bytes,
                         &context.endpoints,
-                    )
-                    {
+                    ) {
                         Ok(context) => context,
                         Err(source_error)
                             if !sender_paths.is_empty()

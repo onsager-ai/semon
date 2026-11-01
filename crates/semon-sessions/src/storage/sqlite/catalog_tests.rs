@@ -10311,9 +10311,13 @@ fn codex_child_page_keeps_a_done_parent_context_only() {
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from([parent_path.clone(), child_path.clone()])
     );
-    assert!(staged_sources.iter().all(
-        |(_, index_done, events_done, identity_done)| *index_done && *events_done && *identity_done
-    ));
+    assert!(
+        staged_sources
+            .iter()
+            .all(|(_, index_done, events_done, identity_done)| *index_done
+                && *events_done
+                && *identity_done)
+    );
     db.execute(
         "UPDATE main.catalog_semantic_sources SET relation_done=1,relation_after=''",
         [],
@@ -10373,7 +10377,10 @@ fn codex_child_page_keeps_a_done_parent_context_only() {
             .any(|cursor| cursor.path == parent_path)
     );
     let locations = batch.context.matching_locations.as_ref().unwrap();
-    assert!(!locations.is_empty(), "the child has a projected semantic event");
+    assert!(
+        !locations.is_empty(),
+        "the child has a projected semantic event"
+    );
     assert!(
         locations
             .iter()
@@ -10473,7 +10480,8 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         .collect::<Vec<_>>();
     inputs.push(unrelated_input);
 
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     cache.prepare_facts_authority(&fixture.options).unwrap();
     for (n, input) in inputs.iter().enumerate() {
         cache
@@ -10516,12 +10524,20 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         if batch.paths.is_empty() {
             continue;
         }
-        let batch_paths = batch.paths.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let batch_paths = batch
+            .paths
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
         let selected = inputs
             .iter()
             .filter(|input| {
-                batch_paths
-                    .contains(&input.full_path(&fixture.options).to_string_lossy().into_owned())
+                batch_paths.contains(
+                    &input
+                        .full_path(&fixture.options)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -10543,7 +10559,10 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         cache.end_scan();
         cache.release_published_indexes();
     }
-    assert!(reached_relations, "real staged inputs did not reach Relations");
+    assert!(
+        reached_relations,
+        "real staged inputs did not reach Relations"
+    );
     drop(cache);
 
     let db = fixture.db();
