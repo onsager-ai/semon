@@ -124,6 +124,76 @@ impl Fixture {
         drop(work);
         evidence.retire();
     }
+    fn begin_identity_stage(&self, paths: &[String]) {
+        assert!(!paths.is_empty());
+        let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
+        cache.prepare_facts_authority(&self.options).unwrap();
+        let runtime = crate::native_evidence::query_runtime_generation(&self.options).unwrap();
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(paths, &runtime, true)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        let db = self.db();
+        for _ in 0..128 {
+            let mut identity_pending = false;
+            for path in paths {
+                identity_pending |= db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE source_path=?1 AND identity_done=0)",
+                        [path],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .unwrap();
+            }
+            if !identity_pending {
+                return;
+            }
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            assert_ne!(
+                batch.phase,
+                crate::model::relation_stage::Phase::Publication,
+                "semantic fixture stage reached publication before relations"
+            );
+            assert_ne!(
+                batch.phase,
+                crate::model::relation_stage::Phase::Relations,
+                "semantic fixture stage reached relations before seed identities were recorded"
+            );
+            if batch.paths.is_empty() {
+                continue;
+            }
+            let inputs = batch
+                .paths
+                .iter()
+                .map(|path| {
+                    crate::native_evidence::catalog_input(
+                        std::path::Path::new(path),
+                        &self.options,
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let prepared = crate::model::prepare_semantic_batch(
+                &self.options,
+                &mut cache,
+                &inputs,
+                &batch,
+                crate::model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, prepared.prepared())
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            cache.end_scan();
+            cache.release_published_indexes();
+        }
+        panic!("semantic fixture stage did not record seed identities");
+    }
     fn body(&self, query: &str) -> (u16, Value) {
         // Projection assertions observe the exact publication under test.
         // Viewer transport now explicitly schedules its native producer.
@@ -10343,7 +10413,6 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
     let mut facts = crate::read_facts(facts_path).unwrap();
     facts.codex_rollouts = Some([first.clone(), corrupt.clone()].into_iter().collect());
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
-    fixture.publish_existing();
 
     let corrupt_path = fixture
         .options
@@ -10351,17 +10420,8 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
         .join(corrupt)
         .to_string_lossy()
         .into_owned();
+    fixture.begin_identity_stage(&[first_path.clone(), corrupt_path.clone()]);
     let db = fixture.db();
-    db.execute(
-        "UPDATE main.catalog_semantic_sources SET relation_done=0,relation_after=''",
-        [],
-    )
-    .unwrap();
-    db.execute(
-        "UPDATE main.catalog_semantic_stage SET phase='relations'",
-        [],
-    )
-    .unwrap();
     let corrupt_owner: String = db
         .query_row(
             "SELECT session_key FROM main.catalog_semantic_owner_sources WHERE source_path=?1",
