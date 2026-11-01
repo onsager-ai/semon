@@ -11165,24 +11165,15 @@ mod tests {
             let path = source.to_string_lossy().into_owned();
             let mut cache = open(&f.config);
             cache
-                .ingest(
-                    &format!("{:064x}", 6300),
-                    &source,
-                    "codex",
-                )
+                .ingest(&format!("{:064x}", 6300), &source, "codex")
                 .unwrap();
-            let (stale, stale_model) =
-                ready(&mut cache, &f, options, std::slice::from_ref(input));
+            let (stale, stale_model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
             assert_eq!(stale.phase, Phase::Publication);
             assert_eq!(stale_model.prepared().rows.len(), 1);
             assert_eq!(stale_model.prepared().rows[0].key, "model-0");
             write(options, input, "changed-ledger", None);
             cache
-                .ingest(
-                    &format!("{:064x}", 6301),
-                    &source,
-                    "codex",
-                )
+                .ingest(&format!("{:064x}", 6301), &source, "codex")
                 .unwrap();
             let before = shared_state(&f);
             assert_eq!(
@@ -11235,9 +11226,9 @@ mod tests {
                 let selected = inputs
                     .iter()
                     .filter(|candidate| {
-                        batch.paths.contains(
-                            &candidate.full_path(options).to_string_lossy().into_owned(),
-                        )
+                        batch
+                            .paths
+                            .contains(&candidate.full_path(options).to_string_lossy().into_owned())
                     })
                     .cloned()
                     .collect::<Vec<_>>();
@@ -11247,19 +11238,17 @@ mod tests {
                     reindexed = true;
                 }
                 let model = cache
-                    .prepare_semantic_model_batch(
-                        options,
-                        &selected,
-                        &batch,
-                        1_790_000_000_000,
-                    )
+                    .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
                     .unwrap();
                 if batch.phase == Phase::Publication {
                     final_model = Some((batch, model));
                     break;
                 }
             }
-            assert!(reindexed, "the changed Raw source is indexed in the new epoch");
+            assert!(
+                reindexed,
+                "the changed Raw source is indexed in the new epoch"
+            );
             let (batch, model) = final_model.expect("bounded reset reaches Publication");
             assert_eq!(model.prepared().rows.len(), 1);
             assert_eq!(model.prepared().rows[0].key, "changed-ledger");

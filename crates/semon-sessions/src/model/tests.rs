@@ -11115,7 +11115,10 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
             Err(error) => panic!("Catalog publication failed: {error}"),
         }
     }
-    assert!(deferrals > 0, "two changed owners require bounded History custody");
+    assert!(
+        deferrals > 0,
+        "two changed owners require bounded History custody"
+    );
     let next_generation = next_generation.expect("bounded History custody did not finish");
     assert_ne!(next_generation, generation);
     assert_eq!(
