@@ -2624,6 +2624,7 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
+        let _source_guard = prepared.publication_guard(self)?;
         let result = self
             .store
             .as_mut()
@@ -3290,6 +3291,15 @@ impl EventCache {
             return Err(io::Error::other("native ledger batch result size changed"));
         }
         Ok(ledgers)
+    }
+
+    /// Read existing admitted source ledgers without loading an index or body.
+    /// Callers use this for bounded source-backed metadata qualification.
+    pub(crate) fn stored_ledger_batch(&self, paths: &[String]) -> io::Result<Vec<Option<Ledger>>> {
+        if self.store.is_none() {
+            return Err(io::Error::other("native ledger store unavailable"));
+        }
+        self.recorded_batch(paths)
     }
 
     /// Selected source preparation may replace this snapshot with per-source

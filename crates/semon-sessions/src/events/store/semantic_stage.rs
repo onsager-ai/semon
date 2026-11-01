@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Receipt keys retain ordinary relay order through bounded staged replay.
 // Other stored recipes are unsupported under the current producer contract.
-pub(super) const RECIPE: &str = "recorded-origin-turn-physical-owner-groups-v6";
+pub(super) const RECIPE: &str = "recorded-origin-turn-physical-owner-groups-v7";
 pub(super) fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(
@@ -3320,7 +3320,6 @@ mod tests {
             removed_sources: Default::default(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
-            #[cfg(feature = "postgres")]
             withdrawal_fence: None,
         };
         (root, store, stage, path, batch, prepared)

@@ -134,7 +134,14 @@ publication replay still qualifies its original request and acknowledgement.
 This exclusion covers cooperating SourceChange writers sharing the lock
 domain. Advisory locks do not exclude arbitrary external writers; non-Unix
 shared locks retain their existing no-op behavior and exclusive SourceChange
-writes remain unsupported. SQLite's existing physical validation is unchanged.
+writes remain unsupported. SQLite retains its transactional withdrawal validation.
+SQLite and PostgreSQL semantic publication also revalidate the bounded foreign
+`trace_prompt` source witnesses at final EventCache admission. The publisher
+checks each current namespace ledger and physical stat while holding the shared
+Facts lock and sorted Source locks through transaction return. These advisory
+locks exclude cooperating SourceChange writers; external harness writers stay
+outside that lock domain. The preview remains source metadata, and source-backed
+proof readers retain authority for bytes.
 Completed PostgreSQL native relocation keeps the old path's exact removal claim
 until qualified successor publication acknowledges it. Re-observing that removed
 path during semantic staging is a metadata-only no-op only when both exact native
@@ -469,7 +476,7 @@ its pointer; bounded garbage collection precedes another stage.
 
 Receipts use immutable publication generation as their physical and logical
 transfer key, allowing multiple committed groups in one epoch. SQLite schema 35
-and stage recipe v6 are one current contract, with no compatibility reader or
+and stage recipe v7 are one current contract, with no compatibility reader or
 migration. PostgreSQL shares the receipt key contract but retains its existing
 explicit large-family stage refusal; normalized PostgreSQL group staging and
 full backend parity remain unqualified. SQLite changes also remain unqualified

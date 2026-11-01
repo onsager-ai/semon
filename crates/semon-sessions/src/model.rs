@@ -1789,6 +1789,7 @@ struct H {
     to: Option<usize>,
     previews: Option<BTreeMap<&'static str, PreviewRef>>,
     preview_owners: BTreeMap<String, String>,
+    foreign_previews: BTreeMap<String, relation_stage::Preview>,
     /// A parent's message that reached its subagent mid-run: an entry of
     /// the child's current turn, not the start of one.
     inline: bool,
@@ -2296,6 +2297,7 @@ impl<'a> Builder<'a> {
             to,
             previews: None,
             preview_owners: BTreeMap::new(),
+            foreign_previews: BTreeMap::new(),
             inline: false,
         });
         self.handoffs.len() - 1
@@ -5388,6 +5390,9 @@ impl<'a> Builder<'a> {
                         .values()
                         .any(|preview| self.sessions[self.of_file[preview.at.0]].key == key)
                 })
+                || h.foreign_previews
+                    .values()
+                    .any(|preview| preview.owner == key)
         }) {
             let mut fields = serde_json::json!({});
             if let Some(previews) = &h.previews {
@@ -5469,6 +5474,25 @@ impl<'a> Builder<'a> {
                     answer["structured"] = serde_json::json!(reply.f & ANSWERED != 0);
                     fields[field] = decorate(answer);
                 }
+            }
+            for (field, preview) in &h.foreign_previews {
+                if preview.owner != key {
+                    continue;
+                }
+                let Some(path) = preview.at.source.path.to_str() else {
+                    continue;
+                };
+                fields[field.as_str()] = decorate(serde_json::json!({
+                    "path": path,
+                    "offset": preview.at.offset,
+                    "block": preview.at.block,
+                    "kind": preview.kind,
+                    "tool": preview.tool,
+                    "cwd": preview.cwd,
+                    "source": preview.at.source,
+                    "arg": preview.arg,
+                    "skip": preview.skip,
+                }));
             }
             if let Some(turn) = turns
                 .iter()
@@ -5724,6 +5748,7 @@ impl<'a> Builder<'a> {
                 to: Some(receiver),
                 previews: None,
                 preview_owners: BTreeMap::new(),
+                foreign_previews: BTreeMap::new(),
                 inline: false,
             });
             self.placed.insert(*at, vec![(index, Place::In)]);
@@ -7534,57 +7559,80 @@ pub(crate) struct PreparedSources {
     pub(crate) removed_sources: BTreeSet<String>,
     pub(crate) indexed_native_parents: Vec<(String, String, String)>,
     pub(crate) withdrawals: Vec<relation_stage::Withdrawal>,
-    #[cfg(feature = "postgres")]
     pub(crate) withdrawal_fence: Option<WithdrawalFence>,
 }
 
 /// Process-local fence provenance; never part of a persisted witness.
 #[derive(Clone)]
-#[cfg(feature = "postgres")]
 pub(crate) struct WithdrawalFence {
     witness: String,
     cache: PathBuf,
 }
 
-#[cfg(feature = "postgres")]
 pub(crate) struct WithdrawalGuard {
     _facts: crate::source_change::SourceLock,
     _sources: Vec<crate::source_change::SourceLock>,
 }
 
 impl PreparedSources {
-    #[cfg(feature = "postgres")]
     pub(crate) fn retain_withdrawal_fence(&mut self, options: &Options) -> io::Result<()> {
         if self.withdrawals.len() > 64 {
             return Err(io::Error::other(
                 "semantic withdrawal source budget exceeded",
             ));
         }
-        if self.withdrawals.is_empty() {
+        let foreign_sources = self.foreign_trace_prompt_sources()?;
+        if self.withdrawals.is_empty() && foreign_sources.is_empty() {
             return Ok(());
         }
-        let facts_path = options
-            .facts
-            .as_ref()
-            .ok_or_else(|| io::Error::other("withdrawal Facts path missing"))?;
         let mut paths = BTreeSet::new();
         for withdrawal in &self.withdrawals {
             let input = crate::Input {
                 root: crate::InputRoot::Codex,
                 path: withdrawal.relative.clone(),
             };
-            if withdrawal.facts_path != *facts_path
+            if options.facts.as_ref() != Some(&withdrawal.facts_path)
                 || input.full_path(options).to_string_lossy() != withdrawal.path
                 || !paths.insert(withdrawal.path.clone())
             {
                 return Err(io::Error::other("withdrawal Source fence differs"));
             }
         }
+        for (path, source) in &foreign_sources {
+            let Some(input) = crate::native_evidence::catalog_input(path, options) else {
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            };
+            if input.full_path(options) != *path || source.path != *path {
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            }
+        }
         self.withdrawal_fence = Some(WithdrawalFence {
-            witness: serde_json::to_string(&self.withdrawals).map_err(io::Error::other)?,
+            witness: self.withdrawal_fence_witness(&foreign_sources)?,
             cache: options.cache.clone(),
         });
         Ok(())
+    }
+
+    fn foreign_trace_prompt_sources(
+        &self,
+    ) -> io::Result<BTreeMap<PathBuf, &summary::CatalogSource>> {
+        let selected_paths = self
+            .claims
+            .iter()
+            .map(|(path, _)| PathBuf::from(path.as_str()))
+            .collect::<BTreeSet<_>>();
+        if selected_paths.len() != self.claims.len() {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+        collect_foreign_trace_prompt_sources(&selected_paths, &self.relationships)
+    }
+
+    fn withdrawal_fence_witness(
+        &self,
+        foreign_sources: &BTreeMap<PathBuf, &summary::CatalogSource>,
+    ) -> io::Result<String> {
+        let sources = foreign_sources.iter().collect::<Vec<_>>();
+        serde_json::to_string(&(&self.withdrawals, sources)).map_err(io::Error::other)
     }
 
     /// Qualify physical witnesses before SQL admission while retaining the
@@ -7599,7 +7647,8 @@ impl PreparedSources {
         if self.withdrawals.is_empty() {
             return Ok(None);
         }
-        let witness = serde_json::to_string(&self.withdrawals).map_err(io::Error::other)?;
+        let foreign_sources = self.foreign_trace_prompt_sources()?;
+        let witness = self.withdrawal_fence_witness(&foreign_sources)?;
         let fence = self
             .withdrawal_fence
             .as_ref()
@@ -7632,6 +7681,63 @@ impl PreparedSources {
                 ));
             }
         }
+        Ok(Some(guard))
+    }
+
+    /// Requalify foreign prompt sources at the final publisher and retain
+    /// SourceChange exclusion through its transaction return.
+    pub(crate) fn publication_guard(
+        &self,
+        cache: &EventCache,
+    ) -> io::Result<Option<WithdrawalGuard>> {
+        if self.withdrawals.len() > 64 {
+            return Err(io::Error::other(
+                "semantic withdrawal source budget exceeded",
+            ));
+        }
+        let foreign_sources = self.foreign_trace_prompt_sources()?;
+        if self.withdrawals.is_empty() && foreign_sources.is_empty() {
+            return Ok(None);
+        }
+        let witness = self.withdrawal_fence_witness(&foreign_sources)?;
+        let fence = self
+            .withdrawal_fence
+            .as_ref()
+            .filter(|fence| fence.witness == witness)
+            .ok_or_else(|| io::Error::other("publication Source fence missing or changed"))?;
+
+        // Match the established Facts-first, sorted-path lock order. Foreign
+        // sources remain metadata-only; no source body or index is loaded.
+        let facts = crate::source_change::SourceLock::acquire_cache(&fence.cache, "facts", false)?;
+        let mut paths = self
+            .withdrawals
+            .iter()
+            .map(|withdrawal| withdrawal.path.clone())
+            .collect::<BTreeSet<_>>();
+        for path in foreign_sources.keys() {
+            let path = path
+                .to_str()
+                .ok_or_else(|| io::Error::other(relation_stage::SourceGenerationChanged))?;
+            paths.insert(path.to_owned());
+        }
+        let sources = paths
+            .iter()
+            .map(|path| {
+                crate::source_change::SourceLock::acquire_cache(&fence.cache, path, false)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let guard = WithdrawalGuard {
+            _facts: facts,
+            _sources: sources,
+        };
+        for withdrawal in &self.withdrawals {
+            if !withdrawal.current()? {
+                return Err(io::Error::other(
+                    "native source admission withdrawal changed",
+                ));
+            }
+        }
+        validate_foreign_prompt_source_witnesses(cache, &foreign_sources)?;
         Ok(Some(guard))
     }
 
@@ -7802,7 +7908,6 @@ pub(crate) fn prepare_semantic_batch(
             .cloned()
             .collect();
     }
-    #[cfg(feature = "postgres")]
     prepared.retain_withdrawal_fence(options)?;
     Ok(SemanticModelBatch { prepared })
 }
@@ -8034,7 +8139,6 @@ pub(crate) fn prepare_semantic_index_sources(
         removed_sources,
         indexed_native_parents,
         withdrawals,
-        #[cfg(feature = "postgres")]
         withdrawal_fence: None,
         lineage_dependencies,
         message_dependencies: Some(Vec::new()),
@@ -8121,6 +8225,7 @@ fn prepare_sources_selected(
             "native producer source batch must contain at most 64 distinct sources",
         ));
     }
+    validate_foreign_trace_prompt_sources(options, cache, &selection)?;
     #[cfg(test)]
     crate::events::CATALOG_DERIVED_SOURCES
         .with(|count| count.set(count.get() + inputs.len() as u64));
@@ -8133,7 +8238,20 @@ fn prepare_sources_selected(
         selection,
         BuildTarget::Sources,
     )? {
-        BuildOutput::Sources(prepared) => Ok(*prepared),
+        BuildOutput::Sources(mut prepared) => {
+            let foreign_sources = prepared.foreign_trace_prompt_sources()?;
+            for path in foreign_sources.keys() {
+                let Some(input) = crate::native_evidence::catalog_input(path, options) else {
+                    return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+                };
+                if input.full_path(options) != *path {
+                    return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+                }
+            }
+            validate_foreign_prompt_source_witnesses(cache, &foreign_sources)?;
+            prepared.retain_withdrawal_fence(options)?;
+            Ok(*prepared)
+        }
         _ => Err(io::Error::other(
             "native producer did not capture projection",
         )),
@@ -8160,6 +8278,141 @@ enum BuildSelection<'a> {
         records: &'a crate::overview_repair::NativeRecords<'a>,
         runtime_binding: Option<crate::storage::QueryRuntimeBinding>,
     },
+}
+
+fn validate_foreign_trace_prompt_sources(
+    options: &Options,
+    cache: &EventCache,
+    selection: &BuildSelection<'_>,
+) -> io::Result<()> {
+    let (inputs, relationships) = match selection {
+        BuildSelection::Identity {
+            inputs,
+            relationships,
+        }
+        | BuildSelection::Staged {
+            inputs,
+            relationships,
+        }
+        | BuildSelection::Matching {
+            inputs,
+            relationships,
+        } => (*inputs, *relationships),
+        BuildSelection::Current(_) | BuildSelection::History { .. } => return Ok(()),
+    };
+    let selected_paths = inputs
+        .iter()
+        .map(|input| input.full_path(options))
+        .collect::<BTreeSet<_>>();
+    let sources = collect_foreign_trace_prompt_sources(&selected_paths, relationships)?;
+    for path in sources.keys() {
+        let Some(input) = crate::native_evidence::catalog_input(path, options) else {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        };
+        if input.full_path(options) != *path {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+    }
+    validate_foreign_prompt_source_witnesses(cache, &sources)
+}
+
+fn collect_foreign_trace_prompt_sources<'a>(
+    selected_paths: &BTreeSet<PathBuf>,
+    relationships: &'a relation_stage::Context,
+) -> io::Result<BTreeMap<PathBuf, &'a summary::CatalogSource>> {
+    let selected_owners = relationships
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| {
+            endpoint
+                .row
+                .sources
+                .iter()
+                .any(|source| selected_paths.contains(&source.path))
+        })
+        .map(|(key, _)| key.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut sources = BTreeMap::<PathBuf, &summary::CatalogSource>::new();
+    let mut metadata_bytes = 0usize;
+    for preview in relationships
+        .relations
+        .values()
+        .flat_map(|relation| relation.previews.values())
+        .filter(|preview| {
+            preview.kind == "trace_prompt"
+                && selected_owners.contains(preview.owner.as_str())
+                && !selected_paths.contains(&preview.at.source.path)
+        })
+    {
+        if preview.reply {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+        let endpoint = relationships
+            .endpoints
+            .get(&preview.owner)
+            .ok_or_else(|| io::Error::other(relation_stage::SourceGenerationChanged))?;
+        if !endpoint.row.sources.contains(&preview.at.source) {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+        let source = &preview.at.source;
+        let path = &source.path;
+        if let Some(previous) = sources.get(path) {
+            if *previous != source {
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            }
+            continue;
+        }
+        metadata_bytes = metadata_bytes
+            .checked_add(serde_json::to_vec(source)?.len())
+            .ok_or_else(|| io::Error::other("semantic foreign preview metadata budget"))?;
+        if metadata_bytes > 1_048_576 || sources.len() == 64 {
+            return Err(io::Error::other("semantic foreign preview metadata budget"));
+        }
+        sources.insert(path.clone(), source);
+    }
+    Ok(sources)
+}
+
+fn validate_foreign_prompt_source_witnesses(
+    cache: &EventCache,
+    sources: &BTreeMap<PathBuf, &summary::CatalogSource>,
+) -> io::Result<()> {
+    if sources.is_empty() {
+        return Ok(());
+    }
+    let paths = sources
+        .keys()
+        .map(|path| {
+            path.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| io::Error::other(relation_stage::SourceGenerationChanged))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    let ledgers = cache.stored_ledger_batch(&paths)?;
+    if ledgers.len() != paths.len() {
+        return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+    }
+    for ((path, source), ledger) in sources.iter().zip(ledgers) {
+        let Some(ledger) = ledger else {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        };
+        let mut observed = ledger.source(path, &source.native_id);
+        observed.native_role.clone_from(&source.native_role);
+        if observed != **source {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+        let file = crate::read_path::open_input(path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::other(relation_stage::SourceGenerationChanged)
+            } else {
+                error
+            }
+        })?;
+        if events::Stat::from_metadata(&file.metadata()?)? != ledger.stat {
+            return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+        }
+    }
+    Ok(())
 }
 
 /// Reuses the native producer over qualified original generations. It cannot
@@ -9238,7 +9491,6 @@ fn build_sources_inner(
                 removed_sources: BTreeSet::new(),
                 indexed_native_parents: Vec::new(),
                 withdrawals: Vec::new(),
-                #[cfg(feature = "postgres")]
                 withdrawal_fence: None,
             })));
         }

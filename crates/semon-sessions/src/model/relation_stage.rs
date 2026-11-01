@@ -534,6 +534,8 @@ pub(crate) struct Preview {
     pub(crate) at: Location,
     pub(crate) reply: bool,
     pub(crate) kind: String,
+    pub(crate) tool: Option<String>,
+    pub(crate) cwd: Option<String>,
     pub(crate) arg: Option<String>,
     pub(crate) skip: usize,
 }
@@ -882,6 +884,7 @@ impl Context {
                     .iter()
                     .flat_map(|previews| previews.iter())
                     .map(|(field, preview)| {
+                        let file = &builder.files[preview.at.0];
                         (
                             (*field).to_owned(),
                             Preview {
@@ -889,6 +892,8 @@ impl Context {
                                 at: Location::capture(builder, preview.at),
                                 reply: preview.reply,
                                 kind: preview.kind.to_owned(),
+                                tool: event(builder.files, preview.at).n.clone(),
+                                cwd: file.summary.cwd.clone(),
                                 arg: preview.arg.clone(),
                                 skip: preview.skip,
                             },
@@ -1217,6 +1222,7 @@ impl Context {
                 to,
             );
             let mut previews = BTreeMap::new();
+            let mut foreign_previews = BTreeMap::new();
             for (field, preview) in &relation.previews {
                 builder.handoffs[index]
                     .preview_owners
@@ -1232,9 +1238,22 @@ impl Context {
                             skip: preview.skip,
                         },
                     );
+                } else if relation.explicit_previews && preview.kind == "trace_prompt" {
+                    if preview.reply
+                        || !self
+                            .endpoints
+                            .get(&preview.owner)
+                            .is_some_and(|endpoint| {
+                                endpoint.row.sources.contains(&preview.at.source)
+                            })
+                    {
+                        return Err(io::Error::other(SourceGenerationChanged));
+                    }
+                    foreign_previews.insert(preview_field(field)?.to_owned(), preview.clone());
                 }
             }
             builder.handoffs[index].previews = relation.explicit_previews.then_some(previews);
+            builder.handoffs[index].foreign_previews = foreign_previews;
             builder.handoffs[index].inline = relation.inline;
             for placement in &relation.placements {
                 if let Some(at) = placement.at.local(builder)? {
