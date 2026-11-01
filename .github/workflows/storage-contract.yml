@@ -89,7 +89,7 @@ jobs:
           for test in \
             events::store::tests::direct_catalog_history_grants_preserve_only_existing_producer_metadata \
             catalog::tests::codex_child_pages_use_complete_parent_calls_across_sibling_pages \
-            catalog::tests::codex_child_page_keeps_a_done_multisource_parent_as_context_only \
+            catalog::tests::codex_child_page_keeps_a_done_parent_context_only \
             catalog::tests::codex_relation_closure_excludes_unrelated_pending_claude_source \
             catalog::tests::codex_relation_corrupt_context_after_prefix_is_fatal \
             catalog::tests::claude_owner_closure_accepts_64_and_refuses_65_during_identity \
