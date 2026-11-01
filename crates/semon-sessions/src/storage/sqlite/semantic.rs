@@ -4342,6 +4342,48 @@ impl Stage {
             let claims = serde_json::to_string(&prepared.claims)
                 .map_err(|e| StoreError::Data(e.to_string()))?;
             if metadata.len().saturating_add(projections.len()) > 2 * 1048576 {
+                #[cfg(test)]
+                {
+                    let physical_group_count =
+                        crate::events::store::semantic_stage::publication_group_count_with(
+                            &plan::Plan { db: &tx, ns },
+                            &batch.paths,
+                        )
+                        .ok();
+                    let max_owner_trace_witness_bytes = prepared
+                        .rows
+                        .iter()
+                        .filter_map(|row| row.trace.as_ref().map(|trace| (row, trace)))
+                        .try_fold(0usize, |max_bytes, (row, trace)| {
+                            serde_json::to_vec(&trace.publication_witness(row))
+                                .ok()
+                                .map(|bytes| max_bytes.max(bytes.len()))
+                        });
+                    let transcript_slot_bytes = prepared.transcripts.iter().try_fold(
+                        0usize,
+                        |total, projection| {
+                            projection.slots.iter().try_fold(total, |total, slot| {
+                                serde_json::to_vec(slot)
+                                    .ok()
+                                    .map(|bytes| total.saturating_add(bytes.len()))
+                            })
+                        },
+                    );
+                    let show_bytes = |value: Option<usize>| {
+                        value.map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+                    };
+                    eprintln!(
+                        "semantic_publication_record_budget metadata_bytes={} model_witness_bytes={} combined_bytes={} limit_bytes={} physical_group_count={} max_owner_trace_witness_bytes={} transcript_slot_bytes={}",
+                        metadata.len(),
+                        projections.len(),
+                        metadata.len().saturating_add(projections.len()),
+                        2 * 1048576,
+                        physical_group_count
+                            .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+                        show_bytes(max_owner_trace_witness_bytes),
+                        show_bytes(transcript_slot_bytes),
+                    );
+                }
                 return Err(refuse("semantic_context_budget"));
             }
             let paths =
