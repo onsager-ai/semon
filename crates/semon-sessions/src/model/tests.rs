@@ -6142,7 +6142,7 @@ fn assert_history_trace_witness(
             .as_array()
             .unwrap()
             .iter()
-            .find(|turn| turn["id"] == turn_id)
+            .find(|turn| turn["id"] == turn_id.as_str())
             .unwrap_or_else(|| panic!("History read omitted {key}/{turn_id}"));
         assert_eq!(actual, &expected, "History turn {key}/{turn_id}");
     }
