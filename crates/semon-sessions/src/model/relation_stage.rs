@@ -109,6 +109,11 @@ pub(crate) struct Context {
     pub(crate) native_events: Vec<NativeEvent>,
     pub(crate) companions: Vec<String>,
     pub(crate) matching_locations: Option<Vec<Location>>,
+    /// A qualified page's current source can carry a parent relationship in
+    /// native header metadata even when the page has no event locations. None
+    /// preserves adapters that do not yet provide this page scope.
+    #[serde(skip)]
+    pub(crate) matching_header_paths: Option<Vec<String>>,
     /// Final replay reads incident relationships in bounded, read-only pages.
     pub(crate) replay_owners: Vec<String>,
     /// Captured Current owners, not authority inferred from SQL absence.

@@ -4124,6 +4124,164 @@ fn staged_codex_native_spawn_and_relay_replay_matches_shared_builder() {
 }
 
 #[test]
+fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(5, 0), "Coordinate"),
+            codex_line(
+                ts(5, 1),
+                "response_item",
+                json!({"type":"function_call","name":"collaboration.spawn_agent","call_id":"selected-spawn","arguments":"{\"task_name\":\"selected\",\"message\":\"Inspect\"}"}),
+            ),
+            codex_line(
+                ts(5, 2),
+                "response_item",
+                json!({"type":"function_call","name":"spawn_agent","call_id":"other-spawn","arguments":"{\"task_name\":\"other\",\"message\":\"Inspect\"}"}),
+            ),
+            codex_line(
+                ts(5, 3),
+                "response_item",
+                json!({"type":"function_call","name":"collaboration.send_message","call_id":"selected-relay","arguments":"{\"target\":\"missing-selected\",\"message\":\"Selected\"}"}),
+            ),
+            codex_line(
+                ts(5, 4),
+                "response_item",
+                json!({"type":"function_call","name":"followup_task","call_id":"other-relay","arguments":"{\"target\":\"missing-other\",\"message\":\"Unselected\"}"}),
+            ),
+        ],
+    );
+    home.codex(
+        "child-selected",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/selected"}),
+        &[codex_user(ts(5, 5), "Selected child"), codex_reply(ts(5, 6), "Done")],
+    );
+    home.codex(
+        "child-other",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/other"}),
+        &[codex_user(ts(5, 5), "Other child"), codex_reply(ts(5, 6), "Done")],
+    );
+    home.codex(
+        "unrelated",
+        json!({}),
+        &[codex_user(ts(5, 7), "Unrelated source")],
+    );
+
+    let inputs = [
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-root.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-child-selected.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-child-other.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-unrelated.jsonl".into(),
+        },
+    ];
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let root_source = full
+        .rows
+        .iter()
+        .find(|row| row.key == "root")
+        .unwrap()
+        .sources[0]
+        .clone();
+    let location = |cache: &mut EventCache, id: &str| {
+        let index = cache.selected_index(&root_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.id.as_deref() == Some(id))
+            .unwrap();
+        relation_stage::Location {
+            source: root_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let root_path = root_source.path.to_string_lossy().into_owned();
+    let mut page = full.relationships.clone();
+    page.relations.clear();
+    page.matching_locations = Some(vec![
+        location(&mut cache, "selected-spawn"),
+        location(&mut cache, "selected-relay"),
+    ]);
+    page.matching_header_paths = Some(vec![root_path]);
+    let selected = prepare_staged_sources(&home.options, &mut cache, &inputs, &page, true, NOW)
+        .unwrap();
+    let spawn_id = stable_id("s", "spawn:codex:child-selected");
+    let relay_id = stable_id("r", "relay:codex:selected-relay");
+    assert_eq!(
+        selected
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([spawn_id.clone(), relay_id.clone()])
+    );
+    let relay = &selected.relationships.relations[&relay_id];
+    assert_eq!(
+        relay
+            .stubs
+            .iter()
+            .map(|stub| stub.key.clone())
+            .collect::<Vec<_>>(),
+        vec![stable_id("peer-", "codex:missing-selected")]
+    );
+    assert!(selected.relationships.relations.values().all(|relation| {
+        relation
+            .stubs
+            .iter()
+            .all(|stub| stub.key != stable_id("peer-", "codex:missing-other"))
+    }));
+
+    let child_path = inputs[1].full_path(&home.options).to_string_lossy().into_owned();
+    let mut header_page = page.clone();
+    header_page.matching_locations = Some(Vec::new());
+    header_page.matching_header_paths = Some(vec![child_path]);
+    let header_only =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert_eq!(
+        header_only
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([spawn_id])
+    );
+
+    let unrelated_path = inputs[3]
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
+    header_page.matching_header_paths = Some(vec![unrelated_path]);
+    let unrelated =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert!(unrelated.relationships.relations.is_empty());
+}
+
+#[test]
 fn staged_claude_unmatched_send_and_orphan_receipt_keep_stubs_and_native_recipes() {
     let home = Home::new();
     home.top(
@@ -4281,6 +4439,35 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     assert_eq!(full_relation.previews["brief"].kind, "trace_prompt");
 
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let expected_relation_ids: BTreeSet<_> = oracle
+        .handoffs
+        .iter()
+        .filter(|edge| matches!(edge.kind, "spawn" | "relay"))
+        .map(|edge| edge.id.clone())
+        .collect();
+    let mut relation_rows = db
+        .prepare("SELECT relation_id,metadata FROM catalog_semantic_relations ORDER BY relation_id")
+        .unwrap();
+    let actual_relation_rows: Vec<(String, String)> = relation_rows
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let actual_relation_ids: BTreeSet<_> = actual_relation_rows
+        .iter()
+        .filter_map(|(id, metadata)| {
+            let relation: Value = serde_json::from_str(metadata).unwrap();
+            matches!(relation["kind"].as_str(), Some("spawn" | "relay"))
+                .then_some(id.clone())
+        })
+        .collect();
+    assert_eq!(actual_relation_ids, expected_relation_ids);
+    for (_, metadata) in actual_relation_rows {
+        let relation: Value = serde_json::from_str(&metadata).unwrap();
+        if matches!(relation["kind"].as_str(), Some("spawn" | "relay")) {
+            assert_eq!(relation["stubs"], json!([]));
+        }
+    }
     for handoff in oracle
         .handoffs
         .iter()

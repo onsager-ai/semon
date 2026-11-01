@@ -104,6 +104,7 @@ fn relation_page(
         end = key;
     }
     context.matching_locations = Some(locations);
+    context.matching_header_paths = Some(vec![path.to_owned()]);
     #[cfg(test)]
     let page_cursor_advanced = end != after;
     serde_json::to_string(&RelationCursor {
@@ -936,12 +937,13 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
     fn candidates(
         &self,
         file: i64,
+        harness: &str,
         after: i64,
         limit: usize,
         visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         let columns = crate::events::store::semantic_stage::projection_columns();
-        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+        let predicate = crate::events::store::semantic_stage::projection_predicate(harness, "");
         let sql = format!(
             "SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4"
         );
@@ -962,8 +964,8 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         }
         Ok(())
     }
-    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
-        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+    fn more(&self, file: i64, harness: &str, after: i64) -> rusqlite::Result<bool> {
+        let predicate = crate::events::store::semantic_stage::projection_predicate(harness, "");
         self.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate})"),params![self.ns,file,after],|r|r.get(0))
     }
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {

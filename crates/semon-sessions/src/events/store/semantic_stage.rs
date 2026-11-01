@@ -954,11 +954,12 @@ pub(crate) trait EventProjectionPort {
     fn candidates(
         &self,
         file: i64,
+        harness: &str,
         after: i64,
         limit: usize,
         visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()>;
-    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool>;
+    fn more(&self, file: i64, harness: &str, after: i64) -> rusqlite::Result<bool>;
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()>;
     fn put(&self, row: &ProjectedEvent) -> rusqlite::Result<()>;
     fn enqueue(&self, kind: &str, value: &str) -> rusqlite::Result<()>;
@@ -974,7 +975,22 @@ pub(crate) fn project_native_event(
     if encoded.len() > MAX_CONTEXT {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let kind = if native.event.k == super::super::Kind::Xsm {
+    let kind = if native.event.k == super::super::Kind::Tool
+        && matches!(
+            native.event.n.as_deref(),
+            Some(
+                "spawn_agent"
+                    | "collaboration.spawn_agent"
+                    | "send_message"
+                    | "followup_task"
+                    | "collaboration.send_message"
+                    | "collaboration.followup_task"
+            )
+        )
+    {
+        // Keep Codex tool IDs out of the Claude call selector's ID index.
+        "codex_call"
+    } else if native.event.k == super::super::Kind::Xsm {
         "xsm"
     } else if native.event.n.as_deref() == Some("SendMessage") {
         if native
@@ -1034,7 +1050,7 @@ pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Resu
             budget -= 1;
             continue;
         };
-        if harness != "claude" {
+        if !matches!(harness.as_str(), "claude" | "codex") {
             port.finish(&path, None, true)?;
             budget -= 1;
             continue;
@@ -1043,7 +1059,7 @@ pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Resu
         let (file, after) = port.cursor(&path)?;
         let mut end = after;
         let mut stopped = false;
-        port.candidates(file, after, budget, &mut |seq, event, occurrence| {
+        port.candidates(file, &harness, after, budget, &mut |seq, event, occurrence| {
             let native = crate::model::relation_stage::NativeEvent {
                 owner: path.clone(),
                 at: crate::model::relation_stage::Location {
@@ -1079,7 +1095,7 @@ pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Resu
             bytes += row.encoded.len();
             Ok(true)
         })?;
-        port.finish(&path, Some(end), !port.more(file, end)?)?;
+        port.finish(&path, Some(end), !port.more(file, &harness, end)?)?;
         if stopped {
             break;
         }
@@ -1093,10 +1109,16 @@ pub(crate) fn projection_candidate(row: &Row<'_>) -> rusqlite::Result<(usize, Ev
     Ok((seq, event))
 }
 /// One candidate predicate, expanded by each physical SQL adapter.
-pub(crate) fn projection_predicate(alias: &str) -> String {
-    format!(
-        "({alias}k IN ('xsm','agm','tn') OR {alias}k='tool' AND {alias}n IN ('SendMessage','Task','Agent'))"
-    )
+pub(crate) fn projection_predicate(harness: &str, alias: &str) -> String {
+    if harness == "codex" {
+        format!(
+            "({alias}k='tool' AND {alias}n IN ('spawn_agent','collaboration.spawn_agent','send_message','followup_task','collaboration.send_message','collaboration.followup_task'))"
+        )
+    } else {
+        format!(
+            "({alias}k IN ('xsm','agm','tn') OR {alias}k='tool' AND {alias}n IN ('SendMessage','Task','Agent'))"
+        )
+    }
 }
 pub(crate) fn projection_columns() -> &'static str {
     EVENT_COLUMNS
@@ -1116,11 +1138,12 @@ impl EventProjectionPort for OrdinaryProjection<'_> {
     fn candidates(
         &self,
         file: i64,
+        harness: &str,
         after: i64,
         limit: usize,
         visit: &mut dyn FnMut(usize, Event, usize) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
-        let predicate = projection_predicate("");
+        let predicate = projection_predicate(harness, "");
         let sql = format!(
             "SELECT {EVENT_COLUMNS} FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate} ORDER BY seq LIMIT ?3"
         );
@@ -1139,8 +1162,8 @@ impl EventProjectionPort for OrdinaryProjection<'_> {
         }
         Ok(())
     }
-    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
-        let predicate = projection_predicate("");
+    fn more(&self, file: i64, harness: &str, after: i64) -> rusqlite::Result<bool> {
+        let predicate = projection_predicate(harness, "");
         self.0.query_row(&format!("SELECT EXISTS(SELECT 1 FROM events WHERE file_id=?1 AND extra=0 AND seq>?2 AND {predicate})"),params![file,after],|r|r.get(0))
     }
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
@@ -1615,6 +1638,7 @@ fn event_context(c: &Connection, path: &str, context: &mut Context) -> rusqlite:
         .filter(|candidate| candidate != path)
         .collect();
     context.matching_locations = Some(selected);
+    context.matching_header_paths = Some(vec![path.to_owned()]);
     serde_json::to_string(&RelationCursor {
         path: path.to_owned(),
         after,
@@ -3011,6 +3035,44 @@ mod tests {
         source_observations::SourceObservationStore, sqlite::source_journal::SourceJournal,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn codex_projection_selects_only_the_supported_relation_tool_names() {
+        let db = Connection::open_in_memory().unwrap();
+        let accepted = [
+            "spawn_agent",
+            "collaboration.spawn_agent",
+            "send_message",
+            "followup_task",
+            "collaboration.send_message",
+            "collaboration.followup_task",
+        ];
+        let codex = projection_predicate("codex", "");
+        for name in accepted {
+            let selected: bool = db
+                .query_row(
+                    &format!("SELECT {codex} FROM (SELECT 'tool' AS k, ?1 AS n)"),
+                    [name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(selected, "Codex relation tool {name} was not projected");
+        }
+        for (kind, name) in [
+            ("tool", "spawn-agent"),
+            ("tool", "SendMessage"),
+            ("message", "spawn_agent"),
+        ] {
+            let selected: bool = db
+                .query_row(
+                    &format!("SELECT {codex} FROM (SELECT ?1 AS k, ?2 AS n)"),
+                    params![kind, name],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!selected, "unexpected Codex relation tool projection for {kind}/{name}");
+        }
+    }
 
     fn physical_owner_db() -> Connection {
         let db = Connection::open_in_memory().unwrap();

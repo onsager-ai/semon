@@ -1959,6 +1959,7 @@ struct Builder<'a> {
     staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
     matching_refs: Option<BTreeSet<Ref>>,
+    matching_header_paths: Option<BTreeSet<String>>,
 }
 
 fn event(files: &[SourceFile], at: Ref) -> &Event {
@@ -2043,6 +2044,7 @@ impl<'a> Builder<'a> {
             staged_origins: BTreeMap::new(),
             staged_epoch: None,
             matching_refs: None,
+            matching_header_paths: None,
         }
     }
 
@@ -2343,6 +2345,28 @@ impl<'a> Builder<'a> {
         self.matching_refs
             .as_ref()
             .is_none_or(|refs| refs.contains(&at))
+    }
+
+    fn matching_relation_selected(&self, at: Option<Ref>, source_path: Option<&str>) -> bool {
+        let Some(paths) = &self.matching_header_paths else {
+            return true;
+        };
+        at.is_some_and(|at| {
+            self.matching_refs
+                .as_ref()
+                .is_some_and(|refs| refs.contains(&at))
+        })
+            || source_path.is_some_and(|path| paths.contains(path))
+    }
+
+    fn matching_session_header_selected(&self, session: usize) -> bool {
+        let Some(paths) = &self.matching_header_paths else {
+            return true;
+        };
+        self.sessions[session].files.iter().any(|position| {
+            let path = self.files[*position].path.to_string_lossy();
+            paths.contains(path.as_ref())
+        })
     }
 
     /// Every session's facts for the agent read surface. `codex_process`
@@ -3904,21 +3928,28 @@ impl<'a> Builder<'a> {
         runs.sort_by_key(|position| (self.files[*position].first, *position));
         for position in runs {
             let (spawner, call, ambiguous) = self.codex_spawner(position)?;
-            spawns.push((self.of_file[position], spawner, call, ambiguous));
+            let selected = self.matching_relation_selected(
+                call,
+                Some(self.files[position].path.to_string_lossy().as_ref()),
+            );
+            spawns.push((self.of_file[position], spawner, call, ambiguous, selected));
         }
-        for (child, spawner, _, _) in &spawns {
+        for (child, spawner, _, _, _) in &spawns {
             self.sessions[*child].parent = *spawner;
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
         }
-        for (child, spawner, call, ambiguous) in spawns {
+        for (child, spawner, call, ambiguous, selected) in spawns {
             let state = self.sessions[child]
                 .out
                 .turn_lifecycle
                 .as_ref()
                 .map_or("off", |turn| turn.state(self.sessions[child].alive));
             self.sessions[child].out.state = state;
+            if !selected {
+                continue;
+            }
             let Some(spawner) = spawner else {
                 continue;
             };
@@ -4530,6 +4561,7 @@ impl<'a> Builder<'a> {
                                 | "collaboration.followup_task"
                         )
                     )
+                    && self.matching_relation_selected(Some((position, at)), None)
                 {
                     sends.push((position, at));
                 }
@@ -4673,13 +4705,19 @@ impl<'a> Builder<'a> {
             else {
                 continue;
             };
+            let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));
+            if self.sessions[child].out.harness == "codex"
+                && !self.matching_relation_selected(call, None)
+                && !self.matching_session_header_selected(child)
+            {
+                continue;
+            }
             self.sessions[child].out.parent_source = Some(link.source);
             if self.sessions[child].parent == Some(parent) {
                 continue;
             }
             self.sessions[child].parent = Some(parent);
             self.sessions[child].out.lane = false;
-            let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));
             if let Some(existing) = self
                 .handoffs
                 .iter()
@@ -9058,6 +9096,10 @@ fn build_sources_inner(
         .and_then(|relationships| relationships.epoch);
     if let Some(relationships) = matching_relationships {
         relationships.install_endpoints(&mut builder)?;
+        builder.matching_header_paths = relationships
+            .matching_header_paths
+            .as_ref()
+            .map(|paths| paths.iter().cloned().collect());
         if let Some(locations) = &relationships.matching_locations {
             let mut selected = BTreeSet::new();
             for location in locations {
