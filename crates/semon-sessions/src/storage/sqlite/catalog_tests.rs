@@ -124,7 +124,10 @@ impl Fixture {
         drop(work);
         evidence.retire();
     }
-    fn begin_identity_stage(&self, paths: &[String]) {
+    fn begin_relation_stage(
+        &self,
+        paths: &[String],
+    ) -> crate::model::relation_stage::Batch {
         assert!(!paths.is_empty());
         let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
         cache.prepare_facts_authority(&self.options).unwrap();
@@ -148,7 +151,19 @@ impl Fixture {
                     .unwrap();
             }
             if !identity_pending {
-                return;
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(
+                    batch.phase,
+                    crate::model::relation_stage::Phase::Relations,
+                    "semantic fixture stage did not reach its first relations batch"
+                );
+                let mut ordered_paths = paths.to_vec();
+                ordered_paths.sort();
+                assert_eq!(
+                    batch.paths, ordered_paths,
+                    "first relations batch did not preserve the ordered source paths"
+                );
+                return batch;
             }
             let batch = cache.semantic_batch(64).unwrap().unwrap();
             assert_ne!(
@@ -10417,7 +10432,8 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
         .join(corrupt)
         .to_string_lossy()
         .into_owned();
-    fixture.begin_identity_stage(&[first_path.clone(), corrupt_path.clone()]);
+    let valid_batch = fixture.begin_relation_stage(&[first_path.clone(), corrupt_path.clone()]);
+    assert_eq!(valid_batch.context.endpoints.len(), 2);
     let db = fixture.db();
     let corrupt_owner: String = db
         .query_row(
@@ -10439,8 +10455,17 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
         ordered_paths,
         vec![first_path.clone(), corrupt_path.clone()]
     );
+    let valid_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.catalog_semantic_endpoints WHERE session_key=?1",
+            [&corrupt_owner],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let _: crate::model::relation_stage::Endpoint =
+        serde_json::from_str(&valid_metadata).unwrap();
     db.execute(
-        "UPDATE main.catalog_semantic_endpoints SET root_key='missing-root' WHERE session_key=?1",
+        "UPDATE main.catalog_semantic_endpoints SET metadata='{}' WHERE session_key=?1",
         [&corrupt_owner],
     )
     .unwrap();
@@ -10456,8 +10481,13 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
     let mut stage = fixture.stage();
     let result = stage.batch(64);
     assert!(
-        result.is_err(),
-        "corrupt context after a valid primary must fail the batch"
+        matches!(
+            result,
+            Err(crate::events::StoreError::Configured(
+                crate::storage::StorageError::Unavailable
+            ))
+        ),
+        "malformed endpoint metadata after a valid primary must fail as unavailable"
     );
 
     let db = fixture.db();
