@@ -10222,6 +10222,122 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
 }
 
 #[test]
+fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
+    let mut fixture = Fixture::new();
+    fixture.options.claude_home = fixture.root.join("zzz-claude");
+    let parent_relatives = (0..63)
+        .map(|n| {
+            fixture.codex_source_with_records(
+                &format!("parent-{n:02}"),
+                "wide-parent",
+                None,
+                None,
+                1,
+                &[],
+            )
+        })
+        .collect::<Vec<_>>();
+    let child = fixture.codex_source("000-child", Some("wide-parent"), 2);
+    let unrelated_claude = fixture.source("unrelated");
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    let mut codex_paths = parent_relatives
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    codex_paths.insert(child.clone());
+    facts.codex_rollouts = Some(codex_paths);
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    fixture.publish_existing();
+
+    let parent_paths = parent_relatives
+        .iter()
+        .map(|path| {
+            fixture
+                .options
+                .codex_home
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let child_path = fixture
+        .options
+        .codex_home
+        .join(child)
+        .to_string_lossy()
+        .into_owned();
+    let unrelated_path = unrelated_claude.to_string_lossy().into_owned();
+    let expected_paths = parent_paths
+        .into_iter()
+        .chain(std::iter::once(child_path.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(expected_paths.len(), 64);
+
+    let db = fixture.db();
+    db.execute(
+        "UPDATE main.catalog_semantic_sources SET relation_done=1,relation_after=''",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.catalog_semantic_sources SET relation_done=0 WHERE source_path IN (?1,?2)",
+        [&child_path, &unrelated_path],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.catalog_semantic_stage SET phase='relations'",
+        [],
+    )
+    .unwrap();
+    let first_pending: String = db
+        .query_row(
+            "SELECT source_path FROM main.catalog_semantic_sources WHERE relation_done=0 ORDER BY source_path LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(first_pending, child_path);
+    drop(db);
+
+    let mut stage = fixture.stage();
+    let batch = stage.batch(64).unwrap().unwrap();
+    assert_eq!(
+        batch
+            .paths
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_paths
+    );
+    assert!(!batch.paths.contains(&unrelated_path));
+    assert_eq!(
+        batch.context.matching_header_paths,
+        Some(vec![child_path.clone()])
+    );
+    assert_eq!(batch.relation_cursors.len(), 1);
+    assert_eq!(batch.relation_cursors[0].path, child_path);
+    assert_eq!(
+        batch
+            .source_claims
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_paths
+    );
+
+    let db = fixture.db();
+    let unrelated_pending: bool = db
+        .query_row(
+            "SELECT relation_done=0 AND relation_after='' FROM main.catalog_semantic_sources WHERE source_path=?1",
+            [&unrelated_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(unrelated_pending);
+}
+
+#[test]
 fn codex_relation_corrupt_context_after_prefix_is_fatal() {
     let fixture = Fixture::new();
     let first = fixture.codex_source("000-valid", None, 1);

@@ -3902,7 +3902,6 @@ impl Stage {
             // can add independent relays. Reserve room for both output sets.
             paths.truncate(RELATION_OUTPUT_LIMIT - RELATION_EVENT_PAGE_LIMIT);
             let mut primary = Vec::new();
-            let mut context_paths = Vec::new();
             for path in paths.drain(..) {
                 let is_claude: bool = tx
                     .query_row(
@@ -3913,13 +3912,12 @@ impl Stage {
                     .optional()
                     .map_err(error)?
                     .unwrap_or(false);
-                if is_claude {
-                    context_paths.push(path);
-                } else {
+                if !is_claude {
                     primary.push(path);
                 }
             }
-            paths = context_paths;
+            // Required cross-harness parents are added from each primary's
+            // canonical owner closure; unrelated pending Claude paths stay pending.
             relation_primary_paths = Some(primary);
         }
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
