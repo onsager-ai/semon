@@ -8676,7 +8676,7 @@ mod tests {
         let stream = config.expected_stream_epoch.as_deref().unwrap().to_owned();
         let mut store = current_test_store_with_epoch(
             &crate::events::EventCache::path(&options.cache),
-            &namespace,
+            &config.namespace,
             &stream,
         );
         let admission = store.owner.admission();
