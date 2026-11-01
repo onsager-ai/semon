@@ -210,3 +210,426 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
     .unwrap();
     fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_carry() {
+    fn selected_details(
+        snapshot: &snapshot::Snapshot<'_, '_>,
+        row: &CatalogRow,
+    ) -> Result<Option<serde_json::Value>, StorageError> {
+        snapshot
+            .selected_details(&row.key, &row.sources, &mut |_, _| {
+                serde_json::json!({"state":null,"observation":"unavailable"})
+            })
+            .map_err(|error| {
+                error
+                    .get_ref()
+                    .and_then(|error| error.downcast_ref::<StorageError>())
+                    .copied()
+                    .unwrap_or(StorageError::Unavailable)
+            })
+    }
+    fn trace_counts(
+        tx: &mut PgTxn<'_>,
+        generation: &str,
+        key: &str,
+    ) -> Result<Vec<i64>, StorageError> {
+        let namespace = tx.namespace.as_str().as_bytes();
+        let key_digest = Sha256::digest(key.as_bytes()).to_vec();
+        [
+            "catalog_trace_headers",
+            "catalog_trace_turns",
+            "catalog_trace_edges",
+            "catalog_trace_bookmarks",
+        ]
+        .iter()
+        .map(|table| {
+            tx.driver
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4"
+                    ),
+                    &[
+                        &namespace,
+                        &generation.as_bytes(),
+                        &key_digest,
+                        &key.as_bytes(),
+                    ],
+                )
+                .map(|row| row.get(0))
+                .map_err(sqlstate::error)
+        })
+        .collect()
+    }
+    fn trace_family(
+        tx: &mut PgTxn<'_>,
+        generation: &str,
+        key: &str,
+    ) -> Result<Vec<u8>, StorageError> {
+        let namespace = tx.namespace.as_str().as_bytes();
+        let key_digest = Sha256::digest(key.as_bytes()).to_vec();
+        let header = tx
+            .driver
+            .query_one(
+                "SELECT trace_generation,source_generation,metadata FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4",
+                &[
+                    &namespace,
+                    &generation.as_bytes(),
+                    &key_digest,
+                    &key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        let header = (
+            header.get::<_, Vec<u8>>(0),
+            header.get::<_, Vec<u8>>(1),
+            header.get::<_, Vec<u8>>(2),
+        );
+        let turns = tx
+            .driver
+            .query(
+                "SELECT turn_digest,turn_id,start_id,metadata FROM semon_pg_native_catalog_trace_turns WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 ORDER BY turn_digest",
+                &[
+                    &namespace,
+                    &generation.as_bytes(),
+                    &key_digest,
+                    &key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, Vec<u8>>(0),
+                    row.get::<_, Vec<u8>>(1),
+                    row.get::<_, Option<Vec<u8>>>(2),
+                    row.get::<_, Vec<u8>>(3),
+                )
+            })
+            .collect::<Vec<_>>();
+        let edges = tx
+            .driver
+            .query(
+                "SELECT edge_digest,edge_id,metadata FROM semon_pg_native_catalog_trace_edges WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 ORDER BY edge_digest",
+                &[
+                    &namespace,
+                    &generation.as_bytes(),
+                    &key_digest,
+                    &key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, Vec<u8>>(0),
+                    row.get::<_, Vec<u8>>(1),
+                    row.get::<_, Vec<u8>>(2),
+                )
+            })
+            .collect::<Vec<_>>();
+        let bookmarks = tx
+            .driver
+            .query(
+                "SELECT target_digest,target,edge_digest,edge_id FROM semon_pg_native_catalog_trace_bookmarks WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 ORDER BY target_digest,edge_digest",
+                &[
+                    &namespace,
+                    &generation.as_bytes(),
+                    &key_digest,
+                    &key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, Vec<u8>>(0),
+                    row.get::<_, Vec<u8>>(1),
+                    row.get::<_, Vec<u8>>(2),
+                    row.get::<_, Vec<u8>>(3),
+                )
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_vec(&(header, turns, edges, bookmarks))
+            .map_err(|_| StorageError::ScopeChanged)
+    }
+    fn admit_generation(
+        tx: &mut PgTxn<'_>,
+        generation: &str,
+        operation_id: &[u8],
+    ) -> Result<(), StorageError> {
+        let namespace = tx.namespace.as_str().as_bytes().to_vec();
+        let payload = b"retained-details-fixture".to_vec();
+        tx.driver
+            .execute(
+                "INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,1)",
+                &[
+                    &namespace,
+                    &operation_id,
+                    &payload,
+                    &generation.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        Ok(())
+    }
+
+    let data = build_oracle(true, false);
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("retained-details-carry");
+    let control = PgCancellation::default();
+    let options = Options {
+        source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
+        claude_home: data.root.join("claude"),
+        claude_json: data.root.join("claude.json"),
+        codex_home: data.root.join("codex"),
+        copilot_home: data.root.join("copilot"),
+        proc_root: data.root.join("proc"),
+        cache: data.root.join("index.json"),
+        all: true,
+        ..Default::default()
+    };
+    let (original_generation, rows) =
+        bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
+    let original = &rows[0];
+    let original_details = snapshot::with_generation(
+        &pool,
+        &namespace,
+        &control,
+        &original_generation,
+        |snapshot| {
+            selected_details(snapshot, original)?.ok_or(StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    let content_generation = original_details["content_generation"]
+        .as_str()
+        .expect("the original trace has a content generation")
+        .to_owned();
+    assert_eq!(original_details["live_observation"], true);
+    let original_counts = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            trace_counts(tx, &original_generation, &original.key)
+        })
+        .unwrap();
+    let original_family = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            trace_family(tx, &original_generation, &original.key)
+        })
+        .unwrap();
+    assert_eq!(original_counts[0], 1);
+    assert!(original_counts[1] + original_counts[2] + original_counts[3] > 0);
+
+    let empty_rows = Vec::new();
+    let empty_transcripts = Vec::new();
+    let withdrawal = crate::slot_projection::Publication {
+        rows: &empty_rows,
+        transcripts: Some(&empty_transcripts),
+        observations: None,
+    };
+    let withdrawn = vec![Sha256::digest(original.key.as_bytes()).to_vec()];
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert!(super::super::history::preserve(
+            tx,
+            L2,
+            &original_generation,
+            &withdrawal,
+            &withdrawn,
+        )?);
+        admit_generation(tx, L2, b"retained-details-first")
+    })
+    .unwrap();
+    let first_details = snapshot::with_generation(&pool, &namespace, &control, L2, |snapshot| {
+        selected_details(snapshot, original)?.ok_or(StorageError::ScopeChanged)
+    })
+    .unwrap();
+    assert_eq!(first_details["live_observation"], false);
+    assert_eq!(first_details["content_generation"], content_generation);
+    assert_eq!(
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            trace_counts(tx, L2, &original.key)
+        })
+        .unwrap(),
+        original_counts,
+        "History captures the complete prior trace family"
+    );
+    let first_family = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            trace_family(tx, L2, &original.key)
+        })
+        .unwrap();
+    assert_eq!(
+        first_family, original_family,
+        "History capture preserves the original header and child payloads"
+    );
+
+    let later = "3333333333333333333333333333333333333333333333333333333333333333";
+    let successor = "4444444444444444444444444444444444444444444444444444444444444444";
+    let source_generation = crate::retention::source_generation(&original.sources).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        super::super::carry::unmentioned(tx, later, L2, &[], &[])?;
+        admit_generation(tx, later, b"retained-details-later")
+    })
+    .unwrap();
+    let later_family = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            trace_family(tx, later, &original.key)
+        })
+        .unwrap();
+    assert_eq!(
+        later_family, original_family,
+        "later History carry preserves the complete header and child payloads"
+    );
+
+    let orphan_target = "5555555555555555555555555555555555555555555555555555555555555555";
+    let orphan_result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver
+            .execute(
+                "DELETE FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                &[&namespace.as_str().as_bytes(), &later.as_bytes(), &original.key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        super::super::carry::unmentioned(tx, orphan_target, later, &[], &[])?;
+        Ok(())
+    });
+    assert_eq!(orphan_result, Err(StorageError::ScopeChanged));
+
+    let successor_turn = "successor-turn";
+    let successor_turn_metadata = br#"{"kind":"successor"}"#;
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let mut successor_header: serde_json::Value = serde_json::from_slice(
+            &tx.driver
+                .query_one(
+                    "SELECT metadata FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[&namespace.as_str().as_bytes(), &later.as_bytes(), &original.key.as_bytes()],
+                )
+                .map_err(sqlstate::error)?
+                .get::<_, Vec<u8>>(0),
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
+        successor_header["successor_marker"] = serde_json::json!("staged");
+        let successor_header = serde_json::to_vec(&successor_header)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        tx.driver
+            .execute(
+                "DELETE FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                &[&namespace.as_str().as_bytes(), &later.as_bytes(), &original.key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        tx.driver
+            .execute(
+                "INSERT INTO semon_pg_native_catalog_trace_headers(namespace,generation,key_digest,session_key,trace_generation,source_generation,metadata) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6)",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &successor.as_bytes(),
+                    &original.key.as_bytes(),
+                    &successor.as_bytes(),
+                    &source_generation.as_bytes(),
+                    &successor_header,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        tx.driver
+            .execute(
+                "INSERT INTO semon_pg_native_catalog_trace_turns(namespace,generation,key_digest,session_key,turn_digest,turn_id,metadata) VALUES($1,$2,sha256($3::bytea),$3,sha256($4::bytea),$4,$5)",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &successor.as_bytes(),
+                    &original.key.as_bytes(),
+                    &successor_turn.as_bytes(),
+                    &successor_turn_metadata.as_slice(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        super::super::carry::unmentioned(tx, successor, later, &[], &[])?;
+        admit_generation(tx, successor, b"retained-details-successor")
+    })
+    .unwrap();
+    let mut changed = original.clone();
+    changed.sources[0].prefix_sha256[0] ^= 1;
+    let changed_metadata = serde_json::to_vec(&changed).unwrap();
+    let parent_key = changed
+        .parent
+        .as_deref()
+        .map(|parent| parent.as_bytes().to_vec());
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        tx.driver
+            .execute(
+                "INSERT INTO semon_pg_native_catalog_rows(namespace,generation,key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6,$7,$8,$9)",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &successor.as_bytes(),
+                    &changed.key.as_bytes(),
+                    &parent_key,
+                    &changed_metadata,
+                    &changed.last.unwrap_or(0),
+                    &changed.harness.as_bytes(),
+                    &changed.repo.as_deref().unwrap_or("").as_bytes(),
+                    &changed.model.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        Ok(())
+    })
+    .unwrap();
+    snapshot::with_generation(&pool, &namespace, &control, successor, |snapshot| {
+        let retained = snapshot
+            .history_display_catalog(&original.key)?
+            .ok_or(StorageError::ScopeChanged)?;
+        assert_eq!(retained.sources, original.sources);
+        let retained_details = selected_details(snapshot, &retained)?
+            .ok_or(StorageError::ScopeChanged)?;
+        assert_eq!(retained_details["content_generation"], content_generation);
+        assert!(
+            selected_details(snapshot, &changed)?.is_none(),
+            "the changed Current cohort cannot borrow History's trace"
+        );
+        Ok(())
+    })
+    .unwrap();
+    pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+        assert_eq!(
+            trace_counts(tx, successor, &original.key)?,
+            vec![1, 1, 0, 0],
+            "the successor keeps its complete trace family without History children"
+        );
+        let header = tx
+            .driver
+            .query_one(
+                "SELECT metadata,trace_generation,source_generation FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &original.key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&header.get::<_, Vec<u8>>(0))
+                .map_err(|_| StorageError::ScopeChanged)?;
+        assert_eq!(metadata["successor_marker"], "staged");
+        assert_eq!(
+            header.get::<_, Vec<u8>>(1),
+            successor.as_bytes().to_vec()
+        );
+        assert_eq!(
+            header.get::<_, Vec<u8>>(2),
+            source_generation.as_bytes().to_vec()
+        );
+        let turns = tx
+            .driver
+            .query(
+                "SELECT turn_id,metadata FROM semon_pg_native_catalog_trace_turns WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY turn_digest",
+                &[&namespace.as_str().as_bytes(), &successor.as_bytes(), &original.key.as_bytes()],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].get::<_, Vec<u8>>(0),
+            successor_turn.as_bytes().to_vec()
+        );
+        assert_eq!(
+            turns[0].get::<_, Vec<u8>>(1),
+            successor_turn_metadata.to_vec()
+        );
+        Ok(())
+    })
+    .unwrap();
+    fs::remove_dir_all(data.root).unwrap();
+}

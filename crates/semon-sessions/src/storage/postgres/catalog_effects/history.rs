@@ -309,6 +309,22 @@ impl OriginalHistoryStore for History<'_, '_> {
             self.retain_source(row, source)?;
         }
         self.write_header(&row.key, metadata, header, !complete, Some(original_header))?;
+        let source_generation = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::ScopeChanged)?;
+        {
+            // Current and trace effects are staged before publication calls
+            // History preservation. An existing target header is the genuine
+            // successor trace and must keep its own children.
+            let mut tx = self.effects.tx.borrow_mut();
+            let owner = vec![(digest(row.key.as_bytes()), row.key.as_bytes().to_vec())];
+            super::carry::trace_families(
+                &mut tx,
+                self.effects.generation,
+                self.previous,
+                &owner,
+                Some(&source_generation),
+            )?;
+        }
         if !complete {
             return Ok(());
         }
