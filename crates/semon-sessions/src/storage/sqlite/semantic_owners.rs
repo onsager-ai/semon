@@ -89,10 +89,9 @@ impl OwnerStore for Owners<'_> {
         Ok(())
     }
     fn relation(&self, relation: &Relation) -> rusqlite::Result<()> {
-        let old: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional().map_err(|error| {
+        let old: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional().inspect_err(|_| {
             #[cfg(test)]
             eprintln!("semantic_relation_record_refusal stage=prior_read");
-            error
         })?;
         let merged = if let Some(old) = old {
             let old = old.ok_or_else(|| {
@@ -123,10 +122,9 @@ impl OwnerStore for Owners<'_> {
             eprintln!("semantic_relation_record_refusal stage=metadata_size");
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,relation_id) DO UPDATE SET metadata=excluded.metadata",params![self.namespace,merged.id,merged.from,merged.to,metadata]).map_err(|error| {
+        self.db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,relation_id) DO UPDATE SET metadata=excluded.metadata",params![self.namespace,merged.id,merged.from,merged.to,metadata]).inspect_err(|_| {
             #[cfg(test)]
             eprintln!("semantic_relation_record_refusal stage=upsert");
-            error
         })?;
         Ok(())
     }
