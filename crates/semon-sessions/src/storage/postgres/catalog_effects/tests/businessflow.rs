@@ -55,6 +55,29 @@ fn native_proof_tuple(
     Ok((row.get(0), row.get(1), row.get(2)))
 }
 
+fn stored_proof_tuple(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    source: &CatalogSource,
+) -> Result<(Vec<u8>, i64, bool), StorageError> {
+    let path = super::super::path(source)?;
+    let rows = tx
+        .driver
+        .query(
+            "SELECT page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 LIMIT 2",
+            &[
+                &tx.namespace.as_str().as_bytes(),
+                &generation.as_bytes(),
+                &path.as_bytes(),
+            ],
+        )
+        .map_err(sqlstate::error)?;
+    if rows.len() != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok((rows[0].get(0), rows[0].get(1), rows[0].get(2)))
+}
+
 fn copy_prepared(saved: &crate::model::PreparedSources) -> crate::model::PreparedSources {
     crate::model::PreparedSources {
         base_generation: saved.base_generation.clone(),
@@ -7357,7 +7380,321 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             break (batch, model);
         }
     };
-    let mut final_deferrals = 0;
+    assert_eq!(
+        final_catchup
+            .publish_semantic_catalog(&final_batch, final_model.prepared())
+            .unwrap(),
+        (crate::events::Outcome::Deferred, None)
+    );
+    assert_eq!(
+        final_catchup.session_catalog_generation().unwrap(),
+        Some(upgraded.clone())
+    );
+    let staged_generation = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let rows = tx
+                .driver
+                .query(
+                    "SELECT generation FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key_digest=sha256($2::bytea) AND session_key=$2 AND owner_generation=generation AND original=false AND generation<>$3 ORDER BY generation LIMIT 2",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &composite_key.as_bytes(),
+                        &caught.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            assert_eq!(rows.len(), 1, "one deferred composite has one successor");
+            String::from_utf8(rows[0].get(0)).map_err(|_| StorageError::ScopeChanged)
+        })
+        .unwrap();
+    assert_ne!(staged_generation, caught);
+    assert_ne!(staged_generation, upgraded);
+    drop(final_catchup);
+    let mut final_catchup =
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
+    assert_eq!(
+        final_catchup.session_catalog_generation().unwrap(),
+        Some(upgraded.clone()),
+        "a private composite receipt does not advance the head"
+    );
+    let first_slot = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let owner = tx
+                .driver
+                .query(
+                    "SELECT owner_generation,original FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            assert_eq!(owner.len(), 1);
+            assert_eq!(
+                owner[0].get::<_, Vec<u8>>(0).as_slice(),
+                staged_generation.as_bytes()
+            );
+            assert!(!owner[0].get::<_, bool>(1));
+            let current_count: i64 = tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
+            assert_eq!(current_count, 0, "private custody never restores Current");
+            let previous_recipe = tx
+                .driver
+                .query_one(
+                    "SELECT recipe_generation,incomplete FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &caught.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            let staged_header = tx
+                .driver
+                .query_one(
+                    "SELECT recipe_generation,source_generation,version,total,incomplete,metadata,original_header FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            assert_eq!(
+                staged_header.get::<_, Vec<u8>>(0),
+                previous_recipe.get::<_, Vec<u8>>(0)
+            );
+            assert_eq!(
+                staged_header.get::<_, bool>(4),
+                previous_recipe.get::<_, bool>(1)
+            );
+            assert!(staged_header.get::<_, Option<Vec<u8>>>(6).is_none());
+            assert_eq!(
+                staged_header.get::<_, i64>(2),
+                i64::from(crate::slot_projection::VERSION)
+            );
+            let metadata: CatalogRow =
+                serde_json::from_slice(&staged_header.get::<_, Vec<u8>>(5)).unwrap();
+            assert!(metadata.query.is_none());
+            assert_eq!(metadata.sources.len(), 2);
+            assert!(metadata.sources.contains(&composite_current_source));
+            assert!(metadata.sources.contains(&composite_withdrawn_source));
+            let source_generation =
+                crate::retention::source_generation(&metadata.sources).unwrap();
+            assert_eq!(
+                staged_header.get::<_, Vec<u8>>(1).as_slice(),
+                source_generation.as_bytes()
+            );
+            let staged_slots = tx
+                .driver
+                .query(
+                    "SELECT slot,metadata FROM semon_pg_native_catalog_history_slots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY slot LIMIT 65",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            assert!(!staged_slots.is_empty());
+            assert!(staged_slots.len() <= 64);
+            assert_eq!(
+                staged_header.get::<_, i64>(3),
+                staged_slots.len() as i64
+            );
+            assert!(
+                staged_slots
+                    .iter()
+                    .map(|row| row.get::<_, Vec<u8>>(1).len())
+                    .sum::<usize>()
+                    <= 1_048_576
+            );
+            for (index, row) in staged_slots.iter().enumerate() {
+                assert_eq!(row.get::<_, i64>(0), index as i64);
+            }
+            let first_slot = staged_slots[0].get::<_, Vec<u8>>(1);
+            let sources = tx
+                .driver
+                .query(
+                    "SELECT source_path FROM semon_pg_native_catalog_history_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY source_path LIMIT 65",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            assert!(sources.len() <= 64);
+            let mut source_paths = sources
+                .iter()
+                .map(|row| row.get::<_, Vec<u8>>(0))
+                .collect::<Vec<_>>();
+            let mut expected_paths = vec![
+                composite_current_source.path.to_str().unwrap().as_bytes().to_vec(),
+                composite_withdrawn_source.path.to_str().unwrap().as_bytes().to_vec(),
+            ];
+            source_paths.sort();
+            expected_paths.sort();
+            assert_eq!(source_paths, expected_paths);
+            assert_eq!(
+                stored_proof_tuple(tx, &staged_generation, &composite_current_source)?,
+                current_a_proof
+            );
+            assert_eq!(
+                stored_proof_tuple(tx, &staged_generation, &composite_withdrawn_source)?,
+                history_b_proof
+            );
+            let operations: i64 = tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?
+                .get(0);
+            assert_eq!(operations, 0, "private receipt has no ACK");
+            Ok(first_slot)
+        })
+        .unwrap();
+    assert!(first_slot.len() <= 1_048_576);
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_history_slots SET metadata=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND slot=0",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &staged_generation.as_bytes(),
+                    &composite_key.as_bytes(),
+                    &b"staged-slot-tampered".as_slice(),
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        final_catchup.publish_semantic_catalog(&final_batch, final_model.prepared()),
+        Err(StorageError::ScopeChanged)
+    ));
+    assert_eq!(
+        final_catchup.session_catalog_generation().unwrap(),
+        Some(upgraded.clone())
+    );
+    let operation_count: i64 = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?
+                .get(0))
+        })
+        .unwrap();
+    assert_eq!(operation_count, 0, "tampered slots cannot earn an ACK");
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_history_slots SET metadata=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 AND slot=0",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &staged_generation.as_bytes(),
+                    &composite_key.as_bytes(),
+                    &first_slot,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
+    let proof_a = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            stored_proof_tuple(tx, &staged_generation, &composite_current_source)
+        })
+        .unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_proofs SET usage_ready=NOT usage_ready WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND page_generation=$4",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &staged_generation.as_bytes(),
+                    &super::super::path(&composite_current_source)?.as_bytes(),
+                    &proof_a.0,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(
+        final_catchup.publish_semantic_catalog(&final_batch, final_model.prepared()),
+        Err(StorageError::ScopeChanged)
+    ));
+    assert_eq!(
+        final_catchup.session_catalog_generation().unwrap(),
+        Some(upgraded.clone())
+    );
+    let operation_count: i64 = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            Ok(tx
+                .driver
+                .query_one(
+                    "SELECT count(*) FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &staged_generation.as_bytes(),
+                    ],
+                )
+                .map_err(sqlstate::error)?
+                .get(0))
+        })
+        .unwrap();
+    assert_eq!(operation_count, 0, "tampered proof cannot earn an ACK");
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let changed = tx
+            .driver
+            .execute(
+                "UPDATE semon_pg_native_catalog_proofs SET page_generation=$4,usage_generation=$5,usage_ready=$6 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND page_generation=$4",
+                &[
+                    &namespace.as_str().as_bytes(),
+                    &staged_generation.as_bytes(),
+                    &super::super::path(&composite_current_source)?.as_bytes(),
+                    &proof_a.0,
+                    &proof_a.1,
+                    &proof_a.2,
+                ],
+            )
+            .map_err(sqlstate::error)?;
+        assert_eq!(changed, 1);
+        Ok(())
+    })
+    .unwrap();
+    let mut final_deferrals = 1;
     let final_ack = loop {
         let ack = final_catchup
             .publish_semantic_catalog(&final_batch, final_model.prepared())

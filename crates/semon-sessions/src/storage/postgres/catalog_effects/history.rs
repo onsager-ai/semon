@@ -3,6 +3,20 @@
 use super::*;
 use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 
+type ProofTuple = (Vec<u8>, i64, bool);
+
+struct RecipeContents {
+    header: OriginalHeader,
+    incomplete: bool,
+    slots: Vec<String>,
+}
+
+enum WithdrawnComposite {
+    NotApplicable,
+    Complete,
+    Staged,
+}
+
 pub(super) struct History<'a, 'tx> {
     pub(super) effects: Effects<'a, 'tx>,
     pub(super) previous: &'a str,
@@ -99,6 +113,410 @@ impl History<'_, '_> {
                 ))
             })
             .transpose()
+    }
+
+    fn recipe_slots_at(
+        &self,
+        generation: &str,
+        key: &str,
+        history: bool,
+    ) -> Result<Vec<String>, StorageError> {
+        let table = if history {
+            "semon_pg_native_catalog_history_slots"
+        } else {
+            "semon_pg_native_catalog_recipe_rows"
+        };
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query(&format!("SELECT session_key=$4,slot,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END FROM (SELECT slot,session_key,metadata FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p ORDER BY slot"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len() > 64 {
+            return Err(StorageError::Busy);
+        }
+        rows.iter()
+            .enumerate()
+            .map(|(index, row)| {
+                if !row.get::<_, bool>(0) || row.get::<_, i64>(1) != index as i64 {
+                    return Err(StorageError::ScopeChanged);
+                }
+                text(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)
+            })
+            .collect()
+    }
+
+    fn recipe_contents(
+        &self,
+        generation: &str,
+        key: &str,
+        history: bool,
+    ) -> Result<RecipeContents, StorageError> {
+        let (header, incomplete) = self
+            .recipe(generation, key, history)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let slots = self.recipe_slots_at(generation, key, history)?;
+        if header.3 < 0 || usize::try_from(header.3).ok() != Some(slots.len()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(RecipeContents {
+            header,
+            incomplete,
+            slots,
+        })
+    }
+
+    fn history_sources_at(
+        &self,
+        generation: &str,
+        key: &str,
+    ) -> Result<std::collections::BTreeMap<String, CatalogSource>, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT session_key=$4,source_path,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END,native_digest FROM semon_pg_native_catalog_history_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY source_path LIMIT 65", &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len() > 64 {
+            return Err(StorageError::Busy);
+        }
+        let mut sources = std::collections::BTreeMap::new();
+        for row in rows {
+            if !row.get::<_, bool>(0) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let path = text(row.get(1))?;
+            let bytes = row
+                .get::<_, Option<Vec<u8>>>(2)
+                .ok_or(StorageError::Busy)?;
+            let source: CatalogSource =
+                serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+            if source.path.to_str() != Some(path.as_str())
+                || row.get::<_, Vec<u8>>(3) != digest(source.native_id.as_bytes())
+                || sources.insert(path, source).is_some()
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        Ok(sources)
+    }
+
+    fn proof_tuples_at(
+        &self,
+        generations: &[&str],
+        sources: &[CatalogSource],
+    ) -> Result<std::collections::BTreeMap<(Vec<u8>, Vec<u8>), ProofTuple>, StorageError> {
+        if generations.len() > 2 || sources.len() > 64 {
+            return Err(StorageError::InvalidArguments);
+        }
+        if generations.is_empty() || sources.is_empty() {
+            return Ok(std::collections::BTreeMap::new());
+        }
+        let generation_bytes = generations
+            .iter()
+            .map(|generation| generation.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let source_paths = sources
+            .iter()
+            .map(|source| path(source).map(|path| path.as_bytes().to_vec()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let expected_receipts = sources
+            .iter()
+            .map(|source| {
+                let path = path(source)?.as_bytes().to_vec();
+                let receipt = crate::events::store::header_ledger(
+                    &crate::source_carrier::ledger(source),
+                );
+                Ok((path, receipt.into_bytes()))
+            })
+            .collect::<Result<std::collections::BTreeMap<_, _>, StorageError>>()?;
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT p.generation,p.source_path,p.path_digest=sha256(p.source_path),p.page_generation,p.usage_generation,p.usage_ready,g.source_path=p.source_path,g.ledger FROM semon_pg_native_catalog_proofs p JOIN semon_pg_native_page_generations g ON g.namespace_digest=p.namespace_digest AND g.namespace=p.namespace AND g.generation=p.page_generation WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=ANY($2::bytea[]) AND p.source_path=ANY($3::bytea[]) ORDER BY p.generation,p.source_path,p.page_generation", &[&ns, &generation_bytes, &source_paths]).map_err(sqlstate::error)?;
+        if rows.len() > generations.len() * sources.len() {
+            return Err(StorageError::ScopeChanged);
+        }
+        let mut proofs = std::collections::BTreeMap::new();
+        for row in rows {
+            let generation = row.get::<_, Vec<u8>>(0);
+            let path = row.get::<_, Vec<u8>>(1);
+            let receipt = row.get::<_, Vec<u8>>(7);
+            if !row.get::<_, bool>(2)
+                || !row.get::<_, bool>(6)
+                || expected_receipts.get(&path) != Some(&receipt)
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            let tuple = (row.get(3), row.get(4), row.get(5));
+            if proofs.insert((generation, path), tuple).is_some() {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        if proofs.keys().any(|(generation, path)| {
+            !generation_bytes.contains(generation) || !source_paths.contains(path)
+        }) {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(proofs)
+    }
+
+    fn has_original_header(&self, generation: &str, key: &str) -> Result<bool, StorageError> {
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query("SELECT session_key=$4,original_header IS NOT NULL FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3", &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        if rows.len() != 1 || !rows[0].get::<_, bool>(0) {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(rows[0].get(1))
+    }
+
+    fn validate_saved_slots(
+        slots: &[String],
+        sources: &[CatalogSource],
+    ) -> Result<std::collections::BTreeMap<String, String>, StorageError> {
+        use std::collections::{BTreeMap, BTreeSet};
+        let paths = sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<BTreeSet<_>>();
+        if paths.len() != sources.len() || sources.len() > 64 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let mut by_identity = BTreeMap::new();
+        for text in slots {
+            let slot: crate::slot_projection::SavedSlot =
+                serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
+            if slot.source_paths().iter().any(|path| !paths.contains(*path))
+                || by_identity.insert(slot.identity(), text.clone()).is_some()
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        Ok(by_identity)
+    }
+
+    fn validate_withdrawn_composite(
+        &self,
+        current: &CatalogRow,
+        owner_generation: &str,
+        metadata: &str,
+    ) -> Result<(CatalogRow, RecipeContents), StorageError> {
+        use std::collections::{BTreeMap, BTreeSet};
+        use sha2::{Digest, Sha256};
+
+        let history: CatalogRow =
+            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if self.has_original_header(owner_generation, &current.key)?
+            || history.key != current.key
+            || history.query.is_some()
+            || history.sources.len() > 64
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let paths = history
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect::<BTreeSet<_>>();
+        if paths.len() != history.sources.len()
+            || current
+                .sources
+                .iter()
+                .any(|source| !history.sources.contains(source))
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let native_ids = history
+            .sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if native_ids != history.native_ids {
+            return Err(StorageError::ScopeChanged);
+        }
+        let mut projected = current.clone();
+        projected.query = None;
+        projected.sources = history.sources.clone();
+        projected.native_ids = history.native_ids.clone();
+        if serde_json::to_value(&projected).map_err(|_| StorageError::ScopeChanged)?
+            != serde_json::to_value(&history).map_err(|_| StorageError::ScopeChanged)?
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+
+        let current_recipe = self.recipe_contents(self.previous, &current.key, false)?;
+        let current_source_generation =
+            crate::retention::source_generation(&current.sources)
+                .map_err(|_| StorageError::ScopeChanged)?;
+        if current_recipe.incomplete
+            || current_recipe.header.1 != crate::slot_projection::VERSION
+            || current_recipe.header.2.as_deref() != Some(current_source_generation.as_str())
+            || crate::slot_projection::generation(&current_recipe.slots, &current.sources)
+                .map_err(|_| StorageError::ScopeChanged)?
+                != current_recipe.header.0
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let current_slots = Self::validate_saved_slots(&current_recipe.slots, &current.sources)?;
+
+        let history_recipe = self.recipe_contents(owner_generation, &current.key, true)?;
+        let history_source_generation =
+            crate::retention::source_generation(&history.sources)
+                .map_err(|_| StorageError::ScopeChanged)?;
+        let expected_history_generation = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_string(&(
+                    crate::slot_projection::VERSION,
+                    &history_source_generation,
+                    &history_recipe.slots,
+                    history_recipe.incomplete,
+                ))
+                .map_err(|_| StorageError::ScopeChanged)?
+                .as_bytes()
+            )
+        );
+        if history_recipe.header.1 != crate::slot_projection::VERSION
+            || history_recipe.header.2.as_deref() != Some(history_source_generation.as_str())
+            || history_recipe.header.0 != expected_history_generation
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let history_slots = Self::validate_saved_slots(&history_recipe.slots, &history.sources)?;
+        if current_slots
+            .iter()
+            .any(|(identity, text)| history_slots.get(identity) != Some(text))
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+
+        let previous_sources = self.history_sources_at(owner_generation, &current.key)?;
+        let history_by_path = history
+            .sources
+            .iter()
+            .map(|source| (source.path.to_string_lossy().into_owned(), source))
+            .collect::<BTreeMap<_, _>>();
+        if previous_sources.iter().any(|(path, source)| {
+            history_by_path.get(path).is_none_or(|expected| *expected != source)
+        }) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let previous_proofs = self.proof_tuples_at(&[self.previous], &history.sources)?;
+        let previous_generation = self.previous.as_bytes().to_vec();
+        for source in &history.sources {
+            if !current.sources.contains(source)
+                && previous_sources.get(path(source)?) != Some(source)
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            if !previous_proofs.contains_key(&(
+                previous_generation.clone(),
+                path(source)?.as_bytes().to_vec(),
+            )) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        Ok((history, history_recipe))
+    }
+
+    fn withdrawn_composite_complete(
+        &self,
+        key: &str,
+        metadata: &str,
+        history: &CatalogRow,
+        recipe: &RecipeContents,
+    ) -> Result<bool, StorageError> {
+        let generation = self.effects.generation;
+        if self.owner_at(generation, key)? != Some((generation.to_owned(), false))
+            || self.metadata("semon_pg_native_catalog_history_headers", generation, key)?
+                .as_deref()
+                != Some(metadata)
+        {
+            return Ok(false);
+        }
+        let Some((header, incomplete)) = self.recipe(generation, key, true)? else {
+            return Ok(false);
+        };
+        let expected_header = (
+            recipe.header.0.clone(),
+            recipe.header.1,
+            recipe.header.2.clone(),
+            recipe.header.3,
+        );
+        if header != expected_header
+            || incomplete != recipe.incomplete
+            || self.recipe_slots_at(generation, key, true)? != recipe.slots
+        {
+            return Ok(false);
+        }
+        if self.has_original_header(generation, key)? {
+            return Ok(false);
+        }
+        let expected_sources = history
+            .sources
+            .iter()
+            .map(|source| (source.path.to_string_lossy().into_owned(), source))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let actual_sources = self.history_sources_at(generation, key)?;
+        if actual_sources.len() != expected_sources.len()
+            || expected_sources
+                .iter()
+                .any(|(path, source)| actual_sources.get(path).is_none_or(|actual| actual != *source))
+        {
+            return Ok(false);
+        }
+        let proofs = self.proof_tuples_at(&[self.previous, generation], &history.sources)?;
+        let previous_generation = self.previous.as_bytes().to_vec();
+        let successor_generation = generation.as_bytes().to_vec();
+        for source in &history.sources {
+            let path = path(source)?.as_bytes().to_vec();
+            let previous = proofs.get(&(previous_generation.clone(), path.clone()));
+            let successor = proofs.get(&(successor_generation.clone(), path));
+            if previous.is_none() || previous != successor {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn preserve_withdrawn_composite(
+        &self,
+        current: &CatalogRow,
+    ) -> Result<WithdrawnComposite, StorageError> {
+        // `stage` writes the Current projection before `preserve`, and the
+        // shared composer builds each non-original owner from that same row
+        // and projection. Reuse is safe only after the checks below prove the
+        // predecessor still contains that exact Current source/recipe subset.
+        let Some((owner_generation, false)) = self.owner(&current.key)? else {
+            return Ok(WithdrawnComposite::NotApplicable);
+        };
+        let metadata = self
+            .metadata(
+                "semon_pg_native_catalog_history_headers",
+                &owner_generation,
+                &current.key,
+            )?
+            .ok_or(StorageError::ScopeChanged)?;
+        let (history, recipe) =
+            self.validate_withdrawn_composite(current, &owner_generation, &metadata)?;
+        if self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
+            return Ok(WithdrawnComposite::Complete);
+        }
+        for source in &history.sources {
+            self.retain_source(&history, source)?;
+        }
+        self.composed(
+            &current.key,
+            &recipe.header.0,
+            recipe.header.2.as_deref().ok_or(StorageError::ScopeChanged)?,
+            &metadata,
+            &recipe.slots,
+            recipe.incomplete,
+        )?;
+        if !self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(WithdrawnComposite::Staged)
     }
     fn write_header(
         &self,
@@ -590,7 +1008,32 @@ pub(super) fn preserve(
         .observations
         .and_then(crate::storage::selected::PresentationObservations::verified_continuations)
         .unwrap_or(&[]);
-    if !catalog::preserve_rows(&store, publication.rows, &old, continuations)? {
+    let mut completed_composites = std::collections::BTreeSet::new();
+    for row in &old {
+        match store.preserve_withdrawn_composite(row)? {
+            WithdrawnComposite::NotApplicable => {}
+            WithdrawnComposite::Complete => {
+                completed_composites.insert(row.key.as_str());
+            }
+            WithdrawnComposite::Staged => {
+                // One composite is staged per attempt. Its complete receipt
+                // is the private progress witness for the deterministic
+                // successor generation; Current and the withdrawal CAS wait.
+                return Ok(false);
+            }
+        }
+    }
+    let original_withdrawn = old
+        .iter()
+        .filter(|row| !completed_composites.contains(row.key.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !catalog::preserve_rows(
+        &store,
+        publication.rows,
+        &original_withdrawn,
+        continuations,
+    )? {
         return Ok(false);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
