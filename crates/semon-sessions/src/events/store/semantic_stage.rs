@@ -986,8 +986,7 @@ pub(crate) fn project_native_event(
                     | "collaboration.send_message"
                     | "collaboration.followup_task"
             )
-        )
-    {
+        ) {
         // Keep Codex tool IDs out of the Claude call selector's ID index.
         "codex_call"
     } else if native.event.k == super::super::Kind::Xsm {
@@ -1059,42 +1058,48 @@ pub(crate) fn event_page_with(port: &impl EventProjectionPort) -> rusqlite::Resu
         let (file, after) = port.cursor(&path)?;
         let mut end = after;
         let mut stopped = false;
-        port.candidates(file, &harness, after, budget, &mut |seq, event, occurrence| {
-            let native = crate::model::relation_stage::NativeEvent {
-                owner: path.clone(),
-                at: crate::model::relation_stage::Location {
-                    source: source.clone(),
-                    offset: event.o,
-                    block: event.b,
-                    kind: event.k,
-                    occurrence,
-                },
-                event,
-            };
-            let row = project_native_event(native, seq)?;
-            if bytes + row.encoded.len() > MAX_CONTEXT {
-                stopped = true;
-                return Ok(false);
-            }
-            port.put(&row)?;
-            if let Some(msg) = &row.msg {
-                port.enqueue("receipt", msg)?;
-                port.enqueue("sender", msg)?;
-            }
-            if let Some(peer) = row
-                .native
-                .event
-                .peer
-                .as_ref()
-                .and_then(|peer| peer.sock.as_deref())
-            {
-                port.native(peer)?;
-            }
-            end = row.seq;
-            budget -= 1;
-            bytes += row.encoded.len();
-            Ok(true)
-        })?;
+        port.candidates(
+            file,
+            &harness,
+            after,
+            budget,
+            &mut |seq, event, occurrence| {
+                let native = crate::model::relation_stage::NativeEvent {
+                    owner: path.clone(),
+                    at: crate::model::relation_stage::Location {
+                        source: source.clone(),
+                        offset: event.o,
+                        block: event.b,
+                        kind: event.k,
+                        occurrence,
+                    },
+                    event,
+                };
+                let row = project_native_event(native, seq)?;
+                if bytes + row.encoded.len() > MAX_CONTEXT {
+                    stopped = true;
+                    return Ok(false);
+                }
+                port.put(&row)?;
+                if let Some(msg) = &row.msg {
+                    port.enqueue("receipt", msg)?;
+                    port.enqueue("sender", msg)?;
+                }
+                if let Some(peer) = row
+                    .native
+                    .event
+                    .peer
+                    .as_ref()
+                    .and_then(|peer| peer.sock.as_deref())
+                {
+                    port.native(peer)?;
+                }
+                end = row.seq;
+                budget -= 1;
+                bytes += row.encoded.len();
+                Ok(true)
+            },
+        )?;
         port.finish(&path, Some(end), !port.more(file, &harness, end)?)?;
         if stopped {
             break;
@@ -3070,7 +3075,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert!(!selected, "unexpected Codex relation tool projection for {kind}/{name}");
+            assert!(
+                !selected,
+                "unexpected Codex relation tool projection for {kind}/{name}"
+            );
         }
     }
 

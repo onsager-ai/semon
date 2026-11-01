@@ -2355,8 +2355,7 @@ impl<'a> Builder<'a> {
             self.matching_refs
                 .as_ref()
                 .is_some_and(|refs| refs.contains(&at))
-        })
-            || source_path.is_some_and(|path| paths.contains(path))
+        }) || source_path.is_some_and(|path| paths.contains(path))
     }
 
     fn matching_session_header_selected(&self, session: usize) -> bool {

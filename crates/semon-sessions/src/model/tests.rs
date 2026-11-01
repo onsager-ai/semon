@@ -4156,12 +4156,18 @@ fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
     home.codex(
         "child-selected",
         json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/selected"}),
-        &[codex_user(ts(5, 5), "Selected child"), codex_reply(ts(5, 6), "Done")],
+        &[
+            codex_user(ts(5, 5), "Selected child"),
+            codex_reply(ts(5, 6), "Done"),
+        ],
     );
     home.codex(
         "child-other",
         json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/other"}),
-        &[codex_user(ts(5, 5), "Other child"), codex_reply(ts(5, 6), "Done")],
+        &[
+            codex_user(ts(5, 5), "Other child"),
+            codex_reply(ts(5, 6), "Done"),
+        ],
     );
     home.codex(
         "unrelated",
@@ -4224,8 +4230,8 @@ fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
         location(&mut cache, "selected-relay"),
     ]);
     page.matching_header_paths = Some(vec![root_path]);
-    let selected = prepare_staged_sources(&home.options, &mut cache, &inputs, &page, true, NOW)
-        .unwrap();
+    let selected =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &page, true, NOW).unwrap();
     let spawn_id = stable_id("s", "spawn:codex:child-selected");
     let relay_id = stable_id("r", "relay:codex:selected-relay");
     assert_eq!(
@@ -4253,7 +4259,10 @@ fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
             .all(|stub| stub.key != stable_id("peer-", "codex:missing-other"))
     }));
 
-    let child_path = inputs[1].full_path(&home.options).to_string_lossy().into_owned();
+    let child_path = inputs[1]
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
     let mut header_page = page.clone();
     header_page.matching_locations = Some(Vec::new());
     header_page.matching_header_paths = Some(vec![child_path]);
@@ -4436,9 +4445,15 @@ fn matching_claude_relations_follow_selected_calls_headers_and_paired_down_messa
     selected_call_page.relations.clear();
     selected_call_page.matching_locations = Some(vec![call_location(&mut cache, "spawn-other")]);
     selected_call_page.matching_header_paths = Some(vec![root_path.clone()]);
-    let selected_call =
-        prepare_staged_sources(&home.options, &mut cache, &inputs, &selected_call_page, true, NOW)
-            .unwrap();
+    let selected_call = prepare_staged_sources(
+        &home.options,
+        &mut cache,
+        &inputs,
+        &selected_call_page,
+        true,
+        NOW,
+    )
+    .unwrap();
     assert_eq!(
         selected_call
             .relationships
@@ -4465,10 +4480,12 @@ fn matching_claude_relations_follow_selected_calls_headers_and_paired_down_messa
         BTreeSet::from([stable_id("s", "spawn:claude:worker")])
     );
 
-    header_page.matching_header_paths = Some(vec![source_for("unrelated.jsonl")
-        .path
-        .to_string_lossy()
-        .into_owned()]);
+    header_page.matching_header_paths = Some(vec![
+        source_for("unrelated.jsonl")
+            .path
+            .to_string_lossy()
+            .into_owned(),
+    ]);
     let unrelated =
         prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
             .unwrap();
@@ -4671,8 +4688,7 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         .iter()
         .filter_map(|(id, metadata)| {
             let relation: Value = serde_json::from_str(metadata).unwrap();
-            matches!(relation["kind"].as_str(), Some("spawn" | "relay"))
-                .then_some(id.clone())
+            matches!(relation["kind"].as_str(), Some("spawn" | "relay")).then_some(id.clone())
         })
         .collect();
     assert_eq!(actual_relation_ids, expected_relation_ids);
