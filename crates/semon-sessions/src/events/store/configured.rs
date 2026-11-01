@@ -7138,7 +7138,6 @@ mod tests {
             removed_sources: Default::default(),
             indexed_native_parents: Vec::new(),
             withdrawals: Vec::new(),
-            #[cfg(feature = "postgres")]
             withdrawal_fence: None,
         }
     }
@@ -7712,6 +7711,40 @@ mod tests {
                 .ingest(&"a".repeat(64), &f.raw, "codex")
                 .unwrap()
                 .replayed
+        );
+    }
+
+    #[test]
+    fn configured_stored_ledger_batch_needs_no_host_source_or_native_body() {
+        let f = Fixture::new();
+        f.native_cache()
+            .ingest(&"a".repeat(64), &f.raw, "codex")
+            .unwrap();
+        let path = f.raw.to_string_lossy().into_owned();
+        fs::remove_file(&f.raw).unwrap();
+
+        let cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        )
+        .unwrap();
+        assert!(cache.host_source.is_none());
+        assert!(cache.files.is_empty());
+        let ledgers = cache
+            .stored_ledger_batch(std::slice::from_ref(&path))
+            .unwrap();
+        assert_eq!(ledgers.len(), 1);
+        assert!(
+            ledgers[0].is_some(),
+            "the configured ledger remains readable"
+        );
+        assert!(
+            cache.selected_index(Path::new(&path)).is_none(),
+            "metadata lookup must not load a FileIndex"
+        );
+        assert!(cache.files.is_empty());
+        assert!(
+            cache.host_scan_ledger_batch(&[path]).unwrap().is_none(),
+            "configured stores without HostSource use the stored-ledger facade"
         );
     }
 
@@ -8602,6 +8635,81 @@ mod tests {
             assert_eq!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='current'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
             assert!(db.query_row("SELECT count(*) FROM session_search_documents WHERE namespace='source-a' AND read_scope='retained_history'",[],|r|r.get::<_,i64>(0)).unwrap()>0);
             assert_eq!(namespace_state(&f, "source-b"), foreign);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn semantic_rejection_removed_withdrawal_authority_conflicts_and_releases_guards() {
+            for removed in ["facts", "source"] {
+                let (f, _, options, inputs) = model_sources();
+                let options = &options[0];
+                let input = &inputs[0];
+                let mut cache = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+                )
+                .unwrap();
+                cache
+                    .ingest(&"c".repeat(64), &input.full_path(options), "codex")
+                    .unwrap();
+                let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+                publish(&mut cache, &f, &batch, &model);
+                cache.finish_semantic_stage(batch.epoch).unwrap();
+
+                crate::facts::write_facts(
+                    options.facts.as_ref().unwrap(),
+                    &crate::Facts {
+                        version: 2,
+                        hostname: "domain".into(),
+                        codex_rollouts: Some(Default::default()),
+                        ..Default::default()
+                    },
+                    &crate::Options::default().source,
+                )
+                .unwrap();
+                let mut cache = EventCache::open_semantic(
+                    crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+                )
+                .unwrap();
+                let (batch, model) = ready(&mut cache, &f, options, std::slice::from_ref(input));
+                assert_eq!(model.prepared().withdrawals.len(), 1);
+                let source_path = model.prepared().withdrawals[0].path.clone();
+                if removed == "source" {
+                    assert_eq!(
+                        source_path,
+                        input.full_path(options).to_string_lossy().into_owned()
+                    );
+                }
+                let remove_path = if removed == "facts" {
+                    options.facts.as_ref().unwrap().clone()
+                } else {
+                    input.full_path(options)
+                };
+                fs::remove_file(remove_path).unwrap();
+
+                let before = shared_state(&f);
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Conflict,
+                    "removed {removed} freshness witness conflicts before publication"
+                );
+                assert_eq!(
+                    shared_state(&f),
+                    before,
+                    "removed {removed} freshness witness makes zero writes"
+                );
+
+                for path in ["facts", source_path.as_str()] {
+                    let lock =
+                        crate::source_change::SourceLock::try_exclusive_cache(&options.cache, path)
+                            .unwrap_or_else(|error| {
+                                panic!("publication released {path} lock: {error}")
+                            });
+                    drop(lock);
+                }
+            }
         }
     }
 

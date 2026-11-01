@@ -20,6 +20,14 @@ struct RelationCursor {
     path: String,
     after: String,
     end: String,
+    #[cfg(test)]
+    page_event_keys: usize,
+    #[cfg(test)]
+    page_own_locations: usize,
+    #[cfg(test)]
+    page_paired_locations: usize,
+    #[cfg(test)]
+    page_cursor_advanced: bool,
 }
 
 fn relation_page(
@@ -36,7 +44,17 @@ fn relation_page(
     let mut locations = Vec::new();
     let mut used = 0usize;
     let mut end = after.clone();
+    #[cfg(test)]
+    let mut page_event_keys = 0usize;
+    #[cfg(test)]
+    let mut page_own_locations = 0usize;
+    #[cfg(test)]
+    let mut page_paired_locations = 0usize;
     while let Some(row) = rows.next()? {
+        #[cfg(test)]
+        {
+            page_event_keys += 1;
+        }
         let key: String = row.get(0)?;
         let text: Option<String> = row.get(1)?;
         let mut candidate_used = used;
@@ -76,15 +94,31 @@ fn relation_page(
         if overflow {
             break;
         }
+        #[cfg(test)]
+        {
+            page_own_locations += 1;
+            page_paired_locations += selected.len().saturating_sub(1);
+        }
         locations.extend(selected);
         used = candidate_used;
         end = key;
     }
     context.matching_locations = Some(locations);
+    context.matching_header_paths = Some(vec![path.to_owned()]);
+    #[cfg(test)]
+    let page_cursor_advanced = end != after;
     serde_json::to_string(&RelationCursor {
         path: path.to_owned(),
         after,
+        #[cfg(test)]
+        page_cursor_advanced,
         end,
+        #[cfg(test)]
+        page_event_keys,
+        #[cfg(test)]
+        page_own_locations,
+        #[cfg(test)]
+        page_paired_locations,
     })
     .map_err(|_| rusqlite::Error::InvalidQuery)
 }
@@ -919,12 +953,13 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
     fn candidates(
         &self,
         file: i64,
+        harness: &str,
         after: i64,
         limit: usize,
         visit: &mut dyn FnMut(usize, crate::events::Event, usize) -> rusqlite::Result<bool>,
     ) -> rusqlite::Result<()> {
         let columns = crate::events::store::semantic_stage::projection_columns();
-        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+        let predicate = crate::events::store::semantic_stage::projection_predicate(harness, "");
         let sql = format!(
             "SELECT {columns} FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate} ORDER BY seq LIMIT ?4"
         );
@@ -945,8 +980,8 @@ impl crate::events::store::semantic_stage::EventProjectionPort for ScopedProject
         }
         Ok(())
     }
-    fn more(&self, file: i64, after: i64) -> rusqlite::Result<bool> {
-        let predicate = crate::events::store::semantic_stage::projection_predicate("");
+    fn more(&self, file: i64, harness: &str, after: i64) -> rusqlite::Result<bool> {
+        let predicate = crate::events::store::semantic_stage::projection_predicate(harness, "");
         self.db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM main.events WHERE namespace=?1 AND file_id=?2 AND extra=0 AND seq>?3 AND {predicate})"),params![self.ns,file,after],|r|r.get(0))
     }
     fn finish(&self, path: &str, after: Option<i64>, done: bool) -> rusqlite::Result<()> {
@@ -3650,6 +3685,56 @@ impl Stage {
                     tx.execute("UPDATE main.catalog_semantic_endpoints SET metadata=?3 WHERE namespace=?1 AND session_key=?2",params![ns,endpoint.row.key,text]).map_err(error)?;
                 }
                 if prepared.relationships.relations.len() > 64 {
+                    #[cfg(test)]
+                    {
+                        let mut from_real = 0usize;
+                        let mut from_stub = 0usize;
+                        let mut from_other = 0usize;
+                        let mut to_real = 0usize;
+                        let mut to_stub = 0usize;
+                        let mut to_other = 0usize;
+                        let mut to_none = 0usize;
+                        for relation in prepared.relationships.relations.values() {
+                            let is_stub =
+                                |key: &String| relation.stubs.iter().any(|stub| &stub.key == key);
+                            if prepared
+                                .relationships
+                                .endpoints
+                                .contains_key(&relation.from)
+                            {
+                                from_real += 1;
+                            } else if is_stub(&relation.from) {
+                                from_stub += 1;
+                            } else {
+                                from_other += 1;
+                            }
+                            match relation.to.as_ref() {
+                                Some(to) if prepared.relationships.endpoints.contains_key(to) => {
+                                    to_real += 1;
+                                }
+                                Some(to) if is_stub(to) => to_stub += 1,
+                                Some(_) => to_other += 1,
+                                None => to_none += 1,
+                            }
+                        }
+                        eprintln!(
+                            "semantic_relation_budget_diag paths={} relations={} from_real={} from_stub={} from_other={} to_real={} to_stub={} to_other={} to_none={} page_cursor_advanced={} page_after_nonempty={} page_event_keys={} page_own_locations={} page_paired_locations={}",
+                            batch.paths.len(),
+                            prepared.relationships.relations.len(),
+                            from_real,
+                            from_stub,
+                            from_other,
+                            to_real,
+                            to_stub,
+                            to_other,
+                            to_none,
+                            cursor.page_cursor_advanced,
+                            !cursor.after.is_empty(),
+                            cursor.page_event_keys,
+                            cursor.page_own_locations,
+                            cursor.page_paired_locations,
+                        );
+                    }
                     return Err(refuse("semantic_relation_budget"));
                 }
                 for relation in prepared.relationships.relations.values() {

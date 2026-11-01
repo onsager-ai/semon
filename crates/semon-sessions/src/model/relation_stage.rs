@@ -109,6 +109,11 @@ pub(crate) struct Context {
     pub(crate) native_events: Vec<NativeEvent>,
     pub(crate) companions: Vec<String>,
     pub(crate) matching_locations: Option<Vec<Location>>,
+    /// A qualified page's current source can carry a parent relationship in
+    /// native header metadata even when the page has no event locations. None
+    /// preserves adapters that do not yet provide this page scope.
+    #[serde(skip)]
+    pub(crate) matching_header_paths: Option<Vec<String>>,
     /// Final replay reads incident relationships in bounded, read-only pages.
     pub(crate) replay_owners: Vec<String>,
     /// Captured Current owners, not authority inferred from SQL absence.
@@ -534,6 +539,8 @@ pub(crate) struct Preview {
     pub(crate) at: Location,
     pub(crate) reply: bool,
     pub(crate) kind: String,
+    pub(crate) tool: Option<String>,
+    pub(crate) cwd: Option<String>,
     pub(crate) arg: Option<String>,
     pub(crate) skip: usize,
 }
@@ -580,6 +587,8 @@ pub(crate) struct Relation {
     pub(crate) heads: Vec<String>,
     pub(crate) after: Vec<Location>,
     pub(crate) previews: BTreeMap<String, Preview>,
+    /// Complete content-free field recipes shared by both relation endpoints.
+    pub(crate) query_content: BTreeMap<String, serde_json::Value>,
     pub(crate) order: (u8, i64, String, u64, u32),
     pub(crate) explicit_previews: bool,
     pub(crate) stubs: Vec<Stub>,
@@ -782,7 +791,8 @@ impl Context {
         builder: &Builder<'_>,
         observed: Option<&BTreeMap<String, SessionFacts>>,
         turns: &[Turn],
-    ) -> Self {
+        rows: &[summary::CatalogRow],
+    ) -> io::Result<Self> {
         let mut holding: BTreeMap<&str, Option<&Turn>> = BTreeMap::new();
         for turn in turns {
             for edge in &turn.sent {
@@ -796,7 +806,7 @@ impl Context {
                     .or_insert(Some(turn));
             }
         }
-        let rows = summary::catalog(
+        let endpoint_rows = summary::catalog(
             builder,
             &builder
                 .handoffs
@@ -806,7 +816,7 @@ impl Context {
         );
         let fallback = builder.session_facts(&BTreeSet::new(), |_| (None, None), |_, _| None);
         let facts = observed.unwrap_or(&fallback);
-        let endpoints: BTreeMap<_, _> = rows
+        let endpoints: BTreeMap<_, _> = endpoint_rows
             .into_iter()
             .map(|row| {
                 let session = &builder.sessions[builder.by_key[&row.key]];
@@ -871,7 +881,7 @@ impl Context {
                 (endpoint.row.key.clone(), endpoint)
             })
             .collect();
-        let relations = builder
+        let mut relations: BTreeMap<String, Relation> = builder
             .handoffs
             .iter()
             .enumerate()
@@ -882,6 +892,7 @@ impl Context {
                     .iter()
                     .flat_map(|previews| previews.iter())
                     .map(|(field, preview)| {
+                        let file = &builder.files[preview.at.0];
                         (
                             (*field).to_owned(),
                             Preview {
@@ -889,6 +900,8 @@ impl Context {
                                 at: Location::capture(builder, preview.at),
                                 reply: preview.reply,
                                 kind: preview.kind.to_owned(),
+                                tool: event(builder.files, preview.at).n.clone(),
+                                cwd: file.summary.cwd.clone(),
                                 arg: preview.arg.clone(),
                                 skip: preview.skip,
                             },
@@ -948,6 +961,7 @@ impl Context {
                         .map(|(at, _)| Location::capture(builder, *at))
                         .collect(),
                     previews,
+                    query_content: BTreeMap::new(),
                     explicit_previews: h.previews.is_some(),
                     inline: h.inline,
                     stubs: [h.from, h.to]
@@ -1063,11 +1077,95 @@ impl Context {
                 (relation.id.clone(), relation)
             })
             .collect();
-        Self {
+        #[cfg(test)]
+        {
+            let mut spawn_codex = 0usize;
+            let mut spawn_claude = 0usize;
+            let mut spawn_other = 0usize;
+            let mut relay_codex = 0usize;
+            let mut relay_claude = 0usize;
+            let mut relay_other = 0usize;
+            for handoff in &builder.handoffs {
+                let from_harness = builder
+                    .by_key
+                    .get(&handoff.out.from)
+                    .map(|at| builder.sessions[*at].out.harness)
+                    .unwrap_or("other");
+                match (handoff.out.kind, from_harness) {
+                    ("spawn", "codex") => spawn_codex += 1,
+                    ("spawn", "claude") => spawn_claude += 1,
+                    ("spawn", _) => spawn_other += 1,
+                    ("relay", "codex") => relay_codex += 1,
+                    ("relay", "claude") => relay_claude += 1,
+                    ("relay", _) => relay_other += 1,
+                    _ => {}
+                }
+            }
+            eprintln!(
+                "semantic_relation_capture_diag files={} matching_refs={} spawn_codex={} spawn_claude={} spawn_other={} relay_codex={} relay_claude={} relay_other={} relations={}",
+                builder.files.len(),
+                builder.matching_refs.as_ref().map_or(0, |refs| refs.len()),
+                spawn_codex,
+                spawn_claude,
+                spawn_other,
+                relay_codex,
+                relay_claude,
+                relay_other,
+                relations.len(),
+            );
+        }
+        for row in rows {
+            let Some(recipe) = &row.query_recipe else {
+                continue;
+            };
+            for edge in &recipe.edges {
+                let id = edge["id"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                let Some(relation) = relations.get_mut(id) else {
+                    continue;
+                };
+                let content = edge["query_content"]
+                    .as_object()
+                    .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                for (field, value) in content {
+                    crate::query_projection::insert_query_content_recipe(
+                        &mut relation.query_content,
+                        field,
+                        value,
+                    )?;
+                    if value.is_null() {
+                        continue;
+                    }
+                    let source: summary::CatalogSource =
+                        serde_json::from_value(value["source"].clone()).map_err(|_| {
+                            io::Error::other("Native handoff source recipe invalid")
+                        })?;
+                    let path = value["path"]
+                        .as_str()
+                        .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                    if source.path != std::path::Path::new(path)
+                        || !std::iter::once(&relation.from)
+                            .chain(relation.to.iter())
+                            .any(|owner| {
+                                endpoints
+                                    .get(owner)
+                                    .is_some_and(|endpoint| endpoint.row.sources.contains(&source))
+                                    || builder.staged_endpoints.get(owner).is_some_and(|endpoint| {
+                                        endpoint.row.sources.contains(&source)
+                                    })
+                            })
+                    {
+                        return Err(io::Error::other(SourceGenerationChanged));
+                    }
+                }
+            }
+        }
+        Ok(Self {
             endpoints,
             relations,
             ..Default::default()
-        }
+        })
     }
 
     pub(super) fn install_endpoints(&self, builder: &mut Builder<'_>) -> io::Result<()> {
@@ -1217,6 +1315,7 @@ impl Context {
                 to,
             );
             let mut previews = BTreeMap::new();
+            let mut foreign_previews = BTreeMap::new();
             for (field, preview) in &relation.previews {
                 builder.handoffs[index]
                     .preview_owners
@@ -1232,9 +1331,19 @@ impl Context {
                             skip: preview.skip,
                         },
                     );
+                } else if relation.explicit_previews && preview.kind == "trace_prompt" {
+                    if preview.reply
+                        || !self.endpoints.get(&preview.owner).is_some_and(|endpoint| {
+                            endpoint.row.sources.contains(&preview.at.source)
+                        })
+                    {
+                        return Err(io::Error::other(SourceGenerationChanged));
+                    }
+                    foreign_previews.insert(preview_field(field)?.to_owned(), preview.clone());
                 }
             }
             builder.handoffs[index].previews = relation.explicit_previews.then_some(previews);
+            builder.handoffs[index].foreign_previews = foreign_previews;
             builder.handoffs[index].inline = relation.inline;
             for placement in &relation.placements {
                 if let Some(at) = placement.at.local(builder)? {

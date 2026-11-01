@@ -3898,6 +3898,203 @@ fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
 }
 
 #[test]
+fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesses() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(0, 0), "Coordinate"),
+            codex_line(
+                ts(0, 1),
+                "response_item",
+                json!({"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"spawn-child","arguments":"{\"task_name\":\"child\",\"message\":\"Inspect\"}"}),
+            ),
+            codex_line(
+                ts(0, 1),
+                "response_item",
+                json!({"type":"function_call_output","call_id":"spawn-child","output":"{\"task_name\":\"child\"}"}),
+            ),
+        ],
+    );
+    home.codex(
+        "child",
+        json!({
+            "parent_thread_id":"root",
+            "thread_source":"subagent",
+            "agent_path":"root/child"
+        }),
+        &[codex_line(
+            ts(0, 2),
+            "response_item",
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"Inspect the first part"},{"type":"input_text","text":"and the second part"}]}),
+        )],
+    );
+
+    let root_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "sessions/2026/09/24/rollout-root.jsonl".into(),
+    };
+    let preview_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "sessions/2026/09/24/rollout-child.jsonl".into(),
+    };
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let published_generation = cache.session_catalog_generation();
+    assert!(published_generation.is_some());
+    let full = prepare_sources(
+        &home.options,
+        &mut cache,
+        &[root_input, preview_input.clone()],
+        NOW,
+    )
+    .unwrap();
+    let expected_row = full.rows.iter().find(|row| row.key == "child").unwrap();
+    let relation = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| relation.to.as_deref() == Some("child"))
+        .unwrap();
+    let recorded_preview = &relation.previews["brief"];
+    assert_eq!(recorded_preview.kind, "trace_prompt");
+    assert_eq!(recorded_preview.cwd.as_deref(), Some("/work/proj"));
+    let expected_overview = serde_json::to_value(expected_row.overview.as_ref().unwrap()).unwrap();
+    let expected_pointer =
+        expected_overview["home"]["content"]["events"][&relation.id]["brief"].clone();
+    assert_eq!(
+        expected_pointer["source"],
+        json!(recorded_preview.at.source)
+    );
+    assert_eq!(expected_pointer["cwd"], json!("/work/proj"));
+    assert!(expected_pointer.get("field").is_none());
+
+    // Model a selected owner source whose explicit prompt location is another
+    // admitted source in that same endpoint. The second source stays foreign
+    // to this producer batch, as it does after staged relation replay.
+    let preview_path = preview_input.full_path(&home.options);
+    let selected_path = home
+        .options
+        .codex_home
+        .join("sessions/2026/09/24/rollout-child-copy.jsonl");
+    fs::copy(&preview_path, &selected_path).unwrap();
+    let selected_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "sessions/2026/09/24/rollout-child-copy.jsonl".into(),
+    };
+    crate::events::scan_file(&selected_path, "codex", &mut cache, &mut false).unwrap();
+    let mut selected_source = cache.source(&selected_path, "child").unwrap();
+    selected_source
+        .native_role
+        .clone_from(&recorded_preview.at.source.native_role);
+
+    let staged_bytes = serde_json::to_vec(&full.relationships).unwrap();
+    let mut staged: relation_stage::Context = serde_json::from_slice(&staged_bytes).unwrap();
+    let endpoint = staged.endpoints.get_mut("child").unwrap();
+    endpoint.row.sources.push(selected_source.clone());
+    endpoint
+        .row
+        .sources
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    let replay = prepare_staged_sources(
+        &home.options,
+        &mut cache,
+        std::slice::from_ref(&selected_input),
+        &staged,
+        false,
+        NOW,
+    )
+    .unwrap();
+    let replayed_row = replay.rows.iter().find(|row| row.key == "child").unwrap();
+    let replayed_overview = serde_json::to_value(replayed_row.overview.as_ref().unwrap()).unwrap();
+    let replayed_pointer = &replayed_overview["home"]["content"]["events"][&relation.id]["brief"];
+    assert_eq!(replayed_pointer, &expected_pointer);
+    assert!(
+        replay.publication_guard(&cache).unwrap().is_some(),
+        "the prepared foreign source witness must qualify before mutation"
+    );
+
+    let assert_refused = |cache: &mut EventCache, context: &relation_stage::Context| {
+        let error = prepare_staged_sources(
+            &home.options,
+            cache,
+            std::slice::from_ref(&selected_input),
+            context,
+            false,
+            NOW,
+        )
+        .err()
+        .expect("a changed foreign source witness must refuse the staged producer");
+        assert!(relation_stage::source_generation_changed(&error), "{error}");
+    };
+
+    let mut endpoint_mismatch = staged.clone();
+    endpoint_mismatch
+        .endpoints
+        .get_mut("child")
+        .unwrap()
+        .row
+        .sources
+        .retain(|source| source != &recorded_preview.at.source);
+    assert_refused(&mut cache, &endpoint_mismatch);
+
+    let mut ledger_mismatch = staged.clone();
+    let changed_source = {
+        let preview = &mut ledger_mismatch
+            .relations
+            .get_mut(&relation.id)
+            .unwrap()
+            .previews
+            .get_mut("brief")
+            .unwrap()
+            .at
+            .source;
+        preview.prefix_sha256[0] ^= 1;
+        preview.clone()
+    };
+    let endpoint = ledger_mismatch.endpoints.get_mut("child").unwrap();
+    endpoint
+        .row
+        .sources
+        .retain(|source| source != &recorded_preview.at.source);
+    endpoint.row.sources.push(changed_source);
+    endpoint
+        .row
+        .sources
+        .sort_by(|left, right| left.path.cmp(&right.path));
+    assert_refused(&mut cache, &ledger_mismatch);
+
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&preview_path)
+            .unwrap(),
+        "{}",
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"changed after admission"}]}})
+    )
+    .unwrap();
+    assert_refused(&mut cache, &staged);
+
+    let batch = relation_stage::Batch {
+        epoch: staged.epoch.unwrap_or_default(),
+        phase: relation_stage::Phase::Publication,
+        paths: replay.claims.iter().map(|(path, _)| path.clone()).collect(),
+        base_generation: replay.base_generation.clone(),
+        source_revision: 0,
+        runtime: String::new(),
+        context: staged.clone(),
+        relation_cursor: None,
+    };
+    assert_eq!(
+        cache.publish_semantic_catalog(&batch, &replay).unwrap(),
+        (crate::events::Outcome::Conflict, None),
+        "a changed foreign source conflicts before final publication"
+    );
+    assert_eq!(cache.session_catalog_generation(), published_generation);
+}
+
+#[test]
 fn staged_codex_native_spawn_and_relay_replay_matches_shared_builder() {
     let home = Home::new();
     home.codex("root", json!({}), &[
@@ -3924,6 +4121,395 @@ fn staged_codex_native_spawn_and_relay_replay_matches_shared_builder() {
             },
         ],
     );
+}
+
+#[test]
+fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
+    let home = Home::new();
+    home.codex(
+        "root",
+        json!({}),
+        &[
+            codex_user(ts(5, 0), "Coordinate"),
+            codex_line(
+                ts(5, 1),
+                "response_item",
+                json!({"type":"function_call","name":"collaboration.spawn_agent","call_id":"selected-spawn","arguments":"{\"task_name\":\"selected\",\"message\":\"Inspect\"}"}),
+            ),
+            codex_line(
+                ts(5, 2),
+                "response_item",
+                json!({"type":"function_call","name":"spawn_agent","call_id":"other-spawn","arguments":"{\"task_name\":\"other\",\"message\":\"Inspect\"}"}),
+            ),
+            codex_line(
+                ts(5, 3),
+                "response_item",
+                json!({"type":"function_call","name":"collaboration.send_message","call_id":"selected-relay","arguments":"{\"target\":\"missing-selected\",\"message\":\"Selected\"}"}),
+            ),
+            codex_line(
+                ts(5, 4),
+                "response_item",
+                json!({"type":"function_call","name":"followup_task","call_id":"other-relay","arguments":"{\"target\":\"missing-other\",\"message\":\"Unselected\"}"}),
+            ),
+        ],
+    );
+    home.codex(
+        "child-selected",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/selected"}),
+        &[
+            codex_user(ts(5, 5), "Selected child"),
+            codex_reply(ts(5, 6), "Done"),
+        ],
+    );
+    home.codex(
+        "child-other",
+        json!({"parent_thread_id":"root","thread_source":"subagent","agent_path":"root/other"}),
+        &[
+            codex_user(ts(5, 5), "Other child"),
+            codex_reply(ts(5, 6), "Done"),
+        ],
+    );
+    home.codex(
+        "unrelated",
+        json!({}),
+        &[codex_user(ts(5, 7), "Unrelated source")],
+    );
+
+    let inputs = [
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-root.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-child-selected.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-child-other.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-unrelated.jsonl".into(),
+        },
+    ];
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let root_source = full
+        .rows
+        .iter()
+        .find(|row| row.key == "root")
+        .unwrap()
+        .sources[0]
+        .clone();
+    let location = |cache: &mut EventCache, id: &str| {
+        let index = cache.selected_index(&root_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.id.as_deref() == Some(id))
+            .unwrap();
+        relation_stage::Location {
+            source: root_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let root_path = root_source.path.to_string_lossy().into_owned();
+    let mut page = full.relationships.clone();
+    page.relations.clear();
+    page.matching_locations = Some(vec![
+        location(&mut cache, "selected-spawn"),
+        location(&mut cache, "selected-relay"),
+    ]);
+    page.matching_header_paths = Some(vec![root_path]);
+    let selected =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &page, true, NOW).unwrap();
+    let spawn_id = stable_id("s", "spawn:codex:child-selected");
+    let relay_id = stable_id("r", "relay:codex:selected-relay");
+    assert_eq!(
+        selected
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([spawn_id.clone(), relay_id.clone()])
+    );
+    let relay = &selected.relationships.relations[&relay_id];
+    assert_eq!(
+        relay
+            .stubs
+            .iter()
+            .map(|stub| stub.key.clone())
+            .collect::<Vec<_>>(),
+        vec![stable_id("peer-", "codex:missing-selected")]
+    );
+    assert!(selected.relationships.relations.values().all(|relation| {
+        relation
+            .stubs
+            .iter()
+            .all(|stub| stub.key != stable_id("peer-", "codex:missing-other"))
+    }));
+
+    let child_path = inputs[1]
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
+    let mut header_page = page.clone();
+    header_page.matching_locations = Some(Vec::new());
+    header_page.matching_header_paths = Some(vec![child_path]);
+    let header_only =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert_eq!(
+        header_only
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([spawn_id])
+    );
+
+    let unrelated_path = inputs[3]
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
+    header_page.matching_header_paths = Some(vec![unrelated_path]);
+    let unrelated =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert!(unrelated.relationships.relations.is_empty());
+}
+
+#[test]
+fn matching_claude_relations_follow_selected_calls_headers_and_paired_down_messages() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(5, 0), "Coordinate"),
+            assistant(
+                "lead",
+                ts(5, 1),
+                vec![
+                    tool("spawn-worker", "Agent", json!({"prompt":"Worker task"})),
+                    tool("spawn-other", "Agent", json!({"prompt":"Other task"})),
+                ],
+            ),
+            result(
+                "lead",
+                ts(5, 1),
+                "spawn-worker",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"worker"}),
+            ),
+            result(
+                "lead",
+                ts(5, 1),
+                "spawn-other",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"other"}),
+            ),
+            assistant(
+                "lead",
+                ts(5, 2),
+                vec![tool(
+                    "down-worker",
+                    "SendMessage",
+                    json!({"to":"worker","message":"Check this detail"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(5, 2),
+                "down-worker",
+                "sent",
+                false,
+                json!({"success":true,"message":"Message queued for delivery to worker at its next tool round."}),
+            ),
+        ],
+    );
+    home.agent(
+        "lead",
+        "worker",
+        "spawn-worker",
+        &[
+            user("lead", ts(5, 1), "Worker task"),
+            coordinator("lead", ts(5, 3), "Check this detail"),
+        ],
+    );
+    home.agent(
+        "lead",
+        "other",
+        "spawn-other",
+        &[user("lead", ts(5, 1), "Other task")],
+    );
+    home.top("unrelated", &[human("unrelated", ts(5, 4), "Unrelated")]);
+    let inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead/subagents/agent-worker.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead/subagents/agent-other.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/unrelated.jsonl".into(),
+        },
+    ];
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let source_for = |suffix: &str| {
+        let source = full
+            .rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.to_string_lossy().ends_with(suffix))
+            .unwrap();
+        (*source).clone()
+    };
+    let root_source = source_for("lead.jsonl");
+    let worker_source = source_for("agent-worker.jsonl");
+    let call_location = |cache: &mut EventCache, id: &str| {
+        let index = cache.selected_index(&root_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.id.as_deref() == Some(id))
+            .unwrap();
+        relation_stage::Location {
+            source: root_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let down_location = |cache: &mut EventCache| {
+        let index = cache.selected_index(&worker_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.k == Kind::Agm && event.script & AGM_DOWN != 0)
+            .unwrap();
+        relation_stage::Location {
+            source: worker_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let root_path = root_source.path.to_string_lossy().into_owned();
+    let worker_path = worker_source.path.to_string_lossy().into_owned();
+    let down_relay = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| {
+            relation.kind == "relay"
+                && relation.from == "lead"
+                && relation.to.as_deref() == Some("worker")
+        })
+        .unwrap()
+        .id
+        .clone();
+
+    let mut selected_call_page = full.relationships.clone();
+    selected_call_page.relations.clear();
+    selected_call_page.matching_locations = Some(vec![call_location(&mut cache, "spawn-other")]);
+    selected_call_page.matching_header_paths = Some(vec![root_path.clone()]);
+    let selected_call = prepare_staged_sources(
+        &home.options,
+        &mut cache,
+        &inputs,
+        &selected_call_page,
+        true,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        selected_call
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([stable_id("s", "spawn:claude:other")])
+    );
+
+    let mut header_page = selected_call_page.clone();
+    header_page.matching_locations = Some(Vec::new());
+    header_page.matching_header_paths = Some(vec![worker_path]);
+    let own_header =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert_eq!(
+        own_header
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([stable_id("s", "spawn:claude:worker")])
+    );
+
+    header_page.matching_header_paths = Some(vec![
+        source_for("unrelated.jsonl")
+            .path
+            .to_string_lossy()
+            .into_owned(),
+    ]);
+    let unrelated =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert!(unrelated.relationships.relations.is_empty());
+
+    for selected in [
+        call_location(&mut cache, "down-worker"),
+        down_location(&mut cache),
+    ] {
+        let mut paired_page = selected_call_page.clone();
+        paired_page.matching_locations = Some(vec![selected]);
+        let paired =
+            prepare_staged_sources(&home.options, &mut cache, &inputs, &paired_page, true, NOW)
+                .unwrap();
+        assert_eq!(
+            paired
+                .relationships
+                .relations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([down_relay.clone()])
+        );
+    }
 }
 
 #[test]
@@ -3991,6 +4577,7 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     let mut evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let mut restarted = false;
     let mut appended = false;
+    let mut durable_preview_restarted = false;
     let mut complete = false;
     for _ in 0..128 {
         let done = evidence
@@ -4016,9 +4603,25 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
             );
         }
         if phase.as_deref() == Some("relations") && !restarted {
-            evidence.retire();
-            evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
-            restarted = true;
+            let relation_id = stable_id("s", "spawn:codex:child-000");
+            let metadata: Option<String> = db
+                .query_row(
+                    "SELECT metadata FROM catalog_semantic_relations WHERE relation_id=?1",
+                    [&relation_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            if let Some(metadata) = metadata {
+                let relation: Value = serde_json::from_str(&metadata).unwrap();
+                assert_eq!(relation["previews"]["brief"]["kind"], "trace_prompt");
+                assert_eq!(relation["previews"]["brief"]["cwd"], "/work/proj");
+                assert!(relation["previews"]["brief"].get("tool").is_some());
+                evidence.retire();
+                evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+                restarted = true;
+                durable_preview_restarted = true;
+            }
         }
         if phase.as_deref() == Some("publication") && !appended {
             let mut file = fs::OpenOptions::new()
@@ -4038,13 +4641,63 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     }
     evidence.retire();
     assert!(
-        complete && restarted && appended,
+        complete && restarted && appended && durable_preview_restarted,
         "durable rich family did not qualify after owner loss and append"
     );
     let mut oracle_options = home.options.clone();
     oracle_options.cache = home.root.join("oracle-index.json");
     let oracle = home.build_at(&oracle_options, NOW);
+
+    let oracle_inputs = [
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-root.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/09/24/rollout-child-000.jsonl".into(),
+        },
+    ];
+    let mut oracle_cache = EventCache::open(&oracle_options.cache, &oracle_options.source).unwrap();
+    let full = prepare_sources(&oracle_options, &mut oracle_cache, &oracle_inputs, NOW).unwrap();
+    let full_row = full.rows.iter().find(|row| row.key == "child-000").unwrap();
+    let full_relation = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| relation.to.as_deref() == Some("child-000"))
+        .unwrap();
+    assert_eq!(full_relation.previews["brief"].kind, "trace_prompt");
+
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let expected_relation_ids: BTreeSet<_> = oracle
+        .handoffs
+        .iter()
+        .filter(|edge| matches!(edge.kind, "spawn" | "relay"))
+        .map(|edge| edge.id.clone())
+        .collect();
+    let mut relation_rows = db
+        .prepare("SELECT relation_id,metadata FROM catalog_semantic_relations ORDER BY relation_id")
+        .unwrap();
+    let actual_relation_rows: Vec<(String, String)> = relation_rows
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    let actual_relation_ids: BTreeSet<_> = actual_relation_rows
+        .iter()
+        .filter_map(|(id, metadata)| {
+            let relation: Value = serde_json::from_str(metadata).unwrap();
+            matches!(relation["kind"].as_str(), Some("spawn" | "relay")).then_some(id.clone())
+        })
+        .collect();
+    assert_eq!(actual_relation_ids, expected_relation_ids);
+    for (_, metadata) in actual_relation_rows {
+        let relation: Value = serde_json::from_str(&metadata).unwrap();
+        if matches!(relation["kind"].as_str(), Some("spawn" | "relay")) {
+            assert_eq!(relation["stubs"], json!([]));
+        }
+    }
     for handoff in oracle
         .handoffs
         .iter()
@@ -4105,6 +4758,22 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
         )
         .unwrap()
         .is_some()
+    );
+
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='child-000' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let replayed: summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    let expected_overview = serde_json::to_value(full_row.overview.as_ref().unwrap()).unwrap();
+    let replayed_overview = serde_json::to_value(replayed.overview.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        replayed_overview["home"]["content"]["events"][&full_relation.id]["brief"],
+        expected_overview["home"]["content"]["events"][&full_relation.id]["brief"],
+        "durable staged replay preserves the full-build native preview pointer"
     );
 }
 

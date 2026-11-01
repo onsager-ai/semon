@@ -126,6 +126,10 @@ jobs:
             events::store::configured::tests::domain52::configured_semantic_domain61_announced_ledger_change_restarts_stage \
             model::tests::catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources \
             events::store::configured::tests::current_recovery::recovery_semantic_index_revision_drift_resets_stale_reduction_witness \
+            model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
+            model::tests::matching_codex_relations_follow_selected_calls_and_header_source_pages \
+            model::tests::matching_claude_relations_follow_selected_calls_headers_and_paired_down_messages \
+            events::store::semantic_stage::tests::codex_projection_selects_only_the_supported_relation_tool_names \
             model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
             model::tests::native_handoff_restart_reads_candidates_and_repairs_locations_without_event_replay \
             model::tests::native_parent_marker_restart_reads_only_its_location_and_repairs_metadata_without_event_replay \
@@ -133,6 +137,10 @@ jobs:
             model::tests::persisted_descriptions_reuse_restart_and_revalidate_changed_sources \
             model::tests::reported_cost_checks_keep_overwritten_runs_and_drop_account_values \
             model::tests::failed_send_bookmarks_resolve_indexed_real_owners_without_source_bytes \
+            model::tests::staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesses \
+            model::tests::staged_codex_native_spawn_and_relay_replay_matches_shared_builder \
+            model::tests::staged_owner_replay_keeps_agent_messages_and_inline_turns \
+            events::store::configured::tests::configured_stored_ledger_batch_needs_no_host_source_or_native_body \
             model::tests::cold_semantic_family_discovers_older_disconnected_native_key_collisions \
             model::tests::staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle \
             model::tests::cold_codex_family_qualifies_pending_copilot_native_collision \
@@ -295,7 +303,7 @@ jobs:
         run: |
           result=0
           cargo test --locked -p semon-sessions --lib semantic_rejection_ -- --nocapture > "$RUNNER_TEMP/semantic-rejection-tests.log" 2>&1 || result=$?
-          if ! grep -Fq 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/semantic-rejection-tests.log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 5 passed; 0 failed;' "$RUNNER_TEMP/semantic-rejection-tests.log"; then result=1; fi
           cat "$RUNNER_TEMP/semantic-rejection-tests.log"
           exit "$result"
       - name: Retain configured semantic rejection results
