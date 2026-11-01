@@ -4138,9 +4138,7 @@ impl<'a> Builder<'a> {
                 }
                 let selected = self.cache.semantic_select(
                     epoch,
-                    &relation_stage::Selector::ClaudeReceipt {
-                        id: id.to_owned(),
-                    },
+                    &relation_stage::Selector::ClaudeReceipt { id: id.to_owned() },
                 )?;
                 let canonical = match selected.location {
                     Some(location) => location.local(self)?,
