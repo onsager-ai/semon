@@ -139,6 +139,32 @@ pub(crate) fn publication_groups_with(
     Ok(groups)
 }
 
+/// Count the complete groups represented by one selected publication batch.
+/// The flattened Batch paths must contain every path from each selected group.
+pub(crate) fn publication_group_count_with(
+    port: &impl PublicationPlanPort,
+    paths: &[String],
+) -> rusqlite::Result<usize> {
+    let selected = paths.iter().cloned().collect::<BTreeSet<_>>();
+    let mut represented = BTreeSet::new();
+    let mut count = 0;
+    for group in publication_groups_with(port)? {
+        let contained = group.iter().filter(|path| selected.contains(*path)).count();
+        if contained == 0 {
+            continue;
+        }
+        if contained != group.len() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        represented.extend(group);
+        count += 1;
+    }
+    if represented != selected {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(count)
+}
+
 pub(crate) trait ContextPort {
     fn owners(&self, path: &str) -> rusqlite::Result<Vec<String>>;
     fn children(&self, key: &str, used: &mut usize) -> rusqlite::Result<Vec<String>>;

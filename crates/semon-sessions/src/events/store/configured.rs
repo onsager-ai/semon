@@ -210,6 +210,7 @@ const SOURCE_METADATA_KEYS: &[&str] = &[
     "catalog_version",
     "search_version",
     "catalog_semantic_recipe",
+    "catalog_semantic_group_admission",
     "catalog_generation",
     "catalog_source_revision",
     "catalog_backfill_state",
@@ -1083,7 +1084,7 @@ CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalida
                     "DELETE" => &["OLD"],
                     _ => &["NEW"],
                 };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_native_publication','catalog_observed_at','catalog_completeness','catalog_semantic_gc','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
+                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_native_publication','catalog_observed_at','catalog_completeness','catalog_semantic_gc','catalog_semantic_group_admission','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
             } else {
                 String::new()
             };
@@ -13824,6 +13825,225 @@ mod tests {
                 before,
                 "changed discovered claim cannot publish Current, History, proofs or ACK"
             );
+        }
+
+        mod presentation_capture_overflow {
+            use super::*;
+
+            fn inputs(count: usize) -> Vec<crate::Input> {
+                (0..count)
+                    .map(|index| crate::Input {
+                        root: crate::InputRoot::Codex,
+                        path: format!("sessions/capture-overflow-{index}.jsonl"),
+                    })
+                    .collect()
+            }
+
+            fn hint(f: &Fixture, namespace: &str) -> Option<(i64, usize)> {
+                let value: Option<String> = f
+                    .db()
+                    .query_row(
+                        "SELECT value FROM meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+                        [namespace],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap();
+                value.map(|value| {
+                    let value: serde_json::Value = serde_json::from_str(&value).unwrap();
+                    (
+                        value["epoch"].as_i64().unwrap(),
+                        value["max_groups"].as_u64().unwrap() as usize,
+                    )
+                })
+            }
+
+            fn selected_inputs(
+                inputs: &[crate::Input],
+                options: &crate::Options,
+                batch: &Batch,
+            ) -> Vec<crate::Input> {
+                let selected = batch.paths.iter().cloned().collect::<BTreeSet<_>>();
+                inputs
+                    .iter()
+                    .filter(|input| {
+                        selected.contains(&input.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect()
+            }
+
+            fn admit_independent_inputs(
+                cache: &mut EventCache,
+                options: &crate::Options,
+                inputs: &[crate::Input],
+            ) {
+                for (index, input) in inputs.iter().enumerate() {
+                    write(options, input, &format!("capture-{index}"), None);
+                    cache
+                        .ingest(
+                            &format!("{:064x}", 9600 + index),
+                            &input.full_path(options),
+                            "codex",
+                        )
+                        .unwrap();
+                }
+            }
+
+            #[test]
+            fn aggregate_overflow_rolls_back_then_halves_and_rebinds_admission() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(4);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                assert_eq!(batch.phase, Phase::Publication);
+                assert_eq!(batch.paths.len(), 4);
+
+                let head_before: Option<String> = f
+                    .db()
+                    .query_row(
+                        "SELECT value FROM meta WHERE namespace='source-a' AND key='catalog_generation'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap();
+                let current_before: i64 = f
+                    .db()
+                    .query_row(
+                        "SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                let (outcome, publication) = cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .unwrap();
+                assert_eq!(outcome, Outcome::Deferred);
+                assert_eq!(publication, None);
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT value FROM meta WHERE namespace='source-a' AND key='catalog_generation'",
+                            [],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()
+                        .unwrap(),
+                    head_before,
+                    "capture overflow rolls back the entire publication head"
+                );
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT count(*) FROM session_catalog WHERE namespace='source-a' AND lifecycle='current'",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                    current_before,
+                    "capture overflow cannot publish Current rows"
+                );
+                let (hint_epoch, max_groups) = hint(&f, "source-a").unwrap();
+                assert_eq!(hint_epoch, batch.epoch);
+                assert_eq!(max_groups, 2);
+                assert_eq!(hint(&f, "source-b"), None, "hints are namespace scoped");
+
+                let retry = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(retry.phase, Phase::Publication);
+                assert_eq!(retry.paths.len(), 2);
+                let selected = selected_inputs(&inputs, options, &retry);
+                let retry_model = cache
+                    .prepare_semantic_model_batch(
+                        options,
+                        &selected,
+                        &retry,
+                        1_790_000_000_000,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&retry, retry_model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Written
+                );
+                assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 2)));
+
+                drop(cache);
+                let mut resumed = open(&f.config);
+                let paths = inputs
+                    .iter()
+                    .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+                assert_eq!(
+                    begin_active_stage(&mut resumed, &f, &paths, &runtime).unwrap(),
+                    Outcome::Written
+                );
+                let resumed_epoch: i64 = f
+                    .db()
+                    .query_row(
+                        "SELECT epoch FROM catalog_semantic_stage WHERE namespace='source-a'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_ne!(resumed_epoch, batch.epoch);
+                assert_eq!(hint(&f, "source-a"), Some((resumed_epoch, 2)));
+                assert_eq!(resumed.semantic_batch(64).unwrap().unwrap().paths.len(), 2);
+            }
+
+            #[test]
+            fn overflow_rejects_a_missing_exact_model_receipt() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(4);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                crate::storage::sqlite::semantic::drop_capture_overflow_receipt_once();
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Conflict
+                );
+                assert_eq!(hint(&f, "source-a"), None);
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT count(*) FROM storage_semantic_model_batches WHERE namespace='source-a' AND epoch=?1",
+                            [batch.epoch],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                    0,
+                    "the injected stale receipt is absent before overflow recovery"
+                );
+            }
+
+            #[test]
+            fn one_oversized_physical_group_keeps_its_receipt_and_stays_pending() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(1);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, model) = ready(&mut cache, &f, options, &inputs);
+                let before = shared_state(&f);
+                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                assert!(cache
+                    .publish_semantic_catalog(&batch, model.prepared())
+                    .is_err());
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+            }
         }
     }
     mod selected57 {

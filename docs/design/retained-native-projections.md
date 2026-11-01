@@ -474,6 +474,13 @@ its claim while any enrolled owner effect needs it. Deferred original-custody
 copying advances only private progress. Completed stage authority retires with
 its pointer; bounded garbage collection precedes another stage.
 
+If aggregate captured-presentation metadata exceeds 8 MiB, publication rolls
+back and persists a namespace- and stage-fenced hint that halves the next
+complete-group admission. The hint survives partial head advances and a
+same-runtime stage resume, and clears on reset or finish. A single oversized
+physical group remains unavailable; source claims and acknowledgements remain
+pending while the hint is applied.
+
 Receipts use immutable publication generation as their physical and logical
 transfer key, allowing multiple committed groups in one epoch. SQLite schema 35
 and stage recipe v7 are one current contract, with no compatibility reader or
