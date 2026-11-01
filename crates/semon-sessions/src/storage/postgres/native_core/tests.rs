@@ -139,7 +139,7 @@ fn phase(cache_path: &std::path::Path, path: &std::path::Path, harness: &str) ->
 fn assert_rows(tx: &mut PgTxn<'_>, phase: &Phase) -> Result<(), StorageError> {
     for (family, expected) in &phase.rows {
         let table = format!("semon_pg_native_{family}");
-        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id','path_digest','cwd_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
+        let columns=tx.driver.query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name NOT IN ('namespace','namespace_digest','file_id','path_digest','cwd_digest','message_id_digest','record_uuid_digest') ORDER BY ordinal_position", &[&table]).map_err(sqlstate::error)?;
         let select = columns
             .iter()
             .map(|c| {
@@ -820,4 +820,122 @@ fn pg_native_core_every_ledger_field_and_warm_drift_refuse_before_effects() {
         Ok(())
     })
     .unwrap();
+}
+
+fn usage_page_body(record: &str) -> String {
+    (0..130)
+        .map(|n| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type":"assistant", "uuid":format!("record-{record}-{n:03}\0🦀"),
+                    "message":{"id":format!("message-{n:03}\0🦀"),"role":"assistant",
+                    "model":"claude-page", "content":[],
+                    "usage":{"input_tokens":n+1,"output_tokens":2}}
+                })
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn pg_usage_batch_130_parser_peer_copies_and_each_page_rollback() {
+    let root = root();
+    let path = root.join("one.jsonl");
+    let peer = root.join("two.jsonl");
+    let cache = root.join("cache.json");
+    std::fs::write(&path, usage_page_body("old")).unwrap();
+    let first = phase(&cache, &path, "claude");
+    assert_eq!(first.index.usage().len(), 130);
+    std::fs::write(&peer, usage_page_body("old")).unwrap();
+    let copies = phase(&cache, &peer, "claude");
+    std::fs::write(&path, usage_page_body("new")).unwrap();
+    let replaced = phase(&cache, &path, "claude");
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("usage-batch-130");
+    let control = PgCancellation::default();
+    let id = pool
+        .transaction(&namespace, TxnKind::Write, &control, |tx| {
+            reset_usage_batch_statements();
+            let id = write(
+                tx,
+                path.to_str().unwrap(),
+                None,
+                &first.ledger,
+                &first.index,
+                None,
+            )?;
+            let d = usage_batch_statements();
+            assert_eq!(d[1], 3);
+            assert_eq!(d[2], 3);
+            assert_eq!(d[0], 3);
+            assert_rows(tx, &first)?;
+            write(
+                tx,
+                peer.to_str().unwrap(),
+                None,
+                &copies.ledger,
+                &copies.index,
+                None,
+            )?;
+            assert_rows(tx, &copies)?;
+            Ok(id)
+        })
+        .unwrap();
+    let before = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+        .unwrap();
+    let changes = native_rows::full_changes(&replaced.index);
+    // First/next/final-partial pages: identity delete, usage upsert and identity
+    // insert. Each logical boundary must roll back both this file and its peer.
+    for point in [
+        1, 64, 65, 128, 129, 192, 193, 257, 321, 384, 385, 387, 389, 390,
+    ] {
+        FAIL_AFTER.with(|f| f.set(Some(point)));
+        let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            write_usage(tx, id, &changes, &replaced.index)
+        });
+        FAIL_AFTER.with(|f| f.set(None));
+        assert_eq!(result, Err(StorageError::Unavailable), "boundary {point}");
+        assert_eq!(
+            pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, snapshot)
+                .unwrap(),
+            before,
+            "boundary {point}"
+        );
+    }
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        reset_usage_batch_statements();
+        write(
+            tx,
+            path.to_str().unwrap(),
+            Some(&first.ledger),
+            &replaced.ledger,
+            &replaced.index,
+            Some(&changes),
+        )?;
+        let d = usage_batch_statements();
+        assert_eq!(d[1], 3);
+        assert_eq!(d[2], 3);
+        assert_eq!(d[0], 5); // 64/0, 64/0, 2
+        assert_rows(tx, &replaced)
+    })
+    .unwrap();
+    // Real replacement with no messages removes usage and both peer copies.
+    std::fs::write(&path, "").unwrap();
+    let empty = phase(&cache, &path, "claude");
+    let deleted = DirtyRows::between(&replaced.index, &empty.index);
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        write(
+            tx,
+            path.to_str().unwrap(),
+            Some(&replaced.ledger),
+            &empty.ledger,
+            &empty.index,
+            Some(&deleted),
+        )?;
+        assert_rows(tx, &empty)
+    })
+    .unwrap();
+    std::fs::remove_dir_all(root).unwrap();
 }

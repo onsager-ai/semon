@@ -21,6 +21,22 @@ thread_local! {
     static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+// Completed rows and physical SQL statements for the bounded-page regression.
+#[cfg(test)]
+thread_local! {
+    static USAGE_MODEL_BATCH_COUNTS: std::cell::Cell<[usize; 2]> = const { std::cell::Cell::new([0; 2]) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_usage_model_batch_counts() {
+    USAGE_MODEL_BATCH_COUNTS.with(|counts| counts.set([0; 2]));
+}
+
+#[cfg(test)]
+pub(super) fn usage_model_batch_counts() -> [usize; 2] {
+    USAGE_MODEL_BATCH_COUNTS.with(|counts| counts.get())
+}
+
 struct Writer<'a, 'tx> {
     tx: &'a mut PgTxn<'tx>,
 }
@@ -88,8 +104,33 @@ impl Writer<'_, '_> {
         for id in rows.closed_tools {
             self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id_digest) DO UPDATE SET closed=true WHERE semon_pg_native_tree_tools.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_tools.tool_id,sha256(excluded.tool_id),excluded.tool_id)", &[&ns,&projection,&id.as_bytes()])?;
         }
-        for (id, model) in rows.usage_models {
-            self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()])?;
+        let mut usage_models = rows.usage_models.iter();
+        loop {
+            let page = usage_models.by_ref().take(64).collect::<Vec<_>>();
+            if page.is_empty() {
+                break;
+            }
+            let ids = page
+                .iter()
+                .map(|(id, _)| id.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let models = page
+                .iter()
+                .map(|(_, model)| model.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            self.tx.check()?;
+            let affected = self.tx.driver.execute("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) SELECT $1,$2,x.id,x.model FROM unnest($3::bytea[],$4::bytea[]) AS x(id,model) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&ids,&models]).map_err(sqlstate::error)?;
+            if affected != page.len() as u64 {
+                return Err(StorageError::Conflict);
+            }
+            #[cfg(test)]
+            USAGE_MODEL_BATCH_COUNTS.with(|counts| {
+                let [rows, statements] = counts.get();
+                counts.set([rows + page.len(), statements + 1]);
+            });
+            for _ in &page {
+                self.boundary()?;
+            }
         }
         Ok(())
     }

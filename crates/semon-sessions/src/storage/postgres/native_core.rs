@@ -11,6 +11,22 @@ use crate::{
 };
 use tokio_postgres::types::ToSql;
 
+// Physical SQL statement counts for the bounded-page regression only.
+#[cfg(test)]
+thread_local! {
+    static USAGE_BATCH_STATEMENTS: std::cell::Cell<[usize; 3]> = const { std::cell::Cell::new([0; 3]) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_usage_batch_statements() {
+    USAGE_BATCH_STATEMENTS.with(|counts| counts.set([0; 3]));
+}
+
+#[cfg(test)]
+pub(super) fn usage_batch_statements() -> [usize; 3] {
+    USAGE_BATCH_STATEMENTS.with(|counts| counts.get())
+}
+
 #[cfg(test)]
 thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 
@@ -66,6 +82,50 @@ impl Row {
         self.add(name, value.map(|v| v.to_string()));
         self.binds.last_mut().unwrap().push_str("::text::numeric");
     }
+    // Usage pages have one static column layout and at most 64 rows. Preserve
+    // each column's existing typed bind, including unsigned numeric encoding.
+    fn put_many(tx: &mut PgTxn<'_>, rows: Vec<Self>) -> Result<(), StorageError> {
+        tx.check()?;
+        let count = rows.len();
+        let columns = rows[0].columns.clone();
+        let updates = columns
+            .iter()
+            .filter(|c| !matches!(**c, "namespace" | "file_id" | "message_id"))
+            .map(|c| format!("{c}=excluded.{c}"))
+            .collect::<Vec<_>>();
+        let mut values = Vec::new();
+        let mut tuples = Vec::new();
+        for row in rows {
+            let offset = values.len();
+            let binds = row
+                .binds
+                .iter()
+                .enumerate()
+                .map(|(at, bind)| {
+                    bind.replacen(&format!("${}", at + 1), &format!("${}", offset + at + 1), 1)
+                })
+                .collect::<Vec<_>>();
+            tuples.push(format!("({})", binds.join(",")));
+            values.extend(row.values);
+        }
+        let refs = values
+            .iter()
+            .map(|v| &**v as &(dyn ToSql + Sync))
+            .collect::<Vec<_>>();
+        let sql = format!(
+            "INSERT INTO semon_pg_native_usage({}) VALUES {} ON CONFLICT(namespace_digest,file_id,message_id) DO UPDATE SET {}",
+            columns.join(","),
+            tuples.join(","),
+            updates.join(",")
+        );
+        if tx.driver.execute(&sql, &refs).map_err(sqlstate::error)? != count as u64 {
+            return Err(StorageError::Conflict);
+        }
+        for _ in 0..count {
+            after(tx)?;
+        }
+        Ok(())
+    }
     fn put(
         self,
         tx: &mut PgTxn<'_>,
@@ -114,14 +174,27 @@ fn delete(
     let ns = tx.namespace.as_str().as_bytes();
     let mut values: Vec<&(dyn ToSql + Sync)> = vec![&ns, &id];
     values.extend_from_slice(parameters);
-    tx.driver
-        .execute(
-            &format!(
-                "DELETE FROM semon_pg_native_{table} WHERE namespace=$1 AND file_id=$2 {suffix}"
-            ),
-            &values,
-        )
-        .map_err(sqlstate::error)?;
+    if matches!(table, "usage" | "usage_identity") {
+        loop {
+            tx.check()?;
+            let count = tx.driver.execute(
+                &format!("DELETE FROM semon_pg_native_{table} WHERE ctid IN (SELECT ctid FROM semon_pg_native_{table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 {suffix} LIMIT 64)"),
+                &values,
+            ).map_err(sqlstate::error)?;
+            if count < 64 {
+                break;
+            }
+        }
+    } else {
+        tx.driver
+            .execute(
+                &format!(
+                    "DELETE FROM semon_pg_native_{table} WHERE namespace=$1 AND file_id=$2 {suffix}"
+                ),
+                &values,
+            )
+            .map_err(sqlstate::error)?;
+    }
     after(tx)
 }
 fn ordinal(value: usize) -> Result<i64, StorageError> {
@@ -200,7 +273,6 @@ pub(super) fn write(
     changes: Option<&DirtyRows>,
 ) -> Result<i64, StorageError> {
     let (id, exists) = qualify(tx, path, expected)?;
-    let ns = tx.namespace.as_str().as_bytes().to_vec();
     after(tx)?;
     if changes.is_none() && exists {
         // Identity deletion first is required by the copied-identity triggers.
@@ -334,15 +406,72 @@ pub(super) fn write(
     if let Some(from) = plan.signals.delete_from() {
         delete(tx, "signals", id, "AND seq >= $3", &[&ordinal(from)?])?;
     }
-    for (message, usage) in UsageChanges::new(changes, index.usage()).iter() {
-        delete(
-            tx,
-            "usage_identity",
-            id,
-            "AND message_id=$3",
-            &[&message.as_bytes()],
-        )?;
-        if let Some(usage) = usage {
+    write_usage(tx, id, changes, index)?;
+    for (seq, u) in plan.codex_usage.upserts() {
+        let mut r = row(tx, id);
+        r.add("seq", ordinal(seq)?);
+        r.add("model", u.model.as_bytes().to_vec());
+        r.number("input", u.tokens.input);
+        r.number("output", u.tokens.output);
+        r.number("cache_write", u.tokens.cache_write);
+        r.number("cache_read", u.tokens.cache_read);
+        r.add("t", u.timestamp);
+        r.put(tx, "codex_usage", "file_id,seq")?;
+    }
+    if let Some(from) = plan.codex_usage.delete_from() {
+        delete(tx, "codex_usage", id, "AND seq >= $3", &[&ordinal(from)?])?;
+    }
+    after(tx)?;
+    Ok(id)
+}
+
+// A page contains distinct messages from UsageChanges' original BTree order.
+// Copy triggers only relate the same (message, record) across different files:
+// regrouping a single file's distinct messages cannot change that relation.
+// Keep identity deletion before usage replacement before identity insertion in
+// every page, and retain every logical rollback/cancellation boundary.
+fn write_usage(
+    tx: &mut PgTxn<'_>,
+    id: i64,
+    changes: &DirtyRows,
+    index: &FileIndex,
+) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let changes = UsageChanges::new(changes, index.usage());
+    let mut messages = changes.iter();
+    loop {
+        let page = messages.by_ref().take(64).collect::<Vec<_>>();
+        if page.is_empty() {
+            break;
+        }
+        let keys = page
+            .iter()
+            .map(|(message, _)| message.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        // One message can have many record UUIDs; limit physical deletions too.
+        loop {
+            tx.check()?;
+            let count = tx.driver.execute("DELETE FROM semon_pg_native_usage_identity WHERE ctid IN (SELECT ctid FROM semon_pg_native_usage_identity WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND message_id=ANY($3::bytea[]) LIMIT 64)", &[&ns,&id,&keys]).map_err(sqlstate::error)?;
+            #[cfg(test)]
+            USAGE_BATCH_STATEMENTS.with(|counts| {
+                let mut value = counts.get();
+                value[0] += 1;
+                counts.set(value);
+            });
+            if count < 64 {
+                break;
+            }
+        }
+        for _ in &page {
+            after(tx)?;
+        }
+        let mut rows = Vec::new();
+        let mut removed = Vec::new();
+        for &(message, usage) in &page {
+            let Some(usage) = usage else {
+                removed.push(message.as_bytes().to_vec());
+                continue;
+            };
             let u = UsageRow::encode(usage).map_err(|_| StorageError::Unavailable)?;
             let mut r = row(tx, id);
             r.add("message_id", message.as_bytes().to_vec());
@@ -372,32 +501,62 @@ pub(super) fn write(
             r.add("billing_timestamp", u.timestamp);
             r.add("billing_split_unknown", u.split_unknown);
             r.add("record_ids", u.record_ids.into_bytes());
-            r.put(tx, "usage", "file_id,message_id")?;
-            for uuid in &usage.record_ids {
-                tx.check()?;
-                tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) VALUES($1,$2,$3,$4)", &[&ns,&id,&message.as_bytes(),&uuid.as_bytes()]).map_err(sqlstate::error)?;
+            rows.push(r);
+        }
+        if !rows.is_empty() {
+            Row::put_many(tx, rows)?;
+            #[cfg(test)]
+            USAGE_BATCH_STATEMENTS.with(|counts| {
+                let mut value = counts.get();
+                value[1] += 1;
+                counts.set(value);
+            });
+        }
+        if !removed.is_empty() {
+            tx.check()?;
+            let count = tx.driver.execute("DELETE FROM semon_pg_native_usage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND file_id=$2 AND message_id=ANY($3::bytea[])", &[&ns,&id,&removed]).map_err(sqlstate::error)?;
+            if count > removed.len() as u64 {
+                return Err(StorageError::Conflict);
+            }
+            for _ in &removed {
                 after(tx)?;
             }
-        } else {
-            delete(tx, "usage", id, "AND message_id=$3", &[&message.as_bytes()])?;
+        }
+        let mut identities = page.iter().flat_map(|(message, usage)| {
+            usage
+                .iter()
+                .flat_map(move |usage| usage.record_ids.iter().map(move |uuid| (*message, uuid)))
+        });
+        loop {
+            let identities = identities.by_ref().take(64).collect::<Vec<_>>();
+            if identities.is_empty() {
+                break;
+            }
+            let keys = identities
+                .iter()
+                .map(|(message, _)| message.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let records = identities
+                .iter()
+                .map(|(_, uuid)| uuid.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            tx.check()?;
+            let count = tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) SELECT $1,$2,x.message,x.record FROM unnest($3::bytea[],$4::bytea[]) AS x(message,record)", &[&ns,&id,&keys,&records]).map_err(sqlstate::error)?;
+            if count != identities.len() as u64 {
+                return Err(StorageError::Conflict);
+            }
+            #[cfg(test)]
+            USAGE_BATCH_STATEMENTS.with(|counts| {
+                let mut value = counts.get();
+                value[2] += 1;
+                counts.set(value);
+            });
+            for _ in &identities {
+                after(tx)?;
+            }
         }
     }
-    for (seq, u) in plan.codex_usage.upserts() {
-        let mut r = row(tx, id);
-        r.add("seq", ordinal(seq)?);
-        r.add("model", u.model.as_bytes().to_vec());
-        r.number("input", u.tokens.input);
-        r.number("output", u.tokens.output);
-        r.number("cache_write", u.tokens.cache_write);
-        r.number("cache_read", u.tokens.cache_read);
-        r.add("t", u.timestamp);
-        r.put(tx, "codex_usage", "file_id,seq")?;
-    }
-    if let Some(from) = plan.codex_usage.delete_from() {
-        delete(tx, "codex_usage", id, "AND seq >= $3", &[&ordinal(from)?])?;
-    }
-    after(tx)?;
-    Ok(id)
+    Ok(())
 }
 
 #[cfg(test)]
