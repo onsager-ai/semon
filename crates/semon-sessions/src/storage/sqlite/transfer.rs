@@ -202,11 +202,13 @@ pub(crate) fn admit_catalog(
         if affected_rows != 1 {
             return Err(StorageError::ScopeChanged);
         }
-        catalog::publish_search_state(tx, import.generation())?;
+        // Head publication revalidates the empty target's current profile.
+        // Keep both writes in this transaction, with readiness after its head.
         head.publish_generation(
             import.generation(),
             &crate::model::summary::CATALOG_VERSION.to_string(),
         )?;
+        catalog::publish_search_state(tx, import.generation())?;
         transfer::catalog_rows::admit_imported_publications(
             tx,
             import.generation(),
