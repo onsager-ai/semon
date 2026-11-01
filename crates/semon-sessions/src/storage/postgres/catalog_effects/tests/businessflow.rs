@@ -4267,7 +4267,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 && source_generation.as_deref() == Some(history_source_generation.as_slice());
             update_history_header(version, source_generation.clone(), incomplete)
                 .expect("install exact History header corruption");
-            let (qualified, composite_qualified) = super::super::snapshot::with_admitted_snapshot(
+            let qualification = super::super::snapshot::with_admitted_snapshot(
                 &pool,
                 &namespace,
                 &control,
@@ -4312,12 +4312,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 history_incomplete,
             )
             .expect("restore exact admitted History header");
+            let (qualified, composite_qualified) =
+                qualification.expect("History header uses the admitted snapshot");
             assert!(
-                !qualified.expect("corrupt History header is read through admitted snapshot"),
+                !qualified,
                 "{reason}"
             );
             assert_eq!(
-                composite_qualified.expect("composite identity uses the same admitted snapshot"),
+                composite_qualified,
                 composite_expected,
                 "{reason}: incomplete composite identity qualification"
             );
@@ -4366,6 +4368,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             Ok(())
         })
     };
+    update_history_header(
+        history_version,
+        Some(history_source_generation.clone()),
+        true,
+    )
+    .expect("install otherwise qualifying incomplete composite header");
     set_history_original(true).expect("install original History owner marker");
     let original_owner_composite_qualified = super::super::snapshot::with_admitted_snapshot(
         &pool,
@@ -4393,6 +4401,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .expect("original History owner is read through admitted snapshot");
     set_history_original(false).expect("restore composite History owner marker");
+    update_history_header(
+        history_version,
+        Some(history_source_generation.clone()),
+        history_incomplete,
+    )
+    .expect("restore exact admitted History header after original-owner check");
     assert!(
         !original_owner_composite_qualified,
         "original History owners cannot use incomplete composite identity qualification"
