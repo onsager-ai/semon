@@ -2290,7 +2290,12 @@ fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
     // qualify the old History peer or rename it from another harness.
     assert!(after["participants"].get("alpha").is_none());
     assert_eq!(after["incomplete"], true);
-    assert_eq!(after["turns"], before["turns"]);
+    // Once the sender no longer qualifies, the same relay starts at the
+    // receiver's native receipt instead of the removed sender's timestamp.
+    assert_eq!(before["turns"][0]["at"], json!(at(5, 1)));
+    let mut expected_turns = before["turns"].clone();
+    expected_turns[0]["at"] = json!(at(5, 2));
+    assert_eq!(after["turns"], expected_turns);
     assert_eq!(after["sessions"], before["sessions"]);
 }
 
