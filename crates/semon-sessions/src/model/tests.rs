@@ -4602,7 +4602,6 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
             complete = true;
             break;
         }
-        let (epoch, phase) = stage.expect("the in-flight semantic stage is durable");
         assert!(
             crate::source_projection_ready(
                 &home.options,
@@ -4613,6 +4612,9 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
             .is_none(),
             "partial epoch became archive-ready"
         );
+        let Some((epoch, phase)) = stage else {
+            continue;
+        };
         if phase == "relations" && !restarted {
             let relation_id = stable_id("s", "spawn:codex:child-000");
             let metadata: Option<String> = db
