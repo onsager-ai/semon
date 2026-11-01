@@ -164,10 +164,7 @@ struct EdgeSourceNeed {
 fn edge_source_needs(
     row: &CatalogRow,
 ) -> Result<(Vec<EdgeSourceNeed>, BTreeSet<String>), StorageError> {
-    let edges = row
-        .query
-        .as_ref()
-        .and_then(|query| query["selected"]["edges"].as_array())
+    let edges = crate::query_projection::SelectedRecipe::edges_for(row)
         .ok_or(StorageError::ScopeChanged)?;
     let mut needs = Vec::<EdgeSourceNeed>::new();
     let mut endpoint_owners = BTreeSet::new();
@@ -441,12 +438,9 @@ pub(crate) fn history_window(
     cutoff: Option<i64>,
 ) -> Result<HistoryWindow, &'static str> {
     let saved = row.query.as_ref().ok_or("retained_query_missing")?;
-    let selected = &saved["selected"];
-    let edges = selected["edges"]
-        .as_array()
+    let edges = crate::query_projection::SelectedRecipe::edges_for(row)
         .ok_or("retained_query_edges_missing")?;
-    let turns = selected["turns"]
-        .as_array()
+    let turns = crate::query_projection::SelectedRecipe::turns_for(row)
         .ok_or("retained_query_turns_missing")?;
     let mut edge_ids = BTreeMap::new();
     let mut timed_edges = BTreeSet::new();

@@ -33,6 +33,26 @@ pub(crate) struct SelectedRecipePublication {
 }
 
 impl SelectedRecipe {
+    // Producers still carry inline selected values before publication. Stored
+    // detached observations must acquire their typed payload from their owner.
+    pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
+        row.query_recipe.as_ref().map(|recipe| &recipe.edges).or_else(|| {
+            row.query.as_ref()?["selected"]["edges"].as_array()
+        })
+    }
+
+    pub(crate) fn turns_for(row: &CatalogRow) -> Option<&Vec<Value>> {
+        row.query_recipe.as_ref().map(|recipe| &recipe.turns).or_else(|| {
+            row.query.as_ref()?["selected"]["turns"].as_array()
+        })
+    }
+
+    pub(crate) fn session_for(row: &CatalogRow) -> Option<&Value> {
+        row.query_recipe.as_ref().map(|recipe| &recipe.session).or_else(|| {
+            row.query.as_ref()?["selected"].get("session")
+        })
+    }
+
     /// Prepare both stored cells without changing the producer's active row.
     pub(crate) fn prepare(row: &CatalogRow) -> std::io::Result<SelectedRecipePublication> {
         if row.query_recipe.is_none()

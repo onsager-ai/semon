@@ -24,6 +24,34 @@ fn authority(error: std::io::Error) -> Error {
 }
 
 impl Snapshot<'_, '_> {
+    /// Keep the compact observation unchanged while loading its separately
+    /// authenticated payload from this physical snapshot.
+    pub(in crate::storage::postgres) fn attach_query_recipe(
+        &self,
+        row: &mut CatalogRow,
+        history: bool,
+    ) -> Result<usize, StorageError> {
+        if row.query.as_ref().is_none_or(|query| query["selected"].get("version").is_none()) {
+            return Ok(0);
+        }
+        let owner = if history {
+            CatalogObservationOwner::History
+        } else {
+            CatalogObservationOwner::Catalog
+        };
+        let load = || {
+            let observation = self.query_recipe_observation(owner, row)?;
+            let (recipe, bytes) = self.load_query_recipe_with_bytes(&observation)?;
+            Ok::<_, Error>((recipe.ok_or(Error::MissingPayload)?, bytes))
+        };
+        let (recipe, bytes) = load().map_err(|error| match error {
+            Error::Storage(error) => error,
+            _ => StorageError::ScopeChanged,
+        })?;
+        row.query_recipe = Some(recipe);
+        Ok(bytes)
+    }
+
     /// `owner` is supplied by the physical selection, independently of display
     /// lifecycle. Authentication reuses the native receipt or imported proof.
     pub(in crate::storage::postgres) fn query_recipe_observation(
@@ -88,6 +116,13 @@ impl Snapshot<'_, '_> {
         &self,
         observation: &QueryRecipeObservation,
     ) -> Result<Option<crate::query_projection::SelectedRecipe>, Error> {
+        self.load_query_recipe_with_bytes(observation).map(|(recipe, _)| recipe)
+    }
+
+    fn load_query_recipe_with_bytes(
+        &self,
+        observation: &QueryRecipeObservation,
+    ) -> Result<(Option<crate::query_projection::SelectedRecipe>, usize), Error> {
         let owner = match &observation.residence {
             QueryRecipeResidence::NativeCatalog { .. }
             | QueryRecipeResidence::Immutable {
@@ -167,7 +202,7 @@ impl Snapshot<'_, '_> {
         tx.check()?;
         if observation.row().query.is_none() {
             return if payload.is_none() {
-                Ok(None)
+                Ok((None, 0))
             } else {
                 Err(Error::CorruptPayload)
             };
@@ -176,7 +211,7 @@ impl Snapshot<'_, '_> {
         let payload = std::str::from_utf8(&payload).map_err(|_| Error::CorruptPayload)?;
         observation
             .decode(payload)
-            .map(Some)
+            .map(|recipe| (Some(recipe), payload.len()))
             .map_err(|_| Error::CorruptPayload)
     }
 }

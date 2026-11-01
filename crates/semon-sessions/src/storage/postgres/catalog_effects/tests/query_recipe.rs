@@ -141,6 +141,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 view.load_query_recipe(&token),
                 Err(Error::MissingPayload)
             ));
+            assert!(view.attach_query_recipe(&mut display, false).is_err());
+            assert!(view.attach_query_recipe(&mut display, true).is_err());
             assert!(view.query_recipe_observation(Owner::History, row).is_err());
             Ok(token)
         })
@@ -158,6 +160,12 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             Some(expected.clone())
         );
         assert_eq!(view.selected_query_recipe(&token).unwrap(), expected);
+        let mut selected = view.catalog(&row.key, false)?.unwrap();
+        let metadata = serde_json::to_string(&selected).unwrap();
+        assert_eq!(view.attach_query_recipe(&mut selected, false)?, payload.len());
+        assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
+        assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
+        assert!(crate::storage::query::history_window(&selected, None).unwrap().member);
         Ok(())
     })
     .unwrap();
@@ -212,6 +220,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                     "bound" => assert!(matches!(error, Error::Storage(StorageError::HistoryRetentionBounds)), "{error}"),
                     _ => assert!(matches!(error, Error::ObservationChanged), "{fault}: {error}"),
                 }
+                let mut selected = row.clone();
+                assert!(view.attach_query_recipe(&mut selected, false).is_err(), "{fault}");
                 Ok(())
             })?;
             checked = true;
@@ -229,6 +239,9 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 held.load_query_recipe(&token).unwrap(),
                 Some(expected.clone())
             );
+            let mut selected = held.catalog(&row.key, false)?.unwrap();
+            held.attach_query_recipe(&mut selected, false)?;
+            assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
             snapshot::with_admitted_snapshot(&pool, &namespace, &control, &next, |view| {
                 let history = view.catalog(&row.key, true)?.unwrap();
                 let history_token = view
@@ -459,7 +472,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     let namespace = &config.namespace;
     let token = snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |view| {
         assert!(view.owner(&row.key)?.is_none());
-        let selected = view.catalog(&row.key, false)?.unwrap();
+        let mut selected = view.catalog(&row.key, false)?.unwrap();
         let token = view
             .query_recipe_observation(Owner::Catalog, &selected)
             .unwrap();
@@ -479,6 +492,15 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             Some(expected)
         );
         assert_eq!(&view.selected_query_recipe(&token).unwrap(), expected);
+        view.attach_query_recipe(&mut selected, false)?;
+        assert_eq!(selected.query_recipe.as_ref(), Some(expected));
+        assert_eq!(serde_json::to_string(&selected).unwrap(), compact.metadata);
+        let paths = vec![selected.sources[0].path.to_str().unwrap().to_owned()];
+        let discovered = {
+            let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            super::super::super::source_lifecycle::component_paths(&mut tx, &paths, &[], &[])?
+        };
+        assert_eq!(discovered, Some(paths));
         assert_eq!(
             token.original, binding,
             "decoding preserves producer coordinates"
@@ -531,6 +553,8 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
                 } else {
                     assert!(matches!(error, Error::ObservationChanged));
                 }
+                let mut selected = row.clone();
+                assert!(view.attach_query_recipe(&mut selected, false).is_err());
                 Ok(())
             })?;
             checked = true;
@@ -542,7 +566,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     // A genuine native successor hands the imported original to immutable
     // History, preserving its existing producer proof and detached payload.
     snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
-        let selected = held.catalog(&row.key, false)?.unwrap();
+        let mut selected = held.catalog(&row.key, false)?.unwrap();
         let (next, continued) = advance_imported_fixture(&config, &pg_options);
         assert_eq!(continued.len(), 1);
         assert_eq!(continued[0].key, selected.key);
@@ -552,8 +576,10 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             held.load_query_recipe(&token).unwrap().as_ref(),
             Some(expected)
         );
+        held.attach_query_recipe(&mut selected, false)?;
+        assert_eq!(selected.query_recipe.as_ref(), Some(expected));
         snapshot::with_admitted_snapshot(&pool, namespace, &control, &next, |view| {
-            let history = view.catalog(&row.key, true)?.unwrap();
+            let mut history = view.catalog(&row.key, true)?.unwrap();
             let history_token = view
                 .query_recipe_observation(Owner::History, &history)
                 .unwrap();
@@ -580,6 +606,8 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
                 view.load_query_recipe(&history_token).unwrap().as_ref(),
                 Some(expected)
             );
+            view.attach_query_recipe(&mut history, true)?;
+            assert_eq!(history.query_recipe.as_ref(), Some(expected));
             Ok(())
         })?;
         Ok(())

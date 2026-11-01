@@ -296,7 +296,7 @@ pub(in crate::storage::postgres) fn with_generation<T>(
 }
 
 /// Custody uses the same admitted observation verifier inside its fenced writer.
-pub(super) fn in_transaction<T>(
+pub(in crate::storage::postgres) fn in_transaction<T>(
     tx: &mut PgTxn<'_>,
     generation: &str,
     read: impl FnOnce(&Snapshot<'_, '_>) -> Result<T, StorageError>,

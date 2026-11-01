@@ -7,7 +7,7 @@ use crate::{
     },
     storage::StorageError,
 };
-use std::{cell::RefCell, collections::BTreeSet, io};
+use std::{cell::{Cell, RefCell}, collections::BTreeSet, io};
 
 pub(super) fn component_paths(
     tx: &mut PgTxn<'_>,
@@ -24,6 +24,8 @@ pub(super) fn component_paths(
     let lookup = Lookup {
         tx: RefCell::new(tx),
         generation,
+        recipe_bytes: Cell::new(0),
+        charged_owners: RefCell::new(BTreeSet::new()),
     };
     let mut seeds = paths.to_vec();
     let mut seeded = Vec::new();
@@ -82,6 +84,8 @@ fn storage(error: io::Error) -> StorageError {
 struct Lookup<'t, 'c> {
     tx: RefCell<&'t mut PgTxn<'c>>,
     generation: String,
+    recipe_bytes: Cell<usize>,
+    charged_owners: RefCell<BTreeSet<String>>,
 }
 
 impl Lookup<'_, '_> {
@@ -116,7 +120,7 @@ impl LifecycleStore for Lookup<'_, '_> {
         self.keys("SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND $4::bytea IS NOT NULL ORDER BY session_key LIMIT 65", path.as_bytes(), b"")
     }
     fn owner(&self, key: &str) -> io::Result<CatalogRow> {
-        let tx = self.tx.borrow_mut();
+        let mut tx = self.tx.borrow_mut();
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
         let rows = tx.driver.query("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.generation.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error).map_err(io::Error::other)?;
@@ -126,17 +130,27 @@ impl LifecycleStore for Lookup<'_, '_> {
         let bytes = row
             .get::<_, Option<Vec<u8>>>(0)
             .ok_or_else(|| io::Error::other(StorageError::Busy))?;
-        let row: CatalogRow = serde_json::from_slice(&bytes)
+        let mut row: CatalogRow = serde_json::from_slice(&bytes)
             .map_err(|_| io::Error::other(StorageError::ScopeChanged))?;
         if row.key != key {
             return Err(io::Error::other(StorageError::ScopeChanged));
         }
+        // Qualify the detached pair using this same fenced Current transaction,
+        // including its native receipt or imported original observation.
+        let payload_bytes = super::catalog_effects::snapshot::in_transaction(
+            &mut tx,
+            &self.generation,
+            |snapshot| snapshot.attach_query_recipe(&mut row, false),
+        ).map_err(io::Error::other)?;
+        if self.charged_owners.borrow_mut().insert(key.to_owned()) {
+            let bytes = self.recipe_bytes.get().saturating_add(bytes.len()).saturating_add(payload_bytes);
+            if bytes > 1048576 {
+                return Err(io::Error::other(StorageError::Busy));
+            }
+            self.recipe_bytes.set(bytes);
+        }
         // Relationship incidence is indexed from the saved selected edges.
-        if row
-            .query
-            .as_ref()
-            .and_then(|q| q["selected"]["edges"].as_array())
-            .is_none()
+        if crate::query_projection::SelectedRecipe::edges_for(&row).is_none()
         {
             return Err(io::Error::other(StorageError::NamespaceUpgradePending));
         }
