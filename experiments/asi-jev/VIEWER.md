@@ -56,6 +56,36 @@ session timelines, individual disagreements or event-derived confusion
 matrices. It still requires an explicit reveal step. The mode is useful for
 checking the generator without private data; it is not authorization to publish.
 
+## Account-private ChatGPT copy
+
+The cloud bundler preserves the existing review gate and embeds the five viewer
+files in one HTML file. It does not rerun or change the experiment:
+
+```sh
+python3 experiments/asi-jev/cloud_viewer.py
+```
+
+The result is `private/cloud-viewer/index.html`. For an aggregate-only bundle,
+use `--aggregate-only`; this reads only public aggregates and contains no session
+text, labels or individual predictions. Both modes write to the same dedicated
+private output file, so choose the mode explicitly before delivery.
+
+Cloud publication requires separate authorization for the exact content and a
+verified owner-only Site audience. The full bundle contains sanitized individual
+session text. Never put it in Git, a public/link-shareable Site, or CI artifacts.
+Keep deployment output ignored, and commit only generic source code to any Site
+repository. Recheck the exact payload and audience before uploading. The current
+user authorization allows the existing reviewed full projection, not raw logs or
+new data. An existing account-private publication does not authorize widening its
+audience.
+
+The bundle makes no external requests. Review drafts live only in browser storage;
+download JSONL to keep the answers. There is no server-side answer sync. Embedded
+results are read only after the reveal step; this remains a UI blinding aid,
+not protection against inspecting the HTML source. Synthetic CI browser checks
+exercise both local and bundled versions, including script injection safety,
+downloads, all seven views, and delayed reading of embedded results.
+
 The generator bounds each input read below 10 MB and checks actual CPU
 temperature before and after work. It stops at 85°C or unavailable telemetry.
 Synthetic generator and browser checks run in CI, with no private inputs.

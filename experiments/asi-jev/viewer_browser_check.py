@@ -15,6 +15,7 @@ from unittest.mock import patch
 from playwright.sync_api import sync_playwright
 
 import local_viewer
+import cloud_viewer
 
 
 class QuietHandler(SimpleHTTPRequestHandler):
@@ -22,7 +23,25 @@ class QuietHandler(SimpleHTTPRequestHandler):
         pass
 
 
-def main() -> None:
+EMBEDDED_READ_PROBE = """(() => {
+  const descriptor = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent');
+  window.embeddedResultsReads = 0;
+  Object.defineProperty(Node.prototype, 'textContent', {
+    ...descriptor,
+    get() {
+      if (this.id === 'results-data') window.embeddedResultsReads++;
+      return descriptor.get.call(this);
+    }
+  });
+})();"""
+
+
+def check_viewer(*, cloud: bool = False) -> None:
+    def results_read(page, requests: list[str]) -> bool:
+        if cloud:
+            return page.evaluate("window.embeddedResultsReads > 0")
+        return any("results.json" in url for url in requests)
+
     with tempfile.TemporaryDirectory() as temporary:
         output = Path(temporary) / "site"
         # CI has no host Tctl hardware. Only this test mocks the measurement;
@@ -55,6 +74,10 @@ def main() -> None:
         }} for c in results["conditions"]}
         (output / "review.json").write_text(json.dumps(review))
         (output / "results.json").write_text(json.dumps(results))
+        if cloud:
+            with patch.object(cloud_viewer, "thermal_checkpoint", return_value=35_000):
+                cloud_viewer.bundle(aggregate, aggregate / "index.html")
+                cloud_viewer.bundle(output, output / "index.html")
         handler = functools.partial(QuietHandler, directory=str(output))
         server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -63,18 +86,20 @@ def main() -> None:
             with sync_playwright() as playwright:
                 browser = playwright.chromium.launch()
                 aggregate_page = browser.new_page()
+                aggregate_page.add_init_script(EMBEDDED_READ_PROBE)
                 aggregate_requests: list[str] = []
                 aggregate_page.on("request", lambda request: aggregate_requests.append(request.url))
                 aggregate_page.goto(origin + "/aggregate/")
                 aggregate_page.locator("#aggregate-review").wait_for(state="visible")
-                assert not any("results.json" in url for url in aggregate_requests)
+                assert not results_read(aggregate_page, aggregate_requests)
                 assert aggregate_page.locator("#aggregate-reveal").is_disabled()
                 aggregate_page.locator("#aggregate-reveal-ack").check()
                 aggregate_page.locator("#aggregate-reveal").click()
                 aggregate_page.locator("#results-app").wait_for(state="visible")
-                assert any("results.json" in url for url in aggregate_requests)
+                assert results_read(aggregate_page, aggregate_requests)
                 aggregate_page.close()
                 page = browser.new_page(viewport={"width": 1365, "height": 1000})
+                page.add_init_script(EMBEDDED_READ_PROBE)
                 requests: list[str] = []
                 errors: list[str] = []
                 page.on("request", lambda request: requests.append(request.url))
@@ -83,7 +108,7 @@ def main() -> None:
                 page.locator("#review-panel").wait_for(state="visible")
                 assert page.locator("#spot-context").inner_text() == malicious
                 assert page.evaluate("window.untrustedMarkupRan") is None
-                assert not any("results.json" in url for url in requests)
+                assert not results_read(page, requests)
                 assert not page.locator("#results-app").is_visible()
                 assert page.locator("#reveal-results").is_disabled()
                 for index in range(50):
@@ -104,10 +129,10 @@ def main() -> None:
                 assert all("predictions" not in row for row in answers)
                 page.locator("#saved-file-confirm").check()
                 page.locator("#reveal-ack").check()
-                assert not any("results.json" in url for url in requests)
+                assert not results_read(page, requests)
                 page.locator("#reveal-results").click()
                 page.locator("#results-app").wait_for(state="visible")
-                assert any("results.json" in url for url in requests)
+                assert results_read(page, requests)
                 assert page.locator("#results-nav button").count() == 7
                 for button in page.locator("#results-nav button").all():
                     button.click()
@@ -133,12 +158,19 @@ def main() -> None:
                 page.set_viewport_size({"width": 390, "height": 844})
                 assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 2")
                 assert all(url.startswith(origin + "/") for url in requests), requests
+                if cloud:
+                    assert not any(url.endswith((".js", ".css", ".json")) for url in requests), requests
                 assert not errors, errors
                 browser.close()
         finally:
             server.shutdown()
             server.server_close()
-    print("Viewer browser checks passed: blind loading, local export, safe text, seven views, mobile, no external requests.")
+    print(f"{'Cloud bundle' if cloud else 'Local viewer'} browser checks passed: blind loading, local export, safe text, seven views, mobile, no external requests.")
+
+
+def main() -> None:
+    check_viewer()
+    check_viewer(cloud=True)
 
 
 if __name__ == "__main__":
