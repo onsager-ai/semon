@@ -5732,6 +5732,20 @@ fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
 }
 
 fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> QueryData {
+    const STAGED_FAILURE_TESTS: [&str; 5] = [
+        "catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages",
+        "catalog_runtime_staged_publication_replays_large_incident_relationships",
+        "staged_agent_messages_match_the_shared_builder_without_duplicate_relations",
+        "staged_claude_ambiguity_and_received_copy_policy_match_shared_builder",
+        "staged_identity_reprepares_copy_resume_split_across_source_pages",
+    ];
+    let current_thread = std::thread::current();
+    let test_name = current_thread.name().unwrap_or_default();
+    let probe = crate::storage::sqlite::StagedFailureProbe::new(
+        STAGED_FAILURE_TESTS
+            .iter()
+            .any(|name| test_name.ends_with(name)),
+    );
     let mut oracle_options = options.clone();
     oracle_options.cache = options.cache.with_extension("oracle.json");
     let oracle = home.build_at(&oracle_options, NOW);
@@ -5802,10 +5816,22 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     crate::viewer::lock(&evidence.work).events = Some(cache);
     let mut complete = false;
     for _ in 0..512 {
-        if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
-            .unwrap()
-        {
+        let refreshed = evidence.refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW);
+        if let Err(error) = &refreshed {
+            if probe.enabled() {
+                let work = crate::viewer::lock(&evidence.work);
+                let semantic_rejection = work
+                    .events
+                    .as_ref()
+                    .and_then(|cache| cache.semantic_rejection())
+                    .unwrap_or("none");
+                eprintln!(
+                    "staged_refresh_refusal semantic_rejection={semantic_rejection} io_kind={:?}",
+                    error.kind()
+                );
+            }
+        }
+        if refreshed.unwrap() {
             complete = true;
             break;
         }
@@ -5869,6 +5895,39 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
             assert_eq!(value["status"], json!(edge.status));
             assert_eq!(value["unmatched"], json!(edge.unmatched));
             assert_eq!(value["ambiguous"], json!(edge.ambiguous));
+        }
+    }
+    if probe.enabled() {
+        let first_missing = oracle.turns.iter().enumerate().find_map(|(ordinal, expected)| {
+            if oracle.sessions[&expected.sid].stub {
+                return None;
+            }
+            let present: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2)",
+                    rusqlite::params![&expected.sid, &expected.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            (!present).then_some((ordinal, expected))
+        });
+        if let Some((ordinal, missing)) = first_missing {
+            let oracle_owner_turn_count = oracle
+                .turns
+                .iter()
+                .filter(|candidate| candidate.sid == missing.sid)
+                .count();
+            let (header_count, persisted_turn_row_count): (i64, i64) = db
+                .query_row(
+                    "SELECT (SELECT count(*) FROM session_trace_headers WHERE session_key=?1), (SELECT count(*) FROM session_trace_turns WHERE session_key=?1)",
+                    [&missing.sid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            eprintln!(
+                "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} persisted_turn_row_count={persisted_turn_row_count}",
+                header_count > 0,
+            );
         }
     }
     for turn in &oracle.turns {
