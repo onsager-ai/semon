@@ -154,6 +154,12 @@ pub(in crate::storage::postgres) fn remove(
     if connected {
         return defer(tx, files, &deferred);
     }
+    // Original custody publication is bounded to 64 withdrawn owners per
+    // attempt. Let the ordinary semantic producer reduce larger removals in
+    // its existing bounded batches.
+    if removed.len() > 64 {
+        return defer(tx, files, &deferred);
+    }
     let generation = format!("{:x}", Sha256::digest(&operation));
     let stages=tx.driver.query("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let Some(stage) = stages.first() else {
@@ -167,6 +173,26 @@ pub(in crate::storage::postgres) fn remove(
         .checked_add(1)
         .ok_or(StorageError::ScopeChanged)?;
     let runtime: Vec<u8> = stage.get(1);
+    let removed_digests = removed
+        .iter()
+        .map(|k| digest(k.as_bytes()))
+        .collect::<Vec<_>>();
+    let empty_publication = crate::slot_projection::Publication {
+        rows: &[],
+        transcripts: None,
+        observations: None,
+    };
+    if !super::history::preserve(
+        tx,
+        &generation,
+        &previous,
+        &empty_publication,
+        &removed_digests,
+    )? {
+        // The exact operation generation owns these private custody pages;
+        // the caller retains and retries the pending removal on Deferred.
+        return Ok(Outcome::Deferred);
+    }
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;
         tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&evidence]).map_err(sqlstate::error)?;
@@ -175,16 +201,11 @@ pub(in crate::storage::postgres) fn remove(
     }
     // Surviving owners keep their exact immutable effects and proofs; no old
     // generation or retained native proof is mutated or deleted.
-    let removed_digests = removed
-        .iter()
-        .map(|k| digest(k.as_bytes()))
-        .collect::<Vec<_>>();
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE carry_unmentioned_begin");
     super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE carry_unmentioned_complete");
-    tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE retained_search_begin");
