@@ -146,10 +146,10 @@ jobs:
           set -o pipefail
           for group in native_core::tests:: tree_writer::tests::; do
             cargo test -p semon-sessions --lib --locked --features postgres-test-tls "storage::postgres::$group" -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
-            grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/usage-batch-case.log"
+            grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/usage-batch-case.log"
           done
-          grep -F 'pg_usage_batch_130_parser_peer_copies_and_each_page_rollback ... ok' "$RUNNER_TEMP/usage-batch.log"
-          grep -F 'pg_usage_batch_tree_130_mapping_pages_preserve_logical_rollback ... ok' "$RUNNER_TEMP/usage-batch.log"
+          grep -F 'test storage::postgres::native_core::tests::pg_usage_batch_130_parser_peer_copies_and_each_page_rollback ... ' "$RUNNER_TEMP/usage-batch.log"
+          grep -F 'test storage::postgres::tree_writer::tests::pg_usage_batch_tree_130_mapping_pages_preserve_logical_rollback ... ' "$RUNNER_TEMP/usage-batch.log"
           cargo test -p semon-sessions --lib --locked --features postgres-test-tls storage::postgres::native_ingest_tests::pg_usage_batch_130_real_native_publication_matches_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/usage-batch-case.log"
       - name: Retain bounded usage publication results
