@@ -5271,13 +5271,20 @@ fn companion_diag_rows(db: &rusqlite::Connection, label: &str, paths: &[String])
 }
 
 fn companion_diag_frontier(db: &rusqlite::Connection, iteration: usize, refreshed: bool) {
-    let (epoch, phase, revision): (i64, String, i64) = db
+    let stage: Option<(i64, String, i64)> = db
         .query_row(
             "SELECT epoch,phase,revision FROM catalog_semantic_stage",
             [],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
+        .optional()
         .unwrap();
+    let Some((epoch, phase, revision)) = stage else {
+        eprintln!(
+            "partial_companion frontier iteration={iteration} refreshed={refreshed} stage=absent"
+        );
+        return;
+    };
     let pending: i64 = db
         .query_row(
             "SELECT count(*) FROM catalog_semantic_sources WHERE relation_done=0",
@@ -5718,7 +5725,7 @@ fn staged_duplicate_receipt_preserves_certified_sender_to_canonical_owner() {
             ("aaa-canonical", Kind::Xsm, "shared-message"),
             ("zzz-sender", Kind::Tool, "single-send"),
         ],
-        false,
+        true,
     );
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let (done, cursor): (bool,String) = db.query_row("SELECT relation_done,relation_after FROM catalog_semantic_sources WHERE source_path=?1", [home.options.claude_home.join("projects/-work-proj/zzz-sender.jsonl").to_string_lossy().as_ref()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
