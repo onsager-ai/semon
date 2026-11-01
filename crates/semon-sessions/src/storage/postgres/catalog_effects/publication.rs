@@ -466,12 +466,29 @@ pub(in crate::storage::postgres) fn publish(
         eprintln!("PG_PUBLISH_STAGE proof_insert");
         tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) VALUES($1,$2,sha256($3::bytea),$3,$4,$5,$6) ON CONFLICT DO NOTHING", &[&ns, &generation.as_bytes(), &reference.path.as_bytes(), &reference.pages.0.as_bytes(), &reference.usage_generation, &reference.usage_ready]).map_err(sqlstate::error)?;
     }
+    let binding = super::super::model_cache::binding(tx)?;
+    let history_publication = crate::storage::catalog::CompositeHistoryPublication::issue(
+        publication.rows,
+        publication.transcripts,
+        tx.namespace.as_str(),
+        binding.admission,
+        &binding.stream_epoch,
+        &payload,
+    )
+    .map_err(|_| StorageError::Unavailable)?;
     #[cfg(test)]
     if expected.is_some() {
         eprintln!("PG_PUBLISH_STAGE history_preserve");
     }
     if let Some(previous) = expected
-        && !history::preserve(tx, &generation, previous, publication, &leaving)?
+        && !history::preserve(
+            tx,
+            &generation,
+            previous,
+            publication,
+            &leaving,
+            &history_publication,
+        )?
     {
         // Only private custody checkpoints commit, before any successor row
         // or owner is carried; the head, claims and stage stay with the old

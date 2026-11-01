@@ -429,12 +429,18 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
     };
     let withdrawn = vec![Sha256::digest(original.key.as_bytes()).to_vec()];
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let history_publication = super::composite_history_publication(
+            tx,
+            &withdrawal,
+            b"pg_native_history_withdrawal_receipt",
+        )?;
         assert!(super::super::history::preserve(
             tx,
             L2,
             &original_generation,
             &withdrawal,
             &withdrawn,
+            &history_publication,
         )?);
         admit_generation(tx, L2, b"retained-details-first")
     })

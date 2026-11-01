@@ -513,8 +513,17 @@ impl AdmittedSource {
             generation: None,
         }
     }
-    pub(super) fn namespace(&self) -> &str {
+    pub(crate) fn namespace(&self) -> &str {
         self.config.namespace.as_str()
+    }
+    pub(crate) fn admission(&self) -> u64 {
+        self.admission
+    }
+    pub(crate) fn stream_epoch(&self) -> Result<&str, StorageError> {
+        self.config
+            .expected_stream_epoch
+            .as_deref()
+            .ok_or(StorageError::ScopeChanged)
     }
     pub(super) fn validate_publication(&self, db: &Connection) -> Result<(), StorageError> {
         if self.owner.is_none() {
@@ -2723,6 +2732,37 @@ impl Stage {
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
         publication_phase("original_history");
+        let stream = self
+            .source
+            .config
+            .expected_stream_epoch
+            .as_deref()
+            .ok_or_else(|| refuse("semantic_stream_epoch"))?;
+        let model_receipt = prepared
+            .staged_model_witness()
+            .map_err(|e| StoreError::Data(e.to_string()))?;
+        let issuer_receipt = serde_json::to_vec(&(
+            "sqlite-semantic-composite-history-v1",
+            ns,
+            batch.epoch,
+            &batch.base_generation,
+            batch.source_revision,
+            &batch.runtime,
+            &selected_paths,
+            &claims_text,
+            &metadata_text,
+            model_receipt,
+        ))
+        .map_err(|e| StoreError::Data(e.to_string()))?;
+        let history_publication = crate::storage::catalog::CompositeHistoryPublication::issue(
+            &prepared.rows,
+            Some(&prepared.transcripts),
+            ns,
+            self.source.admission,
+            stream,
+            &issuer_receipt,
+        )
+        .map_err(|e| StoreError::Data(e.to_string()))?;
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
         if !crate::storage::catalog::preserve_rows(
@@ -2741,6 +2781,7 @@ impl Stage {
         publication_phase("composite_history");
         crate::storage::catalog::publish_history_rows(
             &history,
+            &history_publication,
             &prepared.rows,
             Some(&prepared.transcripts),
         )

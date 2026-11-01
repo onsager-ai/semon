@@ -17,6 +17,23 @@ mod query_recipe;
 const L1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const L2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 
+pub(super) fn composite_history_publication(
+    tx: &mut PgTxn<'_>,
+    publication: &crate::slot_projection::Publication<'_>,
+    issuer_receipt: &[u8],
+) -> Result<crate::storage::catalog::CompositeHistoryPublication, StorageError> {
+    let binding = super::super::model_cache::binding(tx)?;
+    crate::storage::catalog::CompositeHistoryPublication::issue(
+        publication.rows,
+        publication.transcripts,
+        tx.namespace.as_str(),
+        binding.admission,
+        &binding.stream_epoch,
+        issuer_receipt,
+    )
+    .map_err(|_| StorageError::Unavailable)
+}
+
 #[test]
 fn pg_catalog135_real_native_binding_before_effects_and_atomic_refusal() {
     fn whole_database(tx: &mut PgTxn<'_>) -> Result<Vec<(String, Vec<String>)>, StorageError> {
@@ -775,16 +792,23 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             TxnKind::Write,
             &PgCancellation::default(),
             |tx| {
+                let publication = crate::slot_projection::Publication {
+                    rows: &missing,
+                    transcripts: Some(&recipes),
+                    observations: None,
+                };
+                let history_publication = composite_history_publication(
+                    tx,
+                    &publication,
+                    b"pg_catalog127_test_receipt",
+                )?;
                 assert!(history::preserve(
                     tx,
                     L2,
                     generation,
-                    &crate::slot_projection::Publication {
-                        rows: &missing,
-                        transcripts: Some(&recipes),
-                        observations: None,
-                    },
-                    &[]
+                    &publication,
+                    &[],
+                    &history_publication,
                 )?);
                 Ok(())
             },

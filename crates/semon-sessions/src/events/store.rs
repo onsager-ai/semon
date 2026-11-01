@@ -3259,6 +3259,49 @@ impl SqliteStore {
                 }
             }
             stage("fences", &transaction);
+            let stream = owner
+                .config()
+                .expected_stream_epoch
+                .as_deref()
+                .ok_or(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ))?;
+            let semantic_receipt = semantic.map(|batch| {
+                (
+                    batch.epoch,
+                    batch.phase,
+                    &batch.paths,
+                    &batch.source_claims,
+                    &batch.base_generation,
+                    batch.source_revision,
+                    &batch.runtime,
+                    &batch.context,
+                    batch
+                        .relation_cursors
+                        .iter()
+                        .map(|cursor| (&cursor.path, &cursor.after, &cursor.end))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            let issuer_receipt = serde_json::to_vec(&(
+                "sqlite-catalog-composite-history-v1",
+                expected_generation,
+                previous.as_deref(),
+                claims,
+                semantic_receipt,
+                publication.observations,
+                &metadata,
+            ))
+            .map_err(failure)?;
+            let history_publication = crate::storage::catalog::CompositeHistoryPublication::issue(
+                rows,
+                publication.transcripts,
+                owner.config().namespace.as_str(),
+                owner.admission(),
+                stream,
+                &issuer_receipt,
+            )
+            .map_err(failure)?;
             // The same transaction owns replacement and withdrawal custody.
             // Two missing outgoing owners suffice: the shared algorithm
             // advances at most one and defers before changing membership.
@@ -3323,6 +3366,7 @@ impl SqliteStore {
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
             crate::storage::catalog::publish_history_rows(
                 &history,
+                &history_publication,
                 publication.rows,
                 publication.transcripts,
             )

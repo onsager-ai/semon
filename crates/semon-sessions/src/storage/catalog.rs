@@ -177,9 +177,126 @@ pub(crate) trait SearchPublicationStore {
 }
 
 pub(crate) type HistoryRecipeHeader = (u32, Option<String>, bool);
+
+/// Issuer-bound authority for one exact incoming Composite History request.
+/// This is transient publisher evidence; it grants no read or runtime access.
+pub(crate) struct CompositeHistoryPublication {
+    namespace: String,
+    admission: u64,
+    stream: String,
+    issuer_receipt: String,
+    input_digest: String,
+}
+
+impl CompositeHistoryPublication {
+    /// Construct only after the publisher has passed its claims/model fences.
+    /// Call sites supply the exact receipt bytes owned by that publisher.
+    pub(crate) fn issue(
+        rows: &[CatalogRow],
+        projections: Option<&[crate::slot_projection::Projection]>,
+        namespace: &str,
+        admission: u64,
+        stream: &str,
+        issuer_receipt: &[u8],
+    ) -> Result<Self, serde_json::Error> {
+        use sha2::{Digest, Sha256};
+        let issuer_receipt = format!("{:x}", Sha256::digest(issuer_receipt));
+        let input_digest = composite_history_input_digest(
+            rows,
+            projections,
+            namespace,
+            admission,
+            stream,
+            &issuer_receipt,
+        )?;
+        Ok(Self {
+            namespace: namespace.to_owned(),
+            admission,
+            stream: stream.to_owned(),
+            issuer_receipt,
+            input_digest,
+        })
+    }
+
+    pub(crate) fn matches_scope(&self, namespace: &str, admission: u64, stream: &str) -> bool {
+        self.namespace == namespace && self.admission == admission && self.stream == stream
+    }
+
+    fn matches(
+        &self,
+        rows: &[CatalogRow],
+        projections: Option<&[crate::slot_projection::Projection]>,
+    ) -> Result<bool, serde_json::Error> {
+        Ok(composite_history_input_digest(
+            rows,
+            projections,
+            &self.namespace,
+            self.admission,
+            &self.stream,
+            &self.issuer_receipt,
+        )? == self.input_digest)
+    }
+}
+
+fn composite_history_input_digest(
+    rows: &[CatalogRow],
+    projections: Option<&[crate::slot_projection::Projection]>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    issuer_receipt: &str,
+) -> Result<String, serde_json::Error> {
+    use sha2::{Digest, Sha256};
+    let row_witnesses = rows
+        .iter()
+        .map(|row| {
+            Ok((
+                serde_json::to_string(row)?,
+                &row.overview,
+                row.trace
+                    .as_ref()
+                    .map(|trace| trace.publication_witness(row)),
+                &row.query_recipe,
+            ))
+        })
+        .collect::<Result<Vec<_>, serde_json::Error>>()?;
+    let projection_witnesses = projections.map(|projections| {
+        projections
+            .iter()
+            .map(|projection| (&projection.key, &projection.slots, projection.repair))
+            .collect::<Vec<_>>()
+    });
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&(
+            namespace,
+            admission,
+            stream,
+            issuer_receipt,
+            row_witnesses,
+            projection_witnesses,
+        ))?)
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompositeHistoryOwner {
+    Absent,
+    Original,
+}
+
 pub(crate) trait CompositeHistoryStore {
     type Error;
     fn data(error: serde_json::Error) -> Self::Error;
+    fn refused() -> Self::Error;
+    fn validate_publication(
+        &self,
+        publication: &CompositeHistoryPublication,
+    ) -> Result<(), Self::Error>;
+    fn authenticate_owner(
+        &self,
+        key: &str,
+    ) -> Result<CompositeHistoryOwner, Self::Error>;
     fn original(&self, key: &str) -> Result<bool, Self::Error>;
     fn previous(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn history_exists(&self, key: &str) -> Result<bool, Self::Error>;
@@ -777,12 +894,16 @@ pub(crate) trait CatalogSnapshot {
 /// second recipe derivation. Physical reads/effects remain adapter-owned.
 pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
     store: &P,
+    publication: &CompositeHistoryPublication,
     rows: &[CatalogRow],
     projections: Option<&[crate::slot_projection::Projection]>,
 ) -> Result<(), P::Error> {
     use crate::slot_projection::{SavedSlot, VERSION};
-    use sha2::{Digest, Sha256};
     use std::collections::{BTreeMap, BTreeSet};
+    store.validate_publication(publication)?;
+    if !publication.matches(rows, projections).map_err(P::data)? {
+        return Err(P::refused());
+    }
     let Some(projections) = projections else {
         return Ok(());
     };
@@ -791,9 +912,13 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         let Some(current) = rows.get(projection.key.as_str()).copied() else {
             continue;
         };
+        let existing_owner = store.authenticate_owner(&current.key)?;
         // A completed cross-harness original is immutable custody even if a
         // later Current publication reuses its original harness again.
         let original = store.original(&current.key)?;
+        if original != (existing_owner == CompositeHistoryOwner::Original) {
+            return Err(P::refused());
+        }
         if original {
             continue;
         }
@@ -928,14 +1053,8 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
             .map_err(P::data)?;
         let sources = crate::retention::source_generation(&history.sources).map_err(P::data)?;
         let metadata = serde_json::to_string(&history).map_err(P::data)?;
-        let generation = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_string(&(VERSION, &sources, &texts, incomplete))
-                    .map_err(P::data)?
-                    .as_bytes()
-            )
-        );
+        let generation = composite_history_generation(&sources, &texts, incomplete)
+            .map_err(P::data)?;
         store.composed(
             &current.key,
             &generation,
@@ -946,4 +1065,19 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         )?;
     }
     Ok(())
+}
+
+pub(crate) fn composite_history_generation(
+    source_generation: &str,
+    texts: &[String],
+    incomplete: bool,
+) -> serde_json::Result<String> {
+    use crate::slot_projection::VERSION;
+    use sha2::{Digest, Sha256};
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_string(&(VERSION, source_generation, texts, incomplete))?.as_bytes()
+        )
+    ))
 }

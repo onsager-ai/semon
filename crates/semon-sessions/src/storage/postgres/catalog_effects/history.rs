@@ -384,6 +384,124 @@ impl CompositeHistoryStore for History<'_, '_> {
     fn data(_: serde_json::Error) -> StorageError {
         StorageError::ScopeChanged
     }
+    fn refused() -> StorageError {
+        StorageError::ScopeChanged
+    }
+    fn validate_publication(
+        &self,
+        publication: &crate::storage::catalog::CompositeHistoryPublication,
+    ) -> Result<(), StorageError> {
+        let mut tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let binding = super::super::model_cache::binding(&mut tx)?;
+        if !publication.matches_scope(
+            tx.namespace.as_str(),
+            binding.admission,
+            &binding.stream_epoch,
+        ) {
+            return Err(StorageError::ScopeChanged);
+        }
+        tx.check()
+    }
+    fn authenticate_owner(
+        &self,
+        key: &str,
+    ) -> Result<crate::storage::catalog::CompositeHistoryOwner, StorageError> {
+        use crate::storage::catalog::{CompositeHistoryOwner, OriginalHeader};
+        let existing = self
+            .owner_at(self.effects.generation, key)?
+            .or(self.owner(key)?);
+        let Some((owner_generation, original)) = existing else {
+            let mut tx = self.effects.tx.borrow_mut();
+            tx.check()?;
+            let ns = tx.namespace.as_str().as_bytes();
+            for generation in [self.effects.generation, self.previous] {
+                let orphan = tx.driver.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_slots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_progress WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3)",
+                    &[&ns, &generation.as_bytes(), &key.as_bytes()],
+                ).map_err(sqlstate::error)?;
+                if orphan.get::<_, bool>(0) {
+                    return Err(StorageError::ScopeChanged);
+                }
+            }
+            tx.check()?;
+            return Ok(CompositeHistoryOwner::Absent);
+        };
+        if !original {
+            // Existing Composite content has no issuer-bound output receipt in
+            // the current profile, so its header cannot authorize reuse.
+            return Err(StorageError::ScopeChanged);
+        }
+        let metadata = self
+            .metadata(
+                "semon_pg_native_catalog_history_headers",
+                &owner_generation,
+                key,
+            )?
+            .ok_or(StorageError::ScopeChanged)?;
+        let row: CatalogRow = serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != key
+            || row.lifecycle != crate::model::summary::CatalogLifecycle::Retained
+            || serde_json::to_string(&row).map_err(|_| StorageError::ScopeChanged)? != metadata
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let Some(((generation, version, source_generation, total), _incomplete)) =
+            self.recipe(&owner_generation, key, true)?
+        else {
+            return Err(StorageError::ScopeChanged);
+        };
+        let mut tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let header_rows = tx.driver.query(
+            "SELECT session_key=$4,original_header FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+            &[&ns, &owner_generation.as_bytes(), &key.as_bytes(), &key.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        let Some(header_row) = header_rows.first() else {
+            return Err(StorageError::ScopeChanged);
+        };
+        if !header_row.get::<_, bool>(0) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let original_header = header_row.get::<_, Option<Vec<u8>>>(1);
+        let slot_rows = tx.driver.query(
+            "SELECT session_key=$4,slot FROM semon_pg_native_catalog_history_slots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY slot LIMIT 65",
+            &[&ns, &owner_generation.as_bytes(), &key.as_bytes(), &key.as_bytes()],
+        ).map_err(sqlstate::error)?;
+        tx.check()?;
+        if slot_rows.len() > 64 {
+            return Err(StorageError::ScopeChanged);
+        }
+        for (expected, slot_row) in slot_rows.iter().enumerate() {
+            if !slot_row.get::<_, bool>(0)
+                || slot_row.get::<_, i64>(1) != expected as i64
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        let original_header: Option<OriginalHeader> = original_header
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged))
+            .transpose()?;
+        match original_header {
+            Some((original_generation, original_version, original_source, original_total)) => {
+                if original_generation != generation
+                    || i64::from(original_version) != version as i64
+                    || original_source != source_generation
+                    || original_total != total
+                    || i64::try_from(slot_rows.len()).ok() != Some(original_total)
+                {
+                    return Err(StorageError::ScopeChanged);
+                }
+            }
+            None if version == 0
+                && generation.is_empty()
+                && source_generation.is_none()
+                && total == 0 => {}
+            None => return Err(StorageError::ScopeChanged),
+        }
+        Ok(CompositeHistoryOwner::Original)
+    }
     fn original(&self, key: &str) -> Result<bool, StorageError> {
         self.retained(key)
     }
@@ -554,6 +672,7 @@ pub(super) fn preserve(
     previous: &str,
     publication: &crate::slot_projection::Publication<'_>,
     withdrawn: &[Vec<u8>],
+    history_publication: &crate::storage::catalog::CompositeHistoryPublication,
 ) -> Result<bool, StorageError> {
     for generation in [generation, previous] {
         if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -593,6 +712,11 @@ pub(super) fn preserve(
     if !catalog::preserve_rows(&store, publication.rows, &old, continuations)? {
         return Ok(false);
     }
-    catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
+    catalog::publish_history_rows(
+        &store,
+        history_publication,
+        publication.rows,
+        publication.transcripts,
+    )?;
     Ok(true)
 }

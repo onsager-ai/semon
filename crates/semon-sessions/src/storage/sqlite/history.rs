@@ -1,6 +1,8 @@
 //! Authored physical operations for the shared bounded original-custody recipe.
 use crate::model::summary::CatalogRow;
-use crate::storage::catalog::{OriginalHeader, OriginalHistoryStore};
+use crate::storage::catalog::{
+    CompositeHistoryOwner, CompositeHistoryPublication, OriginalHeader, OriginalHistoryStore,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Authored fresh private semantic profile; never converts singleton custody.
@@ -33,6 +35,7 @@ CREATE INDEX session_history_slots_turn ON session_history_slots(namespace,sessi
 pub(crate) struct OriginalHistory<'a> {
     db: &'a Connection,
     namespace: &'a str,
+    source: &'a super::semantic::AdmittedSource,
 }
 
 impl<'a> OriginalHistory<'a> {
@@ -44,8 +47,44 @@ impl<'a> OriginalHistory<'a> {
         Ok(Self {
             db,
             namespace: source.namespace(),
+            source,
         })
     }
+}
+
+fn valid_history_slot_layout(
+    slots: &[(i64, String)],
+    parts: &[(i64, i64, i64)],
+    expected_total: Option<i64>,
+) -> bool {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut slot_numbers = BTreeSet::new();
+    let direct_slots = slots.iter().map(|(slot, _)| *slot).collect::<BTreeSet<_>>();
+    for (slot, _) in slots {
+        if *slot < 0 || !slot_numbers.insert(*slot) {
+            return false;
+        }
+    }
+    let mut next_part = BTreeMap::<i64, i64>::new();
+    for (slot, part, length) in parts {
+        if *slot < 0 || *part < 0 || *length <= 0 || direct_slots.contains(slot) {
+            return false;
+        }
+        let next = next_part.entry(*slot).or_insert(0);
+        if *part != *next {
+            return false;
+        }
+        *next += *length;
+        slot_numbers.insert(*slot);
+    }
+    if slot_numbers
+        .iter()
+        .enumerate()
+        .any(|(expected, actual)| i64::try_from(expected).ok() != Some(*actual))
+    {
+        return false;
+    }
+    expected_total.is_none_or(|total| total >= 0 && total == slot_numbers.len() as i64)
 }
 
 impl OriginalHistoryStore for OriginalHistory<'_> {
@@ -185,6 +224,112 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     type Error = rusqlite::Error;
     fn data(error: serde_json::Error) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+    }
+    fn refused() -> Self::Error {
+        rusqlite::Error::InvalidQuery
+    }
+    fn validate_publication(
+        &self,
+        publication: &CompositeHistoryPublication,
+    ) -> rusqlite::Result<()> {
+        self.source
+            .validate_publication(self.db)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let stream = self
+            .source
+            .stream_epoch()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        if !publication.matches_scope(self.namespace, self.source.admission(), stream) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        Ok(())
+    }
+    fn authenticate_owner(&self, key: &str) -> rusqlite::Result<CompositeHistoryOwner> {
+        let metadata: Option<Option<String>> = self.db.query_row(
+            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![self.namespace, key],
+            |row| row.get(0),
+        ).optional()?;
+        let metadata = match metadata {
+            Some(Some(metadata)) => Some(metadata),
+            Some(None) => return Err(rusqlite::Error::InvalidQuery),
+            None => None,
+        };
+        let projection: Option<(String, String, i64, i64, bool)> = self.db.query_row(
+            "SELECT generation,source_generation,version,total,incomplete FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![self.namespace, key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).optional()?;
+        let original_header: Option<String> = self.db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
+            rusqlite::params![self.namespace, format!("history_original_header:{key}")],
+            |row| row.get(0),
+        ).optional()?;
+        let transfer: Option<String> = self.db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
+            rusqlite::params![self.namespace, format!("history_transfer:{key}")],
+            |row| row.get(0),
+        ).optional()?;
+        let slots = self.db.prepare(
+            "SELECT slot,metadata FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2 ORDER BY slot LIMIT 65",
+        )?.query_map(rusqlite::params![self.namespace, key], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(i64, String)>>>()?;
+        let parts = self.db.prepare(
+            "SELECT slot,part,length(bytes) FROM main.session_history_slot_parts WHERE namespace=?1 AND session_key=?2 ORDER BY slot,part LIMIT 513",
+        )?.query_map(rusqlite::params![self.namespace, key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()?;
+        if slots.len() > 64 || parts.len() > 512 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let Some(metadata) = metadata else {
+            if projection.is_some()
+                || original_header.is_some()
+                || transfer.is_some()
+                || !slots.is_empty()
+                || !parts.is_empty()
+            {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            return Ok(CompositeHistoryOwner::Absent);
+        };
+        if transfer.is_some() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let Some(original_header) = original_header else {
+            // A source/version/content header alone cannot authorize a prior
+            // Composite owner. The terminal output receipt is added separately.
+            return Err(rusqlite::Error::InvalidQuery);
+        };
+        let row: CatalogRow = serde_json::from_str(&metadata).map_err(Self::data)?;
+        if row.key != key
+            || serde_json::to_string(&row).map_err(Self::data)? != metadata
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        if row.lifecycle != crate::model::summary::CatalogLifecycle::Retained {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let original: Option<OriginalHeader> =
+            serde_json::from_str(&original_header).map_err(Self::data)?;
+        match (original, projection.as_ref()) {
+            (None, None) => {
+                if !valid_history_slot_layout(&slots, &parts, None) {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+            (Some((generation, version, source_generation, total)), Some(physical)) => {
+                if physical.0 != generation
+                    || physical.1 != source_generation.as_deref().unwrap_or_default()
+                    || i64::from(version) != physical.2
+                    || total != physical.3
+                    || !valid_history_slot_layout(&slots, &parts, Some(total))
+                {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        }
+        Ok(CompositeHistoryOwner::Original)
     }
     fn original(&self, key: &str) -> rusqlite::Result<bool> {
         #[cfg(test)]
