@@ -482,10 +482,10 @@ impl QueryCatalogStore for QueryCatalog {
         let window = if needs_window && selected_current {
             let part = self
                 .read_cohort(namespace, now, &mut (8 * 1024 * 1024))
-                .inspect_err(|error| {
+                .inspect_err(|_error| {
                     #[cfg(test)]
-                    if error.code == "unavailable"
-                        && error.message == StorageError::ScopeChanged.to_string()
+                    if _error.code == "unavailable"
+                        && _error.message == StorageError::ScopeChanged.to_string()
                     {
                         trace_selected_body_refusal(
                             trace_selected,
