@@ -58,25 +58,16 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         eprintln!("catalog_history_probe method=original_retained");
         self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)", params![self.namespace,key], |r|r.get(0))
     }
-    fn replacement(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
+    fn previous(&self, row: &CatalogRow) -> rusqlite::Result<Option<CatalogRow>> {
         #[cfg(test)]
-        eprintln!("catalog_history_probe method=original_replacement");
+        eprintln!("catalog_history_probe method=original_previous");
         let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
         let old: Option<CatalogRow> = text
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(<Self as OriginalHistoryStore>::data)?;
-        // A withdrawal or metadata refresh retains the same source revisions.
-        // An append/rewrite replaces a revision and must first preserve its
-        // original recipe, even when the native harness/owner is unchanged.
-        Ok(old.filter(|old| {
-            old.harness != row.harness
-                || row
-                    .sources
-                    .iter()
-                    .any(|source| !old.sources.contains(source))
-        }))
+        Ok(old)
     }
     fn header(&self, key: &str) -> rusqlite::Result<Option<OriginalHeader>> {
         #[cfg(test)]

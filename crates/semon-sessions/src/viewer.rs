@@ -6900,6 +6900,13 @@ mod tests {
         };
         view.note_catalog_read().unwrap();
         let before = eventually("complete Catalog before rewrite", generation);
+        let original_source =
+            crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
+                .unwrap()
+                .unwrap()
+                .source_refs[0]
+                .source
+                .clone();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
         let old = fs::read_to_string(&path).unwrap();
         let replacement = old.replace("old prompt", "new prompt");
@@ -6915,6 +6922,11 @@ mod tests {
             "Catalog observes an equal-size rewrite with restored mtime",
             || generation().filter(|next| next != &before),
         );
+        let history =
+            crate::session_catalog_history_identity(&fixture.options, "fixture", "rewrite")
+                .unwrap()
+                .unwrap();
+        assert_eq!(history.source_refs[0].source, original_source);
         let reply = crate::session_transcript_range(
             &fixture.options,
             "fixture",

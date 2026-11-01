@@ -1,6 +1,7 @@
 //! Durable Raw write intents in the existing native index database.
 use crate::{Input, Options, events::Stat};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::io;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -9,6 +10,12 @@ pub(crate) struct AppendEvidence {
     pub(crate) generation: String,
     pub(crate) before: Stat,
     pub(crate) after: Stat,
+}
+
+pub(crate) fn stat_generation(stat: &Stat) -> io::Result<String> {
+    let encoded = serde_json::to_vec(stat).map_err(io::Error::other)?;
+    let digest = format!("{:x}", Sha256::digest(encoded));
+    Ok(digest[..32].to_owned())
 }
 
 impl AppendEvidence {

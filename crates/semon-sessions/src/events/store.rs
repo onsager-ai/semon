@@ -1566,11 +1566,7 @@ pub(crate) fn checkpoint_source_scan(
             "cold checkpoint generation changed",
         ));
     }
-    let generation = format!(
-        "{:x}",
-        Sha256::digest(json(physical).map_err(io::Error::other)?.as_bytes())
-    )[..32]
-        .to_owned();
+    let generation = crate::source_change::stat_generation(physical)?;
     let evidence = crate::source_change::AppendEvidence {
         generation,
         before: ledger.stat,
@@ -3294,8 +3290,18 @@ impl SqliteStore {
                     .map_err(StoreError::Configured)?;
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition");
-            let preserved =
-                crate::storage::catalog::preserve_rows(&history, publication.rows, &withdrawn);
+            let continuations = publication
+                .observations
+                .and_then(
+                    crate::storage::selected::PresentationObservations::verified_continuations,
+                )
+                .unwrap_or(&[]);
+            let preserved = crate::storage::catalog::preserve_rows(
+                &history,
+                publication.rows,
+                &withdrawn,
+                continuations,
+            );
             if !preserved.map_err(failure)? {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);

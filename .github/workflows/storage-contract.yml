@@ -63,6 +63,53 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Archived overview large source offset custody regression
+        id: archive_offset_regression
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        continue-on-error: false
+        shell: bash
+        run: |
+          result=0
+          test=catalog::tests::archived_overview_repair_reuses_exact_indexes_for_large_native_sources
+          cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/archive-offset-diagnostic-case.log" 2>&1 || result=$?
+          if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/archive-offset-diagnostic-case.log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/archive-offset-diagnostic-case.log"; then result=1; fi
+          cat "$RUNNER_TEMP/archive-offset-diagnostic-case.log"
+          echo "CASE name=$test expected=1 status=$result" >> "$RUNNER_TEMP/archive-offset-diagnostic.log"
+          exit "$result"
+      - name: Retain archived overview large source offset diagnostic
+        if: ${{ !cancelled() && steps.archive_offset_regression.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: archive-offset-diagnostic
+          path: ${{ runner.temp }}/archive-offset-diagnostic*.log
+      - name: Catalog continuation and custody regressions
+        id: catalog_custody
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            storage::catalog::catalog_history_classification_rejects_duplicate_current_source_paths \
+            storage::selected::catalog_continuation_digest_is_bounded_and_deserialization_fails_closed \
+            catalog::tests::retained_history_list_keeps_indexed_fields_and_positions_across_append \
+            viewer::tests::catalog_refresh_detects_same_size_rewrites_with_restored_modification_time; do
+            case_result=0
+            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$RUNNER_TEMP/catalog-custody-case.log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$RUNNER_TEMP/catalog-custody-case.log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/catalog-custody-case.log"; then case_result=1; fi
+            cat "$RUNNER_TEMP/catalog-custody-case.log" >> "$RUNNER_TEMP/catalog-custody-tests.log"
+            echo "CASE name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/catalog-custody-tests.log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
+          cat "$RUNNER_TEMP/catalog-custody-tests.log"
+          exit "$result"
+      - name: Retain Catalog custody regression results
+        if: ${{ !cancelled() && steps.catalog_custody.outcome != 'skipped' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: catalog-custody-tests
+          path: ${{ runner.temp }}/catalog-custody-tests.log
       - name: Native turn identity and filename-owner publication qualification
         id: filename_owner
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
