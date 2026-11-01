@@ -6661,9 +6661,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     String::from_utf8_lossy(&fresh.body)
                 );
                 let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
-                let fresh_sources = fresh["content_observation"]["sources"]
-                    .as_array()
-                    .unwrap();
+                let fresh_sources = fresh["content_observation"]["sources"].as_array().unwrap();
                 assert_eq!(fresh_sources.len(), 1, "{scope}/{mutation}: {fresh}");
                 assert!(
                     fresh["observation"]["source_bytes"].as_u64().unwrap() <= 8192,
@@ -6688,8 +6686,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     .calls
                     .load(Ordering::Relaxed)
                     .saturating_sub(provider_calls_before_fresh);
-                let provider_request_limit =
-                    fresh["limits"]["source_requests"].as_u64().unwrap();
+                let provider_request_limit = fresh["limits"]["source_requests"].as_u64().unwrap();
                 assert!(
                     u64::try_from(provider_reads).unwrap() <= provider_request_limit,
                     "{scope}/{mutation}: provider reads exceeded the page request budget"
@@ -6699,23 +6696,19 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     let entries = fresh["entries"].as_array().unwrap();
                     assert_eq!(entries.len(), 3, "{scope}/{mutation}: {fresh}");
                     assert_eq!(
-                        entries[0]["text"],
-                        "original pinned prompt",
+                        entries[0]["text"], "original pinned prompt",
                         "{scope}/{mutation}"
                     );
                     assert_eq!(
-                        entries[1]["text"],
-                        "original pinned answer",
+                        entries[1]["text"], "original pinned answer",
                         "{scope}/{mutation}"
                     );
                     assert_eq!(
-                        entries[2]["text"],
-                        "natural appended answer",
+                        entries[2]["text"], "natural appended answer",
                         "{scope}/{mutation}"
                     );
                     assert_ne!(
-                        fresh["projection"]["generation"],
-                        generation,
+                        fresh["projection"]["generation"], generation,
                         "{scope}/{mutation}"
                     );
                     assert!(
@@ -6728,8 +6721,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                         crate::SessionSourceReadMode::LocalOrPinnedProvider,
                     );
                     assert_eq!(
-                        stale.status,
-                        409,
+                        stale.status, 409,
                         "{scope}/{mutation}: old Current cursor must be fenced"
                     );
                     assert!(
@@ -6746,23 +6738,18 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     );
                 } else {
                     assert_eq!(scope, "retained_history", "{scope}/{mutation}");
-                    let expected_history = vec![
-                        recovered["entries"][0].clone(),
-                        next["entries"][0].clone(),
-                    ];
+                    let expected_history =
+                        vec![recovered["entries"][0].clone(), next["entries"][0].clone()];
                     assert_eq!(
-                        fresh["entries"],
-                        expected_history,
+                        fresh["entries"].as_array().unwrap(), &expected_history,
                         "{scope}/{mutation}: {fresh}"
                     );
                     assert_eq!(
-                        fresh["projection"]["generation"],
-                        generation,
+                        fresh["projection"]["generation"], generation,
                         "{scope}/{mutation}: History must keep the original generation"
                     );
                     assert_eq!(
-                        fresh["projection"]["total"],
-                        2,
+                        fresh["projection"]["total"], 2,
                         "{scope}/{mutation}: History must keep the original transcript length"
                     );
                     assert_eq!(
@@ -6791,8 +6778,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     );
                     let history_next: Value = serde_json::from_slice(&history_next.body).unwrap();
                     assert_eq!(
-                        history_next["entries"][0],
-                        next["entries"][0],
+                        history_next["entries"][0], next["entries"][0],
                         "{scope}/{mutation}: History cursor must keep the original answer"
                     );
                     assert!(
@@ -6806,8 +6792,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                         crate::SessionSourceReadMode::LocalOrPinnedProvider,
                     );
                     assert_eq!(
-                        stale.status,
-                        409,
+                        stale.status, 409,
                         "{scope}/{mutation}: wrong History cursor must be fenced"
                     );
                     assert!(
