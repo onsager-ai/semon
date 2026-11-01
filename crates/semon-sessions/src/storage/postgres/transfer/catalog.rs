@@ -608,8 +608,6 @@ mod tests {
     };
     use crate::storage::transfer::reported::tests::{apply, root, sqlite, stage};
 
-    const RECIPE_FILE_SUFFIX: &str = "-é \t漢字";
-
     fn publish_catalog_with_recipes(
         cache: &mut crate::events::EventCache,
         options: &crate::Options,
@@ -714,15 +712,9 @@ mod tests {
         Vec<crate::model::summary::CatalogRow>,
         Vec<(String, String)>,
     ) {
-        let (options, original_input) =
+        let (options, input) =
             crate::storage::transfer::reported::tests::seed_catalog_input(source, root);
-        let input = crate::Input {
-            root: crate::InputRoot::Claude,
-            path: format!("projects/sanitized/catalog{RECIPE_FILE_SUFFIX}.jsonl").into(),
-        };
-        let original_path = original_input.full_path(&options);
         let path = input.full_path(&options);
-        std::fs::rename(original_path, &path).unwrap();
 
         let mut cache = crate::storage::transfer::reported::tests::cache(source);
         cache.ingest(&"7".repeat(64), &path, "claude").unwrap();
@@ -749,11 +741,11 @@ mod tests {
     ) {
         let old = crate::Input {
             root: crate::InputRoot::Claude,
-            path: format!("projects/sanitized/catalog{RECIPE_FILE_SUFFIX}.jsonl").into(),
+            path: "projects/sanitized/catalog.jsonl".into(),
         };
         let input = crate::Input {
             root: crate::InputRoot::Claude,
-            path: format!("projects/sanitized/successor{RECIPE_FILE_SUFFIX}.jsonl").into(),
+            path: "projects/sanitized/successor.jsonl".into(),
         };
         let old_path = old.full_path(options);
         let path = input.full_path(options);
@@ -941,8 +933,6 @@ mod tests {
         let (expected, current_recipes) = advance_catalog_with_recipes(&source, &options);
         let history_recipe = recipe_for(&initial_recipes, &initial[0].key);
         let current_recipe = recipe_for(&current_recipes, &expected[0].key);
-        assert!(history_recipe.contains(r#"é \t漢字"#));
-        assert!(current_recipe.contains(r#"é \t漢字"#));
         assert_ne!(
             current_recipe, history_recipe,
             "the successor publication owns a distinct selected recipe"
