@@ -3864,6 +3864,8 @@ impl Stage {
         if claude {
             paths.truncate(1);
         } else if result_phase == Phase::Relations {
+            // Each loaded path can add a child spawn; selected primary events
+            // can add independent relays. Reserve room for both output sets.
             paths.truncate(RELATION_OUTPUT_LIMIT - RELATION_EVENT_PAGE_LIMIT);
         }
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
