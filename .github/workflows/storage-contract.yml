@@ -64,6 +64,22 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
+      - name: Producer completion and existing native search demand regressions
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          completion_log="$RUNNER_TEMP/477-focused-completion.log"
+          search_log="$RUNNER_TEMP/477-focused-native-search.log"
+          result=0
+          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch -- --exact --nocapture > "$completion_log" 2>&1 || result=$?
+          if ! grep -Fq 'running 1 test' "$completion_log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$completion_log"; then result=1; fi
+          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::cold_catalog_search_ -- --nocapture > "$search_log" 2>&1 || result=$?
+          if ! grep -Fq 'running 24 tests' "$search_log"; then result=1; fi
+          if ! grep -Fq 'test result: ok. 24 passed; 0 failed;' "$search_log"; then result=1; fi
+          tail -n 40 "$completion_log"
+          tail -n 40 "$search_log"
+          exit "$result"
       - name: Focused correctness diagnostics (not full qualification)
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         shell: bash
@@ -124,17 +140,6 @@ jobs:
                           out.write(path.name + ': ' + line[:1000])
           PYSAFE
           cat "$RUNNER_TEMP/477-focused-summary.txt"
-          exit "$result"
-      - name: Existing native search demand lifecycle regressions
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
-        shell: bash
-        run: |
-          case_log="$RUNNER_TEMP/477-focused-native-search.log"
-          result=0
-          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::cold_catalog_search_ -- --nocapture > "$case_log" 2>&1 || result=$?
-          if ! grep -Fq 'running 24 tests' "$case_log"; then result=1; fi
-          if ! grep -Fq 'test result: ok. 24 passed; 0 failed;' "$case_log"; then result=1; fi
-          tail -n 40 "$case_log"
           exit "$result"
       - name: Retain focused correctness diagnostics
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
