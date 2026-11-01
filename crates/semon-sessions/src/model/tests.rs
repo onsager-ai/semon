@@ -11505,6 +11505,119 @@ fn semantic_index_rejects_source_change_after_producer_preparation() {
 }
 
 #[test]
+fn semantic_index_rejects_unannounced_physical_change_after_producer_preparation() {
+    let home = Home::new();
+    home.codex(
+        "index-physical-race",
+        json!({}),
+        &[codex_user(ts(14, 0), "before producer preparation")],
+    );
+    let inputs = crate::inputs(&home.options).unwrap();
+    assert_eq!(inputs.len(), 1);
+    let input = inputs[0].clone();
+    let path = input
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
+    let source_path = PathBuf::from(&path);
+    let paths = vec![path.clone()];
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let batch = cache.semantic_batch(64).unwrap().unwrap();
+    assert_eq!(batch.phase, relation_stage::Phase::Indexing);
+    let model = prepare_semantic_batch(&home.options, &mut cache, &inputs, &batch, NOW).unwrap();
+    assert_eq!(model.prepared().indexed_sources.len(), 1);
+    let prepared_claims = model.prepared().claims.clone();
+    assert_eq!(cache.catalog_claims(&paths).unwrap(), prepared_claims);
+
+    let before = crate::events::Stat::of(&source_path).unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let (_, ledger) = crate::events::store::ledger_row(&db, &path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(ledger.offset, ledger.stat.size);
+    assert!(ledger.stat.changed_ns.is_some());
+    let from = fs::metadata(&path).unwrap().len();
+    assert_eq!(from, ledger.offset);
+    let line = format!("{}\n", codex_user(ts(14, 1), "unannounced physical change"));
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    file.write_all(line.as_bytes()).unwrap();
+    file.sync_all().unwrap();
+    let after = crate::events::Stat::of(&source_path).unwrap();
+    assert_ne!(
+        after,
+        before,
+        "the unjournaled append changes the physical source stat"
+    );
+    assert!(after.size > ledger.offset, "append extends the scanned prefix");
+    assert_eq!(
+        cache.catalog_claims(&paths).unwrap(),
+        prepared_claims,
+        "the physical mutation does not advance the journal claim"
+    );
+
+    let source_before: (Option<i64>, Option<String>, bool) = db
+        .query_row(
+            "SELECT claim,ledger,index_done FROM catalog_semantic_sources WHERE source_path=?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert!(!source_before.2, "the Index source is still pending");
+    let inputs_before: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalog_semantic_inputs WHERE source_path=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let frontier_before: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalog_semantic_frontier WHERE kind='pathowner' AND value=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    assert_eq!(
+        cache
+            .record_semantic_batch(&batch, model.prepared())
+            .unwrap(),
+        crate::events::Outcome::Conflict,
+        "Index must refuse an unannounced physical source change"
+    );
+
+    let source_after: (Option<i64>, Option<String>, bool) = db
+        .query_row(
+            "SELECT claim,ledger,index_done FROM catalog_semantic_sources WHERE source_path=?1",
+            [&path],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let inputs_after: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalog_semantic_inputs WHERE source_path=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let frontier_after: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalog_semantic_frontier WHERE kind='pathowner' AND value=?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(source_after, source_before, "conflict leaves staged source unchanged");
+    assert_eq!(inputs_after, inputs_before, "conflict writes no staged input");
+    assert_eq!(frontier_after, frontier_before, "conflict writes no owner frontier");
+}
+
+#[test]
 fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     let mut home = acknowledged_semantic_family();
     // Exceed the producer's 4 MiB scan budget with individually bounded native
@@ -11554,6 +11667,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     drop(cache);
     let mut phases = BTreeSet::new();
     let mut partial_index = false;
+    let mut eof_index = false;
     let mut complete = false;
     for step in 0..1024 {
         let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
@@ -11569,8 +11683,8 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
             })
             .optional()
             .unwrap();
-        if let Some(phase) = phase {
-            phases.insert(phase);
+        if let Some(phase_name) = phase.as_ref() {
+            phases.insert(phase_name.clone());
         }
         let resume: Option<i64> = db
             .query_row(
@@ -11581,7 +11695,29 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
             .optional()
             .unwrap()
             .flatten();
-        partial_index |= resume.is_some_and(|offset| offset > 0 && (offset as u64) < large_size);
+        if resume.is_some_and(|offset| offset > 0 && (offset as u64) < large_size) {
+            let index_done: bool = db
+                .query_row(
+                    "SELECT index_done FROM catalog_semantic_sources WHERE source_path=?1",
+                    [large_path.to_string_lossy().as_ref()],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!index_done, "partial Index offset remains pending");
+            partial_index = true;
+        }
+        if phase.as_deref() == Some("identity") {
+            let (index_done, resume_at): (bool, i64) = db
+                .query_row(
+                    "SELECT s.index_done,f.resume_at FROM catalog_semantic_sources s JOIN files f ON f.path=s.source_path WHERE s.source_path=?1",
+                    [large_path.to_string_lossy().as_ref()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert!(index_done, "Index is acknowledged after reaching EOF");
+            assert_eq!(resume_at as u64, large_size, "EOF offset matches source size");
+            eof_index = true;
+        }
         if done {
             complete = true;
             eprintln!(
@@ -11595,6 +11731,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
         partial_index,
         "fixture never exercised a resumed Index write"
     );
+    assert!(eof_index, "Index never acknowledged the source at EOF");
     assert!(complete, "large native source did not recover: {phases:?}");
     assert!(
         phases.contains("indexing")
