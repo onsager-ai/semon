@@ -1569,14 +1569,47 @@ pub(crate) fn query_recipe_observation(
     )
 }
 
+/// Attach only the request-local payload; metadata and its exact persisted
+/// reference continue to be the observation checked by later witnesses.
+pub(crate) fn attach_query_recipe(
+    db: &Connection,
+    reader: &NativeReaderBinding,
+    owner: CatalogObservationOwner,
+    row: &mut CatalogRow,
+) -> Result<usize, StorageError> {
+    use crate::storage::query::QueryRecipeLoadError as Error;
+    let current = reader.runtime_binding_at(db)?;
+    let observation = query_recipe_observation(db, &current, owner, row)?;
+    let (recipe, bytes) =
+        load_query_recipe_with_bytes(db, reader, &observation).map_err(|error| match error {
+            Error::Storage(error) => error,
+            _ => StorageError::ScopeChanged,
+        })?;
+    row.query_recipe = recipe;
+    Ok(bytes)
+}
+
 /// The reader owns the admitted snapshot. A token never reselects another
 /// residence when its original owner, generation or grant no longer qualifies.
+/// None means authenticated inline metadata (or no Query observation) with no
+/// external cell. A detached reference never resolves to None.
 pub(crate) fn load_query_recipe(
     db: &Connection,
     reader: &NativeReaderBinding,
     observation: &crate::storage::query::QueryRecipeObservation,
 ) -> Result<
     Option<crate::query_projection::SelectedRecipe>,
+    crate::storage::query::QueryRecipeLoadError,
+> {
+    load_query_recipe_with_bytes(db, reader, observation).map(|(recipe, _)| recipe)
+}
+
+fn load_query_recipe_with_bytes(
+    db: &Connection,
+    reader: &NativeReaderBinding,
+    observation: &crate::storage::query::QueryRecipeObservation,
+) -> Result<
+    (Option<crate::query_projection::SelectedRecipe>, usize),
     crate::storage::query::QueryRecipeLoadError,
 > {
     use crate::storage::query::{
@@ -1751,9 +1784,11 @@ pub(crate) fn load_query_recipe(
             payload
         }
     };
-    if selected.query.is_none() {
+    // Inline selected metadata remains the ordinary producer's current
+    // representation. It has authenticated above and owns no external cell.
+    if !crate::query_projection::SelectedRecipe::detached(selected) {
         return if payload.is_none() {
-            Ok(None)
+            Ok((None, 0))
         } else {
             Err(Error::CorruptPayload)
         };
@@ -1761,7 +1796,7 @@ pub(crate) fn load_query_recipe(
     let payload = payload.ok_or(crate::storage::query::QueryRecipeLoadError::MissingPayload)?;
     observation
         .decode(&payload)
-        .map(Some)
+        .map(|recipe| (Some(recipe), payload.len()))
         .map_err(|_| crate::storage::query::QueryRecipeLoadError::CorruptPayload)
 }
 

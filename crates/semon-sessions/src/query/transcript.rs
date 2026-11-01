@@ -796,7 +796,20 @@ fn read_inner(
     if scope == crate::CatalogReadScope::Current && !current {
         return Ok(None);
     }
-    let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
+    let mut row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
+    if search.is_some() || args["_session"] == true {
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &binding,
+            if history.is_some() {
+                crate::storage::catalog::CatalogObservationOwner::History
+            } else {
+                crate::storage::catalog::CatalogObservationOwner::Catalog
+            },
+            &mut row,
+        )
+        .map_err(unavailable)?;
+    }
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
     }) {
@@ -1174,8 +1187,7 @@ fn read_inner(
                     {
                         vec![]
                     } else {
-                        let recipe = saved["selected"]["edges"]
-                            .as_array()
+                        let recipe = crate::query_projection::SelectedRecipe::edges_for(&row)
                             .and_then(|edges| {
                                 edges
                                     .iter()
@@ -1314,9 +1326,10 @@ pub(crate) fn render_session(
         .query
         .as_ref()
         .ok_or_else(|| unavailable("Selected Query unavailable"))?;
-    let selected = &saved["selected"];
+    let session = crate::query_projection::SelectedRecipe::session_for(row)
+        .ok_or_else(|| unavailable("Selected Query recipe unavailable"))?;
     let mut summary = saved["rows"][key]["summary"].clone();
-    if !summary.is_object() || !selected["session"]["busy"].is_array() {
+    if !summary.is_object() || !session["busy"].is_array() {
         return Err(unavailable("Selected Query recipe unavailable"));
     }
     if !current {
@@ -1330,7 +1343,7 @@ pub(crate) fn render_session(
             summary["open_question"] = Value::Null;
         }
     }
-    summary["busy"] = selected["session"]["busy"].clone();
+    summary["busy"] = session["busy"].clone();
     if !options.all && !options.scan_window {
         let cutoff =
             now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX));
@@ -1344,8 +1357,7 @@ pub(crate) fn render_session(
     let bytes_left = std::cell::RefCell::new(64 * 1024 * 1024usize);
     let mut metadata = 0usize;
     let mut turns = Vec::new();
-    for recipe in selected["turns"]
-        .as_array()
+    for recipe in crate::query_projection::SelectedRecipe::turns_for(row)
         .ok_or_else(|| unavailable("Query turns unavailable"))?
     {
         metadata += recipe.to_string().len();
@@ -1387,8 +1399,7 @@ pub(crate) fn render_session(
     }
     summary["turns"] = json!(turns);
     let mut handoffs = Vec::new();
-    for recipe in selected["edges"]
-        .as_array()
+    for recipe in crate::query_projection::SelectedRecipe::edges_for(row)
         .ok_or_else(|| unavailable("Query handoffs unavailable"))?
     {
         let id = recipe["id"]

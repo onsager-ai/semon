@@ -383,7 +383,8 @@ impl QueryCatalogStore for QueryCatalog {
                 let retained_window_data = if needs_window && !current {
                     snapshot
                         .selected(key, history, 0, 1)?
-                        .map(|(row, _, _)| {
+                        .map(|(mut row, _, _)| {
+                            snapshot.attach_query_recipe(&mut row, history)?;
                             snapshot
                                 .row_runtime_binding_with_observations(
                                     &row,
@@ -475,7 +476,7 @@ impl QueryCatalogStore for QueryCatalog {
                 // SQLite Query reader; live qualification is independent.
                 // Bodies still come only from authorized Raw Source bytes.
                 let history = snapshot.owner(key)?.is_some();
-                let (row, header, _) = snapshot
+                let (mut row, header, _) = snapshot
                     .selected(key, history, 0, 1)
                     .inspect_err(|_error| {
                         #[cfg(test)]
@@ -484,6 +485,9 @@ impl QueryCatalogStore for QueryCatalog {
                         );
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
+                if args["_session"] == true {
+                    snapshot.attach_query_recipe(&mut row, history)?;
+                }
                 let current_row = snapshot.catalog(key, false)?;
                 let current_row = current_runtime_owner(&row, history, current_row.as_ref());
                 let current = current_row.is_some();
@@ -844,10 +848,12 @@ impl QueryCatalogStore for QueryCatalog {
                         let more = page.len() > 64;
                         page.truncate(64);
                         let next = page.last().map(|(_, activity, key_digest)| (*activity, key_digest.clone()));
-                        for (row, _, _) in page {
+                        for (mut row, _, _) in page {
                             if loaded.get(&row.key).is_some_and(|(_, current, _)| *current) {
                                 continue;
                             }
+                            let payload_bytes = snapshot.attach_query_recipe(&mut row, true)?;
+                            *bytes_left = bytes_left.checked_sub(payload_bytes).ok_or(StorageError::Busy)?;
                             if !history_window(&row, Some(c)).map_err(cohort_scope_changed)?.member {
                                 return Err(cohort_scope_changed("history_activity_projection_mismatch"));
                             }
@@ -862,6 +868,12 @@ impl QueryCatalogStore for QueryCatalog {
             let mut history_turns = BTreeSet::new();
             let mut history_context = BTreeSet::new();
             let mut history_required_owners = BTreeSet::new();
+            for (row, _, selected_history) in loaded.values_mut() {
+                if *selected_history && row.query_recipe.is_none() {
+                    let payload_bytes = snapshot.attach_query_recipe(row, true)?;
+                    *bytes_left = bytes_left.checked_sub(payload_bytes).ok_or(StorageError::Busy)?;
+                }
+            }
             for (row, _, selected_history) in loaded.values() {
                 if !selected_history { continue; }
                 let window = history_window(row, cutoff).map_err(cohort_scope_changed)?;

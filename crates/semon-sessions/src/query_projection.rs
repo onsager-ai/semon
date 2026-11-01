@@ -33,6 +33,40 @@ pub(crate) struct SelectedRecipePublication {
 }
 
 impl SelectedRecipe {
+    pub(crate) fn detached(row: &CatalogRow) -> bool {
+        row.query.as_ref().is_some_and(|query| {
+            query["selected"].get("version").is_some()
+                || query["selected"].get("digest").is_some()
+                || !query["selected"]["session"].is_object()
+                || !query["selected"]["edges"].is_array()
+                || !query["selected"]["turns"].is_array()
+        })
+    }
+
+    // Ordinary producers still publish inline selected values while detached
+    // publication is inactive. Stored observations authenticate either shape
+    // before these accessors inspect inline values or an attached payload.
+    pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
+        row.query_recipe
+            .as_ref()
+            .map(|recipe| &recipe.edges)
+            .or_else(|| row.query.as_ref()?["selected"]["edges"].as_array())
+    }
+
+    pub(crate) fn turns_for(row: &CatalogRow) -> Option<&Vec<Value>> {
+        row.query_recipe
+            .as_ref()
+            .map(|recipe| &recipe.turns)
+            .or_else(|| row.query.as_ref()?["selected"]["turns"].as_array())
+    }
+
+    pub(crate) fn session_for(row: &CatalogRow) -> Option<&Value> {
+        row.query_recipe
+            .as_ref()
+            .map(|recipe| &recipe.session)
+            .or_else(|| row.query.as_ref()?["selected"].get("session"))
+    }
+
     /// Prepare both stored cells without changing the producer's active row.
     pub(crate) fn prepare(row: &CatalogRow) -> std::io::Result<SelectedRecipePublication> {
         if row.query_recipe.is_none()

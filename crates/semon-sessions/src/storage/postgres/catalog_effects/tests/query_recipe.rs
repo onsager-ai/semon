@@ -109,6 +109,116 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         all: true,
         ..Default::default()
     };
+    // Both ordinary current producers still publish inline metadata with a
+    // NULL external cell. Authenticate that representation before exercising
+    // the inactive detached writer below.
+    let sqlite_config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Sqlite {
+            database: crate::events::EventCache::path(&options.cache),
+        },
+        namespace: ns("catalog-effects-oracle"),
+        expected_stream_epoch: Some("c".repeat(64)),
+    };
+    let sqlite_reader = crate::storage::NativeReaderBinding::Semantic(
+        crate::events::store::configured::NativeOwnership::restore(&sqlite_config).unwrap(),
+    );
+    let mut db = sqlite_reader.connection().unwrap();
+    let tx = db.transaction().unwrap();
+    let metadata: String = tx.query_row(
+        "SELECT metadata FROM session_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+        [&data.rows[0].key], |record| record.get(0),
+    ).unwrap();
+    let mut inline: CatalogRow = serde_json::from_str(&metadata).unwrap();
+    assert!(!crate::query_projection::SelectedRecipe::detached(&inline));
+    assert_eq!(
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &sqlite_reader,
+            Owner::Catalog,
+            &mut inline,
+        )
+        .unwrap(),
+        0
+    );
+    assert!(inline.query_recipe.is_none());
+    assert_eq!(serde_json::to_string(&inline).unwrap(), metadata);
+    tx.commit().unwrap();
+    drop(db);
+
+    let inline_namespace = ns("query-recipe-inline-native");
+    let inline_config = crate::storage::StoreConfig {
+        backend: crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        },
+        namespace: inline_namespace.clone(),
+        expected_stream_epoch: Some("c".repeat(64)),
+    };
+    inline_config.create_native_store().unwrap();
+    let mut inline_options = options.clone();
+    inline_options.source =
+        crate::storage::HostSource::new(inline_namespace.clone(), "c".repeat(64))
+            .unwrap()
+            .with_store(inline_config)
+            .unwrap();
+    let mut inline_cache =
+        crate::events::EventCache::open_scoped(&inline_options.cache, &inline_options.source)
+            .unwrap();
+    let path = &data.rows[0].sources[0].path;
+    inline_cache
+        .ingest(&"b".repeat(64), path, "claude")
+        .unwrap();
+    let inline_input = crate::native_evidence::catalog_input(path, &inline_options).unwrap();
+    let inline_prepared = crate::model::prepare_sources(
+        &inline_options,
+        &mut inline_cache,
+        &[inline_input],
+        1790812802000,
+    )
+    .unwrap();
+    let (outcome, inline_generation) = inline_cache
+        .publish_partial_catalog_fenced(&inline_prepared)
+        .unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    let inline_generation = inline_generation.unwrap();
+    let inline_key = &inline_prepared.rows[0].key;
+    snapshot::with_admitted_snapshot(
+        &pool,
+        &inline_namespace,
+        &control,
+        &inline_generation,
+        |view| {
+            let mut selected = view.catalog(inline_key, false)?.unwrap();
+            let metadata = serde_json::to_string(&selected).unwrap();
+            assert!(!crate::query_projection::SelectedRecipe::detached(
+                &selected
+            ));
+            assert_eq!(view.attach_query_recipe(&mut selected, false)?, 0);
+            assert!(selected.query_recipe.is_none());
+            assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
+            let paths = vec![path.to_str().unwrap().to_owned()];
+            let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            assert_eq!(
+                super::super::super::source_lifecycle::component_paths(&mut tx, &paths, &[], &[])?,
+                Some(paths)
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
+    for unexpected in ["{".to_owned(), "x".repeat(1048576)] {
+        let result = pool.transaction(&inline_namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=$3 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&inline_namespace.as_str().as_bytes(), &inline_generation.as_bytes(), &unexpected.as_bytes()]).map_err(sqlstate::error)?;
+            snapshot::in_transaction(tx, &inline_generation, |view| {
+                let mut selected = view.catalog(inline_key, false)?.unwrap();
+                assert!(view.attach_query_recipe(&mut selected, false).is_err());
+                Ok(())
+            })?;
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert_eq!(result, Err(StorageError::Conflict));
+    }
+    drop(inline_cache);
     let mut cache =
         crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
     let path = &data.rows[0].sources[0].path;
@@ -141,6 +251,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 view.load_query_recipe(&token),
                 Err(Error::MissingPayload)
             ));
+            assert!(view.attach_query_recipe(&mut display, false).is_err());
+            assert!(view.attach_query_recipe(&mut display, true).is_err());
             assert!(view.query_recipe_observation(Owner::History, row).is_err());
             Ok(token)
         })
@@ -158,6 +270,27 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             Some(expected.clone())
         );
         assert_eq!(view.selected_query_recipe(&token).unwrap(), expected);
+        let mut selected = view.catalog(&row.key, false)?.unwrap();
+        let metadata = serde_json::to_string(&selected).unwrap();
+        assert_eq!(
+            view.attach_query_recipe(&mut selected, false)?,
+            payload.len()
+        );
+        assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
+        assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
+        // A declared reference cannot evade authentication by also carrying
+        // inline-looking values, even when a typed payload is already attached.
+        let mut mixed = selected.clone();
+        let mixed_query = mixed.query.as_mut().unwrap();
+        mixed_query["selected"]["session"] = expected.session.clone();
+        mixed_query["selected"]["turns"] = serde_json::json!(expected.turns);
+        mixed_query["selected"]["edges"] = serde_json::json!(expected.edges);
+        assert!(view.attach_query_recipe(&mut mixed, false).is_err());
+        assert!(
+            crate::storage::query::history_window(&selected, None)
+                .unwrap()
+                .member
+        );
         Ok(())
     })
     .unwrap();
@@ -173,6 +306,32 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         crate::storage::query::QueryCatalogStore::selected_recipe(&port, &token).unwrap(),
         Some(expected.clone())
     );
+    // Replacing the actual stored reference with a complete inline-shaped
+    // object preserves source/summary fields but invalidates its receipt.
+    let mut replaced = row.clone();
+    replaced.query.as_mut().unwrap()["selected"] = serde_json::to_value(&expected).unwrap();
+    assert!(!crate::query_projection::SelectedRecipe::detached(
+        &replaced
+    ));
+    let replaced_metadata = serde_json::to_vec(&replaced).unwrap();
+    for payload in [None, Some(b"{".to_vec()), Some(vec![b'x'; 1048576])] {
+        let result = pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET metadata=$3,query_recipe=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &replaced_metadata, &payload]).map_err(sqlstate::error)?;
+            snapshot::in_transaction(tx, &generation, |view| {
+                let mut selected = view.catalog(&row.key, false)?.unwrap();
+                assert_eq!(selected.sources, row.sources);
+                assert_eq!(selected.query.as_ref().unwrap()["rows"], row.query.as_ref().unwrap()["rows"]);
+                assert!(!crate::query_projection::SelectedRecipe::detached(&selected));
+                assert!(view.query_recipe_observation(Owner::Catalog, &selected).is_err());
+                assert!(view.attach_query_recipe(&mut selected, false).is_err());
+                Ok(())
+            })?;
+            let paths = vec![path.to_str().unwrap().to_owned()];
+            assert!(super::super::super::source_lifecycle::component_paths(tx, &paths, &[], &[]).is_err());
+            Err::<(), _>(StorageError::Conflict)
+        });
+        assert_eq!(result, Err(StorageError::Conflict));
+    }
     for fault in [
         "corrupt",
         "digest",
@@ -212,6 +371,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                     "bound" => assert!(matches!(error, Error::Storage(StorageError::HistoryRetentionBounds)), "{error}"),
                     _ => assert!(matches!(error, Error::ObservationChanged), "{fault}: {error}"),
                 }
+                let mut selected = row.clone();
+                assert!(view.attach_query_recipe(&mut selected, false).is_err(), "{fault}");
                 Ok(())
             })?;
             checked = true;
@@ -229,6 +390,9 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                 held.load_query_recipe(&token).unwrap(),
                 Some(expected.clone())
             );
+            let mut selected = held.catalog(&row.key, false)?.unwrap();
+            held.attach_query_recipe(&mut selected, false)?;
+            assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
             snapshot::with_admitted_snapshot(&pool, &namespace, &control, &next, |view| {
                 let history = view.catalog(&row.key, true)?.unwrap();
                 let history_token = view
@@ -397,6 +561,74 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         row,
     )
     .unwrap();
+    let mut selected = row.clone();
+    assert_eq!(
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &reader,
+            Owner::Catalog,
+            &mut selected,
+        )
+        .unwrap(),
+        payload.len(),
+    );
+    assert_eq!(selected.query_recipe.as_ref(), Some(expected));
+    assert_eq!(serde_json::to_string(&selected).unwrap(), compact.metadata);
+    assert!(
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &reader,
+            Owner::History,
+            &mut selected,
+        )
+        .is_err()
+    );
+    let mut replaced = row.clone();
+    replaced.query.as_mut().unwrap()["selected"] = serde_json::to_value(expected).unwrap();
+    assert!(!crate::query_projection::SelectedRecipe::detached(
+        &replaced
+    ));
+    let replaced_metadata = serde_json::to_string(&replaced).unwrap();
+    for payload in [None, Some("{".to_owned()), Some("x".repeat(1048576))] {
+        tx.execute_batch("SAVEPOINT inline_shape_corruption")
+            .unwrap();
+        // Corrupt only this fixture's mutable cell, including a pair that a
+        // normal SQLite writer rejects at its CHECK constraint.
+        tx.pragma_update(None, "ignore_check_constraints", true)
+            .unwrap();
+        tx.execute(
+            "UPDATE main.session_catalog SET metadata=?3,query_recipe=?4 WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![source.namespace.as_str(), row.key, replaced_metadata, payload],
+        ).unwrap();
+        let mut selected: CatalogRow = serde_json::from_str(&replaced_metadata).unwrap();
+        assert_eq!(selected.sources, row.sources);
+        assert_eq!(
+            selected.query.as_ref().unwrap()["rows"],
+            row.query.as_ref().unwrap()["rows"]
+        );
+        assert!(
+            crate::storage::sqlite::proof_generations::query_recipe_observation(
+                &tx,
+                &binding,
+                Owner::Catalog,
+                &selected,
+            )
+            .is_err()
+        );
+        assert!(
+            crate::storage::sqlite::proof_generations::attach_query_recipe(
+                &tx,
+                &reader,
+                Owner::Catalog,
+                &mut selected,
+            )
+            .is_err()
+        );
+        tx.execute_batch("ROLLBACK TO inline_shape_corruption; RELEASE inline_shape_corruption")
+            .unwrap();
+        tx.pragma_update(None, "ignore_check_constraints", false)
+            .unwrap();
+    }
     let source_proof = match source_observation.residence {
         QueryRecipeResidence::Immutable { generation, .. } => generation,
         _ => panic!("ordinary semantic publication must own the immutable recipe"),
@@ -459,7 +691,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     let namespace = &config.namespace;
     let token = snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |view| {
         assert!(view.owner(&row.key)?.is_none());
-        let selected = view.catalog(&row.key, false)?.unwrap();
+        let mut selected = view.catalog(&row.key, false)?.unwrap();
         let token = view
             .query_recipe_observation(Owner::Catalog, &selected)
             .unwrap();
@@ -479,6 +711,15 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             Some(expected)
         );
         assert_eq!(&view.selected_query_recipe(&token).unwrap(), expected);
+        view.attach_query_recipe(&mut selected, false)?;
+        assert_eq!(selected.query_recipe.as_ref(), Some(expected));
+        assert_eq!(serde_json::to_string(&selected).unwrap(), compact.metadata);
+        let paths = vec![selected.sources[0].path.to_str().unwrap().to_owned()];
+        let discovered = {
+            let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            super::super::super::source_lifecycle::component_paths(&mut tx, &paths, &[], &[])?
+        };
+        assert_eq!(discovered, Some(paths));
         assert_eq!(
             token.original, binding,
             "decoding preserves producer coordinates"
@@ -531,8 +772,15 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
                 } else {
                     assert!(matches!(error, Error::ObservationChanged));
                 }
+                let mut selected = row.clone();
+                assert!(view.attach_query_recipe(&mut selected, false).is_err());
                 Ok(())
             })?;
+            let paths = vec![row.sources[0].path.to_str().unwrap().to_owned()];
+            assert!(
+                super::super::super::source_lifecycle::component_paths(tx, &paths, &[], &[])
+                    .is_err()
+            );
             checked = true;
             Err::<(), _>(StorageError::Conflict)
         });
@@ -542,7 +790,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
     // A genuine native successor hands the imported original to immutable
     // History, preserving its existing producer proof and detached payload.
     snapshot::with_admitted_snapshot(&pool, namespace, &control, &generation, |held| {
-        let selected = held.catalog(&row.key, false)?.unwrap();
+        let mut selected = held.catalog(&row.key, false)?.unwrap();
         let (next, continued) = advance_imported_fixture(&config, &pg_options);
         assert_eq!(continued.len(), 1);
         assert_eq!(continued[0].key, selected.key);
@@ -552,8 +800,10 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             held.load_query_recipe(&token).unwrap().as_ref(),
             Some(expected)
         );
+        held.attach_query_recipe(&mut selected, false)?;
+        assert_eq!(selected.query_recipe.as_ref(), Some(expected));
         snapshot::with_admitted_snapshot(&pool, namespace, &control, &next, |view| {
-            let history = view.catalog(&row.key, true)?.unwrap();
+            let mut history = view.catalog(&row.key, true)?.unwrap();
             let history_token = view
                 .query_recipe_observation(Owner::History, &history)
                 .unwrap();
@@ -580,6 +830,8 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
                 view.load_query_recipe(&history_token).unwrap().as_ref(),
                 Some(expected)
             );
+            view.attach_query_recipe(&mut history, true)?;
+            assert_eq!(history.query_recipe.as_ref(), Some(expected));
             Ok(())
         })?;
         Ok(())
