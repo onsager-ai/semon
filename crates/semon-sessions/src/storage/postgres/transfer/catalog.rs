@@ -941,6 +941,77 @@ mod tests {
         tx.commit().unwrap();
     }
 
+    fn search_observations(config: &StoreConfig, options: &crate::Options, imported: bool) -> serde_json::Value {
+        let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
+        let mut options = options.clone();
+        options.source = crate::storage::HostSource::new(config.namespace.clone(),config.expected_stream_epoch.clone().unwrap()).unwrap().with_store(config.clone()).unwrap();
+        let mut observations = Vec::new();
+        for scope in ["current","retained_history"] {
+            for query in ["claude","catalog","successor","facts-transfer-repo","no-such-transfer-session"] {
+                let reply = config.catalog_page(&options,&format!("scope={scope}&q={query}&limit=60")).unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(reply.status,200,"metadata search scope={scope} query={query}: {body}");
+                assert!(body["search"].is_object());
+                if imported {
+                    assert_eq!(body["completeness"]["state"],"partial");
+                    assert_eq!(body["search"]["index_complete"],false,"Catalog-scoped admission cannot claim full search completeness");
+                }
+                assert_eq!(body["search"]["partial"],false);
+                assert!(body["next_cursor"].is_null());
+                let items = body["items"].as_array().unwrap().iter().map(|item|serde_json::json!({"key":item["key"],"name":item["name"],"harness":item["harness"],"repo":item["repo"],"branch":item["branch"],"model":item["model"],"last":item["last"],"lifecycle":item["lifecycle"]})).collect::<Vec<_>>();
+                if query=="claude" { assert_eq!(items.len(),if scope=="current" {1} else {2},"genuine current/retained supersession"); }
+                if query=="no-such-transfer-session" { assert!(items.is_empty()); }
+                observations.push(serde_json::json!({"scope":scope,"query":query,"items":items,"candidates":body["search"]["candidates"],"candidate_budget":body["search"]["candidate_budget"],"byte_budget":body["search"]["byte_budget"]}));
+            }
+        }
+        serde_json::Value::Array(observations)
+    }
+
+    fn search_admission_corruption_refusals(
+        config: &StoreConfig,
+        pool: &PgPool,
+        control: &PgCancellation,
+        source: &StoreConfig,
+        manifest: &transfer::SnapshotManifest,
+        options: &crate::Options,
+        generation: &str,
+    ) {
+        // Change real applied rows, then call the public admission against the
+        // actual frozen source. Restore exact original values before asserting.
+        for (case,table,columns,keys,filter,change) in [
+            ("missing publication","catalog_search_publications","namespace,generation,scope,version,search_generation,backfill_complete,incomplete","namespace_digest,generation,scope","scope='current'::bytea","DELETE"),
+            ("wrong search generation","catalog_search_publications","namespace,generation,scope,version,search_generation,backfill_complete,incomplete","namespace_digest,generation,scope","scope='current'::bytea","UPDATE search_generation='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'::bytea"),
+            ("missing coverage","catalog_search_coverage","namespace,generation,scope,incomplete","namespace_digest,generation,scope","scope='current'::bytea","DELETE"),
+            ("wrong coverage","catalog_search_coverage","namespace,generation,scope,incomplete","namespace_digest,generation,scope","scope='current'::bytea","UPDATE incomplete=incomplete+1"),
+            ("missing posting","catalog_search_memberships","namespace,generation,key_digest,session_key,gram,last_ms","namespace_digest,generation,key_digest,gram","(key_digest,gram)=(SELECT key_digest,gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY key_digest,gram LIMIT 1)","DELETE"),
+            ("wrong posting timestamp","catalog_search_memberships","namespace,generation,key_digest,session_key,gram,last_ms","namespace_digest,generation,key_digest,gram","(key_digest,gram)=(SELECT key_digest,gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY key_digest,gram LIMIT 1)","UPDATE last_ms=last_ms+1"),
+        ] {
+            let table = format!("semon_pg_native_{table}");
+            let original: String = pool.transaction(&config.namespace,TxnKind::Transfer,control,|tx| {
+                let ns = config.namespace.as_str().as_bytes();
+                let where_clause = format!("namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND {filter}");
+                let rows = tx.driver.query(&format!("SELECT row_to_json(s)::text FROM (SELECT {columns} FROM {table} WHERE {where_clause} LIMIT 2) s"),&[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+                assert_eq!(rows.len(),1,"{case} must corrupt one genuine applied row");
+                let mutation = if change=="DELETE" {format!("DELETE FROM {table} WHERE {where_clause}")} else {format!("UPDATE {table} SET {} WHERE {where_clause}",change.strip_prefix("UPDATE ").unwrap())};
+                assert_eq!(tx.driver.execute(&mutation,&[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?,1);
+                Ok(rows[0].get(0))
+            }).unwrap();
+            let result = config.transfer_inbox().admit_catalog_from(&source.transfer_inbox(),manifest,options);
+            let published = pool.transaction(&config.namespace,TxnKind::Transfer,control,|tx| {
+                let updates = columns.split(',').map(|column|format!("{column}=excluded.{column}")).collect::<Vec<_>>().join(",");
+                tx.driver.execute(&format!("INSERT INTO {table}({columns}) SELECT {columns} FROM json_populate_record(NULL::{table},$1::text::json) ON CONFLICT({keys}) DO UPDATE SET {updates}"),&[&original]).map_err(sqlstate::error)?;
+                let ns = config.namespace.as_str().as_bytes();
+                let generation = super::super::super::model_cache::generation(tx)?;
+                let operations: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",&[&ns]).map_err(sqlstate::error)?.get(0);
+                let grants: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND convert_from(key,'UTF8') LIKE 'native_transfer_v1:catalog-owner:%'",&[&ns]).map_err(sqlstate::error)?.get(0);
+                Ok((generation,operations,grants))
+            }).unwrap();
+            eprintln!("transfer_search_admission_corruption case={case} result={result:?} published={published:?}");
+            assert!(matches!(result,Err(StorageError::ScopeChanged)),"{case} must refuse before publication");
+            assert_eq!(published,(None,0,0),"{case} must roll back head, operation and import grant");
+        }
+    }
+
     #[test]
     fn pg_current_transfer225_occupied_description_refused_before_native_commit() {
         let root = root();
@@ -1063,6 +1134,7 @@ mod tests {
         );
         original_lease.release().unwrap();
         let original_selected = selected_receipts(&source, &options, &host);
+        let original_search = search_observations(&source,&options,false);
         // Capturing the SQLite source performs no PG work. Discard an idle
         // fixture connection before the server's ten-second idle-session cap.
         let (pool, _) = super::super::super::tests::fixture(|limits| {
@@ -1247,6 +1319,7 @@ mod tests {
             assert_eq!(history_proof_recipe_pg.as_deref(), Some(history_proof_recipe.as_bytes()));
             Ok(())
         }).unwrap();
+        search_admission_corruption_refusals(&config,&pool,&control,&source,&manifest,&options,&source.catalog_generation().unwrap());
         let admitted = config
             .transfer_inbox()
             .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
@@ -1259,6 +1332,9 @@ mod tests {
             admitted
         );
         assert_eq!(config.catalog_generation().unwrap(), admitted);
+        let forward_search = search_observations(&config,&options,true);
+        assert_eq!(forward_search,original_search,"SQLite to PostgreSQL metadata search equivalence with Raw absent");
+        eprintln!("transfer_search_equivalence direction=sqlite_to_pg passed");
         assert!(
             stale_target
                 .transaction(&config.namespace, TxnKind::ReadSnapshot, &control, |_| Ok(
@@ -1639,6 +1715,8 @@ mod tests {
             admitted
         );
         assert_eq!(reverse.catalog_generation().unwrap(), admitted);
+        assert_eq!(search_observations(&reverse,&options,true),forward_search,"PostgreSQL to SQLite metadata search equivalence with Raw absent");
+        eprintln!("transfer_search_equivalence direction=pg_to_sqlite passed");
         let reverse_reader = crate::storage::NativeReaderBinding::Admitted(reverse.clone());
         let reverse_db = reverse_reader.connection().unwrap();
         assert_eq!(reverse_db.query_row("SELECT value FROM meta WHERE namespace=semon_namespace() AND key='catalog_completeness'", [], |row| row.get::<_,String>(0)).unwrap(), "partial");
