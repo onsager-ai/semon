@@ -21,6 +21,39 @@ const RELATION_OUTPUT_LIMIT: usize = 64;
 const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 
+fn relation_owner_source_paths(
+    physical: &(impl crate::events::store::semantic_stage::OwnerClosurePort
+         + crate::events::store::semantic_stage::ContextPort),
+    selected: &str,
+    epoch: i64,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let mut paths = crate::events::store::semantic_stage::owner_closure_with(physical, selected)?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let owner_paths = paths.iter().cloned().collect::<Vec<_>>();
+    let context = crate::events::store::semantic_stage::context_with(
+        physical,
+        &owner_paths,
+        Phase::Relations,
+        epoch,
+    )?;
+    for parent in context.parent_paths(&owner_paths) {
+        paths.extend(crate::events::store::semantic_stage::owner_closure_with(
+            physical, &parent,
+        )?);
+    }
+    Ok(paths)
+}
+
+fn relation_context_budget_error(error: &rusqlite::Error) -> bool {
+    matches!(error, rusqlite::Error::InvalidQuery)
+        || matches!(
+            error,
+            rusqlite::Error::ToSqlConversionFailure(cause)
+                if cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
+        )
+}
+
 struct RelationPage {
     cursor: RelationCursor,
     locations: Vec<Location>,
@@ -3861,12 +3894,33 @@ impl Stage {
             .map_err(error)?;
         }
         let claude = result_phase == Phase::Relations && paths.first().map(|path| tx.query_row("SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2", params![ns,path], |r| r.get::<_,bool>(0)).optional()).transpose().map_err(error)?.flatten().unwrap_or(false);
+        let mut relation_primary_paths = None;
         if claude {
             paths.truncate(1);
         } else if result_phase == Phase::Relations {
             // Each loaded path can add a child spawn; selected primary events
             // can add independent relays. Reserve room for both output sets.
             paths.truncate(RELATION_OUTPUT_LIMIT - RELATION_EVENT_PAGE_LIMIT);
+            let mut primary = Vec::new();
+            let mut context_paths = Vec::new();
+            for path in paths.drain(..) {
+                let is_claude: bool = tx
+                    .query_row(
+                        "SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2",
+                        params![ns, path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(error)?
+                    .unwrap_or(false);
+                if is_claude {
+                    context_paths.push(path);
+                } else {
+                    primary.push(path);
+                }
+            }
+            paths = context_paths;
+            relation_primary_paths = Some(primary);
         }
         let mut context = if matches!(result_phase, Phase::Indexing | Phase::Identity) {
             Context {
@@ -3921,7 +3975,12 @@ impl Stage {
         };
         let mut relation_cursors = Vec::new();
         let mut relation_read_budget = RelationPageReadBudget::default();
-        if result_phase == Phase::Relations && !paths.is_empty() {
+        if result_phase == Phase::Relations
+            && (!paths.is_empty()
+                || relation_primary_paths
+                    .as_ref()
+                    .is_some_and(|primary| !primary.is_empty()))
+        {
             if claude {
                 let selected = paths[0].clone();
                 let page = relation_page(
@@ -3965,27 +4024,51 @@ impl Stage {
                 relation_cursors.push(page.cursor);
             } else {
                 let mut remaining_primary_events = RELATION_EVENT_PAGE_LIMIT;
-                let mut page_paths = Vec::with_capacity(paths.len());
-                for path in &paths {
-                    let is_claude: bool = tx
-                        .query_row(
-                            "SELECT harness='claude' FROM main.catalog_semantic_inputs WHERE namespace=?1 AND source_path=?2",
-                            params![ns, path],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(error)?
-                        .unwrap_or(false);
-                    if !is_claude {
-                        page_paths.push(path.clone());
-                    }
-                }
+                let page_paths = relation_primary_paths.take().unwrap_or_default();
                 for selected in page_paths {
                     if relation_read_budget.metadata_reads >= RELATION_EVENT_READ_BATCH_LIMIT
                         || relation_read_budget.metadata_bytes >= RELATION_METADATA_BATCH_LIMIT
                     {
                         break;
                     }
+                    let mut candidate_paths = paths
+                        .iter()
+                        .cloned()
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let closure = match relation_owner_source_paths(&physical, &selected, epoch) {
+                        Ok(paths) => paths,
+                        Err(source_error) if relation_context_budget_error(&source_error) => {
+                            if relation_cursors.is_empty() {
+                                return Err(refuse("semantic_source_budget"));
+                            }
+                            break;
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    };
+                    candidate_paths.extend(closure);
+                    if candidate_paths.len() > 64 {
+                        if relation_cursors.is_empty() {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        break;
+                    }
+                    let candidate_paths = candidate_paths.into_iter().collect::<Vec<_>>();
+                    let mut candidate_context =
+                        match crate::events::store::semantic_stage::context_with(
+                            &physical,
+                            &candidate_paths,
+                            result_phase,
+                            epoch,
+                        ) {
+                        Ok(context) => context,
+                        Err(source_error) if relation_context_budget_error(&source_error) => {
+                            if relation_cursors.is_empty() {
+                                return Err(refuse("semantic_source_budget"));
+                            }
+                            break;
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    };
                     let RelationPage {
                         cursor,
                         locations,
@@ -4005,40 +4088,30 @@ impl Stage {
                         }
                         break;
                     }
-                    let had_locations = context.matching_locations.is_some();
-                    let location_count = context.matching_locations.as_ref().map_or(0, Vec::len);
-                    let had_headers = context.matching_header_paths.is_some();
-                    let header_count = context.matching_header_paths.as_ref().map_or(0, Vec::len);
-                    context
+                    let mut selected_locations = context
                         .matching_locations
-                        .get_or_insert_with(Vec::new)
-                        .extend(locations);
-                    context
+                        .clone()
+                        .unwrap_or_default();
+                    selected_locations.extend(locations);
+                    candidate_context.matching_locations = Some(selected_locations);
+                    let mut selected_headers = context
                         .matching_header_paths
-                        .get_or_insert_with(Vec::new)
-                        .push(selected);
-                    if serde_json::to_vec(&context)
+                        .clone()
+                        .unwrap_or_default();
+                    selected_headers.push(selected);
+                    candidate_context.matching_header_paths = Some(selected_headers);
+                    if serde_json::to_vec(&candidate_context)
                         .map_err(|e| StoreError::Data(e.to_string()))?
                         .len()
                         > 1048576
                     {
-                        if let Some(locations) = &mut context.matching_locations {
-                            locations.truncate(location_count);
-                        }
-                        if !had_locations {
-                            context.matching_locations = None;
-                        }
-                        if let Some(headers) = &mut context.matching_header_paths {
-                            headers.truncate(header_count);
-                        }
-                        if !had_headers {
-                            context.matching_header_paths = None;
-                        }
                         if relation_cursors.is_empty() {
-                            continue;
+                            return Err(refuse("semantic_source_budget"));
                         }
                         break;
                     }
+                    paths = candidate_paths;
+                    context = candidate_context;
                     remaining_primary_events -= primary_events;
                     relation_cursors.push(cursor);
                     if budget_blocked

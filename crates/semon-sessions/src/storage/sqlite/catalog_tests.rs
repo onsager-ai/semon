@@ -66,17 +66,28 @@ impl Fixture {
         path
     }
     fn codex_source(&self, id: &str, parent: Option<&str>, modified: u64) -> String {
-        let relative = format!("sessions/2026/10/01/rollout-{id}.jsonl");
+        self.codex_source_with_records(id, id, parent, None, modified, &[])
+    }
+    fn codex_source_with_records(
+        &self,
+        file_id: &str,
+        native_id: &str,
+        parent: Option<&str>,
+        agent_path: Option<&str>,
+        modified: u64,
+        records: &[Value],
+    ) -> String {
+        let relative = format!("sessions/2026/10/01/rollout-{file_id}.jsonl");
         let path = self.options.codex_home.join(&relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(
-                &path,
-                format!(
-                    "{}\n",
-                    json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":id,"parent_thread_id":parent,"thread_source":if parent.is_some() {"subagent"} else {"cli"},"cwd":"/synthetic/project"}})
-                ),
-            )
-            .unwrap();
+        let mut header = json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":native_id,"parent_thread_id":parent,"thread_source":if parent.is_some() {"subagent"} else {"cli"},"cwd":"/synthetic/project"}});
+        if let Some(agent_path) = agent_path {
+            header["payload"]["agent_path"] = json!(agent_path);
+        }
+        let mut lines = Vec::with_capacity(records.len() + 1);
+        lines.push(header.to_string());
+        lines.extend(records.iter().map(|record| record.to_string()));
+        fs::write(&path, format!("{}\n", lines.join("\n"))).unwrap();
         fs::File::open(&path)
             .unwrap()
             .set_times(
@@ -87,13 +98,15 @@ impl Fixture {
         relative
     }
     /// The admitted Catalog producer, including its namespace and writer roles.
-    fn db(&self) -> Connection {
+    fn stage(&self) -> crate::storage::sqlite::semantic::Stage {
         let config = self.options.source.config(&self.options.cache).unwrap();
         crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
         )
         .unwrap()
-        .into_test_connection()
+    }
+    fn db(&self) -> Connection {
+        self.stage().into_test_connection()
     }
     fn publish(&self, count: usize) {
         for id in 0..count {
@@ -9946,6 +9959,355 @@ fn cold_codex_family_crossing_batches_preserves_every_native_parent() {
             "{child} lost its native parent across source batches"
         );
     }
+}
+
+#[test]
+fn codex_child_pages_use_complete_parent_calls_across_sibling_pages() {
+    for parent_file in ["000-family-parent", "zzz-family-parent"] {
+        let fixture = Fixture::new();
+        let spawn_call = |call_id: String, task: String| {
+            json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":call_id,"arguments":json!({"task_name":task}).to_string()}})
+        };
+        let mut calls = vec![spawn_call("spawn-first".into(), "task-000".into())];
+        for n in 1..80 {
+            calls.push(spawn_call(
+                format!("spawn-{n:03}"),
+                format!("task-{n:03}"),
+            ));
+        }
+        for n in 0..176 {
+            calls.push(spawn_call(
+                format!("noise-{n:03}"),
+                format!("unclaimed-{n:03}"),
+            ));
+        }
+        calls.push(spawn_call("spawn-last".into(), "task-000".into()));
+        assert_eq!(calls.len(), 257);
+
+        // The duplicate task call is in the seventeenth 16-event page. Keep a
+        // second physical source under the same native parent identity.
+        let parent = fixture.codex_source_with_records(
+            parent_file,
+            "family-parent",
+            None,
+            None,
+            1,
+            &calls,
+        );
+        let parent_copy = fixture.codex_source_with_records(
+            &format!("{parent_file}-copy"),
+            "family-parent",
+            None,
+            None,
+            1,
+            &[],
+        );
+        let parent_call_path = fixture
+            .options
+            .codex_home
+            .join(&parent)
+            .to_string_lossy()
+            .into_owned();
+        let mut paths = std::collections::BTreeSet::from([parent.clone(), parent_copy.clone()]);
+        let mut child_paths = std::collections::BTreeMap::new();
+        for n in 0..80 {
+            let task = format!("task-{n:03}");
+            let child = format!("family-child-{n:03}");
+            let records = [
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":format!("brief-{task}")}]}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("result-{task}")}]}}),
+            ];
+            let source = fixture.codex_source_with_records(
+                &format!("child-{n:03}"),
+                &child,
+                Some("family-parent"),
+                Some(&task),
+                2,
+                &records,
+            );
+            paths.insert(source.clone());
+            child_paths.insert(child, source);
+        }
+
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some(std::collections::BTreeSet::from([
+            parent.clone(),
+            parent_copy.clone(),
+        ]));
+        crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+        fixture.publish_existing();
+        let db = fixture.db();
+        let parent_rows = rows(&db, &Request::parse("sid=family-parent").unwrap()).unwrap();
+        assert_eq!(parent_rows[0].sources.len(), 2);
+        drop(db);
+
+        facts.codex_rollouts = Some(paths);
+        crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+        fixture.publish_existing();
+
+        let db = fixture.db();
+        let parent_done: bool = db
+            .query_row(
+                "SELECT relation_done=1 FROM catalog_semantic_sources WHERE source_path=?1",
+                [&parent_call_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(parent_done);
+        let metadata = db
+            .prepare("SELECT metadata FROM catalog_semantic_relations WHERE from_key='family-parent' AND to_key LIKE 'family-child-%' ORDER BY to_key")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(metadata.len(), 80);
+        let mut outgoing = 0;
+        for text in metadata {
+            let relation: Value = serde_json::from_str(&text).unwrap();
+            let child = relation["to"].as_str().unwrap();
+            let child_source = fixture
+                .options
+                .codex_home
+                .join(child_paths.get(child).unwrap())
+                .to_string_lossy()
+                .into_owned();
+            assert_eq!(relation["kind"], "spawn");
+            assert_eq!(relation["has_result"], true);
+            assert!(relation["previews"].get("brief").is_some());
+            assert!(relation["previews"].get("result").is_some());
+            let placements = relation["placements"].as_array().unwrap();
+            assert!(placements.iter().any(|placement| {
+                placement["outgoing"] == false
+                    && placement["at"]["source"]["path"].as_str()
+                        == Some(child_source.as_str())
+            }));
+            if child == "family-child-000" {
+                assert_eq!(relation["ambiguous"], true);
+                assert!(!placements.iter().any(|placement| placement["outgoing"] == true));
+            } else {
+                assert_eq!(relation["ambiguous"], false);
+                assert!(placements.iter().any(|placement| {
+                    placement["outgoing"] == true
+                        && placement["at"]["source"]["path"].as_str()
+                            == Some(parent_call_path.as_str())
+                }));
+                outgoing += 1;
+            }
+        }
+        assert_eq!(outgoing, 79);
+        let first_child = fixture
+            .options
+            .codex_home
+            .join(child_paths.values().next().unwrap())
+            .to_string_lossy()
+            .into_owned();
+        if parent_file.starts_with("000-") {
+            assert!(parent_call_path < first_child);
+        } else {
+            assert!(parent_call_path > first_child);
+        }
+    }
+}
+
+#[test]
+fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
+    let fixture = Fixture::new();
+    let spawn = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});
+    let parent = fixture.codex_source_with_records(
+        "parent-a",
+        "family-parent",
+        None,
+        None,
+        1,
+        &[spawn],
+    );
+    let parent_copy = fixture.codex_source_with_records(
+        "parent-b",
+        "family-parent",
+        None,
+        None,
+        1,
+        &[],
+    );
+    let child_records = [json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}})];
+    let child = fixture.codex_source_with_records(
+        "child-0",
+        "family-child-0",
+        Some("family-parent"),
+        Some("task-0"),
+        2,
+        &child_records,
+    );
+    let facts_path = fixture.options.facts.as_ref().unwrap();
+    let mut facts = crate::read_facts(facts_path).unwrap();
+    facts.codex_rollouts = Some(
+        [parent.clone(), parent_copy.clone(), child.clone()]
+            .into_iter()
+            .collect(),
+    );
+    crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    fixture.publish_existing();
+
+    let parent_paths = [parent, parent_copy]
+        .into_iter()
+        .map(|path| {
+            fixture
+                .options
+                .codex_home
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let child_path = fixture
+        .options
+        .codex_home
+        .join(child)
+        .to_string_lossy()
+        .into_owned();
+    let db = fixture.db();
+    db.execute(
+        "UPDATE main.catalog_semantic_sources SET relation_done=1,relation_after=''",
+        [],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.catalog_semantic_sources SET relation_done=0 WHERE source_path=?1",
+        [&child_path],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.catalog_semantic_stage SET phase='relations'",
+        [],
+    )
+    .unwrap();
+    drop(db);
+
+    let mut stage = fixture.stage();
+    let batch = stage.batch(64).unwrap().unwrap();
+    assert!(batch.paths.contains(&child_path));
+    for parent in &parent_paths {
+        assert!(batch.paths.contains(parent));
+        assert!(!batch
+            .context
+            .matching_header_paths
+            .as_ref()
+            .unwrap()
+            .contains(parent));
+        assert!(!batch
+            .relation_cursors
+            .iter()
+            .any(|cursor| &cursor.path == parent));
+    }
+    assert_eq!(batch.context.matching_header_paths, Some(vec![child_path.clone()]));
+    assert_eq!(batch.relation_cursors.len(), 1);
+    assert_eq!(batch.relation_cursors[0].path, child_path);
+    assert!(batch
+        .context
+        .matching_locations
+        .as_ref()
+        .unwrap()
+        .iter()
+        .all(|location| location.source.path.to_string_lossy().as_ref() == child_path));
+    assert_eq!(
+        batch
+            .source_claims
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        batch.paths.iter().cloned().collect()
+    );
+}
+
+#[test]
+fn codex_relation_closure_over_budget_refuses_without_advancing_sources() {
+    let fixture = Fixture::new();
+    let parent_call = json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"spawn-0","arguments":json!({"task_name":"task-0"}).to_string()}});
+    let mut paths = std::collections::BTreeSet::new();
+    for n in 0..64 {
+        let records: &[Value] = if n == 0 {
+            std::slice::from_ref(&parent_call)
+        } else {
+            &[]
+        };
+        paths.insert(fixture.codex_source_with_records(
+            &format!("parent-{n:02}"),
+            "wide-parent",
+            None,
+            None,
+            1,
+            records,
+        ));
+    }
+    let child_records = [json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"brief"}]}})];
+    let child = fixture.codex_source_with_records(
+        "000-child",
+        "wide-child",
+        Some("wide-parent"),
+        Some("task-0"),
+        2,
+        &child_records,
+    );
+    paths.insert(child.clone());
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some(paths);
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let mut refusal = None;
+    for _ in 0..128 {
+        match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
+            Ok(true) => panic!("an overbudget complete parent closure was published"),
+            Ok(false) => {}
+            Err(error) => {
+                refusal = Some(error.to_string());
+                break;
+            }
+        }
+    }
+    drop(work);
+    evidence.retire();
+    assert!(refusal.is_some(), "the overbudget closure was not refused");
+
+    let db = fixture.db();
+    let child_path = fixture
+        .options
+        .codex_home
+        .join(child)
+        .to_string_lossy()
+        .into_owned();
+    let child_cursor: (bool, String) = db
+        .query_row(
+            "SELECT relation_done=1,relation_after FROM main.catalog_semantic_sources WHERE source_path=?1",
+            [&child_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(child_cursor, (false, String::new()));
+    let advanced: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.catalog_semantic_sources WHERE relation_done=1 OR relation_after<>''",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(advanced, 0);
+    let child_published: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE lifecycle='current' AND session_key='wide-child')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(!child_published);
 }
 
 #[test]
