@@ -623,7 +623,11 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
                           AND key_digest=sha256($3::bytea) AND session_key=$3
                      ), retained AS (
-                        SELECT h.metadata,o.last_ms,o.harness,o.repo
+                        SELECT h.metadata,o.last_ms,o.harness,o.repo,o.original,
+                            EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c
+                              WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace
+                                AND c.generation=o.generation AND c.key_digest=o.key_digest
+                                AND c.session_key=o.session_key) AS has_current
                         FROM semon_pg_native_catalog_history_owners o
                         JOIN semon_pg_native_catalog_history_headers h
                           ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
@@ -632,12 +636,12 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                         WHERE $5 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1
                           AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3
                      ), chosen AS (
-                        SELECT metadata,last_ms,harness,repo,true AS is_live FROM live
+                        SELECT metadata,last_ms,harness,repo,true AS is_live,NULL::boolean AS original,NULL::boolean AS has_current FROM live
                         UNION ALL
-                        SELECT metadata,last_ms,harness,repo,false FROM retained
+                        SELECT metadata,last_ms,harness,repo,false,original,has_current FROM retained
                         WHERE NOT EXISTS (SELECT 1 FROM live)
                      ) SELECT octet_length(metadata)::bigint,CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END,
-                         last_ms,harness,repo,is_live FROM chosen",
+                         last_ms,harness,repo,is_live,original,has_current FROM chosen",
                     &[&ns, &generation, &key.as_bytes(), &(budget as i64), &history],
                 )?;
                 if rows.len() > 1 {
@@ -646,25 +650,55 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
                 let text = |bytes: Vec<u8>| String::from_utf8(bytes).map_err(io::Error::other);
                 rows.first()
                     .map(|row| {
+                        let is_live: bool = row.get(5);
+                        let original: Option<bool> = row.get(6);
+                        let has_current: Option<bool> = row.get(7);
                         let repo = text(row.get(4))?;
+                        let mut length: i64 = row.get(0);
+                        let mut encoded: Option<Vec<u8>> = row.get(1);
+                        let mut lifecycle = if is_live {
+                            crate::model::summary::CatalogLifecycle::Current
+                        } else {
+                            crate::model::summary::CatalogLifecycle::Retained
+                        };
+                        // History headers keep their captured lifecycle. Project
+                        // only this bounded fallback candidate through the same
+                        // owner rule as history_display_catalog.
+                        if !is_live {
+                            if let Some(bytes) = encoded.take() {
+                                let mut value: CatalogRow = serde_json::from_slice(&bytes)
+                                    .map_err(|_| failed(StorageError::ScopeChanged))?;
+                                let captured = value.lifecycle;
+                                lifecycle = super::history_display_lifecycle(
+                                    original.ok_or_else(|| failed(StorageError::ScopeChanged))?,
+                                    has_current
+                                        .ok_or_else(|| failed(StorageError::ScopeChanged))?,
+                                    captured,
+                                );
+                                if lifecycle != captured {
+                                    value.lifecycle = lifecycle;
+                                    let projected =
+                                        serde_json::to_vec(&value).map_err(io::Error::other)?;
+                                    length =
+                                        i64::try_from(projected.len()).map_err(io::Error::other)?;
+                                    encoded = (length <= budget as i64).then_some(projected);
+                                } else {
+                                    encoded = Some(bytes);
+                                }
+                            }
+                        }
                         Ok(Candidate {
-                            owner: if row.get::<_, bool>(5) {
+                            owner: if is_live {
                                 CatalogObservationOwner::Catalog
                             } else {
                                 CatalogObservationOwner::History
                             },
-                            length: row.get(0),
-                            encoded: row.get::<_, Option<Vec<u8>>>(1).map(text).transpose()?,
+                            length,
+                            encoded: encoded.map(text).transpose()?,
                             last: row.get(2),
                             harness: text(row.get(3))?,
                             repo: (!repo.is_empty()).then_some(repo),
-                            lifecycle: if row.get::<_, bool>(5) {
-                                crate::model::summary::CatalogLifecycle::Current
-                            } else {
-                                crate::model::summary::CatalogLifecycle::Retained
-                            }
-                            .as_str()
-                            .to_owned(),
+                            lifecycle: lifecycle.as_str().to_owned(),
                         })
                     })
                     .transpose()
