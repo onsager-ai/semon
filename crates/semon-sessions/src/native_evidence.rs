@@ -4553,6 +4553,8 @@ mod catalog_owner_tests {
         .unwrap();
 
         let evidence = NativeEvidence::new(options.clone());
+        let initialized = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        drop(initialized);
         let database = cold_search_connection(&options);
         let paths = [&first, &second]
             .into_iter()

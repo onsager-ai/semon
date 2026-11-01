@@ -9568,7 +9568,17 @@ mod tests {
             options: &crate::Options,
             inputs: &[crate::Input],
         ) -> (Batch, crate::model::SemanticModelBatch) {
-            let paths = inputs
+            ready_from_seeds(cache, f, options, inputs, inputs)
+        }
+
+        fn ready_from_seeds(
+            cache: &mut EventCache,
+            f: &Fixture,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+            seeds: &[crate::Input],
+        ) -> (Batch, crate::model::SemanticModelBatch) {
+            let paths = seeds
                 .iter()
                 .map(|i| i.full_path(options).to_string_lossy().into_owned())
                 .collect::<Vec<_>>();
@@ -14140,11 +14150,12 @@ mod tests {
             #[test]
             fn stale_wider_oversized_retry_preserves_narrower_hint_and_prior_receipt() {
                 let (f, _, options, _) = model_sources();
-                let options = &options[0];
-                let inputs = inputs(68);
+                let options = &options[1];
+                let inputs = claude_inputs(options, 68, 0);
                 let mut cache = open(&f.config);
-                admit_independent_inputs(&mut cache, options, &inputs);
-                let (first, first_model) = ready(&mut cache, &f, options, &inputs);
+                claude_ingest(&mut cache, options, &inputs);
+                let (first, first_model) =
+                    ready_from_seeds(&mut cache, &f, options, &inputs, &inputs[..1]);
                 assert_eq!(first.phase, Phase::Publication);
                 assert_eq!(first.paths.len(), 64);
                 assert_eq!(
@@ -14243,11 +14254,12 @@ mod tests {
             #[test]
             fn later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch() {
                 let (f, _, options, _) = model_sources();
-                let options = &options[0];
-                let inputs = inputs(66);
+                let options = &options[1];
+                let inputs = claude_inputs(options, 66, 0);
                 let mut cache = open(&f.config);
-                admit_independent_inputs(&mut cache, options, &inputs);
-                let (first, first_model) = ready(&mut cache, &f, options, &inputs);
+                claude_ingest(&mut cache, options, &inputs);
+                let (first, first_model) =
+                    ready_from_seeds(&mut cache, &f, options, &inputs, &inputs[..1]);
                 assert_eq!(first.phase, Phase::Publication);
                 assert_eq!(first.paths.len(), 64);
                 assert_eq!(
