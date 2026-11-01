@@ -232,6 +232,7 @@ pub(super) fn next(tx: &mut PgTxn<'_>, limit: usize) -> Result<Option<Batch>, St
         epoch: stage.epoch,
         phase: stage.phase,
         paths: stage.paths,
+        source_claims: stage.claims.clone(),
         base_generation: stage.generation,
         source_revision: stage.revision,
         runtime: stage.runtime,
