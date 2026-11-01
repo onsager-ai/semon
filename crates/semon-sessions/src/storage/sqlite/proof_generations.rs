@@ -2399,7 +2399,9 @@ pub(crate) fn reconcile_native_observation_owners(
         )
         .map_err(failed)?;
     }
-    if !history_proof_owned && !catalog_proof_owned && !history_owned && history_capture.is_some() {
+    // A new Catalog proof does not replace the old exact grant's History
+    // custody. Each physical owner qualifies against its own row digest.
+    if !history_proof_owned && !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
         db.execute(
             "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
