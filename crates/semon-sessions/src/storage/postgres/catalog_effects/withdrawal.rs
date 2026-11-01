@@ -200,16 +200,22 @@ pub(in crate::storage::postgres) fn remove(
         transcripts: None,
         observations: None,
     };
-    if !super::history::preserve(
+    let search_receipt = match super::history::preserve(
         tx,
         &generation,
         &previous,
         &empty_publication,
         &removed_digests,
     )? {
-        // The exact operation generation owns these private custody pages;
-        // the caller retains and retries the pending removal on Deferred.
-        return Ok(Outcome::Deferred);
+        super::history::PreserveOutcome::Deferred => {
+            // The exact operation generation owns these private custody pages;
+            // the caller retains and retries the pending removal on Deferred.
+            return Ok(Outcome::Deferred);
+        }
+        super::history::PreserveOutcome::Complete(receipt) => receipt,
+    };
+    if !search_receipt.is_empty() {
+        return Err(StorageError::ScopeChanged);
     }
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;
@@ -227,7 +233,7 @@ pub(in crate::storage::postgres) fn remove(
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE retained_search_begin");
-    super::search::publish_retained_history(tx, &generation, &removed_digests)?;
+    super::search::publish_retained_history(tx, &generation, &removed_digests, search_receipt)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE retained_search_complete");
     let effects = Effects {

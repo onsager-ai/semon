@@ -520,13 +520,19 @@ pub(in crate::storage::postgres) fn publish(
     if expected.is_some() {
         eprintln!("PG_PUBLISH_STAGE history_preserve");
     }
-    if let Some(previous) = expected
-        && !history::preserve(tx, &generation, previous, publication, &leaving)?
-    {
-        // Only private custody checkpoints commit, before any successor row
-        // or owner is carried; the head, claims and stage stay with the old
-        // generation until custody completes and the CAS below succeeds.
-        return Ok((Outcome::Deferred, None));
+    let mut retained_search_receipt = None;
+    if let Some(previous) = expected {
+        match history::preserve(tx, &generation, previous, publication, &leaving)? {
+            history::PreserveOutcome::Deferred => {
+                // Only private custody checkpoints commit, before any successor row
+                // or owner is carried; the head, claims and stage stay with the old
+                // generation until custody completes and the CAS below succeeds.
+                return Ok((Outcome::Deferred, None));
+            }
+            history::PreserveOutcome::Complete(receipt) => {
+                retained_search_receipt = Some(receipt);
+            }
+        }
     }
     if let Some((previous, mentioned, claimed)) = carried {
         #[cfg(test)]
@@ -538,7 +544,10 @@ pub(in crate::storage::postgres) fn publish(
         tx.driver.execute("DELETE FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns, &generation.as_bytes()]).map_err(sqlstate::error)?;
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE retained_search_begin");
-        super::search::publish_retained_history(tx, &generation, &leaving)?;
+        let receipt = retained_search_receipt
+            .take()
+            .ok_or(StorageError::ScopeChanged)?;
+        super::search::publish_retained_history(tx, &generation, &leaving, receipt)?;
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE retained_search_complete");
         let effects = Effects {

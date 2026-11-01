@@ -7898,6 +7898,33 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(page["items"][0]["key"], composite_key);
     assert_eq!(page["items"][0]["lifecycle"], "retained");
     assert_eq!(physical.key, composite_key);
+    let retained_search = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &final_generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &facts_options,
+                recent_machine,
+                &crate::catalog::Request::parse(
+                    "scope=retained_history&limit=50&q=fresh-composite-a",
+                )
+                .unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    assert_eq!(retained_search.status, 200);
+    let retained_search_page: serde_json::Value =
+        serde_json::from_slice(&retained_search.body).unwrap();
+    assert!(retained_search_page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["key"] == composite_key));
 
     // A retained-only owner remains readable from its publication proof when
     // the configured current Facts file has moved on. The same change refuses

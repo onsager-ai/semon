@@ -175,20 +175,16 @@ pub(in crate::storage::postgres) fn verify_state(
     tx.check()
 }
 
-/// Publish retained search from the exact original History authority for
-/// owners leaving Current. Their prior Search projection may describe a newer
-/// Current row than the retained header does.
+/// Publish retained search from original History plus composite authority
+/// qualified by the same transaction's History preservation.
 pub(super) fn publish_retained_history(
     tx: &mut PgTxn<'_>,
     generation: &str,
     key_digests: &[Vec<u8>],
+    receipt: super::history::HistorySearchReceipt,
 ) -> Result<(), StorageError> {
     if key_digests.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
         return Err(StorageError::Busy);
-    }
-    if key_digests.is_empty() {
-        tx.check()?;
-        return Ok(());
     }
     let mut keys = key_digests.to_vec();
     keys.sort();
@@ -198,18 +194,59 @@ pub(super) fn publish_retained_history(
 
     tx.check()?;
     let namespace = tx.namespace.as_str().as_bytes();
+    let (receipt_namespace, receipt_generation, composites, receipt_bytes) =
+        receipt.into_parts();
+    if receipt_namespace.as_bytes() != namespace
+        || receipt_generation.as_bytes() != generation.as_bytes()
+        || composites.len() > keys.len()
+        || receipt_bytes > crate::catalog_search::MAX_PUBLICATION_BYTES
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut composite_keys = std::collections::BTreeSet::new();
+    let mut composite_bytes = 0usize;
+    let mut catalog_rows = Vec::with_capacity(keys.len());
+    for (row, metadata_bytes) in composites {
+        let key_digest = digest(row.key.as_bytes());
+        if row.lifecycle != crate::model::summary::CatalogLifecycle::Retained
+            || row.query.is_some()
+            || row.sources.len() > 64
+            || metadata_bytes == 0
+            || keys.binary_search(&key_digest).is_err()
+            || !composite_keys.insert(key_digest.clone())
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        composite_bytes = composite_bytes
+            .checked_add(metadata_bytes)
+            .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
+            .ok_or(StorageError::ScopeChanged)?;
+        catalog_rows.push((key_digest, row));
+    }
+    if composite_bytes != receipt_bytes {
+        return Err(StorageError::ScopeChanged);
+    }
+    let original_keys = keys
+        .iter()
+        .filter(|key| !composite_keys.contains(*key))
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        tx.check()?;
+        return Ok(());
+    }
     let lengths = tx
         .driver
         .query(
             "SELECT o.key_digest,octet_length(h.metadata)::bigint,octet_length(h.original_header)::bigint FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
-            &[&namespace, &generation.as_bytes(), &keys],
+            &[&namespace, &generation.as_bytes(), &original_keys],
         )
         .map_err(sqlstate::error)?;
     tx.check()?;
-    if lengths.len() != keys.len() {
+    if lengths.len() != original_keys.len() {
         return Err(StorageError::ScopeChanged);
     }
-    let mut total_bytes = 0usize;
+    let mut total_bytes = receipt_bytes;
     let mut payload_lengths = Vec::with_capacity(lengths.len());
     for (index, row) in lengths.iter().enumerate() {
         let key: Vec<u8> = row.get(0);
@@ -220,7 +257,7 @@ pub(super) fn publish_retained_history(
                 .ok_or(StorageError::ScopeChanged)?,
         )
         .map_err(|_| StorageError::ScopeChanged)?;
-        if key.as_slice() != keys[index].as_slice() {
+        if key.as_slice() != original_keys[index].as_slice() {
             return Err(StorageError::ScopeChanged);
         }
         total_bytes = total_bytes
@@ -236,15 +273,14 @@ pub(super) fn publish_retained_history(
         .driver
         .query(
             "SELECT o.key_digest,o.session_key,o.owner_generation,o.original,o.last_ms,o.harness,o.repo,o.model,o.query_activity,o.query_active,o.parent_key,h.last_ms,h.harness,h.repo,h.model,h.query_activity,h.query_active,h.parent_key,h.metadata,h.original_header,h.recipe_generation,h.source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
-            &[&namespace, &generation.as_bytes(), &keys],
+            &[&namespace, &generation.as_bytes(), &original_keys],
         )
         .map_err(sqlstate::error)?;
     tx.check()?;
-    if headers.len() != keys.len() {
+    if headers.len() != original_keys.len() {
         return Err(StorageError::ScopeChanged);
     }
 
-    let mut catalog_rows = Vec::with_capacity(headers.len());
     for (index, header) in headers.iter().enumerate() {
         let key_digest: Vec<u8> = header.get(0);
         let session_key: Vec<u8> = header.get(1);
@@ -274,7 +310,7 @@ pub(super) fn publish_retained_history(
             u32::try_from(header.get::<_, i64>(22)).map_err(|_| StorageError::ScopeChanged)?;
         let total: i64 = header.get(23);
         let incomplete: bool = header.get(24);
-        if key_digest.as_slice() != keys[index].as_slice()
+        if key_digest.as_slice() != original_keys[index].as_slice()
             || owner_generation.len() != 64
             || !owner_generation.iter().all(|byte| byte.is_ascii_hexdigit())
             || !original
@@ -339,10 +375,27 @@ pub(super) fn publish_retained_history(
         // `name` and `branch` have no SQL mirrors and remain authoritative in
         // this admitted History metadata. This admission mirrors only the
         // indexed owner/header fields above; it does not claim whole-row integrity.
-        catalog_rows.push(row);
+        catalog_rows.push((key_digest, row));
     }
     tx.check()?;
 
+    catalog_rows.sort_by(|left, right| left.0.cmp(&right.0));
+    let catalog_digests = catalog_rows
+        .iter()
+        .map(|(key_digest, _)| key_digest.clone())
+        .collect::<Vec<_>>();
+    if catalog_rows.len() != keys.len()
+        || catalog_rows
+            .iter()
+            .any(|(key_digest, row)| key_digest != &digest(row.key.as_bytes()))
+        || catalog_digests != keys
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let catalog_rows = catalog_rows
+        .into_iter()
+        .map(|(_, row)| row)
+        .collect::<Vec<_>>();
     let keys = catalog_rows
         .iter()
         .map(|row| row.key.clone())

@@ -14,8 +14,54 @@ struct RecipeContents {
 
 enum WithdrawnComposite {
     NotApplicable,
-    Complete,
+    Complete {
+        row: CatalogRow,
+        metadata_bytes: usize,
+    },
     Staged,
+}
+
+pub(super) enum PreserveOutcome {
+    Deferred,
+    Complete(HistorySearchReceipt),
+}
+
+/// Same-transaction authority for the qualified composite rows retained by
+/// `preserve`; consumed by the retained-search publisher.
+pub(super) struct HistorySearchReceipt {
+    namespace: String,
+    generation: String,
+    composites: Vec<(CatalogRow, usize)>,
+    metadata_bytes: usize,
+}
+
+impl HistorySearchReceipt {
+    fn new(
+        namespace: &str,
+        generation: &str,
+        composites: Vec<(CatalogRow, usize)>,
+        metadata_bytes: usize,
+    ) -> Self {
+        Self {
+            namespace: namespace.to_owned(),
+            generation: generation.to_owned(),
+            composites,
+            metadata_bytes,
+        }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.composites.is_empty()
+    }
+
+    pub(super) fn into_parts(self) -> (String, String, Vec<(CatalogRow, usize)>, usize) {
+        (
+            self.namespace,
+            self.generation,
+            self.composites,
+            self.metadata_bytes,
+        )
+    }
 }
 
 pub(super) struct History<'a, 'tx> {
@@ -640,7 +686,10 @@ impl History<'_, '_> {
         let (history, recipe) =
             self.validate_withdrawn_composite(current, &owner_generation, &metadata)?;
         if self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
-            return Ok(WithdrawnComposite::Complete);
+            return Ok(WithdrawnComposite::Complete {
+                row: history,
+                metadata_bytes: metadata.len(),
+            });
         }
         for source in &history.sources {
             self.retain_source(&history, source)?;
@@ -1121,14 +1170,14 @@ impl CompositeHistoryStore for History<'_, '_> {
 }
 
 /// Call repeatedly with the same immutable generations until custody is done;
-/// false commits only bounded custody staging, never a Catalog receipt.
+/// Deferred commits only bounded custody staging, never a Catalog receipt.
 pub(super) fn preserve(
     tx: &mut PgTxn<'_>,
     generation: &str,
     previous: &str,
     publication: &crate::slot_projection::Publication<'_>,
     withdrawn: &[Vec<u8>],
-) -> Result<bool, StorageError> {
+) -> Result<PreserveOutcome, StorageError> {
     for generation in [generation, previous] {
         if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(StorageError::InvalidArguments);
@@ -1165,28 +1214,46 @@ pub(super) fn preserve(
         .and_then(crate::storage::selected::PresentationObservations::verified_continuations)
         .unwrap_or(&[]);
     let mut completed_composites = std::collections::BTreeSet::new();
+    let mut composite_search_rows = Vec::new();
+    let mut composite_search_bytes = 0usize;
     for row in &old {
         match store.preserve_withdrawn_composite(row)? {
             WithdrawnComposite::NotApplicable => {}
-            WithdrawnComposite::Complete => {
-                completed_composites.insert(row.key.as_str());
+            WithdrawnComposite::Complete {
+                row: history,
+                metadata_bytes,
+            } => {
+                composite_search_bytes = composite_search_bytes
+                    .checked_add(metadata_bytes)
+                    .filter(|total| {
+                        *total <= crate::catalog_search::MAX_PUBLICATION_BYTES
+                    })
+                    .ok_or(StorageError::Busy)?;
+                completed_composites.insert(history.key.clone());
+                composite_search_rows.push((history, metadata_bytes));
             }
             WithdrawnComposite::Staged => {
-                // One composite is staged per attempt. Its complete receipt
-                // is the private progress witness for the deterministic
+                // One composite is staged per attempt. Its complete custody
+                // witness is the private progress marker for the deterministic
                 // successor generation; Current and the withdrawal CAS wait.
-                return Ok(false);
+                return Ok(PreserveOutcome::Deferred);
             }
         }
     }
     let original_withdrawn = old
         .iter()
-        .filter(|row| !completed_composites.contains(row.key.as_str()))
+        .filter(|row| !completed_composites.contains(&row.key))
         .cloned()
         .collect::<Vec<_>>();
     if !catalog::preserve_rows(&store, publication.rows, &original_withdrawn, continuations)? {
-        return Ok(false);
+        return Ok(PreserveOutcome::Deferred);
     }
     catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
-    Ok(true)
+    let namespace = store.effects.tx.borrow().namespace.as_str().to_owned();
+    Ok(PreserveOutcome::Complete(HistorySearchReceipt::new(
+        &namespace,
+        generation,
+        composite_search_rows,
+        composite_search_bytes,
+    )))
 }

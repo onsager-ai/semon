@@ -776,17 +776,20 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             TxnKind::Write,
             &PgCancellation::default(),
             |tx| {
-                assert!(history::preserve(
-                    tx,
-                    L2,
-                    generation,
-                    &crate::slot_projection::Publication {
-                        rows: &missing,
-                        transcripts: Some(&recipes),
-                        observations: None,
-                    },
-                    &[]
-                )?);
+                assert!(matches!(
+                    history::preserve(
+                        tx,
+                        L2,
+                        generation,
+                        &crate::slot_projection::Publication {
+                            rows: &missing,
+                            transcripts: Some(&recipes),
+                            observations: None,
+                        },
+                        &[]
+                    )?,
+                    history::PreserveOutcome::Complete(_)
+                ));
                 Ok(())
             },
         )
