@@ -1056,12 +1056,44 @@ mod tests {
                 "DELETE",
             ),
             (
-                "wrong posting timestamp",
+                "wrong Current posting timestamp",
                 "catalog_search_memberships",
                 "namespace,generation,key_digest,session_key,gram,last_ms",
                 "namespace_digest,generation,key_digest,gram",
-                "(key_digest,gram)=(SELECT key_digest,gram FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ORDER BY key_digest,gram LIMIT 1)",
+                "(key_digest,gram)=(SELECT m.key_digest,m.gram FROM semon_pg_native_catalog_search_memberships m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key) ORDER BY m.key_digest,m.gram LIMIT 1)",
                 "UPDATE last_ms=last_ms+1",
+            ),
+            (
+                "wrong retained-only posting timestamp",
+                "catalog_search_memberships",
+                "namespace,generation,key_digest,session_key,gram,last_ms",
+                "namespace_digest,generation,key_digest,gram",
+                "(key_digest,gram)=(SELECT m.key_digest,m.gram FROM semon_pg_native_catalog_search_memberships m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key) ORDER BY m.key_digest,m.gram LIMIT 1)",
+                "UPDATE last_ms=last_ms+1",
+            ),
+            (
+                "missing retained-only header",
+                "catalog_history_headers",
+                "namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,query_recipe,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key",
+                "namespace_digest,generation,key_digest",
+                "(generation,key_digest,session_key)=(SELECT o.owner_generation,o.key_digest,o.session_key FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key) ORDER BY o.key_digest LIMIT 1)",
+                "DELETE",
+            ),
+            (
+                "mismatched retained-only header timestamp",
+                "catalog_history_headers",
+                "namespace,generation,key_digest,session_key,recipe_generation,source_generation,version,total,incomplete,metadata,query_recipe,original_header,last_ms,harness,repo,model,query_activity,query_active,parent_key",
+                "namespace_digest,generation,key_digest",
+                "(generation,key_digest,session_key)=(SELECT o.owner_generation,o.key_digest,o.session_key FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key) ORDER BY o.key_digest LIMIT 1)",
+                "UPDATE last_ms=last_ms+1",
+            ),
+            (
+                "mismatched retained-only header reference",
+                "catalog_history_owners",
+                "namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key",
+                "namespace_digest,generation,key_digest",
+                "key_digest=(SELECT o.key_digest FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key) ORDER BY o.key_digest LIMIT 1)",
+                "UPDATE owner_generation='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'::bytea",
             ),
         ] {
             let table = format!("semon_pg_native_{table}");
@@ -1191,6 +1223,10 @@ mod tests {
         assert_ne!(
             current_recipe, history_recipe,
             "the successor publication owns a distinct selected recipe"
+        );
+        assert_ne!(
+            expected[0].last, initial[0].last,
+            "genuine Current and original History have different timestamps"
         );
         publish_catalog_recipe_cell(
             &source,
