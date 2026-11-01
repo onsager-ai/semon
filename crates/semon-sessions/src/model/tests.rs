@@ -4282,6 +4282,220 @@ fn matching_codex_relations_follow_selected_calls_and_header_source_pages() {
 }
 
 #[test]
+fn matching_claude_relations_follow_selected_calls_headers_and_paired_down_messages() {
+    let home = Home::new();
+    home.top(
+        "lead",
+        &[
+            human("lead", ts(5, 0), "Coordinate"),
+            assistant(
+                "lead",
+                ts(5, 1),
+                vec![
+                    tool("spawn-worker", "Agent", json!({"prompt":"Worker task"})),
+                    tool("spawn-other", "Agent", json!({"prompt":"Other task"})),
+                ],
+            ),
+            result(
+                "lead",
+                ts(5, 1),
+                "spawn-worker",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"worker"}),
+            ),
+            result(
+                "lead",
+                ts(5, 1),
+                "spawn-other",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"other"}),
+            ),
+            assistant(
+                "lead",
+                ts(5, 2),
+                vec![tool(
+                    "down-worker",
+                    "SendMessage",
+                    json!({"to":"worker","message":"Check this detail"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(5, 2),
+                "down-worker",
+                "sent",
+                false,
+                json!({"success":true,"message":"Message queued for delivery to worker at its next tool round."}),
+            ),
+        ],
+    );
+    home.agent(
+        "lead",
+        "worker",
+        "spawn-worker",
+        &[
+            user("lead", ts(5, 1), "Worker task"),
+            coordinator("lead", ts(5, 3), "Check this detail"),
+        ],
+    );
+    home.agent(
+        "lead",
+        "other",
+        "spawn-other",
+        &[user("lead", ts(5, 1), "Other task")],
+    );
+    home.top("unrelated", &[human("unrelated", ts(5, 4), "Unrelated")]);
+    let inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead/subagents/agent-worker.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/lead/subagents/agent-other.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/unrelated.jsonl".into(),
+        },
+    ];
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let source_for = |suffix: &str| {
+        let source = full
+            .rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.to_string_lossy().ends_with(suffix))
+            .unwrap();
+        (*source).clone()
+    };
+    let root_source = source_for("lead.jsonl");
+    let worker_source = source_for("agent-worker.jsonl");
+    let call_location = |cache: &mut EventCache, id: &str| {
+        let index = cache.selected_index(&root_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.id.as_deref() == Some(id))
+            .unwrap();
+        relation_stage::Location {
+            source: root_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let down_location = |cache: &mut EventCache| {
+        let index = cache.selected_index(&worker_source.path).unwrap();
+        let (at, found) = index
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| event.k == Kind::Agm && event.script & AGM_DOWN != 0)
+            .unwrap();
+        relation_stage::Location {
+            source: worker_source.clone(),
+            offset: found.o,
+            block: found.b,
+            kind: found.k,
+            occurrence: index.events[..at]
+                .iter()
+                .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+                .count(),
+        }
+    };
+    let root_path = root_source.path.to_string_lossy().into_owned();
+    let worker_path = worker_source.path.to_string_lossy().into_owned();
+    let down_relay = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| {
+            relation.kind == "relay"
+                && relation.from == "lead"
+                && relation.to.as_deref() == Some("worker")
+        })
+        .unwrap()
+        .id
+        .clone();
+
+    let mut selected_call_page = full.relationships.clone();
+    selected_call_page.relations.clear();
+    selected_call_page.matching_locations = Some(vec![call_location(&mut cache, "spawn-other")]);
+    selected_call_page.matching_header_paths = Some(vec![root_path.clone()]);
+    let selected_call =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &selected_call_page, true, NOW)
+            .unwrap();
+    assert_eq!(
+        selected_call
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([stable_id("s", "spawn:claude:other")])
+    );
+
+    let mut header_page = selected_call_page.clone();
+    header_page.matching_locations = Some(Vec::new());
+    header_page.matching_header_paths = Some(vec![worker_path]);
+    let own_header =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert_eq!(
+        own_header
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([stable_id("s", "spawn:claude:worker")])
+    );
+
+    header_page.matching_header_paths = Some(vec![source_for("unrelated.jsonl")
+        .path
+        .to_string_lossy()
+        .into_owned()]);
+    let unrelated =
+        prepare_staged_sources(&home.options, &mut cache, &inputs, &header_page, true, NOW)
+            .unwrap();
+    assert!(unrelated.relationships.relations.is_empty());
+
+    for selected in [
+        call_location(&mut cache, "down-worker"),
+        down_location(&mut cache),
+    ] {
+        let mut paired_page = selected_call_page.clone();
+        paired_page.matching_locations = Some(vec![selected]);
+        let paired =
+            prepare_staged_sources(&home.options, &mut cache, &inputs, &paired_page, true, NOW)
+                .unwrap();
+        assert_eq!(
+            paired
+                .relationships
+                .relations
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([down_relay.clone()])
+        );
+    }
+}
+
+#[test]
 fn staged_claude_unmatched_send_and_orphan_receipt_keep_stubs_and_native_recipes() {
     let home = Home::new();
     home.top(

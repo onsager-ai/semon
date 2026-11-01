@@ -3261,6 +3261,8 @@ impl<'a> Builder<'a> {
             let Some(spawner) = spawner else {
                 continue;
             };
+            let relation_selected = self.matching_relation_selected(call, None)
+                || self.matching_session_header_selected(child);
             let child_events = self.events_of(child);
             let first_prompt = child_events
                 .iter()
@@ -3425,15 +3427,17 @@ impl<'a> Builder<'a> {
                     brief.as_deref().unwrap_or("(brief not in these logs)"),
                 )
             };
-            let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
-            self.handoffs[handoff].previews = Some(previews);
-            if let Some(at) = call {
-                self.place(at, handoff, Place::Out);
-            }
-            match first_prompt {
-                Some(at) => self.place(at, handoff, Place::In),
-                None => {
-                    self.head.insert(child, handoff);
+            if relation_selected {
+                let handoff = self.add_handoff(handoff, Some(spawner), Some(child));
+                self.handoffs[handoff].previews = Some(previews);
+                if let Some(at) = call {
+                    self.place(at, handoff, Place::Out);
+                }
+                match first_prompt {
+                    Some(at) => self.place(at, handoff, Place::In),
+                    None => {
+                        self.head.insert(child, handoff);
+                    }
                 }
             }
             self.down_messages(
@@ -4150,6 +4154,13 @@ impl<'a> Builder<'a> {
         // Ties sort by handoff id, as staged relations do.
         let mut downs: Vec<_> = std::mem::take(&mut self.pending_downs)
             .into_iter()
+            // Pair every down message before filtering so an unselected
+            // subagent spawn still prevents its sends from becoming ordinary
+            // relays. A selected send or received event selects the pair.
+            .filter(|message| {
+                self.match_selected(message.down)
+                    || message.send.is_some_and(|send| self.match_selected(send))
+            })
             .map(|message| {
                 (
                     self.relay_order(message.spawner, message.send),
@@ -4706,8 +4717,7 @@ impl<'a> Builder<'a> {
                 continue;
             };
             let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));
-            if self.sessions[child].out.harness == "codex"
-                && !self.matching_relation_selected(call, None)
+            if !self.matching_relation_selected(call, None)
                 && !self.matching_session_header_selected(child)
             {
                 continue;
