@@ -136,6 +136,8 @@ jobs:
             model::tests::cold_semantic_family_discovers_older_disconnected_native_key_collisions \
             model::tests::staged_native_key_long_reserved_prefix_chain_matches_shared_identity_oracle \
             model::tests::cold_codex_family_qualifies_pending_copilot_native_collision \
+            model::tests::staged_duplicate_receipt_preserves_certified_sender_to_canonical_owner \
+            model::tests::staged_partial_native_companion_keeps_cursor_and_endpoint_pending \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_owner_source_budget_refuses_atomically \
             events::store::configured::tests::domain52::configured_semantic_domain81_filename_peer_pages_to_bounded_publications \
             model::tests::replay_equivalence_seed_from_env \
