@@ -105,25 +105,69 @@ const SEARCH_PUBLICATION: &str = "(SELECT v.namespace,c.read_scope,v.value AS ve
 
 pub(super) fn verify_search_state(tx: &Inbox<'_>, generation: &str) -> Result<(), StorageError> {
     let valid: bool = tx.0.query_row("SELECT (SELECT count(*) FROM main.session_search_coverage WHERE namespace=?1)=2 AND (SELECT count(*) FROM main.meta WHERE namespace=?1 AND key IN ('search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history'))=6 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_version' AND value=?3) AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='search_backfill_complete' AND value='1') AND NOT EXISTS(SELECT 1 FROM main.session_search_coverage c WHERE c.namespace=?1 AND (c.incomplete<>(SELECT count(*) FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.read_scope=c.read_scope AND NOT d.complete) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_incomplete_'||c.read_scope AND m.value=CAST(c.incomplete AS TEXT)) OR NOT EXISTS(SELECT 1 FROM main.meta m WHERE m.namespace=c.namespace AND m.key='search_generation_'||c.read_scope AND m.value=?2))) AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=?1 AND (c.lifecycle='current' OR EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key)) AND (NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='retained_history') OR (c.lifecycle='current' AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=c.namespace AND d.session_key=c.session_key AND d.read_scope='current')))) AND NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=?1 AND NOT EXISTS(SELECT 1 FROM main.session_catalog c WHERE c.namespace=d.namespace AND c.session_key=d.session_key AND (c.lifecycle='current' OR (d.read_scope='retained_history' AND EXISTS(SELECT 1 FROM main.session_history_catalog h WHERE h.namespace=c.namespace AND h.session_key=c.session_key))))) AND NOT EXISTS(SELECT 1 FROM main.session_search_memberships m WHERE m.namespace=?1 AND (m.history_last_ms IS NULL OR (m.current_last_ms IS NOT NULL AND m.current_last_ms<>m.history_last_ms) OR NOT EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='retained_history' AND d.complete) OR ((m.current_last_ms IS NOT NULL) <> EXISTS(SELECT 1 FROM main.session_search_documents d WHERE d.namespace=m.namespace AND d.session_key=m.session_key AND d.read_scope='current'))))", params![tx.1,generation,crate::catalog_search::VERSION], |r| r.get(0)).map_err(failed)?;
-    if !valid { return Err(StorageError::ScopeChanged); }
+    if !valid {
+        return Err(StorageError::ScopeChanged);
+    }
     let mismatch: bool = tx.0.query_row("WITH physical AS (SELECT 'current' AS read_scope,gram,count(*) AS members FROM main.session_search_memberships WHERE namespace=?1 AND current_last_ms IS NOT NULL GROUP BY gram UNION ALL SELECT 'retained_history',gram,count(*) FROM main.session_search_memberships WHERE namespace=?1 AND history_last_ms IS NOT NULL GROUP BY gram), stored AS (SELECT read_scope,gram,members FROM main.session_search_counts WHERE namespace=?1) SELECT EXISTS(SELECT * FROM physical EXCEPT SELECT * FROM stored) OR EXISTS(SELECT * FROM stored EXCEPT SELECT * FROM physical)", [tx.1], |r| r.get(0)).map_err(failed)?;
-    if mismatch { return Err(StorageError::ScopeChanged); }
+    if mismatch {
+        return Err(StorageError::ScopeChanged);
+    }
     Ok(())
 }
 
 /// Keep incoming readiness private until the same transaction publishes its head.
-pub(super) fn publish_search_state(tx: &mut Inbox<'_>, generation: &str) -> Result<(), StorageError> {
-    for scope in ["current","retained_history"] {
-        let bytes = tx.get(&format!("native_transfer_v1:search-publication:{scope}"),4096)?.ok_or(StorageError::ScopeChanged)?;
-        let values: Vec<serde_json::Value> = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
-        catalog_rows::validate(&TransferRecord::CatalogRow { generation:generation.to_owned(),kind:CatalogRowKind::SearchPublication,values:values.clone() })?;
-        if values[0].as_str()!=Some(scope) { return Err(StorageError::ScopeChanged); }
-        for (key,value) in [("search_version".to_owned(),values[1].as_str().ok_or(StorageError::ScopeChanged)?.to_owned()),("search_backfill_complete".to_owned(),"1".to_owned()),(format!("search_generation_{scope}"),values[2].as_str().ok_or(StorageError::ScopeChanged)?.to_owned()),(format!("search_incomplete_{scope}"),values[4].as_i64().ok_or(StorageError::ScopeChanged)?.to_string())] {
-            if tx.get(&key,64)?.is_some_and(|old| old != value.as_bytes()) { return Err(StorageError::Conflict); }
-            tx.put(&key,value.as_bytes())?;
+pub(super) fn publish_search_state(
+    tx: &mut Inbox<'_>,
+    generation: &str,
+) -> Result<(), StorageError> {
+    for scope in ["current", "retained_history"] {
+        let bytes = tx
+            .get(
+                &format!("native_transfer_v1:search-publication:{scope}"),
+                4096,
+            )?
+            .ok_or(StorageError::ScopeChanged)?;
+        let values: Vec<serde_json::Value> =
+            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+        catalog_rows::validate(&TransferRecord::CatalogRow {
+            generation: generation.to_owned(),
+            kind: CatalogRowKind::SearchPublication,
+            values: values.clone(),
+        })?;
+        if values[0].as_str() != Some(scope) {
+            return Err(StorageError::ScopeChanged);
+        }
+        for (key, value) in [
+            (
+                "search_version".to_owned(),
+                values[1]
+                    .as_str()
+                    .ok_or(StorageError::ScopeChanged)?
+                    .to_owned(),
+            ),
+            ("search_backfill_complete".to_owned(), "1".to_owned()),
+            (
+                format!("search_generation_{scope}"),
+                values[2]
+                    .as_str()
+                    .ok_or(StorageError::ScopeChanged)?
+                    .to_owned(),
+            ),
+            (
+                format!("search_incomplete_{scope}"),
+                values[4]
+                    .as_i64()
+                    .ok_or(StorageError::ScopeChanged)?
+                    .to_string(),
+            ),
+        ] {
+            if tx.get(&key, 64)?.is_some_and(|old| old != value.as_bytes()) {
+                return Err(StorageError::Conflict);
+            }
+            tx.put(&key, value.as_bytes())?;
         }
     }
-    verify_search_state(tx,generation)
+    verify_search_state(tx, generation)
 }
 
 /// Refuse all already-owned Catalog content before applying the first page.
@@ -217,12 +261,28 @@ fn verify_authority(
         SearchDocument => {
             let scope = text(0)?;
             let metadata: String = tx.0.query_row("SELECT CASE WHEN octet_length(metadata)<=?3 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![tx.1,text(1)?,*verification_bytes as i64], |r| r.get::<_,Option<String>>(0)).map_err(failed)?.ok_or(StorageError::Busy)?;
-            *verification_bytes = verification_bytes.checked_sub(metadata.len()).ok_or(StorageError::Busy)?;
-            let column = if scope == "current" { "current_last_ms" } else { "history_last_ms" };
+            *verification_bytes = verification_bytes
+                .checked_sub(metadata.len())
+                .ok_or(StorageError::Busy)?;
+            let column = if scope == "current" {
+                "current_last_ms"
+            } else {
+                "history_last_ms"
+            };
             let posting_bytes: i64 = tx.0.query_row(&format!("SELECT coalesce(sum(octet_length(gram)+8),0) FROM (SELECT gram FROM main.session_search_memberships WHERE namespace=?1 AND session_key=?2 AND {column} IS NOT NULL ORDER BY gram LIMIT 1025)"), params![tx.1,text(1)?], |r| r.get(0)).map_err(failed)?;
-            *verification_bytes = verification_bytes.checked_sub(usize::try_from(posting_bytes).map_err(|_| StorageError::ScopeChanged)?).ok_or(StorageError::Busy)?;
+            *verification_bytes = verification_bytes
+                .checked_sub(
+                    usize::try_from(posting_bytes).map_err(|_| StorageError::ScopeChanged)?,
+                )
+                .ok_or(StorageError::Busy)?;
             let postings: Vec<(String,i64)> = tx.0.prepare(&format!("SELECT gram,{column} FROM main.session_search_memberships WHERE namespace=?1 AND session_key=?2 AND {column} IS NOT NULL ORDER BY gram LIMIT 1025")).map_err(failed)?.query_map(params![tx.1,text(1)?], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-            catalog_rows::verify_search_document(&metadata,text(1)?,text(2)?,values[3].as_bool().ok_or(StorageError::ScopeChanged)?,postings)?;
+            catalog_rows::verify_search_document(
+                &metadata,
+                text(1)?,
+                text(2)?,
+                values[3].as_bool().ok_or(StorageError::ScopeChanged)?,
+                postings,
+            )?;
         }
         _ => {}
     }
@@ -235,8 +295,14 @@ pub(super) fn capture(
 ) -> Result<transfer::CaptureProgress, StorageError> {
     let index = usize::from(state.native_family - 32);
     let Some(kind) = CatalogRowKind::ALL.get(index).copied() else {
-        if let Some(generation) = tx.get("catalog_generation",64)?.or(tx.get(catalog_rows::IMPORTED_GENERATION,64)?) {
-            verify_search_state(tx, std::str::from_utf8(&generation).map_err(|_| StorageError::ScopeChanged)?)?;
+        if let Some(generation) = tx
+            .get("catalog_generation", 64)?
+            .or(tx.get(catalog_rows::IMPORTED_GENERATION, 64)?)
+        {
+            verify_search_state(
+                tx,
+                std::str::from_utf8(&generation).map_err(|_| StorageError::ScopeChanged)?,
+            )?;
         }
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
@@ -310,8 +376,12 @@ pub(super) fn capture(
         .collect::<Vec<_>>()
         .join("+");
     let size = if kind == CatalogRowKind::SearchDocument {
-        format!("{size}+coalesce((SELECT octet_length(c.metadata) FROM main.session_catalog c WHERE c.namespace=?1 AND c.session_key=session_search_documents.session_key),0)+coalesce((SELECT sum(octet_length(m.gram)+8) FROM main.session_search_memberships m WHERE m.namespace=?1 AND m.session_key=session_search_documents.session_key AND CASE WHEN session_search_documents.read_scope='current' THEN m.current_last_ms IS NOT NULL ELSE m.history_last_ms IS NOT NULL END),0)")
-    } else { size };
+        format!(
+            "{size}+coalesce((SELECT octet_length(c.metadata) FROM main.session_catalog c WHERE c.namespace=?1 AND c.session_key=session_search_documents.session_key),0)+coalesce((SELECT sum(octet_length(m.gram)+8) FROM main.session_search_memberships m WHERE m.namespace=?1 AND m.session_key=session_search_documents.session_key AND CASE WHEN session_search_documents.read_scope='current' THEN m.current_last_ms IS NOT NULL ELSE m.history_last_ms IS NOT NULL END),0)"
+        )
+    } else {
+        size
+    };
     let sizes =
         tx.0.prepare(&format!("SELECT {size} {suffix} LIMIT 64"))
             .map_err(failed)?
@@ -344,18 +414,29 @@ pub(super) fn capture(
             .map_err(failed)?
             .collect::<rusqlite::Result<Vec<_>>>()
             .map_err(failed)?;
-    let mut verification_bytes = transfer::MAX_PAGE_BYTES-4096;
+    let mut verification_bytes = transfer::MAX_PAGE_BYTES - 4096;
     if rows.is_empty() {
         state.native_family += 1;
         state.native_key = None;
     } else {
         let mut records = Vec::new();
         for row in rows {
-            let record = TransferRecord::CatalogRow { generation: generation.clone(), kind, values: row.0 };
-            let size = serde_json::to_vec(&record).map_err(|_| StorageError::ScopeChanged)?.len()+1;
-            if verification_bytes < size { break; }
+            let record = TransferRecord::CatalogRow {
+                generation: generation.clone(),
+                kind,
+                values: row.0,
+            };
+            let size = serde_json::to_vec(&record)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .len()
+                + 1;
+            if verification_bytes < size {
+                break;
+            }
             verification_bytes -= size;
-            let TransferRecord::CatalogRow { values, .. } = &record else { unreachable!() };
+            let TransferRecord::CatalogRow { values, .. } = &record else {
+                unreachable!()
+            };
             match verify_authority(tx, kind, values, &mut verification_bytes) {
                 Err(StorageError::Busy) if !records.is_empty() => break,
                 result => result?,
@@ -368,7 +449,11 @@ pub(super) fn capture(
     Ok(state.progress())
 }
 
-pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord, verification_bytes: &mut usize) -> Result<(), StorageError> {
+pub(super) fn apply(
+    tx: &mut Inbox<'_>,
+    record: &TransferRecord,
+    verification_bytes: &mut usize,
+) -> Result<(), StorageError> {
     catalog_rows::validate(record)?;
     let TransferRecord::CatalogRow {
         generation,
@@ -385,8 +470,10 @@ pub(super) fn apply(tx: &mut Inbox<'_>, record: &TransferRecord, verification_by
         let scope = values[0].as_str().ok_or(StorageError::ScopeChanged)?;
         let key = format!("native_transfer_v1:search-publication:{scope}");
         let bytes = serde_json::to_vec(values).map_err(|_| StorageError::ScopeChanged)?;
-        if tx.get(&key,4096)?.is_some() { return Err(StorageError::Conflict); }
-        return tx.put(&key,&bytes);
+        if tx.get(&key, 4096)?.is_some() {
+            return Err(StorageError::Conflict);
+        }
+        return tx.put(&key, &bytes);
     }
     if matches!(
         kind,
@@ -483,39 +570,89 @@ mod tests {
     #[test]
     fn current_transfer225_search_bounded_document_and_state_refusals() {
         let mut db = rusqlite::Connection::open_in_memory().unwrap();
-        db.execute_batch(super::super::super::search::SCHEMA).unwrap();
+        db.execute_batch(super::super::super::search::SCHEMA)
+            .unwrap();
         db.execute_batch("CREATE TABLE session_catalog(namespace TEXT,session_key TEXT,lifecycle TEXT,metadata TEXT); CREATE TABLE session_history_catalog(namespace TEXT,session_key TEXT); CREATE TABLE meta(namespace TEXT,key TEXT,value TEXT,PRIMARY KEY(namespace,key));").unwrap();
         let row: crate::model::summary::CatalogRow = serde_json::from_value(serde_json::json!({"key":"key","name":"search 漢字","harness":"claude","kind":"session","native_ids":[],"parent":null,"parent_source":null,"repo":null,"branch":null,"model":"model","effort":null,"start":null,"last":7,"tokens":[0.0,0.0,0.0],"cost":crate::pricing::Cost::default(),"sources":[]})).unwrap();
         let metadata = serde_json::to_string(&row).unwrap();
-        let (fields,grams,complete) = crate::catalog_search::prepared_fields_port(&row).unwrap();
+        let (fields, grams, complete) = crate::catalog_search::prepared_fields_port(&row).unwrap();
         let tx = db.transaction().unwrap();
-        tx.execute("INSERT INTO session_catalog VALUES('ns','key','current',?1)",[&metadata]).unwrap();
+        tx.execute(
+            "INSERT INTO session_catalog VALUES('ns','key','current',?1)",
+            [&metadata],
+        )
+        .unwrap();
         for gram in &grams {
-            tx.execute("INSERT INTO session_search_memberships VALUES('ns','key',?1,7,7)",[gram]).unwrap();
+            tx.execute(
+                "INSERT INTO session_search_memberships VALUES('ns','key',?1,7,7)",
+                [gram],
+            )
+            .unwrap();
         }
-        let values = vec!["current".into(),"key".into(),fields.clone().into(),complete.into()];
-        let mut inbox = Inbox(&tx,"ns");
-        let exact = metadata.len()+grams.iter().map(|g| g.len()+8).sum::<usize>();
+        let values = vec![
+            "current".into(),
+            "key".into(),
+            fields.clone().into(),
+            complete.into(),
+        ];
+        let mut inbox = Inbox(&tx, "ns");
+        let exact = metadata.len() + grams.iter().map(|g| g.len() + 8).sum::<usize>();
         let mut budget = exact;
-        verify_authority(&inbox,CatalogRowKind::SearchDocument,&values,&mut budget).unwrap();
-        assert_eq!(budget,0);
-        let mut short = exact-1;
-        assert!(matches!(verify_authority(&inbox,CatalogRowKind::SearchDocument,&values,&mut short),Err(StorageError::Busy)));
-        let mut no_metadata = metadata.len()-1;
-        assert!(matches!(verify_authority(&inbox,CatalogRowKind::SearchDocument,&values,&mut no_metadata),Err(StorageError::Busy)));
+        verify_authority(&inbox, CatalogRowKind::SearchDocument, &values, &mut budget).unwrap();
+        assert_eq!(budget, 0);
+        let mut short = exact - 1;
+        assert!(matches!(
+            verify_authority(&inbox, CatalogRowKind::SearchDocument, &values, &mut short),
+            Err(StorageError::Busy)
+        ));
+        let mut no_metadata = metadata.len() - 1;
+        assert!(matches!(
+            verify_authority(
+                &inbox,
+                CatalogRowKind::SearchDocument,
+                &values,
+                &mut no_metadata
+            ),
+            Err(StorageError::Busy)
+        ));
         let generation = "a".repeat(64);
-        for scope in ["current","retained_history"] {
-            tx.execute("INSERT INTO session_search_documents VALUES('ns',?1,'key',?2,1)",params![scope,fields]).unwrap();
-            tx.execute("INSERT INTO session_search_coverage VALUES('ns',?1,0)",[scope]).unwrap();
+        for scope in ["current", "retained_history"] {
+            tx.execute(
+                "INSERT INTO session_search_documents VALUES('ns',?1,'key',?2,1)",
+                params![scope, fields],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO session_search_coverage VALUES('ns',?1,0)",
+                [scope],
+            )
+            .unwrap();
             for gram in &grams {
-                tx.execute("INSERT INTO session_search_counts VALUES('ns',?1,?2,1)",params![scope,gram]).unwrap();
+                tx.execute(
+                    "INSERT INTO session_search_counts VALUES('ns',?1,?2,1)",
+                    params![scope, gram],
+                )
+                .unwrap();
             }
-            let record = TransferRecord::CatalogRow { generation:generation.clone(),kind:CatalogRowKind::SearchPublication,values:vec![scope.into(),crate::catalog_search::VERSION.into(),generation.clone().into(),true.into(),0.into()] };
+            let record = TransferRecord::CatalogRow {
+                generation: generation.clone(),
+                kind: CatalogRowKind::SearchPublication,
+                values: vec![
+                    scope.into(),
+                    crate::catalog_search::VERSION.into(),
+                    generation.clone().into(),
+                    true.into(),
+                    0.into(),
+                ],
+            };
             let mut budget = transfer::MAX_PAGE_BYTES;
-            apply(&mut inbox,&record,&mut budget).unwrap();
+            apply(&mut inbox, &record, &mut budget).unwrap();
         }
-        assert!(inbox.get("search_version",64).unwrap().is_none(),"incoming records do not expose readiness");
-        publish_search_state(&mut inbox,&generation).unwrap();
+        assert!(
+            inbox.get("search_version", 64).unwrap().is_none(),
+            "incoming records do not expose readiness"
+        );
+        publish_search_state(&mut inbox, &generation).unwrap();
         for corruption in [
             "DELETE FROM meta WHERE key='native_transfer_v1:search-publication:current'",
             "UPDATE meta SET value='unsupported' WHERE key='search_version'",
@@ -526,11 +663,21 @@ mod tests {
         ] {
             tx.execute_batch("SAVEPOINT corrupt").unwrap();
             tx.execute_batch(corruption).unwrap();
-            assert!(publish_search_state(&mut inbox,&generation).is_err(),"accepted {corruption}");
-            tx.execute_batch("ROLLBACK TO corrupt; RELEASE corrupt").unwrap();
+            assert!(
+                publish_search_state(&mut inbox, &generation).is_err(),
+                "accepted {corruption}"
+            );
+            tx.execute_batch("ROLLBACK TO corrupt; RELEASE corrupt")
+                .unwrap();
         }
-        tx.execute("DELETE FROM session_search_memberships WHERE gram=?1",[grams.first().unwrap()]).unwrap();
+        tx.execute(
+            "DELETE FROM session_search_memberships WHERE gram=?1",
+            [grams.first().unwrap()],
+        )
+        .unwrap();
         let mut budget = transfer::MAX_PAGE_BYTES;
-        assert!(verify_authority(&inbox,CatalogRowKind::SearchDocument,&values,&mut budget).is_err());
+        assert!(
+            verify_authority(&inbox, CatalogRowKind::SearchDocument, &values, &mut budget).is_err()
+        );
     }
 }

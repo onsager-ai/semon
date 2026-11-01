@@ -23,6 +23,15 @@ receipt with the Catalog head CAS. It neither replays completed producer staging
 nor creates reader leases or acknowledges pending claims. This Catalog-scoped
 effect reports partial completeness; full inventory, catchup, fenced ownership
 cutover and qualified rollback remain separate unqualified obligations.
+Search transport carries documents, scoped posting timestamps, counts, coverage
+and the producer's generation-bound readiness values. Each bounded document
+phase verifies the complete posting set with the ordinary producer's shared
+normalization; admission checks owner coverage and SQL aggregates before
+publishing readiness with the Catalog head. Incoming SQLite readiness stays
+private until that transaction. PostgreSQL persists its own generation-scoped
+coverage and readiness instead of inferring them from an admitted head. Its
+unscoped physical postings accept only the current producer's exact dual-scope
+fields and timestamp equivalence; divergent scoped state refuses transfer.
 
 Ordinary imported Catalog/Query reads preserve the producer's runtime fingerprint
 and validate its per-row selected proof, original receipt and presentation root
