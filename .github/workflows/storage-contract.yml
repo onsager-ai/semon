@@ -142,6 +142,17 @@ jobs:
           PYSAFE
           cat "$RUNNER_TEMP/477-focused-summary.txt"
           exit "$result"
+      - name: Append continuation proof acceptance and refusal
+        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          proof_log="$RUNNER_TEMP/477-focused-continuation-proof.log"
+          plan_log="$RUNNER_TEMP/477-focused-append-plan.log"
+          cargo test --locked -p semon-sessions --lib storage::catalog::source_continuation_tests:: -- --nocapture 2>&1 | tee "$proof_log"
+          grep -F 'test result: ok. 4 passed; 0 failed;' "$proof_log"
+          cargo test --locked -p semon-sessions --lib source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture 2>&1 | tee "$plan_log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$plan_log"
       - name: Retain focused correctness diagnostics
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
