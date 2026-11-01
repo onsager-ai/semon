@@ -10030,7 +10030,7 @@ fn selected_native_index_preserves_membership_and_native_semantics() {
         json!({
             "sid": "session-00000", "from": 0, "to": 1, "total": 1,
             "calls": 0, "errors": 0, "window_start": null,
-            "entries": [{"k": "u", "text": "synthetic prompt", "turn": "session-00000:session-00000:0"}]
+            "entries": [{"k": "u", "text": "synthetic prompt", "turn": "t334ad30ea6f0648e"}]
         })
     );
     let full = crate::model::build_query(
