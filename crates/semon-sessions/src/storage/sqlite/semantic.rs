@@ -3946,7 +3946,9 @@ impl Stage {
             return Ok(Outcome::Conflict);
         }
         let claims = super::source_journal::claims(&tx, ns, &batch.paths).map_err(error)?;
-        if claims != batch.source_claims || claims != prepared.claims {
+        if claims != prepared.claims
+            || (batch.phase != Phase::Indexing && claims != batch.source_claims)
+        {
             #[cfg(test)]
             eprintln!("semantic_record_conflict: source_claims");
             return Ok(Outcome::Conflict);
