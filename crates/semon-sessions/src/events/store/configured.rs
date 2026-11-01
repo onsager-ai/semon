@@ -14018,7 +14018,11 @@ mod tests {
                     .collect::<Vec<_>>();
                 assert_eq!(retry_paths, expected_alias_paths);
                 let selected = selected_inputs(&inputs, options, &retry);
-                assert_eq!(selected.len(), 2, "the continued Claude sources stay grouped");
+                assert_eq!(
+                    selected.len(),
+                    2,
+                    "the continued Claude sources stay grouped"
+                );
                 let retry_model = cache
                     .prepare_semantic_model_batch(options, &selected, &retry, 1_790_000_000_000)
                     .unwrap();
