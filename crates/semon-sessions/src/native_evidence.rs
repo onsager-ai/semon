@@ -4654,6 +4654,17 @@ mod catalog_owner_tests {
             complete,
             "producer did not continue and finish the packed groups"
         );
+        eprintln!(
+            "catalog_pending_diag work_tree_repair={} cache_tree_repair={} cold_catalog={} pending_sources={} audit={} audit_revision_matches={}",
+            work.tree_repair_pending,
+            work.events
+                .as_ref()
+                .is_some_and(EventCache::tree_repair_pending),
+            work.cold_catalog.is_some(),
+            work.pending_sources,
+            work.audit.is_some(),
+            evidence.audit_request.load(Ordering::Acquire) == work.audit_revision,
+        );
         assert!(!evidence.catalog_pending(&work));
         assert_eq!(
             database
