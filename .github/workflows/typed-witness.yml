@@ -74,6 +74,7 @@ jobs:
           test "$(grep -c 'typed_witness_cases positive=2 negative=10' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
           test "$(grep -c 'typed_witness_production_refusal unchanged_head=true pending_claim_paths_unchanged=true publication_not_activated=true' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
           test "$(grep -c 'typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 1
+          test "$(grep -c 'typed_presentation_cases backend=.* exact_roundtrip=17 immutable_entry_checks=17 negative=103 publication_activated=false' "$RUNNER_TEMP/typed-witness-tests.log")" -eq 2
       - name: Focused library lint
         if: ${{ !cancelled() && steps.reconstruction.outcome == 'success' }}
         run: cargo clippy --locked -p semon-sessions --all-targets --features postgres-test-tls -- --no-deps -D warnings

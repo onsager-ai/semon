@@ -4194,6 +4194,20 @@ fn authored_storage_ddl() -> [&'static str; 22] {
     ]
 }
 
+#[cfg(test)]
+pub(crate) fn presentation_measurement_schema(db: &Connection) -> rusqlite::Result<()> {
+    for ddl in [
+        configured::CORE_SCHEMA,
+        COMPOSITE_CATALOG_SCHEMA,
+        crate::storage::sqlite::publication::SLOT_SCHEMA,
+        crate::storage::sqlite::trace::SCHEMA,
+        crate::storage::sqlite::history::SCHEMA,
+    ] {
+        db.execute_batch(ddl)?;
+    }
+    Ok(())
+}
+
 /// Qualify the complete authored current profile without changing the store.
 /// Reference databases contain only schema and seed metadata, never user data.
 /// Comparing definitions also checks columns, keys, constraints and trigger

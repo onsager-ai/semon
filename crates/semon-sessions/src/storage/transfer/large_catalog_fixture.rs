@@ -49,6 +49,7 @@ pub(crate) fn measure_mode(
         true,
     );
     let initial = finish_measured(
+        config,
         &mut initial_cache,
         &options,
         std::slice::from_ref(&initial_input),
@@ -91,6 +92,7 @@ pub(crate) fn measure_mode(
         );
         assert!(
             finish_measured(
+                config,
                 &mut cache,
                 &options,
                 std::slice::from_ref(&old_input),
@@ -190,7 +192,7 @@ pub(crate) fn measure_mode(
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     begin_active_catalog(&mut cache, &paths, &runtime, true);
-    let rows = finish_measured(&mut cache, &options, &inputs, typed_refusal.as_deref());
+    let rows = finish_measured(config, &mut cache, &options, &inputs, typed_refusal.as_deref());
     assert_eq!(rows.len(), CHILDREN + 1);
     assert_eq!(
         rows.iter()
@@ -207,6 +209,7 @@ pub(crate) fn measure_mode(
 }
 
 fn finish_measured(
+    config: &StoreConfig,
     cache: &mut crate::events::EventCache,
     options: &crate::Options,
     inputs: &[crate::Input],
@@ -370,7 +373,8 @@ fn finish_measured(
             && batch.paths.len() == 17
             && batch.phase == crate::model::relation_stage::Phase::Publication;
         if typed_publication {
-            crate::model::typed_witness::qualify(model.prepared()).unwrap();
+            let semantic_bytes = crate::model::typed_witness::qualify(model.prepared()).unwrap();
+            super::presentation_measurement::qualify(config, model.prepared(), semantic_bytes).unwrap();
         }
         let before = cache.session_catalog_generation();
         let pending = if typed_publication {

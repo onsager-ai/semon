@@ -28,6 +28,47 @@ pub(super) mod withdrawal;
 
 const MAX: usize = 1024 * 1024;
 
+#[cfg(test)]
+pub(crate) fn measure_presentations(
+    config: &crate::storage::StoreConfig,
+    pool: &super::PgPool,
+    control: &super::PgCancellation,
+    prepared: &crate::model::PreparedSources,
+    generation: &str,
+) -> Result<(Vec<(String, String)>, String), StorageError> {
+    pool.transaction(&config.namespace, super::txn::TxnKind::Write, control, |tx| {
+        tx.driver.batch_execute("SAVEPOINT typed_presentation_measurement").map_err(sqlstate::error)?;
+        let ns = config.namespace.as_str().as_bytes();
+        if let Some(previous) = prepared.base_generation.as_deref() {
+            for row in &prepared.rows {
+                tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$2::bytea,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$3 AND key_digest=sha256($4::bytea) AND session_key=$4", &[&ns,&generation.as_bytes(),&previous.as_bytes(),&row.key.as_bytes()]).map_err(sqlstate::error)?;
+            }
+        }
+        {
+            let effects = Effects { tx: RefCell::new(&mut *tx), generation };
+            for row in &prepared.rows {
+                let cell = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?;
+                effects.current(&cell.row, &cell.metadata)?;
+                if let Some(trace) = &row.trace {
+                    crate::causal_trace::publish_with_store(&effects, row, trace)?;
+                }
+            }
+            catalog::publish_slot_rows(&effects, &prepared.rows, &prepared.transcripts)?;
+        }
+        let mut history = std::collections::BTreeSet::new();
+        for row in &prepared.rows {
+            let found: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3)", &[&ns,&generation.as_bytes(),&row.key.as_bytes()]).map_err(sqlstate::error)?.get(0);
+            if found { history.insert(row.key.clone()); }
+        }
+        let rows = snapshot::in_transaction(tx, generation, |lookup| {
+            crate::storage::transfer::presentation_measurement::capture(lookup, prepared, generation, &history)
+        })?;
+        let manifest = crate::storage::transfer::presentation_measurement::manifest(prepared, &rows)?;
+        tx.driver.batch_execute("ROLLBACK TO SAVEPOINT typed_presentation_measurement; RELEASE SAVEPOINT typed_presentation_measurement").map_err(sqlstate::error)?;
+        Ok((rows, manifest))
+    })
+}
+
 fn digest(value: &[u8]) -> Vec<u8> {
     Sha256::digest(value).to_vec()
 }

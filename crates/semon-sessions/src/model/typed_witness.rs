@@ -490,7 +490,7 @@ impl Rows {
     }
 }
 
-pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
+pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<usize> {
     let witness = Witness::capture(prepared)?;
     witness.verify(prepared)?;
     eprintln!("typed_witness_case name=genuine_exact_reconstruction status=pass");
@@ -672,5 +672,5 @@ pub(crate) fn qualify(prepared: &PreparedSources) -> io::Result<()> {
     }
     eprintln!("typed_witness_case name=producer_cost_copy_mismatch status=refused");
     eprintln!("typed_witness_cases positive=2 negative=10");
-    Ok(())
+    Ok(rows.bytes)
 }

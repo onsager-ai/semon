@@ -4,6 +4,8 @@
 //! the authorized host. This module never reads environment credentials.
 mod cancel;
 mod catalog_effects;
+#[cfg(test)]
+pub(crate) use catalog_effects::measure_presentations;
 mod changes;
 pub(crate) mod current_sources;
 pub(crate) mod host;

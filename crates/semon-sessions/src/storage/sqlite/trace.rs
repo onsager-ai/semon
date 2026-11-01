@@ -111,6 +111,11 @@ pub(crate) struct TraceWriter<'a> {
     namespace: &'a str,
 }
 impl<'a> TraceWriter<'a> {
+    #[cfg(test)]
+    pub(crate) fn measurement(db: &'a Connection, namespace: &'a str) -> Self {
+        Self { db, namespace }
+    }
+
     pub(crate) fn owned(
         db: &'a Connection,
         owner: &'a crate::events::store::configured::NativeOwnership,

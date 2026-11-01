@@ -14,6 +14,50 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 const DIRECT_CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(test)]
+pub(crate) fn measure_presentations(
+    config: &crate::storage::StoreConfig,
+    prepared: &crate::model::PreparedSources,
+    generation: &str,
+) -> Result<(Vec<(String, String)>, String), StorageError> {
+    // A disposable metadata image exercises the production SQL context and
+    // immutable capture. It has no source owner, published head or claim ACK.
+    let mut db = Connection::open_in_memory().map_err(failed)?;
+    let namespace = config.namespace.as_str().to_owned();
+    let selected_namespace = namespace.clone();
+    db.create_scalar_function("semon_namespace", 0, rusqlite::functions::FunctionFlags::SQLITE_UTF8, move |_| Ok(selected_namespace.clone())).map_err(failed)?;
+    crate::events::store::presentation_measurement_schema(&db).map_err(failed)?;
+    db.execute_batch(SCHEMA).map_err(failed)?;
+    db.execute("ATTACH DATABASE ?1 AS observed", [config.backend.sqlite_database()?.to_str().ok_or(StorageError::InvalidArguments)?]).map_err(failed)?;
+    let original = Connection::open_with_flags(config.backend.sqlite_database()?, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(failed)?;
+    let tx = db.transaction().map_err(failed)?;
+    for row in &prepared.rows {
+        let cell = crate::query_projection::SelectedRecipe::prepare(row).map_err(|_| StorageError::ScopeChanged)?;
+        tx.execute("INSERT INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata,query_recipe) VALUES(?1,?2,'current',?3,?4,?5,?6,?7,?8)", params![namespace,row.key,row.last.unwrap_or(0),row.harness,row.repo,row.parent,cell.metadata,cell.query_recipe]).map_err(failed)?;
+        let history: Option<(String,Option<String>)> = original.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END,query_recipe FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",params![namespace,row.key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(failed)?;
+        if let Some((metadata, recipe)) = history {
+            proof_codec::validate_query_recipe_cell(&metadata, recipe.as_deref())?;
+            tx.execute("INSERT INTO session_history_catalog(namespace,session_key,metadata,query_recipe) VALUES(?1,?2,?3,?4)",params![namespace,row.key,metadata,recipe]).map_err(failed)?;
+        }
+        for source in &row.sources {
+            tx.execute("INSERT OR IGNORE INTO main.files SELECT * FROM observed.files WHERE namespace=?1 AND path=?2", params![namespace,source.path.to_string_lossy()]).map_err(failed)?;
+        }
+        if let Some(trace) = &row.trace {
+            crate::causal_trace::publish_with_store(&super::trace::TraceWriter::measurement(&tx, &namespace), row, trace).map_err(failed)?;
+        }
+        let projection = prepared.transcripts.iter().find(|p| p.key == row.key).ok_or(StorageError::ScopeChanged)?;
+        let texts = projection.slots.iter().map(serde_json::to_string).collect::<Result<Vec<_>,_>>().map_err(|_| StorageError::Unavailable)?;
+        let header = crate::slot_projection::generation(&texts, &row.sources).map_err(|_| StorageError::Unavailable)?;
+        let source = crate::retention::source_generation(&row.sources).map_err(|_| StorageError::Unavailable)?;
+        tx.execute("INSERT INTO session_slot_projections VALUES(?1,?2,?3,?4,?5,?6)",params![namespace,row.key,header,source,crate::slot_projection::VERSION,texts.len() as i64]).map_err(failed)?;
+    }
+    let rows = capture_presentations(&tx, &namespace, generation, prepared, 1_790_000_000_000)?;
+    let root = bind_presentations(&tx, &namespace, generation, generation, &rows, prepared)?;
+    let manifest = tx.query_row("SELECT manifest FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2",params![namespace,root],|r|r.get(0)).map_err(failed)?;
+    tx.rollback().map_err(failed)?;
+    Ok((rows, manifest))
+}
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
