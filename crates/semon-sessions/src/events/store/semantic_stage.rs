@@ -2890,7 +2890,8 @@ impl SqliteStore {
             db: &self.connection,
             replay: Vec::new(),
         };
-        let result = crate::model::relation_stage::select_with(&mut lookup, selector);
+        let mut used = 0;
+        let result = crate::model::relation_stage::select_with(&mut lookup, selector, &mut used);
         let replay = lookup.replay;
         if !replay.is_empty() {
             let tx = self
@@ -2929,6 +2930,11 @@ impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
     type Error = rusqlite::Error;
     fn invalid(&self, message: &'static str) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(message)))
+    }
+    fn metadata_budget(&self) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(
+            crate::model::relation_stage::SelectorMetadataBudget,
+        ))
     }
     fn native_key(
         &self,
@@ -4073,12 +4079,14 @@ mod tests {
                 db: &connection,
                 replay: Vec::new(),
             };
+            let mut used = 0;
             let result = crate::model::relation_stage::select_with(
                 &mut lookup,
                 &Selector::NativeKey {
                     native: "same".into(),
                     harness: "codex".into(),
                 },
+                &mut used,
             )
             .unwrap();
             assert_eq!(result.key, Some(format!("{}codex:same", ":".repeat(80))));
