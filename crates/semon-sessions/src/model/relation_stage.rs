@@ -669,8 +669,8 @@ impl Relation {
                         } else {
                             shared_different += 1;
                             let recipe_fields = [
-                                "path", "offset", "block", "kind", "tool", "cwd", "source", "field",
-                                "arg",
+                                "path", "offset", "block", "kind", "tool", "cwd", "source",
+                                "field", "arg",
                             ]
                             .into_iter()
                             .filter(|key| old.get(*key) != recipe.get(*key))
