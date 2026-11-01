@@ -7323,6 +7323,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             )
             .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let composite = model
+                .prepared()
+                .rows
+                .iter()
+                .find(|row| row.key == composite_key);
+            eprintln!(
+                "PG_FINAL_REMOVE_MODEL rows={} composite_present={} composite_sources={} composite_includes_removed_a={} retired_composite={}",
+                model.prepared().rows.len(),
+                composite.is_some(),
+                composite.map_or(0, |row| row.sources.len()),
+                composite.is_some_and(|row| {
+                    row.sources.iter().any(|source| {
+                        source.path.as_path() == composite_current_source.path.as_path()
+                    })
+                }),
+                model
+                    .prepared()
+                    .relationships
+                    .retired_owners
+                    .iter()
+                    .any(|row| row.key == composite_key),
+            );
             break (batch, model);
         }
     };
@@ -7361,9 +7383,20 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let owner = snapshot
                     .owner(composite_key)?
                     .ok_or(StorageError::ScopeChanged)?;
+                let final_current = snapshot.catalog(composite_key, false)?;
+                eprintln!(
+                    "PG_FINAL_REMOVE_CATALOG current_present={} current_sources={} current_includes_removed_a={}",
+                    final_current.is_some(),
+                    final_current.as_ref().map_or(0, |row| row.sources.len()),
+                    final_current.as_ref().is_some_and(|row| {
+                        row.sources.iter().any(|source| {
+                            source.path.as_path() == composite_current_source.path.as_path()
+                        })
+                    }),
+                );
                 assert!(!owner.original, "the same composite History owner survives");
                 assert!(!owner.has_current, "Source A removal leaves no Current row");
-                assert!(snapshot.catalog(composite_key, false)?.is_none());
+                assert!(final_current.is_none());
 
                 let physical = snapshot
                     .catalog(composite_key, true)?
