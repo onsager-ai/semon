@@ -637,6 +637,8 @@ impl PresentationObservations {
             machine_label,
             sources,
             relative_statuses: BTreeMap::new(),
+            source_continuation_digest: None,
+            source_continuations: Vec::new(),
             authority: Some(std::sync::Arc::new(PresentationAuthority {
                 options: options.clone(),
                 runtime: scoped,

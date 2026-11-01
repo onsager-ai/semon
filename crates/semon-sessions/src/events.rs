@@ -3768,7 +3768,7 @@ fn scan_file_with_mode(
         }
         let started = cache.scan_measurements.start();
         let accepted_evidence = match recorded.as_ref() {
-            Some(ledger) if !verify_prefix => cache
+            Some(_) if !verify_prefix => cache
                 .store
                 .as_ref()
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?

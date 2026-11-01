@@ -9031,7 +9031,7 @@ fn build_sources_inner(
         }
         crate::query_projection::complete_recipes(rows)?;
     }
-    let presentation = presentation
+    let mut presentation = presentation
         .map(|observations| {
             let rows = catalog.as_deref().expect("publication catalog");
             let cohort = rows.iter().chain(
