@@ -10,7 +10,7 @@ use crate::storage::{
         CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
         SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims, SourceIntent,
         SourceMutationReceipt, SourceObservationStore, SourceOperation, selected_projection_paths,
-        validate_intent, validate_paths,
+        validate_catalog_pending_exclusions, validate_intent, validate_paths,
     },
 };
 
@@ -427,7 +427,7 @@ impl SourceObservationStore for PgSourceJournal {
             }
 
             let excluded = search.map_or(&[][..], |search| search.excluded);
-            validate_paths(excluded)?;
+            validate_catalog_pending_exclusions(excluded)?;
             let excluded = excluded
                 .iter()
                 .map(|path| path.as_bytes().to_vec())

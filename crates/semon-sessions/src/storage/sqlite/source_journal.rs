@@ -6,7 +6,7 @@ use crate::storage::{
     source_observations::{
         CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
         SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
-        operation_replay, validate_intent, validate_paths,
+        operation_replay, validate_catalog_pending_exclusions, validate_intent, validate_paths,
     },
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -1060,8 +1060,10 @@ impl SourceObservationStore for SourceJournal {
                 }
             }
         }
-        let excluded = serde_json::to_string(search.map_or(&[][..], |search| search.excluded))
-            .map_err(|_| StorageError::InvalidArguments)?;
+        let excluded = search.map_or(&[][..], |search| search.excluded);
+        validate_catalog_pending_exclusions(excluded)?;
+        let excluded =
+            serde_json::to_string(excluded).map_err(|_| StorageError::InvalidArguments)?;
         let fallback = {
             let mut statement = db.prepare(PENDING_SQL).map_err(failed)?;
             statement
@@ -2384,6 +2386,132 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn configured_catalog_pending_selector_respects_large_exclusion_union() {
+        let fixture = CacheFixture::new();
+        let config = crate::Options::default()
+            .source
+            .config(&fixture.cache_path)
+            .unwrap();
+        let namespace = config.namespace.as_str();
+        let mut store = SourceJournal::owned(
+            crate::events::store::configured::NativeOwnership::restore(&config).unwrap(),
+        );
+
+        // Five tickets can each retain 64 distinct pending paths.
+        let excluded = (0..5)
+            .flat_map(|ticket| {
+                (0..64).map(move |path| format!("waiting-{ticket:02}-{path:02}"))
+            })
+            .collect::<Vec<_>>();
+        let mut sources = excluded.clone();
+        sources.extend(["fifo-a".to_owned(), "hint-z".to_owned()]);
+        for paths in sources.chunks(256) {
+            store
+                .discover(&discover_operation(namespace, paths, false), paths, false)
+                .unwrap();
+        }
+
+        let hint = ["hint-z".to_owned()];
+        let yield_search = CatalogPendingSearch {
+            paths: &hint,
+            retry: None,
+            yield_to_fifo: true,
+            excluded: &excluded,
+        };
+        let batch = store
+            .pending_catalog_sources(1, Some(&yield_search))
+            .unwrap();
+        assert_eq!(batch.tier, CatalogPendingTier::Fifo);
+        assert_eq!(batch.paths, vec!["fifo-a"]);
+        assert!(batch.fallback.is_empty());
+        assert!(!batch.search_checked);
+
+        let hint_search = CatalogPendingSearch {
+            yield_to_fifo: false,
+            ..yield_search
+        };
+        let batch = store
+            .pending_catalog_sources(1, Some(&hint_search))
+            .unwrap();
+        assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
+        assert_eq!(batch.paths, vec!["hint-z"]);
+        assert_eq!(batch.fallback, vec!["fifo-a"]);
+        assert!(batch.search_checked);
+
+        let exclusion_limit =
+            crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
+        let maximum = (0..exclusion_limit)
+            .map(|index| format!("other-{index:04}"))
+            .collect::<Vec<_>>();
+        let maximum_search = CatalogPendingSearch {
+            excluded: &maximum,
+            ..hint_search
+        };
+        let batch = store
+            .pending_catalog_sources(1, Some(&maximum_search))
+            .unwrap();
+        assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
+        assert_eq!(batch.paths, vec!["hint-z"]);
+        assert_eq!(batch.fallback, vec!["fifo-a"]);
+
+        let known_paths = ["fifo-a".to_owned(), "hint-z".to_owned()];
+        let before = store.claims(&known_paths).unwrap();
+        let too_many = (0..=exclusion_limit)
+            .map(|index| format!("other-{index:04}"))
+            .collect::<Vec<_>>();
+        let oversized = CatalogPendingSearch {
+            excluded: &too_many,
+            ..maximum_search
+        };
+        assert!(matches!(
+            store.pending_catalog_sources(1, Some(&oversized)),
+            Err(StorageError::InvalidArguments)
+        ));
+        let empty_path = [String::new()];
+        let invalid_path = CatalogPendingSearch {
+            excluded: &empty_path,
+            ..oversized
+        };
+        assert!(matches!(
+            store.pending_catalog_sources(1, Some(&invalid_path)),
+            Err(StorageError::InvalidArguments)
+        ));
+        assert!(store
+            .claims(&too_many[..256])
+            .unwrap()
+            .iter()
+            .all(|(_, revision)| revision.is_none()));
+        let overlong_path = ["x".repeat(4097)];
+        let invalid_path = CatalogPendingSearch {
+            excluded: &overlong_path,
+            ..invalid_path
+        };
+        assert!(matches!(
+            store.pending_catalog_sources(1, Some(&invalid_path)),
+            Err(StorageError::InvalidArguments)
+        ));
+        assert_eq!(store.claims(&known_paths).unwrap(), before);
+
+        let too_many_mutations = (0..257)
+            .map(|index| format!("mutation-{index:03}"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            store.discover(
+                &discover_operation(namespace, &too_many_mutations, false),
+                &too_many_mutations,
+                false,
+            ),
+            Err(StorageError::InvalidArguments)
+        );
+        assert_eq!(store.claims(&known_paths).unwrap(), before);
+        assert!(store
+            .claims(&too_many_mutations[..256])
+            .unwrap()
+            .iter()
+            .all(|(_, revision)| revision.is_none()));
     }
 
     #[test]
