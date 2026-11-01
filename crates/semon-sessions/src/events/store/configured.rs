@@ -13920,7 +13920,7 @@ mod tests {
                 fs::write(first, raw).unwrap();
 
                 for index in 2..4 {
-                    let session_id = format!("capture-overflow-independent-{index}");
+                    let session_id = format!("zz-capture-overflow-independent-{index}");
                     let input = crate::Input {
                         root: crate::InputRoot::Claude,
                         path: format!("projects/sanitized/zz-capture-overflow-{index}.jsonl"),
