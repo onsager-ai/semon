@@ -37,20 +37,21 @@ pub(super) fn trace_families(
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let generation_bytes = generation.as_bytes().to_vec();
     let previous_bytes = previous.as_bytes().to_vec();
-    let digests = owners.iter().map(|owner| owner.0.clone()).collect::<Vec<_>>();
-    let keys = owners.iter().map(|owner| owner.1.clone()).collect::<Vec<_>>();
+    let digests = owners
+        .iter()
+        .map(|owner| owner.0.clone())
+        .collect::<Vec<_>>();
+    let keys = owners
+        .iter()
+        .map(|owner| owner.1.clone())
+        .collect::<Vec<_>>();
     let source_filter = if source_generation.is_some() {
         " AND h.source_generation=$6"
     } else {
         ""
     };
-    let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = vec![
-        &ns,
-        &generation_bytes,
-        &previous_bytes,
-        &digests,
-        &keys,
-    ];
+    let mut args: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+        vec![&ns, &generation_bytes, &previous_bytes, &digests, &keys];
     let expected_source = source_generation.map(|value| value.as_bytes().to_vec());
     if let Some(expected_source) = &expected_source {
         args.push(expected_source);
@@ -153,7 +154,10 @@ pub(super) fn trace_families(
                   AND target.generation=$2 AND target.key_digest=h.key_digest AND target.session_key=h.session_key
             ){source_filter}"
     );
-    let state = tx.driver.query_one(&state_sql, &args).map_err(sqlstate::error)?;
+    let state = tx
+        .driver
+        .query_one(&state_sql, &args)
+        .map_err(sqlstate::error)?;
     if state.get::<_, bool>(0) {
         return Err(StorageError::ScopeChanged);
     }
