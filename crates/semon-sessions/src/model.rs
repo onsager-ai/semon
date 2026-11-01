@@ -8489,6 +8489,7 @@ fn build_sources_inner(
         &selection,
         BuildSelection::Identity { .. } | BuildSelection::Matching { .. }
     );
+    let ordinary_current_sources = matches!(&selection, BuildSelection::Current(_));
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
@@ -9156,6 +9157,15 @@ fn build_sources_inner(
                     }
                 }
             }
+            if ordinary_current_sources {
+                let rows = catalog.as_deref().unwrap_or_default();
+                let continuations = builder.cache.take_source_continuations(rows);
+                if let Some(observations) = presentation.as_mut() {
+                    observations.set_source_continuations(continuations)?;
+                }
+            } else {
+                builder.cache.discard_source_continuations();
+            }
             relationships.presentation = presentation;
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
@@ -9234,9 +9244,13 @@ fn build_sources_inner(
         }
         BuildTarget::Catalog => {
             let rows = catalog.as_deref().unwrap_or_default();
-            let continuations = cache.take_source_continuations(rows);
-            if let Some(observations) = presentation.as_mut() {
-                observations.set_source_continuations(continuations)?;
+            if ordinary_current_sources {
+                let continuations = cache.take_source_continuations(rows);
+                if let Some(observations) = presentation.as_mut() {
+                    observations.set_source_continuations(continuations)?;
+                }
+            } else {
+                cache.discard_source_continuations();
             }
             let publication_started = std::time::Instant::now();
             let generation = cache.publish_catalog_projection_fenced(

@@ -63,9 +63,10 @@ jobs:
       - name: Production host API callers compile
         id: production
         run: cargo check --locked --workspace --all-targets
-      - name: Archived overview large source offset diagnostic
-        id: archive_offset_diagnostic
+      - name: Archived overview large source offset custody regression
+        id: archive_offset_regression
         if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+        continue-on-error: false
         shell: bash
         run: |
           result=0
@@ -77,7 +78,7 @@ jobs:
           echo "CASE name=$test expected=1 status=$result" >> "$RUNNER_TEMP/archive-offset-diagnostic.log"
           exit "$result"
       - name: Retain archived overview large source offset diagnostic
-        if: ${{ !cancelled() && steps.archive_offset_diagnostic.outcome != 'skipped' }}
+        if: ${{ !cancelled() && steps.archive_offset_regression.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: archive-offset-diagnostic

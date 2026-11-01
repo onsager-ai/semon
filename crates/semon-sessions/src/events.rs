@@ -2949,6 +2949,10 @@ impl EventCache {
             .collect()
     }
 
+    pub(crate) fn discard_source_continuations(&mut self) {
+        self.source_continuations.clear();
+    }
+
     fn from_loaded(loaded: Loaded) -> Self {
         let Loaded {
             files,
