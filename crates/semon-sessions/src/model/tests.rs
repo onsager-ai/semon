@@ -11355,7 +11355,10 @@ fn semantic_index_rejects_source_change_after_producer_preparation() {
     let inputs = crate::inputs(&home.options).unwrap();
     assert_eq!(inputs.len(), 1);
     let input = inputs[0].clone();
-    let path = input.full_path(&home.options).to_string_lossy().into_owned();
+    let path = input
+        .full_path(&home.options)
+        .to_string_lossy()
+        .into_owned();
     let paths = vec![path.clone()];
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
@@ -11365,8 +11368,7 @@ fn semantic_index_rejects_source_change_after_producer_preparation() {
     );
     let batch = cache.semantic_batch(64).unwrap().unwrap();
     assert_eq!(batch.phase, relation_stage::Phase::Indexing);
-    let model =
-        prepare_semantic_batch(&home.options, &mut cache, &inputs, &batch, NOW).unwrap();
+    let model = prepare_semantic_batch(&home.options, &mut cache, &inputs, &batch, NOW).unwrap();
     assert_eq!(model.prepared().indexed_sources.len(), 1);
     let prepared_claims = model.prepared().claims.clone();
     assert_eq!(cache.catalog_claims(&paths).unwrap(), prepared_claims);
@@ -11411,7 +11413,10 @@ fn semantic_index_rejects_source_change_after_producer_preparation() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(!index_done, "a stale Index batch cannot acknowledge its source");
+    assert!(
+        !index_done,
+        "a stale Index batch cannot acknowledge its source"
+    );
 }
 
 #[test]
