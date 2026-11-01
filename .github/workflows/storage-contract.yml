@@ -89,7 +89,11 @@ jobs:
             model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
             model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
             model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
-            catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key; do
+            catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key \
+            catalog::tests::semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group \
+            catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
+            catalog::tests::semantic_stage_publishes_summary_and_trace_without_query_recipes \
+            catalog::tests::semantic_stage_summary_overflow_preflights_before_trace_publication; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0
