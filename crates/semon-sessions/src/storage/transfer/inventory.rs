@@ -176,9 +176,11 @@ fn native(name: &str) -> Option<Disposition> {
         | "catalog_history_sources"
         | "catalog_history_progress" => &[CatalogHistory],
         "catalog_recipe_headers" | "catalog_recipe_rows" => &[Recipes, Slots],
-        "catalog_search_documents" | "catalog_search_memberships" | "catalog_search_counts" => {
-            &[Search]
-        }
+        "catalog_search_documents"
+        | "catalog_search_memberships"
+        | "catalog_search_counts"
+        | "catalog_search_coverage"
+        | "catalog_search_publications" => &[Search],
         "catalog_search_headers" => {
             return Some(Disposition::LocalOnly(
                 "Derived header search keys are rebuilt in the same destination transaction as the transferred native_codex_header metadata; authoritative header bytes travel as NativeMetadata in NativeHeaders.",
