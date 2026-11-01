@@ -487,7 +487,7 @@ impl QueryCatalogStore for QueryCatalog {
         let window = if needs_window && selected_current {
             let part = self
                 .read_cohort(namespace, now, &mut (8 * 1024 * 1024))
-                .map_err(|error| {
+                .inspect_err(|error| {
                     #[cfg(test)]
                     if error.code == "unavailable"
                         && error.message == StorageError::ScopeChanged.to_string()
@@ -499,7 +499,6 @@ impl QueryCatalogStore for QueryCatalog {
                             "cohort_read",
                         );
                     }
-                    error
                 })?;
             if part.generation != self.generation
                 || Some(part.runtime.as_str()) != runtime.as_deref()
