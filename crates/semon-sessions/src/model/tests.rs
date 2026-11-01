@@ -5704,7 +5704,40 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
         home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
     }
     let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
+    let mut full_options = home.options.clone();
+    full_options.cache = home.root.join("full-origin-oracle.json");
+    let full_inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/alpha.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/beta.jsonl".into(),
+        },
+    ];
+    let mut full_cache = EventCache::open(&full_options.cache, &full_options.source).unwrap();
+    let full = prepare_sources(&full_options, &mut full_cache, &full_inputs, NOW).unwrap();
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    for (id, relation) in &full.relationships.relations {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM catalog_semantic_relations WHERE relation_id=?1",
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let persisted: Value = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(
+            persisted["query_content"]["origin"],
+            relation
+                .query_content
+                .get("origin")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "{id}: persisted selected origin recipe matches the full build"
+        );
+    }
     for turn in &oracle.turns {
         for edge in &turn.sent {
             let handoff = oracle.handoffs.iter().find(|h| h.id == *edge).unwrap();
