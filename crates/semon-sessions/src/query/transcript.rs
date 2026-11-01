@@ -782,17 +782,19 @@ fn read_inner(
         return Ok(None);
     }
     let mut row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
-    crate::storage::sqlite::proof_generations::attach_query_recipe(
-        &tx,
-        &binding,
-        if history.is_some() {
-            crate::storage::catalog::CatalogObservationOwner::History
-        } else {
-            crate::storage::catalog::CatalogObservationOwner::Catalog
-        },
-        &mut row,
-    )
-    .map_err(unavailable)?;
+    if search.is_some() || args["_session"] == true {
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx,
+            &binding,
+            if history.is_some() {
+                crate::storage::catalog::CatalogObservationOwner::History
+            } else {
+                crate::storage::catalog::CatalogObservationOwner::Catalog
+            },
+            &mut row,
+        )
+        .map_err(unavailable)?;
+    }
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
     }) {

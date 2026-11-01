@@ -485,7 +485,9 @@ impl QueryCatalogStore for QueryCatalog {
                         );
                     })?
                     .ok_or(StorageError::ScopeChanged)?;
-                snapshot.attach_query_recipe(&mut row, history)?;
+                if args["_session"] == true {
+                    snapshot.attach_query_recipe(&mut row, history)?;
+                }
                 let current_row = snapshot.catalog(key, false)?;
                 let current_row = current_runtime_owner(&row, history, current_row.as_ref());
                 let current = current_row.is_some();
