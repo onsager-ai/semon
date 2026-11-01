@@ -42,6 +42,7 @@ pub(crate) trait OwnerClosurePort {
 pub(crate) fn owner_closure_with(
     port: &impl OwnerClosurePort,
     seed: &str,
+    used: &mut usize,
 ) -> rusqlite::Result<Vec<String>> {
     let Some((harness, top, id)) = port.input(seed)? else {
         return Ok(vec![seed.to_owned()]);
@@ -63,7 +64,6 @@ pub(crate) fn owner_closure_with(
     let mut pending = vec![seed.to_owned()];
     let mut ids = BTreeSet::new();
     let mut bridges = BTreeSet::new();
-    let mut used = 0usize;
     while let Some(path) = pending.pop() {
         if !paths.insert(path.clone()) {
             continue;
@@ -72,7 +72,19 @@ pub(crate) fn owner_closure_with(
             return Err(source_budget());
         }
         let (id, links) = port.links(&path)?;
-        let links: super::super::super::Links = bounded(links, &mut used)?;
+        let links: super::super::super::Links =
+            crate::model::relation_stage::selector_metadata(links, used).map_err(|error| {
+                if error
+                    .get_ref()
+                    .is_some_and(|cause| {
+                        cause.is::<crate::model::relation_stage::SelectorMetadataBudget>()
+                    })
+                {
+                    context_budget()
+                } else {
+                    rusqlite::Error::InvalidQuery
+                }
+            })?;
         let mut selectors = Vec::new();
         for id in std::iter::once(id)
             .chain(links.session_ids)

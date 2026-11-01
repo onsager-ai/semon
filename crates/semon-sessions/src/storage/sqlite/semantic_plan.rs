@@ -137,13 +137,15 @@ mod tests {
             let expected = (0..count)
                 .map(|i| format!("group-{count}/source-{i:02}"))
                 .collect::<Vec<_>>();
+            let mut used = 0;
             assert_eq!(
-                owner_closure_with(&source_a, &expected[0]).unwrap(),
+                owner_closure_with(&source_a, &expected[0], &mut used).unwrap(),
                 expected
             );
         }
+        let mut used = 0;
         assert_eq!(
-            owner_closure_with(&source_a, "a-seed").unwrap(),
+            owner_closure_with(&source_a, "a-seed", &mut used).unwrap(),
             vec!["a-seed".to_owned(), "z-peer".to_owned()]
         );
         for i in 0..65 {
@@ -156,7 +158,8 @@ mod tests {
                 i % 2 == 1,
             );
         }
-        match owner_closure_with(&source_a, "overflow/source-00").unwrap_err() {
+        let mut used = 0;
+        match owner_closure_with(&source_a, "overflow/source-00", &mut used).unwrap_err() {
             rusqlite::Error::ToSqlConversionFailure(source) => {
                 assert_eq!(source.to_string(), "semantic_physical_owner_source_budget");
             }
@@ -166,8 +169,9 @@ mod tests {
             db: &db,
             ns: "source-b",
         };
+        let mut used = 0;
         assert_eq!(
-            owner_closure_with(&source_b, "different-namespace").unwrap(),
+            owner_closure_with(&source_b, "different-namespace", &mut used).unwrap(),
             vec!["different-namespace".to_owned()]
         );
     }

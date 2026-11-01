@@ -123,6 +123,11 @@ pub(crate) struct Context {
     pub(crate) native_events: Vec<NativeEvent>,
     pub(crate) companions: Vec<String>,
     pub(crate) matching_locations: Option<Vec<Location>>,
+    /// Exact globally unique Claude Agent calls selected with relation
+    /// companions, so staged model construction can localize them without a
+    /// second metadata lookup.
+    #[serde(default)]
+    pub(crate) claude_call_locations: BTreeMap<String, Option<Location>>,
     /// A qualified page's current source can carry a parent relationship in
     /// native header metadata even when the page has no event locations. None
     /// preserves adapters that do not yet provide this page scope.
@@ -323,6 +328,7 @@ pub(crate) trait SelectorLookup {
     type Error;
     fn invalid(&self, message: &'static str) -> Self::Error;
     fn metadata_budget(&self) -> Self::Error;
+    fn event_read_budget(&self) -> Self::Error;
     fn native_key(&self, native: &str, harness: &str) -> Result<Selection, Self::Error>;
     fn receipt_first(&self, id: &str) -> Result<Option<Option<String>>, Self::Error>;
     fn call_owners(&self, id: &str) -> Result<Vec<(String, String)>, Self::Error>;
@@ -389,6 +395,11 @@ pub(crate) type SelectorEndpointRow = (Option<String>, Option<String>, Option<St
 #[derive(Debug)]
 pub(crate) struct SelectorMetadataBudget;
 
+pub(crate) const SELECTOR_EVENT_READ_LIMIT: usize = 64;
+
+#[derive(Debug)]
+pub(crate) struct SelectorEventReadBudget;
+
 impl std::fmt::Display for SelectorMetadataBudget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("semantic_selector_metadata_budget")
@@ -396,6 +407,22 @@ impl std::fmt::Display for SelectorMetadataBudget {
 }
 
 impl std::error::Error for SelectorMetadataBudget {}
+
+impl std::fmt::Display for SelectorEventReadBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("semantic_selector_event_read_budget")
+    }
+}
+
+impl std::error::Error for SelectorEventReadBudget {}
+
+fn charge_selector_event_read(reads: &mut usize) -> Result<(), SelectorEventReadBudget> {
+    if *reads >= SELECTOR_EVENT_READ_LIMIT {
+        return Err(SelectorEventReadBudget);
+    }
+    *reads += 1;
+    Ok(())
+}
 
 fn selector_metadata_error<P: SelectorLookup>(port: &P, error: io::Error) -> P::Error {
     if error
@@ -457,6 +484,7 @@ pub(crate) fn select_with<P: SelectorLookup>(
     port: &mut P,
     selector: &Selector,
     used: &mut usize,
+    event_reads: &mut usize,
 ) -> Result<Selection, P::Error> {
     let (keys, endpoint) = match selector {
         Selector::NativeKey { native, harness } => return port.native_key(native, harness),
@@ -479,6 +507,7 @@ pub(crate) fn select_with<P: SelectorLookup>(
                     ..Default::default()
                 });
             }
+            charge_selector_event_read(event_reads).map_err(|_| port.event_read_budget())?;
             let text = port.event_metadata(&keys[0].0, &keys[0].1)?;
             let native = selector_event(port, text, used)?;
             let endpoint = selector_endpoint(port, &native.owner, used, false)?;
@@ -1276,6 +1305,9 @@ impl Context {
     }
 
     pub(super) fn install_endpoints(&self, builder: &mut Builder<'_>) -> io::Result<()> {
+        builder
+            .staged_claude_call_locations
+            .extend(self.claude_call_locations.clone());
         for endpoint in self.endpoints.values() {
             Self::install_endpoint(endpoint, builder)?;
         }
@@ -1589,7 +1621,21 @@ mod origin_turn_tests {
 
 #[cfg(test)]
 mod selector_metadata_tests {
-    use super::{SelectorMetadataBudget, selector_metadata};
+    use super::{
+        SELECTOR_EVENT_READ_LIMIT, SelectorMetadataBudget, charge_selector_event_read,
+        selector_metadata,
+    };
+
+    #[test]
+    fn selector_event_read_budget_refuses_the_next_read() {
+        let mut reads = SELECTOR_EVENT_READ_LIMIT - 1;
+        charge_selector_event_read(&mut reads).unwrap();
+        assert_eq!(reads, SELECTOR_EVENT_READ_LIMIT);
+
+        let error = charge_selector_event_read(&mut reads).unwrap_err();
+        assert_eq!(error.to_string(), "semantic_selector_event_read_budget");
+        assert_eq!(reads, SELECTOR_EVENT_READ_LIMIT);
+    }
 
     #[test]
     fn selector_metadata_shares_the_byte_meter_and_keeps_decode_errors_fatal() {

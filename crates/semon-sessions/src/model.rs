@@ -2030,6 +2030,7 @@ struct Builder<'a> {
     /// among the relays.
     pending_downs: Vec<DownMessage>,
     staged_endpoints: BTreeMap<String, relation_stage::Endpoint>,
+    staged_claude_call_locations: BTreeMap<String, Option<relation_stage::Location>>,
     staged_origins: BTreeMap<String, relation_stage::RelationOrigin>,
     staged_epoch: Option<i64>,
     matching_refs: Option<BTreeSet<Ref>>,
@@ -2115,6 +2116,7 @@ impl<'a> Builder<'a> {
             down_sends: BTreeSet::new(),
             pending_downs: Vec::new(),
             staged_endpoints: BTreeMap::new(),
+            staged_claude_call_locations: BTreeMap::new(),
             staged_origins: BTreeMap::new(),
             staged_epoch: None,
             matching_refs: None,
@@ -3283,6 +3285,17 @@ impl<'a> Builder<'a> {
             });
             let call = if exact_parent.is_some() {
                 exact_parent
+            } else if let Some(location) = meta
+                .tool_use_id
+                .as_ref()
+                .and_then(|id| self.staged_claude_call_locations.get(id))
+            {
+                match location {
+                    Some(location) => Some(location.local(self)?.ok_or_else(|| {
+                        io::Error::other("staged Claude call source not selected")
+                    })?),
+                    None => None,
+                }
             } else if let (Some(epoch), Some(id)) = (self.staged_epoch, meta.tool_use_id.as_ref()) {
                 let selected = self.cache.semantic_select(
                     epoch,

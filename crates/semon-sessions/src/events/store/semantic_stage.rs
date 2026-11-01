@@ -869,7 +869,8 @@ impl PublicationPlanPort for OrdinaryOwnerPlan<'_> {
     }
 }
 fn owner_closure(c: &Connection, seed: &str) -> rusqlite::Result<Vec<String>> {
-    owner_closure_with(&OrdinaryOwnerPlan(c), seed)
+    let mut used = 0;
+    owner_closure_with(&OrdinaryOwnerPlan(c), seed, &mut used)
 }
 /// Qualification is a separate bounded Identity sub-phase after reduction.
 pub(crate) trait QualificationPort {
@@ -2891,7 +2892,13 @@ impl SqliteStore {
             replay: Vec::new(),
         };
         let mut used = 0;
-        let result = crate::model::relation_stage::select_with(&mut lookup, selector, &mut used);
+        let mut event_reads = 0;
+        let result = crate::model::relation_stage::select_with(
+            &mut lookup,
+            selector,
+            &mut used,
+            &mut event_reads,
+        );
         let replay = lookup.replay;
         if !replay.is_empty() {
             let tx = self
@@ -2934,6 +2941,11 @@ impl crate::model::relation_stage::SelectorLookup for OrdinaryLookup<'_> {
     fn metadata_budget(&self) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(
             crate::model::relation_stage::SelectorMetadataBudget,
+        ))
+    }
+    fn event_read_budget(&self) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(
+            crate::model::relation_stage::SelectorEventReadBudget,
         ))
     }
     fn native_key(
@@ -3170,8 +3182,9 @@ mod tests {
             let expected = (0..count)
                 .map(|i| format!("group-{count}/source-{i:02}"))
                 .collect::<Vec<_>>();
+            let mut used = 0;
             assert_eq!(
-                owner_closure_with(&OrdinaryOwnerPlan(&db), &expected[0]).unwrap(),
+                owner_closure_with(&OrdinaryOwnerPlan(&db), &expected[0], &mut used).unwrap(),
                 expected
             );
         }
@@ -3185,7 +3198,13 @@ mod tests {
                 i % 2 == 1,
             );
         }
-        let error = owner_closure_with(&OrdinaryOwnerPlan(&db), "overflow/source-00").unwrap_err();
+        let mut used = 0;
+        let error = owner_closure_with(
+            &OrdinaryOwnerPlan(&db),
+            "overflow/source-00",
+            &mut used,
+        )
+        .unwrap_err();
         match error {
             rusqlite::Error::ToSqlConversionFailure(source) => {
                 assert_eq!(source.to_string(), "semantic_physical_owner_source_budget");
@@ -3206,8 +3225,9 @@ mod tests {
         ] {
             add_physical_owner_input(&db, path, harness, id, is_top);
         }
+        let mut used = 0;
         assert_eq!(
-            owner_closure_with(&OrdinaryOwnerPlan(&db), "rollout/a").unwrap(),
+            owner_closure_with(&OrdinaryOwnerPlan(&db), "rollout/a", &mut used).unwrap(),
             vec!["rollout/a".to_owned(), "rollout/b".to_owned()]
         );
     }
@@ -4080,6 +4100,7 @@ mod tests {
                 replay: Vec::new(),
             };
             let mut used = 0;
+            let mut event_reads = 0;
             let result = crate::model::relation_stage::select_with(
                 &mut lookup,
                 &Selector::NativeKey {
@@ -4087,6 +4108,7 @@ mod tests {
                     harness: "codex".into(),
                 },
                 &mut used,
+                &mut event_reads,
             )
             .unwrap();
             assert_eq!(result.key, Some(format!("{}codex:same", ":".repeat(80))));
