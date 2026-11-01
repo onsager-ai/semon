@@ -11323,9 +11323,93 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             break;
         }
     }
+    let diagnostic = if injected && complete {
+        String::new()
+    } else {
+        let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let stage: Option<(i64, String, bool, i64, Option<String>)> = db
+            .query_row(
+                "SELECT epoch,phase,resetting,revision,generation FROM catalog_semantic_stage LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap();
+        let pending: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_catalog_invalidations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let first_pending: Option<(
+            String,
+            i64,
+            String,
+            Option<i64>,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+            Option<bool>,
+        )> = db
+            .query_row(
+                "SELECT i.source_path,i.revision,i.reason,s.claim,s.ledger IS NOT NULL,s.index_done,s.events_done,s.identity_done,s.relation_done,s.publication_done,s.ack_done FROM session_catalog_invalidations i LEFT JOIN catalog_semantic_sources s ON s.namespace=i.namespace AND s.source_path=i.source_path ORDER BY i.source_path LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap();
+        let catalog_state: (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = db
+            .query_row(
+                "SELECT (SELECT value FROM meta WHERE key='catalog_completeness' LIMIT 1),(SELECT backfill_state FROM storage_source_journal LIMIT 1),(SELECT value FROM meta WHERE key='catalog_generation' LIMIT 1),(SELECT value FROM meta WHERE key='slot_projection_catalog_generation' LIMIT 1)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let frontier: Option<(String, String, String, String, String)> = db
+            .query_row(
+                "SELECT kind,value,harness,after_key,after_edge FROM catalog_semantic_frontier WHERE done=0 ORDER BY kind,value,harness LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .optional()
+            .unwrap();
+        format!(
+            "stage={stage:?} pending_invalidations={pending} first_pending={first_pending:?} completeness_backfill_catalog_generation_slot_generation={catalog_state:?} first_frontier={frontier:?}"
+        )
+    };
     assert!(
         injected && complete,
-        "persistent stage/backlog did not recover: {phases:?}"
+        "persistent stage/backlog did not recover: {phases:?}; {diagnostic}"
     );
     assert!(
         phases.contains("indexing")

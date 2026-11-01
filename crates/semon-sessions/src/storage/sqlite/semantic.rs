@@ -436,6 +436,17 @@ fn refuse(reason: &'static str) -> StoreError {
     StoreError::Data(reason.into())
 }
 
+fn indexing_physical_stat_matches(
+    physical: &crate::events::Stat,
+    ledger: &crate::events::Ledger,
+) -> bool {
+    let mut expected = ledger.stat;
+    if ledger.offset == ledger.stat.size && physical.size >= ledger.offset {
+        expected.size = physical.size;
+    }
+    physical == &expected
+}
+
 // The admitted transaction has already fenced epoch/generation before these
 // namespace-owned physical operations. Claims are observations, never ACKs.
 fn reset(c: &Connection, ns: &str, runtime: &str) -> rusqlite::Result<()> {
@@ -2996,8 +3007,8 @@ impl Stage {
             .map_err(error)?;
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.config.namespace.as_str();
-        let stage: Option<(i64,String,Option<String>,String)> = tx.query_row("SELECT epoch,phase,generation,runtime FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(error)?;
-        let Some((epoch, mut phase, base_generation, runtime)) = stage else {
+        let stage: Option<(i64,String,Option<String>,String,i64)> = tx.query_row("SELECT epoch,phase,generation,runtime,revision FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional().map_err(error)?;
+        let Some((epoch, mut phase, base_generation, runtime, stage_revision)) = stage else {
             return Ok(None);
         };
         if self.epoch != Some(epoch) {
@@ -3058,11 +3069,6 @@ impl Stage {
         } else {
             true
         };
-        if !resetting && !reduction_witnesses(&tx, ns).map_err(error)?.current()? {
-            #[cfg(test)]
-            eprintln!("semantic_batch_conflict reason=reduction");
-            return Err(StoreError::Configured(StorageError::Conflict));
-        }
         let revision: i64 = tx
             .query_row(
                 "SELECT revision FROM storage_source_journal WHERE namespace=?1",
@@ -3070,6 +3076,14 @@ impl Stage {
                 |r| r.get(0),
             )
             .map_err(error)?;
+        if !resetting
+            && stage_revision == revision
+            && !reduction_witnesses(&tx, ns).map_err(error)?.current()?
+        {
+            #[cfg(test)]
+            eprintln!("semantic_batch_conflict reason=reduction");
+            return Err(StoreError::Configured(StorageError::Conflict));
+        }
         let changed: bool = tx.query_row("SELECT revision<>?2 OR EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND index_done=0) FROM main.catalog_semantic_stage WHERE namespace=?1", params![ns,revision], |r| r.get(0)).map_err(error)?;
         if !resetting && phase != "indexing" && changed {
             reset(&tx, ns, &runtime).map_err(error)?;
@@ -3707,9 +3721,10 @@ impl Stage {
             };
             let mut expected = ledger.source(&source.path, &source.native_id);
             expected.native_role = source.native_role.clone();
-            if expected != *source
-                || crate::events::Stat::of(&source.path).ok().as_ref() != Some(&ledger.stat)
-            {
+            let physical_matches = crate::events::Stat::of(&source.path)
+                .ok()
+                .is_some_and(|physical| indexing_physical_stat_matches(&physical, &ledger));
+            if expected != *source || !physical_matches {
                 #[cfg(test)]
                 eprintln!("semantic_record_conflict: indexing_ledger_changed");
                 return Ok(Outcome::Conflict);
