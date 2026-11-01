@@ -828,6 +828,7 @@ impl NativeOwnership {
 
     /// Admit only the already-authored, fully composite native profile. No row
     /// conversion, singleton adoption, or public qualification is performed.
+    #[allow(dead_code)] // Kept inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
         Self::admit_inner(config, false)
     }

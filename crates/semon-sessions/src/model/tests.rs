@@ -2868,17 +2868,16 @@ fn native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots() 
         data.tx["shared"]
             .slots
             .iter()
-            .filter_map(|slot| {
-                matches!(slot.kind, SlotKind::U).then(|| {
-                    (
-                        slot.file
-                            .as_ref()
-                            .expect("source prompt has a file")
-                            .path
-                            .clone(),
-                        slot.turn.clone().expect("source prompt has a turn"),
-                    )
-                })
+            .filter(|&slot| matches!(slot.kind, SlotKind::U))
+            .map(|slot| {
+                (
+                    slot.file
+                        .as_ref()
+                        .expect("source prompt has a file")
+                        .path
+                        .clone(),
+                    slot.turn.clone().expect("source prompt has a turn"),
+                )
             })
             .collect::<BTreeMap<_, _>>()
     };

@@ -27,6 +27,7 @@ pub(crate) struct SelectedRecipeRef {
 
 /// A single publication's compact metadata and complete selected payload.
 /// This preparation boundary is inactive until every storage/read hook is ready.
+#[allow(dead_code)]
 pub(crate) struct SelectedRecipePublication {
     pub(crate) metadata: String,
     pub(crate) query_recipe: Option<String>,
@@ -68,6 +69,7 @@ impl SelectedRecipe {
     }
 
     /// Prepare both stored cells without changing the producer's active row.
+    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn prepare(row: &CatalogRow) -> std::io::Result<SelectedRecipePublication> {
         if row.query_recipe.is_none()
             && row
@@ -99,6 +101,7 @@ impl SelectedRecipe {
 
     /// Replace selected result metadata with its exact publication reference.
     /// The caller publishes the returned bytes atomically with this row.
+    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
         let Some(recipe) = &row.query_recipe else {
             return Ok(None);
