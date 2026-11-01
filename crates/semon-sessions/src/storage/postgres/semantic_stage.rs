@@ -95,7 +95,10 @@ fn save(tx: &mut PgTxn<'_>, stage: &Stage, insert: bool) -> Result<(), StorageEr
     if bytes.len() > MAX || stage.paths.len() > 64 || stage.context.endpoints.len() > 64 {
         #[cfg(test)]
         if stage.paths.len() == 17 && stage.phase == Phase::Publication && bytes.len() > MAX {
-            eprintln!("typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget bytes={} max={MAX}", bytes.len());
+            eprintln!(
+                "typed_witness_pg_production_refusal kind=Busy reason=whole_stage_budget bytes={} max={MAX}",
+                bytes.len()
+            );
         }
         return Err(StorageError::Busy);
     }

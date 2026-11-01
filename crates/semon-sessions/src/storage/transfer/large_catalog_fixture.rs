@@ -382,7 +382,10 @@ fn finish_measured(
         if typed_publication {
             match cache.semantic_rejection() {
                 Some("semantic_context_budget") => assert!(recorded.is_err()),
-                None => assert_eq!(recorded.unwrap_err().to_string(), crate::storage::StorageError::Busy.to_string()),
+                None => assert_eq!(
+                    recorded.unwrap_err().to_string(),
+                    crate::storage::StorageError::Busy.to_string()
+                ),
                 other => panic!("unexpected production record refusal: {other:?}"),
             }
             assert_eq!(cache.session_catalog_generation(), before);
