@@ -1015,7 +1015,14 @@ fn read_inner(
             );
         }
     })?;
-    crate::storage::sqlite::proof_generations::observation_binding(&transaction, &current, &row)
+    // History metadata may retain Current's lifecycle. Preserve the physical
+    // owner already selected from the snapshot when authenticating its row.
+    crate::storage::sqlite::proof_generations::observation_binding_for_physical_owner(
+        &transaction,
+        &current,
+        &row,
+        observation_owner,
+    )
         .inspect_err(|_| {
             if crate::native_timing::enabled() {
                 eprintln!("semon sessions native: selected_row_authority_refused boundary=observation_binding");

@@ -129,6 +129,7 @@ jobs:
             model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
             model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
             model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
+            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
             events::store::configured::tests::current_recovery::recovery_semantic_index_revision_drift_resets_stale_reduction_witness \
             model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
             model::tests::semantic_relation_batches_continue_after_codex_primary_event_budget \
