@@ -1174,14 +1174,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let pid_bytes = serde_json::to_vec(&serde_json::json!({"sessionId":"one","procStart":1234,"startedAt":1790812800000i64,"status":"waiting","waitingFor":"input needed"})).unwrap();
     let parent_before_withdrawal = fs::read(&claude_parent).unwrap();
-    let refresh = |options: &Options| {
+    let refresh_at = |options: &Options, now: i64| {
         // Query's private listing completion does not finish Catalog/search
         // publication. Run the ordinary observer to completion before saving
         // the exact retained-search oracle, rather than forging its markers.
         let listing = crate::Query::from_sources(std::sync::Arc::new(
             crate::SessionSources::with_machines(vec![(recent_machine.into(), options.clone())]),
         ))
-        .call_at("list_sessions", &serde_json::json!({}), recent_now)
+        .call_at("list_sessions", &serde_json::json!({}), now)
         .expect("SQLite withdrawal oracle list");
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         evidence.request_metadata_audit();
@@ -1194,7 +1194,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let mut advances = 0;
         while started.elapsed() < Duration::from_secs(60) {
             advances += 1;
-            if evidence.refresh_catalog(&mut work, recent_now).unwrap() {
+            if evidence.refresh_catalog(&mut work, now).unwrap() {
                 complete = true;
                 break;
             }
@@ -1212,6 +1212,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         drop(work);
         listing
     };
+    let refresh = |options: &Options| refresh_at(options, recent_now);
 
     // Give SQLite the same original `one` owner that PostgreSQL published
     // before its continuation. The retained History recipe after the append
@@ -1800,15 +1801,48 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
     fs::remove_file(&oracle_pid).unwrap();
+    // Publish a dedicated SQLite cohort while Copilot is present, then let
+    // the same observer retain its owner when the source disappears. This
+    // gives the all-sessions Query the retained History row PG will compare.
+    let mut withdrawal_options = options.clone();
+    withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
+    let withdrawal_now = 1790812802000;
+    let capture_withdrawal = || {
+        let store = crate::storage::local_query_catalog(
+            &withdrawal_options,
+            withdrawal_options.source.namespace().unwrap(),
+        )
+        .unwrap();
+        let mut query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(
+                recent_machine.into(),
+                withdrawal_options.clone(),
+            )]),
+        ));
+        query.call_bound_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            withdrawal_now,
+            &*store,
+        )
+    };
+    refresh_at(&withdrawal_options, withdrawal_now);
+    let published_withdrawal = capture_withdrawal().expect("SQLite published withdrawal cohort");
+    assert!(
+        published_withdrawal["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|session| session["id"].as_str() == Some(copilot_id)),
+        "the published SQLite cohort includes Copilot before withdrawal"
+    );
+    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
+    fs::rename(&copilot, &copilot_parked).unwrap();
+    refresh_at(&withdrawal_options, withdrawal_now);
     // Capture the ordinary Query's post-withdrawal membership independently,
     // before the process-wide Guard. Query membership includes virtual peers
     // as well as physical Catalog owners.
-    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
-    fs::rename(&copilot, &copilot_parked).unwrap();
-    let mut withdrawal_options = options.clone();
-    withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
-    let withdrawal_oracle = crate::Query::new(withdrawal_options)
-        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+    let withdrawal_oracle = capture_withdrawal()
         .expect("SQLite ordinary withdrawal cohort");
     fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
