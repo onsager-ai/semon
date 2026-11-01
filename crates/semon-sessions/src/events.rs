@@ -2624,7 +2624,13 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
-        let _source_guard = prepared.publication_guard(self)?;
+        let _source_guard = match prepared.publication_guard(self) {
+            Ok(guard) => guard,
+            Err(error) if crate::model::relation_stage::source_generation_changed(&error) => {
+                return Ok((Outcome::Conflict, None));
+            }
+            Err(error) => return Err(error),
+        };
         let result = self
             .store
             .as_mut()

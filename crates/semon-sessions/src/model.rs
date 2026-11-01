@@ -7750,9 +7750,7 @@ impl PreparedSources {
         };
         for withdrawal in &self.withdrawals {
             if !withdrawal.current()? {
-                return Err(io::Error::other(
-                    "native source admission withdrawal changed",
-                ));
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
             }
         }
         validate_foreign_prompt_source_witnesses(cache, &fence.foreign_sources)?;
@@ -8322,7 +8320,24 @@ fn validate_foreign_trace_prompt_sources(
         .iter()
         .map(|input| input.full_path(options))
         .collect::<BTreeSet<_>>();
-    let sources = collect_foreign_trace_prompt_sources(&selected_paths, relationships)?;
+    let mut sources = collect_foreign_trace_prompt_sources(&selected_paths, relationships)?;
+    for (path, source) in collect_foreign_query_content_sources(&selected_paths, relationships)? {
+        if let Some(previous) = sources.get(&path) {
+            if previous != &source {
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            }
+        } else {
+            sources.insert(path, source);
+        }
+    }
+    let metadata_bytes = sources.values().try_fold(0usize, |total, source| {
+        total
+            .checked_add(serde_json::to_vec(source)?.len())
+            .ok_or_else(|| io::Error::other("semantic foreign preview metadata budget"))
+    })?;
+    if metadata_bytes > 1_048_576 || sources.len() > 64 {
+        return Err(io::Error::other("semantic foreign preview metadata budget"));
+    }
     for path in sources.keys() {
         let Some(input) = crate::native_evidence::catalog_input(path, options) else {
             return Err(io::Error::other(relation_stage::SourceGenerationChanged));
@@ -8331,18 +8346,15 @@ fn validate_foreign_trace_prompt_sources(
             return Err(io::Error::other(relation_stage::SourceGenerationChanged));
         }
     }
-    let sources = sources
-        .into_values()
-        .map(|source| source.clone())
-        .collect::<Vec<_>>();
+    let sources = sources.into_values().collect::<Vec<_>>();
     validate_foreign_prompt_source_witnesses(cache, &sources)?;
     Ok(sources)
 }
 
-fn collect_foreign_trace_prompt_sources<'a>(
+fn collect_foreign_trace_prompt_sources(
     selected_paths: &BTreeSet<PathBuf>,
-    relationships: &'a relation_stage::Context,
-) -> io::Result<BTreeMap<PathBuf, &'a summary::CatalogSource>> {
+    relationships: &relation_stage::Context,
+) -> io::Result<BTreeMap<PathBuf, summary::CatalogSource>> {
     let selected_owners = relationships
         .endpoints
         .iter()
@@ -8355,7 +8367,7 @@ fn collect_foreign_trace_prompt_sources<'a>(
         })
         .map(|(key, _)| key.as_str())
         .collect::<BTreeSet<_>>();
-    let mut sources = BTreeMap::<PathBuf, &summary::CatalogSource>::new();
+    let mut sources = BTreeMap::<PathBuf, summary::CatalogSource>::new();
     let mut metadata_bytes = 0usize;
     for preview in relationships
         .relations
@@ -8380,7 +8392,7 @@ fn collect_foreign_trace_prompt_sources<'a>(
         let source = &preview.at.source;
         let path = &source.path;
         if let Some(previous) = sources.get(path) {
-            if *previous != source {
+            if previous != source {
                 return Err(io::Error::other(relation_stage::SourceGenerationChanged));
             }
             continue;
@@ -8391,7 +8403,71 @@ fn collect_foreign_trace_prompt_sources<'a>(
         if metadata_bytes > 1_048_576 || sources.len() == 64 {
             return Err(io::Error::other("semantic foreign preview metadata budget"));
         }
-        sources.insert(path.clone(), source);
+        sources.insert(path.clone(), source.clone());
+    }
+    Ok(sources)
+}
+
+fn collect_foreign_query_content_sources(
+    selected_paths: &BTreeSet<PathBuf>,
+    relationships: &relation_stage::Context,
+) -> io::Result<BTreeMap<PathBuf, summary::CatalogSource>> {
+    let selected_owners = relationships
+        .endpoints
+        .iter()
+        .filter(|(_, endpoint)| {
+            endpoint
+                .row
+                .sources
+                .iter()
+                .any(|source| selected_paths.contains(&source.path))
+        })
+        .map(|(key, _)| key.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut sources = BTreeMap::<PathBuf, summary::CatalogSource>::new();
+    for relation in relationships.relations.values().filter(|relation| {
+        selected_owners.contains(relation.from.as_str())
+            || relation
+                .to
+                .as_deref()
+                .is_some_and(|owner| selected_owners.contains(owner))
+    }) {
+        for (field, recipe) in &relation.query_content {
+            crate::query_projection::validate_query_content_field(field)?;
+            if recipe.is_null() {
+                continue;
+            }
+            crate::query_projection::validate_query_content_recipe(recipe)?;
+            let path = recipe["path"]
+                .as_str()
+                .map(PathBuf::from)
+                .ok_or_else(|| io::Error::other(relation_stage::SourceGenerationChanged))?;
+            let source: summary::CatalogSource = serde_json::from_value(recipe["source"].clone())
+                .map_err(|_| io::Error::other(relation_stage::SourceGenerationChanged))?;
+            if source.path != path
+                || !std::iter::once(&relation.from)
+                    .chain(relation.to.iter())
+                    .filter_map(|owner| relationships.endpoints.get(owner))
+                    .any(|endpoint| endpoint.row.sources.contains(&source))
+            {
+                return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+            }
+            if selected_paths.contains(&path) {
+                continue;
+            }
+            if let Some(previous) = sources.get(&path) {
+                if previous != &source {
+                    return Err(io::Error::other(relation_stage::SourceGenerationChanged));
+                }
+            } else {
+                sources.insert(path, source);
+                if sources.len() > 64 {
+                    return Err(io::Error::other(
+                        "semantic foreign preview metadata budget",
+                    ));
+                }
+            }
+        }
     }
     Ok(sources)
 }
@@ -9313,6 +9389,9 @@ fn build_sources_inner(
             }
         }
         crate::query_projection::complete_recipes(rows)?;
+        if let Some(relationships) = staged_relationships {
+            crate::query_projection::complete_staged_recipes(rows, &relationships.relations)?;
+        }
     }
     let mut presentation = presentation
         .map(|observations| {
@@ -9406,7 +9485,8 @@ fn build_sources_inner(
                 &builder,
                 published_facts.as_ref(),
                 sender_turns.as_deref().unwrap_or(&turns),
-            );
+                rows,
+            )?;
             if let Some(replay) =
                 staged_relationships.filter(|context| !context.replay_owners.is_empty())
             {
@@ -9435,6 +9515,13 @@ fn build_sources_inner(
                             .source_turn
                             .merge(&captured.source_turn)
                             .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+                        for (field, recipe) in &captured.query_content {
+                            crate::query_projection::insert_query_content_recipe(
+                                &mut recorded.query_content,
+                                field,
+                                recipe,
+                            )?;
+                        }
                         *captured = recorded;
                     }
                 }

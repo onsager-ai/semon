@@ -4086,10 +4086,11 @@ fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesse
         context: staged.clone(),
         relation_cursor: None,
     };
-    let error = cache
-        .publish_semantic_catalog(&batch, &replay)
-        .expect_err("a changed foreign source must refuse final publication");
-    assert!(relation_stage::source_generation_changed(&error), "{error}");
+    assert_eq!(
+        cache.publish_semantic_catalog(&batch, &replay).unwrap(),
+        (crate::events::Outcome::Conflict, None),
+        "a changed foreign source conflicts before final publication"
+    );
     assert_eq!(cache.session_catalog_generation(), published_generation);
 }
 

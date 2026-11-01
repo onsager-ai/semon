@@ -7723,7 +7723,10 @@ mod tests {
         let path = f.raw.to_string_lossy().into_owned();
         fs::remove_file(&f.raw).unwrap();
 
-        let cache = EventCache::open_configured(&f.config).unwrap();
+        let cache = EventCache::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        )
+        .unwrap();
         assert!(cache.host_source.is_none());
         assert!(cache.files.is_empty());
         let ledgers = cache

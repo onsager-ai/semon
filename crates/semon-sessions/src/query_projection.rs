@@ -321,6 +321,145 @@ pub(crate) fn complete_recipes(rows: &mut [CatalogRow]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Staged owner groups restore the complete edge fields captured with their
+/// relation witnesses, even when the other endpoint is outside this group.
+pub(crate) fn complete_staged_recipes(
+    rows: &mut [CatalogRow],
+    relations: &std::collections::BTreeMap<String, crate::model::relation_stage::Relation>,
+) -> std::io::Result<()> {
+    for row in rows.iter_mut() {
+        let Some(recipe) = &mut row.query_recipe else {
+            continue;
+        };
+        for edge in &mut recipe.edges {
+            let id = edge["id"]
+                .as_str()
+                .ok_or_else(|| std::io::Error::other("Native handoff source recipe invalid"))?;
+            let Some(content) = relations.get(id).map(|relation| &relation.query_content) else {
+                continue;
+            };
+            let mut fields = std::collections::BTreeMap::new();
+            let Some(existing) = edge["query_content"].as_object() else {
+                return Err(std::io::Error::other(
+                    "Native handoff source recipe invalid",
+                ));
+            };
+            for (field, value) in existing {
+                insert_query_content_recipe(&mut fields, field, value)?;
+            }
+            for (field, value) in content {
+                insert_query_content_recipe(&mut fields, field, value)?;
+            }
+            edge["query_content"] = serde_json::to_value(fields).map_err(std::io::Error::other)?;
+        }
+    }
+    for row in rows {
+        if let Some(recipe) = &row.query_recipe {
+            row.query
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("Selected Query observation missing"))?["selected"] =
+                serde_json::to_value(recipe).map_err(std::io::Error::other)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn insert_query_content_recipe(
+    fields: &mut std::collections::BTreeMap<String, Value>,
+    field: &str,
+    recipe: &Value,
+) -> std::io::Result<()> {
+    validate_query_content_field(field)?;
+    if recipe.is_null() {
+        return Ok(());
+    }
+    validate_query_content_recipe(recipe)?;
+    if let Some(prior) = fields.get(field) {
+        if prior != recipe {
+            return Err(std::io::Error::other(
+                "Native handoff source recipes disagree",
+            ));
+        }
+    } else {
+        fields.insert(field.to_owned(), recipe.clone());
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_query_content_field(field: &str) -> std::io::Result<()> {
+    if matches!(field, "answer" | "brief" | "origin" | "result") {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "Native handoff source recipe invalid",
+        ))
+    }
+}
+
+pub(crate) fn validate_query_content_recipe(value: &Value) -> std::io::Result<()> {
+    let invalid = || std::io::Error::other("Native handoff source recipe invalid");
+    let Some(object) = value.as_object() else {
+        return Err(invalid());
+    };
+    if object.keys().any(|field| {
+        !matches!(
+            field.as_str(),
+            "path" | "offset" | "block" | "kind" | "tool" | "cwd" | "source" | "field"
+                | "arg" | "skip" | "structured"
+        )
+    }) {
+        return Err(invalid());
+    }
+    let path = value["path"].as_str().ok_or_else(invalid)?;
+    let offset = value["offset"].as_u64().ok_or_else(invalid)?;
+    let block = value["block"].as_u64().ok_or_else(invalid)?;
+    let kind = value["kind"].as_str().ok_or_else(invalid)?;
+    if !matches!(
+        kind,
+        "assistant"
+            | "answer"
+            | "handback"
+            | "notification"
+            | "prompt"
+            | "question"
+            | "received_agent"
+            | "received_cross"
+            | "received_down"
+            | "relay"
+            | "spawn"
+            | "tool_result"
+            | "trace_prompt"
+    ) || block > u64::from(u32::MAX)
+    {
+        return Err(invalid());
+    }
+    let source: crate::model::summary::CatalogSource =
+        serde_json::from_value(value["source"].clone()).map_err(|_| invalid())?;
+    if source.path != std::path::Path::new(path) {
+        return Err(invalid());
+    }
+    for field in ["tool", "cwd", "arg"] {
+        if value.get(field).is_some_and(|value| !value.is_null() && !value.is_string()) {
+            return Err(invalid());
+        }
+    }
+    if value.get("skip").is_some_and(|value| value.as_u64().is_none())
+        || value
+            .get("structured")
+            .is_some_and(|value| value.as_bool().is_none())
+    {
+        return Err(invalid());
+    }
+    if let Some(field) = value.get("field").filter(|field| !field.is_null()) {
+        let field: crate::native_field::NativeField =
+            serde_json::from_value(field.clone()).map_err(|_| invalid())?;
+        if field.record_offset != offset || u64::from(field.block) != block {
+            return Err(invalid());
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Projection {
     session: Value,

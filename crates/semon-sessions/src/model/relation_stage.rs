@@ -582,6 +582,8 @@ pub(crate) struct Relation {
     pub(crate) heads: Vec<String>,
     pub(crate) after: Vec<Location>,
     pub(crate) previews: BTreeMap<String, Preview>,
+    /// Complete content-free field recipes shared by both relation endpoints.
+    pub(crate) query_content: BTreeMap<String, serde_json::Value>,
     pub(crate) order: (u8, i64, String, u64, u32),
     pub(crate) explicit_previews: bool,
     pub(crate) stubs: Vec<Stub>,
@@ -784,7 +786,8 @@ impl Context {
         builder: &Builder<'_>,
         observed: Option<&BTreeMap<String, SessionFacts>>,
         turns: &[Turn],
-    ) -> Self {
+        rows: &[summary::CatalogRow],
+    ) -> io::Result<Self> {
         let mut holding: BTreeMap<&str, Option<&Turn>> = BTreeMap::new();
         for turn in turns {
             for edge in &turn.sent {
@@ -798,7 +801,7 @@ impl Context {
                     .or_insert(Some(turn));
             }
         }
-        let rows = summary::catalog(
+        let endpoint_rows = summary::catalog(
             builder,
             &builder
                 .handoffs
@@ -808,7 +811,7 @@ impl Context {
         );
         let fallback = builder.session_facts(&BTreeSet::new(), |_| (None, None), |_, _| None);
         let facts = observed.unwrap_or(&fallback);
-        let endpoints: BTreeMap<_, _> = rows
+        let endpoints: BTreeMap<_, _> = endpoint_rows
             .into_iter()
             .map(|row| {
                 let session = &builder.sessions[builder.by_key[&row.key]];
@@ -873,7 +876,7 @@ impl Context {
                 (endpoint.row.key.clone(), endpoint)
             })
             .collect();
-        let relations = builder
+        let mut relations = builder
             .handoffs
             .iter()
             .enumerate()
@@ -953,6 +956,7 @@ impl Context {
                         .map(|(at, _)| Location::capture(builder, *at))
                         .collect(),
                     previews,
+                    query_content: BTreeMap::new(),
                     explicit_previews: h.previews.is_some(),
                     inline: h.inline,
                     stubs: [h.from, h.to]
@@ -1068,11 +1072,59 @@ impl Context {
                 (relation.id.clone(), relation)
             })
             .collect();
-        Self {
+        for row in rows {
+            let Some(recipe) = &row.query_recipe else {
+                continue;
+            };
+            for edge in &recipe.edges {
+                let id = edge["id"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                let Some(relation) = relations.get_mut(id) else {
+                    continue;
+                };
+                let content = edge["query_content"]
+                    .as_object()
+                    .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                for (field, value) in content {
+                    crate::query_projection::insert_query_content_recipe(
+                        &mut relation.query_content,
+                        field,
+                        value,
+                    )?;
+                    if value.is_null() {
+                        continue;
+                    }
+                    let source: summary::CatalogSource =
+                        serde_json::from_value(value["source"].clone()).map_err(|_| {
+                            io::Error::other("Native handoff source recipe invalid")
+                        })?;
+                    let path = value["path"]
+                        .as_str()
+                        .ok_or_else(|| io::Error::other("Native handoff source recipe invalid"))?;
+                    if source.path != std::path::Path::new(path)
+                        || !std::iter::once(&relation.from)
+                            .chain(relation.to.iter())
+                            .any(|owner| {
+                                endpoints
+                                    .get(owner)
+                                    .is_some_and(|endpoint| endpoint.row.sources.contains(&source))
+                                    || builder
+                                        .staged_endpoints
+                                        .get(owner)
+                                        .is_some_and(|endpoint| endpoint.row.sources.contains(&source))
+                            })
+                    {
+                        return Err(io::Error::other(SourceGenerationChanged));
+                    }
+                }
+            }
+        }
+        Ok(Self {
             endpoints,
             relations,
             ..Default::default()
-        }
+        })
     }
 
     pub(super) fn install_endpoints(&self, builder: &mut Builder<'_>) -> io::Result<()> {

@@ -3449,6 +3449,7 @@ mod tests {
                 heads: Vec::new(),
                 after: Vec::new(),
                 previews: Default::default(),
+                query_content: Default::default(),
                 order: (2, 0, String::new(), n, 0),
                 explicit_previews: false,
                 stubs: Vec::new(),
