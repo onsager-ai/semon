@@ -159,7 +159,7 @@ pub(crate) fn publish_current_owned(
         let started = measurements.start();
         let expected = crate::retention::source_generation(&history.sources)
             .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let prior=tx.query_row("SELECT CASE WHEN octet_length(summary)<=4194304 THEN summary ELSE NULL END FROM session_overview WHERE session_key=?1",[&row.key],|row|row.get::<_,String>(0)).optional()?.map(|text|serde_json::from_str::<Summary>(&text)).transpose().map_err(|error|rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let prior=tx.query_row("SELECT CASE WHEN octet_length(summary)<=4194304 THEN summary ELSE NULL END FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",[&row.key],|row|row.get::<_,String>(0)).optional()?.map(|text|serde_json::from_str::<Summary>(&text)).transpose().map_err(|error|rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         measurements.record("history_prior", started, 1);
         if let Some(mut prior) = prior
             && prior.source_generation == expected

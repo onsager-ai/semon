@@ -391,7 +391,7 @@ pub(crate) fn update_current_observation(
 ) -> rusqlite::Result<Option<String>> {
     let prior: Option<(String, String)> = tx
         .query_row(
-            "SELECT metadata,generation FROM session_trace_headers WHERE session_key=?1",
+            "SELECT metadata,generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
             [key],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

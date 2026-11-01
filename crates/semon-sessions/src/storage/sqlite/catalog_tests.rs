@@ -11565,3 +11565,217 @@ fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification(
     {}
     evidence.retire();
 }
+
+#[test]
+fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key() {
+    let mut current = Fixture::new();
+    let mut foreign = Fixture::new();
+    let shared_cache = current.options.cache.clone();
+    foreign.options.cache = shared_cache;
+    foreign.options.codex_home = current.options.codex_home.clone();
+    let current_namespace = "zz-semantic-overview-current";
+    let foreign_namespace = "aa-semantic-overview-foreign";
+    current.options.source = crate::storage::HostSource::new(
+        crate::storage::LogicalSourceNamespace::new(current_namespace).unwrap(),
+        "a".repeat(64),
+    )
+    .unwrap();
+    foreign.options.source = crate::storage::HostSource::new(
+        crate::storage::LogicalSourceNamespace::new(foreign_namespace).unwrap(),
+        "a".repeat(64),
+    )
+    .unwrap();
+    let relative = current.codex_source("shared-key", None, 1);
+    for fixture in [&current, &foreign] {
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = Some([relative.clone()].into_iter().collect());
+        crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
+    }
+    current.publish_existing();
+    foreign.publish_existing();
+
+    let config = current
+        .options
+        .source
+        .config(&current.options.cache)
+        .unwrap();
+    let mut db = current.db();
+    let current_catalog: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key='shared-key' AND lifecycle='current'",
+            [current_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let foreign_catalog: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key='shared-key' AND lifecycle='current'",
+            [foreign_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current_catalog: Value = serde_json::from_str(&current_catalog).unwrap();
+    let foreign_catalog: Value = serde_json::from_str(&foreign_catalog).unwrap();
+    assert_eq!(current_catalog["key"], "shared-key");
+    assert_eq!(foreign_catalog["key"], "shared-key");
+    assert_eq!(current_catalog["sources"], foreign_catalog["sources"]);
+
+    let mut retained: crate::model::summary::CatalogRow =
+        serde_json::from_value(current_catalog).unwrap();
+    retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let retained_sources = retained.sources.clone();
+    let retained_source_generation =
+        crate::retention::source_generation(&retained_sources).unwrap();
+    let retained_metadata = serde_json::to_string(&retained).unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute(
+        "INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_active) VALUES(?1,'shared-key',?2,0)",
+        rusqlite::params![current_namespace, retained_metadata],
+    )
+    .unwrap();
+    let current_summary: String = tx
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=?1 AND session_key='shared-key'",
+            [current_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current_summary: Value = serde_json::from_str(&current_summary).unwrap();
+    assert_eq!(
+        current_summary["source_generation"],
+        json!(retained_source_generation)
+    );
+    tx.commit().unwrap();
+    drop(db);
+
+    let mut db = foreign.db();
+    let tx = db.transaction().unwrap();
+    let foreign_summary: String = tx
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=?1 AND session_key='shared-key'",
+            [foreign_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut foreign_summary: Value = serde_json::from_str(&foreign_summary).unwrap();
+    assert_eq!(
+        foreign_summary["source_generation"],
+        json!(retained_source_generation)
+    );
+    foreign_summary["home"]["content"]["foreign_namespace_marker"] = json!(true);
+    let foreign_summary_after_marker = foreign_summary.to_string();
+    tx.execute(
+        "UPDATE main.session_overview SET summary=?1 WHERE namespace=?2 AND session_key='shared-key'",
+        rusqlite::params![&foreign_summary_after_marker, foreign_namespace],
+    )
+    .unwrap();
+    let foreign_trace: String = tx
+        .query_row(
+            "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
+            [foreign_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut foreign_trace: Value = serde_json::from_str(&foreign_trace).unwrap();
+    foreign_trace["foreign_namespace_marker"] = json!(true);
+    let foreign_trace_after_marker = foreign_trace.to_string();
+    tx.execute(
+        "UPDATE main.session_trace_headers SET metadata=?1 WHERE namespace=?2 AND session_key='shared-key'",
+        rusqlite::params![&foreign_trace_after_marker, foreign_namespace],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+
+    let source_path = current.options.codex_home.join(&relative);
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&source_path)
+            .unwrap(),
+        "{}",
+        json!({
+            "type":"response_item",
+            "timestamp":"2026-10-01T00:00:01Z",
+            "payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Updated native overview"}]}
+        })
+    )
+    .unwrap();
+    fs::File::open(&source_path)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(2)),
+        )
+        .unwrap();
+    let mut cache = EventCache::open_scoped(&current.options.cache, &current.options.source).unwrap();
+    cache.prepare_facts_authority(&current.options).unwrap();
+    let input = crate::native_evidence::catalog_input(&source_path, &current.options).unwrap();
+    let prepared = crate::model::prepare_sources(
+        &current.options,
+        &mut cache,
+        &[input],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let mut row = prepared
+        .rows
+        .iter()
+        .find(|row| row.key == "shared-key")
+        .unwrap()
+        .clone();
+    assert!(row.overview.is_some());
+    assert!(row.trace.is_some());
+    assert_ne!(row.sources, retained_sources);
+    row.query = None;
+
+    let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(
+        &config,
+    )
+    .unwrap();
+    let stage = current.stage();
+    let mut db = stage.into_test_connection();
+    let tx = db.transaction().unwrap();
+    let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
+    let mut measurements = crate::native_timing::Measurements::default();
+    crate::overview::publish_current_owned(&tx, &row, &mut measurements, Some(&trace)).unwrap();
+    tx.commit().unwrap();
+
+    let db = current.db();
+    let updated_summary: String = db
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=?1 AND session_key='shared-key'",
+            [current_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let updated_summary: Value = serde_json::from_str(&updated_summary).unwrap();
+    assert!(updated_summary["home"]["content"]
+        .get("foreign_namespace_marker")
+        .is_none());
+    let updated_trace: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
+            [current_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let updated_trace: Value = serde_json::from_str(&updated_trace).unwrap();
+    assert!(updated_trace.get("foreign_namespace_marker").is_none());
+    let foreign_summary_after: String = db
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=?1 AND session_key='shared-key'",
+            [foreign_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(foreign_summary_after, foreign_summary_after_marker);
+    let foreign_trace_after: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
+            [foreign_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(foreign_trace_after, foreign_trace_after_marker);
+}
