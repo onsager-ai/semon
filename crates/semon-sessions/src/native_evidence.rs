@@ -20,6 +20,41 @@ use std::{
 pub(crate) mod runtime;
 pub(crate) use runtime::RuntimeObservations;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TRACE_COMPANION_FRONTIER: std::cell::Cell<bool> = const {
+        std::cell::Cell::new(false)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn companion_diag_hash(value: &str) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(value.as_bytes()))
+}
+
+#[cfg(test)]
+pub(crate) fn companion_diag_cursor(cursor: Option<&str>) -> String {
+    let Some(cursor) = cursor else {
+        return "none".to_owned();
+    };
+    let Ok(cursor) = serde_json::from_str::<serde_json::Value>(cursor) else {
+        return "invalid".to_owned();
+    };
+    let hash_field = |field: &str| {
+        cursor[field]
+            .as_str()
+            .map(companion_diag_hash)
+            .unwrap_or_else(|| "missing".to_owned())
+    };
+    format!(
+        "path={} after={} end={}",
+        hash_field("path"),
+        hash_field("after"),
+        hash_field("end")
+    )
+}
+
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
     pub(crate) store_config: Option<crate::storage::StoreConfig>,
@@ -1115,6 +1150,8 @@ impl NativeEvidence {
             return Ok(false);
         };
         #[cfg(test)]
+        let trace_companion_frontier = TRACE_COMPANION_FRONTIER.with(std::cell::Cell::get);
+        #[cfg(test)]
         eprintln!(
             "native_stage phase={:?} epoch={} revision={} sources={}",
             batch.phase,
@@ -1122,6 +1159,23 @@ impl NativeEvidence {
             batch.source_revision,
             batch.paths.len()
         );
+        #[cfg(test)]
+        if trace_companion_frontier {
+            let paths = batch
+                .paths
+                .iter()
+                .map(|path| companion_diag_hash(path))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "companion_stage batch phase={:?} epoch={} revision={} path_hashes=[{}] cursor={}",
+                batch.phase,
+                batch.epoch,
+                batch.source_revision,
+                paths,
+                companion_diag_cursor(batch.relation_cursor.as_deref())
+            );
+        }
         work.pending_sources = true;
         // Runtime/facts qualification also covers scalar reductions and the
         // durable final acknowledgement, which may have no selected sources.
@@ -1189,6 +1243,14 @@ impl NativeEvidence {
             }
         };
         let prepared = prepared.prepared();
+        #[cfg(test)]
+        if trace_companion_frontier {
+            eprintln!(
+                "companion_stage prepared inputs={} claims={}",
+                inputs.len(),
+                prepared.claims.len()
+            );
+        }
         if let Some(discovery) = &mut work.cold_catalog {
             discovery.pids.extend(prepared.pids.iter().copied());
         }

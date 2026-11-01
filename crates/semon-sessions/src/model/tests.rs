@@ -5253,6 +5253,70 @@ fn companion_fixture_before_relations(home: &Home) -> (EventCache, relation_stag
     panic!("fixture identity frontier did not reach native matching");
 }
 
+fn companion_diag_rows(db: &rusqlite::Connection, label: &str, paths: &[String]) {
+    for path in paths {
+        let (done, after): (bool, String) = db
+            .query_row(
+                "SELECT relation_done,relation_after FROM catalog_semantic_sources WHERE source_path=?1",
+                [path],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        eprintln!(
+            "partial_companion row label={label} path={} done={done} after={}",
+            crate::native_evidence::companion_diag_hash(path),
+            crate::native_evidence::companion_diag_hash(&after)
+        );
+    }
+}
+
+fn companion_diag_frontier(db: &rusqlite::Connection, iteration: usize, refreshed: bool) {
+    let (epoch, phase, revision): (i64, String, i64) = db
+        .query_row(
+            "SELECT epoch,phase,revision FROM catalog_semantic_stage",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let pending: i64 = db
+        .query_row(
+            "SELECT count(*) FROM catalog_semantic_sources WHERE relation_done=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first: Option<(String, bool, String)> = db
+        .query_row(
+            "SELECT source_path,relation_done,relation_after FROM catalog_semantic_sources WHERE relation_done=0 ORDER BY source_path LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .unwrap();
+    let first = first.map_or_else(
+        || "none".to_owned(),
+        |(path, done, after)| {
+            format!(
+                "path={} done={done} after={}",
+                crate::native_evidence::companion_diag_hash(&path),
+                crate::native_evidence::companion_diag_hash(&after)
+            )
+        },
+    );
+    eprintln!(
+        "partial_companion frontier iteration={iteration} refreshed={refreshed} epoch={epoch} phase={phase} revision={revision} pending_relations={pending} first=[{first}]"
+    );
+}
+
+struct CompanionTraceReset(bool);
+
+impl Drop for CompanionTraceReset {
+    fn drop(&mut self) {
+        crate::native_evidence::TRACE_COMPANION_FRONTIER
+            .with(|enabled| enabled.set(self.0));
+    }
+}
+
 /// Exercise a valid selected native matching batch at an existing durable
 /// frontier. Choosing the duplicate receipt explicitly avoids having canonical
 /// source ordering mask the incident-edge/certified-companion interaction.
@@ -5263,6 +5327,7 @@ fn record_selected_companion_batch(
     seed: &str,
     actors: &[&str],
     selected: &[(&str, Kind, &str)],
+    trace: bool,
 ) -> PreparedSources {
     let mut ordered_actors = Vec::with_capacity(actors.len());
     ordered_actors.push(seed);
@@ -5364,26 +5429,57 @@ fn record_selected_companion_batch(
     batch.relation_cursor = Some(json!({"path":seed_path,"after":after,"end":end}).to_string());
     let prepared =
         prepare_staged_sources(&home.options, cache, &inputs, &batch.context, true, NOW).unwrap();
+    if trace {
+        let paths = batch
+            .paths
+            .iter()
+            .map(|path| crate::native_evidence::companion_diag_hash(path))
+            .collect::<Vec<_>>()
+            .join(",");
+        eprintln!(
+            "partial_companion selected phase={:?} path_hashes=[{}] cursor={} inputs={} claims={}",
+            batch.phase,
+            paths,
+            crate::native_evidence::companion_diag_cursor(batch.relation_cursor.as_deref()),
+            inputs.len(),
+            prepared.claims.len()
+        );
+        companion_diag_rows(&db, "before_selected_record", &batch.paths);
+    }
     assert_eq!(
         cache.record_semantic_batch(&batch, &prepared).unwrap(),
         crate::events::Outcome::Written
     );
+    if trace {
+        companion_diag_rows(&db, "after_selected_record", &batch.paths);
+    }
     cache.end_scan();
     prepared
 }
 
-fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
+fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData, trace: bool) {
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let previous_trace = crate::native_evidence::TRACE_COMPANION_FRONTIER
+        .with(|enabled| enabled.replace(trace));
+    let trace_reset = CompanionTraceReset(previous_trace);
+    let diag_db = trace.then(|| {
+        rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap()
+    });
     let mut complete = false;
-    for _ in 0..128 {
-        if evidence
+    for iteration in 0..128 {
+        let refreshed = evidence
             .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
-            .unwrap()
-        {
+            .unwrap();
+        if let Some(db) = &diag_db {
+            companion_diag_frontier(db, iteration, refreshed);
+        }
+        if refreshed {
             complete = true;
             break;
         }
     }
+    drop(diag_db);
+    drop(trace_reset);
     evidence.retire();
     assert!(
         complete,
@@ -5622,6 +5718,7 @@ fn staged_duplicate_receipt_preserves_certified_sender_to_canonical_owner() {
             ("aaa-canonical", Kind::Xsm, "shared-message"),
             ("zzz-sender", Kind::Tool, "single-send"),
         ],
+        false,
     );
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let (done, cursor): (bool,String) = db.query_row("SELECT relation_done,relation_after FROM catalog_semantic_sources WHERE source_path=?1", [home.options.claude_home.join("projects/-work-proj/zzz-sender.jsonl").to_string_lossy().as_ref()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
@@ -5653,7 +5750,7 @@ fn staged_duplicate_receipt_preserves_certified_sender_to_canonical_owner() {
     );
     drop(db);
     drop(cache);
-    finish_companion_fixture_against_oracle(&home, &oracle);
+    finish_companion_fixture_against_oracle(&home, &oracle, false);
 }
 
 #[test]
@@ -5763,6 +5860,7 @@ fn staged_partial_native_companion_keeps_cursor_and_endpoint_pending() {
             ("aaa-selected", Kind::Xsm, "first-message"),
             ("zzz-sender", Kind::Tool, "first-send"),
         ],
+        true,
     );
     let after: (bool,String) = db.query_row("SELECT relation_done,relation_after FROM catalog_semantic_sources WHERE source_path=?1", [home.options.claude_home.join("projects/-work-proj/zzz-sender.jsonl").to_string_lossy().as_ref()], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
     assert_eq!(
@@ -5792,7 +5890,7 @@ fn staged_partial_native_companion_keeps_cursor_and_endpoint_pending() {
     );
     drop(db);
     drop(cache);
-    finish_companion_fixture_against_oracle(&home, &oracle);
+    finish_companion_fixture_against_oracle(&home, &oracle, true);
 }
 
 #[test]
