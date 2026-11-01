@@ -11554,6 +11554,7 @@ fn semantic_index_rejects_unannounced_physical_change_after_producer_preparation
         "the unjournaled append changes the physical source stat"
     );
     assert!(after.size > ledger.offset, "append extends the scanned prefix");
+    assert_ne!(after.changed_ns, ledger.stat.changed_ns);
     assert_eq!(
         cache.catalog_claims(&paths).unwrap(),
         prepared_claims,
