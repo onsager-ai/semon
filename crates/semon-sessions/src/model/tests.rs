@@ -11255,6 +11255,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
     )
     .unwrap();
     intent.complete().unwrap();
+    enroll_stage_inventory(&home.options, &inputs);
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for page in paths.chunks(64) {
@@ -11427,6 +11428,21 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
         )
         .unwrap();
     assert_eq!(pending, 0);
+}
+
+// These tests restart a manually begun Stage, so first put it inside the real
+// discovered-and-draining backfill lifecycle used by NativeEvidence.
+fn enroll_stage_inventory(options: &crate::Options, inputs: &[crate::Input]) {
+    assert!(!inputs.is_empty());
+    let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    while !cache.discover_recovery_sources().unwrap() {}
+    for (page_index, page) in inputs.chunks(64).enumerate() {
+        let complete = (page_index + 1) * 64 >= inputs.len();
+        cache
+            .discover_catalog_sources(options, page, complete)
+            .unwrap();
+    }
+    assert_eq!(cache.backfill_state().unwrap().as_deref(), Some("draining"));
 }
 
 #[test]
@@ -11667,6 +11683,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     )
     .unwrap();
     intent.complete().unwrap();
+    enroll_stage_inventory(&home.options, &inputs);
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     for page in paths.chunks(64) {
