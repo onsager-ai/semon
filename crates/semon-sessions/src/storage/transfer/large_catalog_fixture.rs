@@ -27,6 +27,11 @@ pub(crate) fn measure_mode(
 ) {
     const CHILDREN: usize = 16;
     const USAGE_REPORTS: usize = 1000;
+    let typed_refusal = typed.then(|| match &config.backend {
+        crate::storage::StoreBackend::Sqlite { .. } => "semantic_context_budget".to_owned(),
+        #[cfg(feature = "postgres")]
+        crate::storage::StoreBackend::Postgres { .. } => crate::storage::StorageError::Busy.to_string(),
+    });
     let (options, initial_input) = seed_catalog_input(config, root);
     let initial_path = initial_input.full_path(&options);
     let mut initial_cache = cache(config);
@@ -45,7 +50,7 @@ pub(crate) fn measure_mode(
         &mut initial_cache,
         &options,
         std::slice::from_ref(&initial_input),
-        typed,
+        typed_refusal.as_deref(),
     );
     assert_eq!(initial[0].repo.as_deref(), Some("facts-transfer-repo"));
     drop(initial_cache);
@@ -87,7 +92,7 @@ pub(crate) fn measure_mode(
                 &mut cache,
                 &options,
                 std::slice::from_ref(&old_input),
-                typed
+                typed_refusal.as_deref()
             )
             .is_empty()
         );
@@ -183,7 +188,7 @@ pub(crate) fn measure_mode(
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     begin_active_catalog(&mut cache, &paths, &runtime, true);
-    let rows = finish_measured(&mut cache, &options, &inputs, typed);
+    let rows = finish_measured(&mut cache, &options, &inputs, typed_refusal.as_deref());
     assert_eq!(rows.len(), CHILDREN + 1);
     assert_eq!(
         rows.iter()
@@ -203,7 +208,7 @@ fn finish_measured(
     cache: &mut crate::events::EventCache,
     options: &crate::Options,
     inputs: &[crate::Input],
-    typed: bool,
+    typed_refusal: Option<&str>,
 ) -> Vec<crate::model::summary::CatalogRow> {
     for _ in 0..256 {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
@@ -359,7 +364,7 @@ fn finish_measured(
                 );
             }
         }
-        let typed_publication = typed
+        let typed_publication = typed_refusal.is_some()
             && batch.paths.len() == 17
             && batch.phase == crate::model::relation_stage::Phase::Publication;
         if typed_publication {
@@ -380,14 +385,7 @@ fn finish_measured(
             );
         }
         if typed_publication {
-            match cache.semantic_rejection() {
-                Some("semantic_context_budget") => assert!(recorded.is_err()),
-                None => assert_eq!(
-                    recorded.unwrap_err().to_string(),
-                    crate::storage::StorageError::Busy.to_string()
-                ),
-                other => panic!("unexpected production record refusal: {other:?}"),
-            }
+            assert_eq!(recorded.unwrap_err().to_string(), typed_refusal.unwrap());
             assert_eq!(cache.session_catalog_generation(), before);
             assert_eq!(before, batch.base_generation);
             assert_eq!(cache.pending_catalog_sources(64).unwrap(), pending.unwrap());
