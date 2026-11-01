@@ -174,3 +174,122 @@ pub(in crate::storage::postgres) fn verify_state(
     }
     tx.check()
 }
+
+/// Publish retained search from the exact original History authority for
+/// owners leaving Current. Their prior Search projection may describe a newer
+/// Current row than the retained header does.
+pub(super) fn publish_retained_history(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    key_digests: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    if key_digests.len() > crate::catalog_search::MAX_PUBLICATION_KEYS {
+        return Err(StorageError::Busy);
+    }
+    if key_digests.is_empty() {
+        tx.check()?;
+        return Ok(());
+    }
+    let mut keys = key_digests.to_vec();
+    keys.sort();
+    if keys.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(StorageError::ScopeChanged);
+    }
+
+    tx.check()?;
+    let namespace = tx.namespace.as_str().as_bytes();
+    let lengths = tx
+        .driver
+        .query(
+            "SELECT o.key_digest,octet_length(h.metadata)::bigint FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
+            &[&namespace, &generation.as_bytes(), &keys],
+        )
+        .map_err(sqlstate::error)?;
+    tx.check()?;
+    if lengths.len() != keys.len() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut total_bytes = 0usize;
+    let mut header_lengths = Vec::with_capacity(lengths.len());
+    for (index, row) in lengths.iter().enumerate() {
+        let key: Vec<u8> = row.get(0);
+        let length = usize::try_from(row.get::<_, i64>(1))
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if key.as_slice() != keys[index].as_slice() {
+            return Err(StorageError::ScopeChanged);
+        }
+        total_bytes = total_bytes
+            .checked_add(length)
+            .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
+            .ok_or(StorageError::Busy)?;
+        header_lengths.push(length);
+    }
+    tx.check()?;
+
+    let headers = tx
+        .driver
+        .query(
+            "SELECT o.key_digest,o.session_key,o.owner_generation,o.original,o.last_ms,h.last_ms,h.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=ANY($3::bytea[]) ORDER BY o.key_digest",
+            &[&namespace, &generation.as_bytes(), &keys],
+        )
+        .map_err(sqlstate::error)?;
+    tx.check()?;
+    if headers.len() != keys.len() {
+        return Err(StorageError::ScopeChanged);
+    }
+
+    let mut catalog_rows = Vec::with_capacity(headers.len());
+    for (index, header) in headers.iter().enumerate() {
+        let key_digest: Vec<u8> = header.get(0);
+        let session_key: Vec<u8> = header.get(1);
+        let owner_generation: Vec<u8> = header.get(2);
+        let original: bool = header.get(3);
+        let owner_last: i64 = header.get(4);
+        let header_last: i64 = header.get(5);
+        let metadata: Vec<u8> = header.get(6);
+        if key_digest.as_slice() != keys[index].as_slice()
+            || owner_generation.len() != 64
+            || !owner_generation
+                .iter()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || !original
+            || metadata.len() != header_lengths[index]
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let row: CatalogRow =
+            serde_json::from_slice(&metadata).map_err(|_| StorageError::ScopeChanged)?;
+        let last = row.last.unwrap_or(0);
+        if digest(row.key.as_bytes()).as_slice() != key_digest.as_slice()
+            || row.key.as_bytes() != session_key.as_slice()
+            || last != owner_last
+            || last != header_last
+            || row.lifecycle != crate::model::summary::CatalogLifecycle::Retained
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        catalog_rows.push(row);
+    }
+    tx.check()?;
+
+    let keys = catalog_rows
+        .iter()
+        .map(|row| row.key.clone())
+        .collect::<Vec<_>>();
+    let rows = catalog_rows
+        .iter()
+        .map(|row| crate::catalog_search::ScopedCatalogRow {
+            row,
+            scopes: crate::catalog_search::SearchScopeEligibility {
+                current: false,
+                retained_history: true,
+            },
+        })
+        .collect::<Vec<_>>();
+    let effects = Effects {
+        tx: RefCell::new(&mut *tx),
+        generation,
+    };
+    crate::catalog_search::publish_scoped_rows_port(&effects, &keys, &rows, 64, |_, _| {})?;
+    Ok(())
+}

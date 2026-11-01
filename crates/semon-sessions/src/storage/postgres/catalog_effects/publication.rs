@@ -530,13 +530,15 @@ pub(in crate::storage::postgres) fn publish(
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE carry_unmentioned");
         super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
-        #[cfg(test)]
-        eprintln!("PG_PUBLISH_STAGE carry_retained_search");
-        super::carry::retained_search(tx, &generation, previous, &leaving)?;
-        // Staged counts predate the carried owners' memberships; the
-        // unadmitted successor's aggregate is rebuilt once, as withdrawal does.
+        // Staged counts predate carried memberships. Clear them before the
+        // authority-derived projection and the final aggregate pass.
         use crate::storage::catalog::SearchPublicationStore;
         tx.driver.execute("DELETE FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2", &[&ns, &generation.as_bytes()]).map_err(sqlstate::error)?;
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE retained_search_begin");
+        super::search::publish_retained_history(tx, &generation, &leaving)?;
+        #[cfg(test)]
+        eprintln!("PG_PUBLISH_STAGE retained_search_complete");
         let effects = Effects {
             tx: RefCell::new(&mut *tx),
             generation: &generation,

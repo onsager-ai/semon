@@ -209,7 +209,7 @@ pub(in crate::storage::postgres) fn remove(
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE retained_search_begin");
-    super::carry::retained_search(tx, &generation, &previous, &removed_digests)?;
+    super::search::publish_retained_history(tx, &generation, &removed_digests)?;
     #[cfg(test)]
     eprintln!("PG_WITHDRAWAL_STAGE retained_search_complete");
     let effects = Effects {
