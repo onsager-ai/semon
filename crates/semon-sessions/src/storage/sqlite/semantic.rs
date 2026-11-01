@@ -1949,8 +1949,8 @@ impl Stage {
         {
             return Ok((Outcome::Conflict, None));
         }
-        let publication_head = super::publication::admitted_head(&tx, &self.source)
-            .map_err(StoreError::Configured)?;
+        let publication_head =
+            super::publication::admitted_head(&tx, &self.source).map_err(StoreError::Configured)?;
         if publication_head
             .base_generation()
             .map_err(StoreError::Configured)?
@@ -1981,8 +1981,8 @@ impl Stage {
         if pending {
             return Ok((Outcome::Conflict, None));
         }
-        let selected_paths =
-            serde_json::to_string(&batch.paths).map_err(|error| StoreError::Data(error.to_string()))?;
+        let selected_paths = serde_json::to_string(&batch.paths)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
         let staged: Vec<String> = tx
             .prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path IN (SELECT value FROM json_each(?2)) ORDER BY source_path LIMIT 65")
             .map_err(error)?
@@ -2001,8 +2001,7 @@ impl Stage {
                 .map(|(path, _)| path.clone())
                 .collect::<Vec<_>>()
                 != staged
-            || super::source_journal::claims(&tx, ns, &staged).map_err(error)?
-                != prepared.claims
+            || super::source_journal::claims(&tx, ns, &staged).map_err(error)? != prepared.claims
         {
             return Ok((Outcome::Conflict, None));
         }
@@ -2012,8 +2011,8 @@ impl Stage {
             .map(serde_json::to_string)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| StoreError::Data(error.to_string()))?;
-        let metadata =
-            serde_json::to_string(&metadata).map_err(|error| StoreError::Data(error.to_string()))?;
+        let metadata = serde_json::to_string(&metadata)
+            .map_err(|error| StoreError::Data(error.to_string()))?;
         let projections = prepared
             .staged_model_witness()
             .map_err(|error| StoreError::Data(error.to_string()))?;
@@ -2630,20 +2629,19 @@ impl Stage {
             Some(crate::model::now_ms())
         };
         if let Some(selected_observed_at) = selected_observed_at {
-            let presentations =
-                match super::proof_generations::capture_presentations(
-                    &tx,
-                    ns,
-                    &generation,
-                    prepared,
-                    selected_observed_at,
-                ) {
-                    Err(StorageError::HistoryRetentionBounds) => {
-                        return Err(refuse(PRESENTATION_CAPTURE_BUDGET));
-                    }
-                    Err(error) => return Err(StoreError::Configured(error)),
-                    Ok(presentations) => presentations,
-                };
+            let presentations = match super::proof_generations::capture_presentations(
+                &tx,
+                ns,
+                &generation,
+                prepared,
+                selected_observed_at,
+            ) {
+                Err(StorageError::HistoryRetentionBounds) => {
+                    return Err(refuse(PRESENTATION_CAPTURE_BUDGET));
+                }
+                Err(error) => return Err(StoreError::Configured(error)),
+                Ok(presentations) => presentations,
+            };
             let proof_digest = super::proof_generations::bind_presentations(
                 &tx,
                 ns,
@@ -3371,7 +3369,9 @@ impl Stage {
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.config.namespace.as_str();
         let stage: Option<(i64,String,Option<String>,String,i64,Option<String>)> = tx.query_row("SELECT epoch,phase,generation,runtime,revision,original_generation FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(error)?;
-        let Some((epoch, mut phase, base_generation, runtime, stage_revision, original_generation)) = stage else {
+        let Some((epoch, mut phase, base_generation, runtime, stage_revision, original_generation)) =
+            stage
+        else {
             return Ok(None);
         };
         if self.epoch != Some(epoch) {

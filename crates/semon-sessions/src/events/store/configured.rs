@@ -13979,12 +13979,7 @@ mod tests {
                 let selected = selected_inputs(&inputs, options, &retry);
                 assert_eq!(selected.len(), 2, "the two aliases stay in one group");
                 let retry_model = cache
-                    .prepare_semantic_model_batch(
-                        options,
-                        &selected,
-                        &retry,
-                        1_790_000_000_000,
-                    )
+                    .prepare_semantic_model_batch(options, &selected, &retry, 1_790_000_000_000)
                     .unwrap();
                 assert_eq!(
                     cache
@@ -14061,9 +14056,11 @@ mod tests {
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
                 let before = shared_state(&f);
                 crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
-                assert!(cache
-                    .publish_semantic_catalog(&batch, model.prepared())
-                    .is_err());
+                assert!(
+                    cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .is_err()
+                );
                 assert_eq!(shared_state(&f), before);
                 assert_eq!(hint(&f, "source-a"), None);
             }
