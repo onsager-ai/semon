@@ -125,6 +125,10 @@ jobs:
           for test in \
             events::store::configured::tests::domain52::configured_semantic_domain61_announced_ledger_change_restarts_stage \
             model::tests::catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources \
+            model::tests::causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence \
+            model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
+            model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
+            model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
             events::store::configured::tests::current_recovery::recovery_semantic_index_revision_drift_resets_stale_reduction_witness \
             model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
             model::tests::semantic_relation_batches_continue_after_codex_primary_event_budget \
