@@ -60,9 +60,8 @@ pub(crate) struct PreparedTraceWitnessCapture {
 impl PreparedTraceWitnessCapture {
     pub(crate) fn new(keys: impl IntoIterator<Item = String>) -> Self {
         let state = Some((keys.into_iter().collect(), BTreeMap::new()));
-        let previous = PREPARED_TRACE_WITNESS_CAPTURE.with(|capture| {
-            std::mem::replace(&mut *capture.borrow_mut(), state)
-        });
+        let previous = PREPARED_TRACE_WITNESS_CAPTURE
+            .with(|capture| std::mem::replace(&mut *capture.borrow_mut(), state));
         Self { previous }
     }
 
@@ -87,10 +86,7 @@ impl Drop for PreparedTraceWitnessCapture {
 }
 
 #[cfg(test)]
-fn capture_prepared_trace_witnesses(
-    phase: relation_stage::Phase,
-    rows: &[summary::CatalogRow],
-) {
+fn capture_prepared_trace_witnesses(phase: relation_stage::Phase, rows: &[summary::CatalogRow]) {
     if phase != relation_stage::Phase::Publication
         || !crate::storage::sqlite::staged_failure_probe_enabled()
     {

@@ -5889,10 +5889,7 @@ fn trace_rows_snapshot(options: &Options, key: &str) -> Option<(String, TraceRow
     let original_header: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE namespace=?1 AND key=?2)",
-            rusqlite::params![
-                namespace.as_str(),
-                format!("history_original_header:{key}")
-            ],
+            rusqlite::params![namespace.as_str(), format!("history_original_header:{key}")],
             |row| row.get(0),
         )
         .unwrap();
@@ -5971,7 +5968,10 @@ fn assert_current_trace_witness(oracle: &QueryData, key: &str, witness: &str) {
         expected_turns.len(),
         "Current producer turn count for {key}"
     );
-    assert_eq!(actual_turns, &expected_turns, "Current producer turns for {key}");
+    assert_eq!(
+        actual_turns, &expected_turns,
+        "Current producer turns for {key}"
+    );
     assert_eq!(
         witness[0]["details"]["turns"],
         json!(expected_turns.len()),
@@ -6053,7 +6053,10 @@ fn assert_history_trace_witness(
         .as_ref()
         .unwrap_or_else(|| panic!("Current Catalog row missing for {key}"));
     assert!(current.history_present, "History row missing for {key}");
-    assert!(current.original_header, "original History header missing for {key}");
+    assert!(
+        current.original_header,
+        "original History header missing for {key}"
+    );
     assert_eq!(
         &trace_source_generation, history_source_generation,
         "stored trace belongs to History for {key}"
@@ -6168,9 +6171,8 @@ fn assert_queued_identity_matches_oracle_with_history_trace(
             .iter()
             .any(|name| test_name.ends_with(name)),
     );
-    let prepared_trace_capture = history_trace_key.map(|key| {
-        crate::model::PreparedTraceWitnessCapture::new([key.to_owned()])
-    });
+    let prepared_trace_capture = history_trace_key
+        .map(|key| crate::model::PreparedTraceWitnessCapture::new([key.to_owned()]));
     let mut trace_snapshots = BTreeMap::new();
     let mut oracle_options = options.clone();
     oracle_options.cache = options.cache.with_extension("oracle.json");
@@ -6413,15 +6415,24 @@ fn assert_queued_identity_matches_oracle_with_history_trace(
             let original: bool = db
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2)",
-                    rusqlite::params![namespace.as_str(), format!("history_original_header:{}", missing.sid)],
+                    rusqlite::params![
+                        namespace.as_str(),
+                        format!("history_original_header:{}", missing.sid)
+                    ],
                     |row| row.get(0),
                 )
                 .unwrap();
             eprintln!(
                 "staged_missing_turn_observation history_present={} original_header={original} trace_matches_history={:?} trace_matches_current={:?}",
                 history_source.is_some(),
-                trace_source.as_ref().zip(history_source.as_ref()).map(|(trace, history)| trace == history),
-                trace_source.as_ref().zip(current_source.as_ref()).map(|(trace, current)| trace == current),
+                trace_source
+                    .as_ref()
+                    .zip(history_source.as_ref())
+                    .map(|(trace, history)| trace == history),
+                trace_source
+                    .as_ref()
+                    .zip(current_source.as_ref())
+                    .map(|(trace, current)| trace == current),
             );
         }
     }
