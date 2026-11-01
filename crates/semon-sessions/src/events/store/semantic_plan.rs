@@ -74,12 +74,9 @@ pub(crate) fn owner_closure_with(
         let (id, links) = port.links(&path)?;
         let links: super::super::super::Links =
             crate::model::relation_stage::selector_metadata(links, used).map_err(|error| {
-                if error
-                    .get_ref()
-                    .is_some_and(|cause| {
-                        cause.is::<crate::model::relation_stage::SelectorMetadataBudget>()
-                    })
-                {
+                if error.get_ref().is_some_and(|cause| {
+                    cause.is::<crate::model::relation_stage::SelectorMetadataBudget>()
+                }) {
                     context_budget()
                 } else {
                     rusqlite::Error::InvalidQuery

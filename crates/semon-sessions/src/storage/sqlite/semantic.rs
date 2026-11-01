@@ -35,13 +35,10 @@ fn relation_owner_source_paths(
     epoch: i64,
 ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut used = 0;
-    let mut paths = crate::events::store::semantic_stage::owner_closure_with(
-        physical,
-        selected,
-        &mut used,
-    )?
-    .into_iter()
-    .collect::<std::collections::BTreeSet<_>>();
+    let mut paths =
+        crate::events::store::semantic_stage::owner_closure_with(physical, selected, &mut used)?
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
     let owner_paths = paths.iter().cloned().collect::<Vec<_>>();
     let context = crate::events::store::semantic_stage::context_with_budget(
         physical,
@@ -53,9 +50,7 @@ fn relation_owner_source_paths(
     )?;
     for parent in context.parent_paths(&owner_paths) {
         paths.extend(crate::events::store::semantic_stage::owner_closure_with(
-            physical,
-            &parent,
-            &mut used,
+            physical, &parent, &mut used,
         )?);
         if paths.len() > RELATION_OUTPUT_LIMIT {
             return Err(crate::events::store::semantic_stage::context_budget());
@@ -172,9 +167,7 @@ fn agent_tool_use_ids(
         .row
         .sources
         .iter()
-        .filter(|source| {
-            loaded_paths.contains(source.path.to_string_lossy().as_ref())
-        })
+        .filter(|source| loaded_paths.contains(source.path.to_string_lossy().as_ref()))
         .filter_map(|source| source.native_role.as_ref())
         .filter_map(|role| role.get("Agent"))
         .filter_map(|agent| agent.get("tool_use_id"))
@@ -189,8 +182,10 @@ fn agent_tool_use_ids(
 fn relation_spawn_call_context(
     db: &Connection,
     namespace: &str,
-    physical: &(impl crate::events::store::semantic_stage::ContextPort
-          + crate::events::store::semantic_stage::OwnerClosurePort),
+    physical: &(
+         impl crate::events::store::semantic_stage::ContextPort
+         + crate::events::store::semantic_stage::OwnerClosurePort
+     ),
     epoch: i64,
     used: &mut usize,
     budget: &mut RelationPageReadBudget,
@@ -248,9 +243,8 @@ fn relation_spawn_call_context(
         let path = location.source.path.to_string_lossy().into_owned();
         claude_call_locations.insert(id, Some(location.clone()));
         if selected_sources.insert(path.clone()) && !expanded_paths.contains(&path) {
-            let closure = crate::events::store::semantic_stage::owner_closure_with(
-                physical, &path, used,
-            )?;
+            let closure =
+                crate::events::store::semantic_stage::owner_closure_with(physical, &path, used)?;
             expanded_paths.extend(closure.iter().cloned());
             loaded_paths.extend(closure.iter().cloned());
             paths.extend(closure.iter().cloned());
@@ -303,14 +297,12 @@ fn relation_spawn_call_context(
                             if loaded_paths.len() > RELATION_OUTPUT_LIMIT
                                 || paths.len() > RELATION_OUTPUT_LIMIT
                             {
-                                return Err(
-                                    crate::events::store::semantic_stage::context_budget(),
-                                );
+                                return Err(crate::events::store::semantic_stage::context_budget());
                             }
                         }
                     }
                 }
-                frontier = next_frontier;
+                frontier = next_frontier.into_iter().collect();
             }
         }
         endpoints.insert(endpoint.row.key.clone(), endpoint.clone());
