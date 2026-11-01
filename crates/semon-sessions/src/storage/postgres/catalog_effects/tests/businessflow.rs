@@ -6442,13 +6442,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             path: "projects/project/fresh-composite-b.jsonl".into(),
         },
     ];
-    let paths = connected
+    let connected_paths = connected
         .iter()
         .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let catchup_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
     catchup
-        .begin_semantic_stage(&paths, &catchup_runtime)
+        .begin_semantic_stage(&connected_paths, &catchup_runtime)
         .unwrap();
     let (batch, model) = loop {
         let batch = catchup.semantic_batch(64).unwrap().unwrap();
@@ -7310,10 +7310,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let final_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
     final_catchup
-        .begin_semantic_stage(&paths, &final_runtime)
+        .begin_semantic_stage(&connected_paths, &final_runtime)
         .unwrap();
     let (final_batch, final_model) = loop {
         let batch = final_catchup.semantic_batch(64).unwrap().unwrap();
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            assert!(
+                batch.paths.contains(&composite_a),
+                "final publication retains removed Source A in its claim paths"
+            );
+        }
         let model = final_catchup
             .prepare_semantic_model_batch(
                 &facts_options,
