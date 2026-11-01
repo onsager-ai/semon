@@ -5566,8 +5566,9 @@ impl<'a> Builder<'a> {
                     "skip": preview.skip,
                 }));
             }
-            if let Some(at) = canonical_origins
-                .and_then(|origins| origins.get(&h.out.id).copied())
+            if h.out.from == key
+                && let Some(at) = canonical_origins
+                    .and_then(|origins| origins.get(&h.out.id).copied())
             {
                 fields["origin"] = recipe(at, "prompt");
             } else if let Some(turn) = turns
