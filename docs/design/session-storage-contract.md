@@ -133,6 +133,13 @@ SQLite and PostgreSQL readers have no local-host capability and retain the
 original refusal until their explicit native producer ingests the change.
 Incomplete or corrupt Index witnesses retain their separate refusal path.
 
+Indexing may advance its own source claim while committing a native scan or
+removal. Its record still compares the current claim with the post-scan prepared
+claim; committed-read phases additionally require the batch's captured claim.
+SQLite relation pages refine the seed owner directly and consume a companion
+only after qualifying its complete current source and indexed event roster.
+Partial companions keep their cursor, endpoint and pending source claim.
+
 PostgreSQL semantic withdrawal qualifies Facts/Source metadata before opening
 the SQL writer, under the existing shared Facts and sorted Source locks. The
 operation retains those locks through transaction return, while SQL rechecks
