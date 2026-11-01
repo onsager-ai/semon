@@ -123,6 +123,7 @@ jobs:
         run: |
           result=0
           for test in \
+            events::store::tests::direct_catalog_history_grants_preserve_only_existing_producer_metadata \
             model::tests::catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages \
             model::tests::catalog_runtime_staged_publication_replays_large_incident_relationships \
             model::tests::staged_agent_messages_match_the_shared_builder_without_duplicate_relations \
