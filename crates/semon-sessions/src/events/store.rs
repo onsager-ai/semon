@@ -8663,6 +8663,136 @@ mod tests {
         );
         drop(store);
         fs::remove_dir_all(root).unwrap();
+
+        // A real native publication can install an exact Current proof while
+        // the prior direct Catalog grant still owns the row moved to History.
+        // The LocalOnly grant itself has no captured observations in this path.
+        let coexist_root = scratch("direct-catalog-history-current-proof");
+        let (options, rows, projections) = catalog_native_fixture(&coexist_root, 2, false);
+        let key = "native-cx-01";
+        let old = rows.iter().find(|row| row.key == key).unwrap().clone();
+        let config = options.source.config(&options.cache).unwrap();
+        let namespace = config.namespace.as_str().to_owned();
+        let stream = config.expected_stream_epoch.as_deref().unwrap().to_owned();
+        let mut store = current_test_store_with_epoch(
+            &crate::events::EventCache::path(&options.cache),
+            &namespace,
+            &stream,
+        );
+        let admission = store.owner.admission();
+        assert_eq!(
+            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let (old_digest, old_capture): (String, Option<String>) = store
+            .connection
+            .query_row(
+                "SELECT metadata_digest,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                params![namespace, key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(old_capture.is_none());
+        drop(store);
+
+        fs::remove_file(&old.sources[0].path).unwrap();
+        let replacement = options
+            .claude_home
+            .join(format!("projects/-work-proj/{key}.jsonl"));
+        fs::write(
+            &replacement,
+            serde_json::json!({"type":"user","uuid":"replacement-native","sessionId":key,"timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Replacement native Claude owner"}}).to_string()
+                + "\n",
+        )
+        .unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let complete = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&evidence.work),
+                    CATALOG_FIXTURE_NOW,
+                )
+                .unwrap()
+        });
+        evidence.retire();
+        assert!(complete, "replacement native publication did not finish");
+
+        let publisher = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let current_metadata: String = publisher
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current: crate::model::summary::CatalogRow =
+            serde_json::from_str(&current_metadata).unwrap();
+        assert_eq!(current.harness, "claude");
+        assert_eq!(
+            current.lifecycle,
+            crate::model::summary::CatalogLifecycle::Current
+        );
+        assert!(
+            publisher
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.metadata=?3 AND g.admission=?4 AND g.stream=?5)",
+                    params![namespace, key, current_metadata, i64::try_from(admission).unwrap(), stream],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap(),
+            "the replacement has an exact Current immutable proof"
+        );
+
+        let history_metadata: String = publisher
+            .query_row(
+                "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let history: crate::model::summary::CatalogRow =
+            serde_json::from_str(&history_metadata).unwrap();
+        assert_eq!(history.harness, "codex");
+        let mut normalized_history = history.clone();
+        normalized_history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+        assert_eq!(
+            serde_json::to_string(&normalized_history).unwrap(),
+            serde_json::to_string(&old).unwrap(),
+            "History retains the exact old producer metadata"
+        );
+        let history_refs: i64 = publisher
+            .query_row(
+                "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
+                params![namespace, key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_refs, 0, "the History row has no immutable owner");
+        let (history_digest, history_admission, history_stream, history_capture): (
+            String,
+            i64,
+            String,
+            Option<String>,
+        ) = publisher
+            .query_row(
+                "SELECT metadata_digest,admission,stream,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+                params![namespace, key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(history_digest, old_digest);
+        assert_eq!(history_admission, i64::try_from(admission).unwrap());
+        assert_eq!(history_stream, stream);
+        assert!(history_capture.is_none());
+        drop(publisher);
+        drop(evidence);
+        fs::remove_dir_all(coexist_root).unwrap();
     }
 
     #[test]
