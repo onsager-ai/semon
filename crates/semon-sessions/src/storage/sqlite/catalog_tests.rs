@@ -9933,24 +9933,9 @@ fn cold_codex_family_crossing_batches_preserves_every_native_parent() {
         &crate::Options::default().source,
     )
     .unwrap();
-    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-    let mut work = crate::viewer::lock(&evidence.work);
-    let mut complete = false;
-    for _ in 0..16 {
-        if evidence
-            .refresh_catalog(&mut work, crate::model::now_ms())
-            .unwrap()
-        {
-            complete = true;
-            break;
-        }
-    }
-    drop(work);
-    evidence.retire();
-    assert!(
-        complete,
-        "connected cold family did not finish bounded steps"
-    );
+    // A connected family advances through independently bounded source,
+    // metadata, relationship and publication pages before parent links settle.
+    fixture.publish_existing();
     let db = fixture.db();
     let parents = db.prepare("SELECT session_key,parent_key FROM session_catalog WHERE lifecycle='current' AND session_key LIKE 'family-child-%' ORDER BY session_key").unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
     assert_eq!(parents.len(), 80);

@@ -94,6 +94,7 @@ jobs:
             storage::sqlite::transfer::catalog::tests::current_transfer225_search_bounded_document_and_state_refusals \
             storage::transfer::reported::tests::current_transfer225_real_catalog_materializes_and_reverses_without_granting_publication \
             catalog::tests::large_families_repair_one_owner_without_replacing_related_publications \
+            catalog::tests::cold_codex_family_crossing_batches_preserves_every_native_parent \
             catalog::tests::pinned_provider_recovers_stale_codex_pages_and_fences_continuations \
             storage::catalog::catalog_history_classification_rejects_duplicate_current_source_paths \
             storage::selected::catalog_continuation_digest_is_bounded_and_deserialization_fails_closed \
