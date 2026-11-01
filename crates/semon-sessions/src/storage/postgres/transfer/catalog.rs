@@ -128,7 +128,7 @@ fn verify_authority(
             }
         }
         Presentation => {
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes(),&(*verification_bytes as i64)]).map_err(sqlstate::error)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             let slots = decode(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
             let manifest = decode(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
@@ -165,7 +165,7 @@ fn verify_authority(
                     .map(|b| String::from_utf8(b).map_err(|_| StorageError::ScopeChanged))
                     .transpose()?)
                 .ok_or(StorageError::ScopeChanged)?;
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=$4::bigint THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes(),&(*verification_bytes as i64)]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             *verification_bytes = verification_bytes
                 .checked_sub(metadata.len())
@@ -1185,7 +1185,10 @@ mod tests {
                 {
                     values[0] = Value::String("0".repeat(64));
                     assert!(matches!(
-                        transaction(&config, &pool, &control, |tx| super::apply(tx, &record)),
+                        transaction(&config, &pool, &control, |tx| {
+                            let mut budget = transfer::MAX_PAGE_BYTES - 4096;
+                            super::apply(tx, &record, &mut budget)
+                        }),
                         Err(StorageError::ScopeChanged)
                     ));
                     checked_forgery = true;
