@@ -204,8 +204,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
     let later_key = rows
         .iter()
         .find(|row| {
-            row.key.as_str() != resumed_key.as_str()
-                && row.key.as_str() != untouched_key.as_str()
+            row.key.as_str() != resumed_key.as_str() && row.key.as_str() != untouched_key.as_str()
         })
         .unwrap()
         .key
@@ -374,7 +373,10 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
         })
         .unwrap();
     assert!(resumed_changed, "reappeared source keeps its changed claim");
-    assert!(!resumed_removed, "reappeared source is not claimed as removed");
+    assert!(
+        !resumed_removed,
+        "reappeared source is not claimed as removed"
+    );
     assert!(!retired_pending, "withdrawn sources have no pending claim");
 
     drop(cache);

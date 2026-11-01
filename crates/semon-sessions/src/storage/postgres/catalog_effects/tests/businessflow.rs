@@ -1813,12 +1813,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             withdrawal_options.source.namespace().unwrap(),
         )
         .unwrap();
-        let mut query = crate::Query::from_sources(std::sync::Arc::new(
-            crate::SessionSources::with_machines(vec![(
-                recent_machine.into(),
-                withdrawal_options.clone(),
-            )]),
-        ));
+        let mut query =
+            crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+                vec![(recent_machine.into(), withdrawal_options.clone())],
+            )));
         query.call_bound_catalog_at(
             "list_sessions",
             &serde_json::json!({}),
@@ -1842,8 +1840,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // Capture the ordinary Query's post-withdrawal membership independently,
     // before the process-wide Guard. Query membership includes virtual peers
     // as well as physical Catalog owners.
-    let withdrawal_oracle = capture_withdrawal()
-        .expect("SQLite ordinary withdrawal cohort");
+    let withdrawal_oracle = capture_withdrawal().expect("SQLite ordinary withdrawal cohort");
     fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
