@@ -3666,7 +3666,50 @@ fn scan_file_with_mode(
             .load_file(&key)
             .map_err(store_io_error)?
             .ok_or_else(|| io::Error::other(crate::storage::StorageError::Conflict))?;
-        if ledger.stat != Stat::of(path)?
+        #[cfg(test)]
+        let committed_witness_incomplete = if harness == "codex" {
+            let current_stat = Stat::of(path)?;
+            let stat_matches = ledger.stat == current_stat;
+            let source_chunks_present = index.source_chunks.is_some();
+            let source_chunks_valid = index
+                .source_chunks
+                .as_ref()
+                .is_some_and(|chunks| chunks.valid(ledger.offset));
+            let marker_index_present = index.marker_index.is_some();
+            let handoff_index_present = index.handoff_index.is_some();
+            let codex_header_present = index.codex_header.is_some();
+            let incomplete = !stat_matches
+                || !source_chunks_valid
+                || !marker_index_present
+                || !handoff_index_present
+                || !codex_header_present;
+            if incomplete {
+                eprintln!(
+                    "native_committed_codex_witness_incomplete path_sha256={:x} stat_matches={stat_matches} source_chunks_present={source_chunks_present} source_chunks_valid={source_chunks_valid} marker_index_present={marker_index_present} handoff_index_present={handoff_index_present} codex_header_present={codex_header_present} ledger_offset={} ledger_size={} current_size={}",
+                    Sha256::digest(key.as_bytes()),
+                    ledger.offset,
+                    ledger.stat.size,
+                    current_stat.size,
+                );
+            }
+            incomplete
+        } else {
+            ledger.stat != Stat::of(path)?
+                || !index
+                    .source_chunks
+                    .as_ref()
+                    .is_some_and(|chunks| chunks.valid(ledger.offset))
+                || (harness != "copilot" && index.marker_index.is_none())
+                || index.handoff_index.is_none()
+                || (harness == "codex" && index.codex_header.is_none())
+                || (agent
+                    && !index
+                        .claude_sidecar
+                        .as_ref()
+                        .is_some_and(|sidecar| sidecar.current(path)))
+        };
+        #[cfg(not(test))]
+        let committed_witness_incomplete = ledger.stat != Stat::of(path)?
             || !index
                 .source_chunks
                 .as_ref()
@@ -3678,8 +3721,8 @@ fn scan_file_with_mode(
                 && !index
                     .claude_sidecar
                     .as_ref()
-                    .is_some_and(|sidecar| sidecar.current(path)))
-        {
+                    .is_some_and(|sidecar| sidecar.current(path)));
+        if committed_witness_incomplete {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "committed model source changed or incomplete",
