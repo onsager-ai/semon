@@ -177,7 +177,7 @@ fn pg_catalog127_current_only_withdrawal_resumes_bounded_history_before_retained
                     ],
                 )
                 .map_err(sqlstate::error)?;
-            Ok((progress, row.get(0), row.get(1)))
+            Ok((progress, row.get::<_, bool>(0), row.get::<_, bool>(1)))
         })
         .unwrap();
     assert_eq!(progress.len(), 1, "one original owner advances per attempt");
