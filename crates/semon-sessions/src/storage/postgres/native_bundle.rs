@@ -58,12 +58,14 @@ impl StageTrace {
 
     fn report_failure(&self, txn_elapsed_us: u128) {
         eprintln!(
-            "PG_NATIVE_BUNDLE_DIAGNOSTIC txn_elapsed_us={} bundle_elapsed_us={} completed_stage_us={:?} failing_stage={} failing_stage_elapsed_us={}",
+            "PG_NATIVE_BUNDLE_DIAGNOSTIC txn_elapsed_us={} bundle_elapsed_us={} completed_stage_us={:?} failing_stage={} failing_stage_elapsed_us={} core_usage={:?} tree_usage_models={:?}",
             txn_elapsed_us,
             self.started.elapsed().as_micros(),
             self.completed,
             self.current.0,
             self.current.1.elapsed().as_micros(),
+            super::native_core::usage_diagnostic(),
+            super::tree_writer::usage_models_diagnostic(),
         );
     }
 }
@@ -342,6 +344,11 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
         if existing {
             return Err(StorageError::NamespaceUpgradePending);
         }
+    }
+    #[cfg(test)]
+    {
+        super::native_core::reset_usage_diagnostic();
+        super::tree_writer::reset_usage_models_diagnostic();
     }
     #[cfg(test)]
     let started = Instant::now();

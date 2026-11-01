@@ -12,6 +12,49 @@ use crate::{
 use tokio_postgres::types::ToSql;
 
 #[cfg(test)]
+use std::time::Instant;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+struct SqlEffectDiagnostic {
+    rows_attempted: usize,
+    rows_completed: usize,
+    sql_attempted: usize,
+    sql_completed: usize,
+    elapsed_us: u128,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct UsageDiagnostic {
+    usage_by_id_rows: usize,
+    identity_delete: SqlEffectDiagnostic,
+    usage_upsert: SqlEffectDiagnostic,
+    identity_insert: SqlEffectDiagnostic,
+}
+
+#[cfg(test)]
+thread_local! {
+    static USAGE_DIAGNOSTIC: std::cell::RefCell<UsageDiagnostic> =
+        std::cell::RefCell::new(UsageDiagnostic::default());
+}
+
+#[cfg(test)]
+pub(super) fn reset_usage_diagnostic() {
+    USAGE_DIAGNOSTIC.with(|diagnostic| *diagnostic.borrow_mut() = UsageDiagnostic::default());
+}
+
+#[cfg(test)]
+pub(super) fn usage_diagnostic() -> UsageDiagnostic {
+    USAGE_DIAGNOSTIC.with(|diagnostic| *diagnostic.borrow())
+}
+
+#[cfg(test)]
+fn update_usage_diagnostic(update: impl FnOnce(&mut UsageDiagnostic)) {
+    USAGE_DIAGNOSTIC.with(|diagnostic| update(&mut diagnostic.borrow_mut()));
+}
+
+#[cfg(test)]
 thread_local! { static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) }; }
 
 fn after(tx: &PgTxn<'_>) -> Result<(), StorageError> {
@@ -199,6 +242,8 @@ pub(super) fn write(
     index: &FileIndex,
     changes: Option<&DirtyRows>,
 ) -> Result<i64, StorageError> {
+    #[cfg(test)]
+    update_usage_diagnostic(|diagnostic| diagnostic.usage_by_id_rows = index.usage().len());
     let (id, exists) = qualify(tx, path, expected)?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     after(tx)?;
@@ -335,13 +380,30 @@ pub(super) fn write(
         delete(tx, "signals", id, "AND seq >= $3", &[&ordinal(from)?])?;
     }
     for (message, usage) in UsageChanges::new(changes, index.usage()).iter() {
-        delete(
+        #[cfg(test)]
+        let identity_delete_started = Instant::now();
+        #[cfg(test)]
+        update_usage_diagnostic(|diagnostic| {
+            diagnostic.identity_delete.rows_attempted += 1;
+            diagnostic.identity_delete.sql_attempted += 1;
+        });
+        let identity_delete = delete(
             tx,
             "usage_identity",
             id,
             "AND message_id=$3",
             &[&message.as_bytes()],
-        )?;
+        );
+        #[cfg(test)]
+        update_usage_diagnostic(|diagnostic| {
+            diagnostic.identity_delete.elapsed_us +=
+                identity_delete_started.elapsed().as_micros();
+            if identity_delete.is_ok() {
+                diagnostic.identity_delete.rows_completed += 1;
+                diagnostic.identity_delete.sql_completed += 1;
+            }
+        });
+        identity_delete?;
         if let Some(usage) = usage {
             let u = UsageRow::encode(usage).map_err(|_| StorageError::Unavailable)?;
             let mut r = row(tx, id);
@@ -372,11 +434,51 @@ pub(super) fn write(
             r.add("billing_timestamp", u.timestamp);
             r.add("billing_split_unknown", u.split_unknown);
             r.add("record_ids", u.record_ids.into_bytes());
-            r.put(tx, "usage", "file_id,message_id")?;
+            #[cfg(test)]
+            let usage_upsert_started = Instant::now();
+            #[cfg(test)]
+            update_usage_diagnostic(|diagnostic| {
+                diagnostic.usage_upsert.rows_attempted += 1;
+                diagnostic.usage_upsert.sql_attempted += 1;
+            });
+            let usage_upsert = r.put(tx, "usage", "file_id,message_id");
+            #[cfg(test)]
+            update_usage_diagnostic(|diagnostic| {
+                diagnostic.usage_upsert.elapsed_us +=
+                    usage_upsert_started.elapsed().as_micros();
+                if usage_upsert.is_ok() {
+                    diagnostic.usage_upsert.rows_completed += 1;
+                    diagnostic.usage_upsert.sql_completed += 1;
+                }
+            });
+            usage_upsert?;
             for uuid in &usage.record_ids {
+                #[cfg(test)]
+                update_usage_diagnostic(|diagnostic| {
+                    diagnostic.identity_insert.rows_attempted += 1;
+                });
                 tx.check()?;
-                tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) VALUES($1,$2,$3,$4)", &[&ns,&id,&message.as_bytes(),&uuid.as_bytes()]).map_err(sqlstate::error)?;
+                #[cfg(test)]
+                let identity_insert_started = Instant::now();
+                #[cfg(test)]
+                update_usage_diagnostic(|diagnostic| {
+                    diagnostic.identity_insert.sql_attempted += 1;
+                });
+                let identity_insert = tx.driver.execute("INSERT INTO semon_pg_native_usage_identity(namespace,file_id,message_id,record_uuid) VALUES($1,$2,$3,$4)", &[&ns,&id,&message.as_bytes(),&uuid.as_bytes()]);
+                #[cfg(test)]
+                update_usage_diagnostic(|diagnostic| {
+                    diagnostic.identity_insert.elapsed_us +=
+                        identity_insert_started.elapsed().as_micros();
+                    if identity_insert.is_ok() {
+                        diagnostic.identity_insert.sql_completed += 1;
+                    }
+                });
+                identity_insert.map_err(sqlstate::error)?;
                 after(tx)?;
+                #[cfg(test)]
+                update_usage_diagnostic(|diagnostic| {
+                    diagnostic.identity_insert.rows_completed += 1;
+                });
             }
         } else {
             delete(tx, "usage", id, "AND message_id=$3", &[&message.as_bytes()])?;

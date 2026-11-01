@@ -13,12 +13,45 @@ use crate::{
 };
 use tokio_postgres::types::ToSql;
 
+#[cfg(test)]
+use std::time::Instant;
+
 pub(super) const HEADER_EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM semon_pg_native_tree_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=semon_pg_native_digest($1::bytea,$2::bytea,'tree.path') AND semon_pg_native_key_matches(source_path,sha256($2::bytea),$2))";
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct UsageModelsDiagnostic {
+    rows_total: usize,
+    rows_attempted: usize,
+    rows_completed: usize,
+    sql_attempted: usize,
+    sql_completed: usize,
+    elapsed_us: u128,
+}
 
 #[cfg(test)]
 thread_local! {
     static FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static DECODED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static USAGE_MODELS_DIAGNOSTIC: std::cell::RefCell<UsageModelsDiagnostic> =
+        std::cell::RefCell::new(UsageModelsDiagnostic::default());
+}
+
+#[cfg(test)]
+pub(super) fn reset_usage_models_diagnostic() {
+    USAGE_MODELS_DIAGNOSTIC.with(|diagnostic| {
+        *diagnostic.borrow_mut() = UsageModelsDiagnostic::default();
+    });
+}
+
+#[cfg(test)]
+pub(super) fn usage_models_diagnostic() -> UsageModelsDiagnostic {
+    USAGE_MODELS_DIAGNOSTIC.with(|diagnostic| *diagnostic.borrow())
+}
+
+#[cfg(test)]
+fn update_usage_models_diagnostic(update: impl FnOnce(&mut UsageModelsDiagnostic)) {
+    USAGE_MODELS_DIAGNOSTIC.with(|diagnostic| update(&mut diagnostic.borrow_mut()));
 }
 
 struct Writer<'a, 'tx> {
@@ -60,6 +93,10 @@ impl Writer<'_, '_> {
 
     fn values(&mut self, projection: i64, summary: &Summary) -> Result<(), StorageError> {
         let rows = TreeRows::new(summary).map_err(|_| StorageError::InvalidArguments)?;
+        #[cfg(test)]
+        update_usage_models_diagnostic(|diagnostic| {
+            diagnostic.rows_total = rows.usage_models.len();
+        });
         let ns = self.tx.namespace.as_str().as_bytes().to_vec();
         let label = "INSERT INTO semon_pg_native_tree_labels(namespace,projection_id,label,value) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,label) DO UPDATE SET value=excluded.value";
         self.effect(
@@ -89,7 +126,23 @@ impl Writer<'_, '_> {
             self.effect("INSERT INTO semon_pg_native_tree_tools(namespace,projection_id,tool_id,name,closed) VALUES($1,$2,$3,NULL,true) ON CONFLICT(namespace_digest,projection_id,tool_id_digest) DO UPDATE SET closed=true WHERE semon_pg_native_tree_tools.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_tools.tool_id,sha256(excluded.tool_id),excluded.tool_id)", &[&ns,&projection,&id.as_bytes()])?;
         }
         for (id, model) in rows.usage_models {
-            self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()])?;
+            #[cfg(test)]
+            let started = Instant::now();
+            #[cfg(test)]
+            update_usage_models_diagnostic(|diagnostic| {
+                diagnostic.rows_attempted += 1;
+                diagnostic.sql_attempted += 1;
+            });
+            let result = self.effect("INSERT INTO semon_pg_native_tree_usage_models(namespace,projection_id,message_id,model) VALUES($1,$2,$3,$4) ON CONFLICT(namespace_digest,projection_id,message_id_digest) DO UPDATE SET model=excluded.model WHERE semon_pg_native_tree_usage_models.namespace=excluded.namespace AND semon_pg_native_key_matches(semon_pg_native_tree_usage_models.message_id,sha256(excluded.message_id),excluded.message_id)", &[&ns,&projection,&id.as_bytes(),&model.as_bytes()]);
+            #[cfg(test)]
+            update_usage_models_diagnostic(|diagnostic| {
+                diagnostic.elapsed_us += started.elapsed().as_micros();
+                if result.is_ok() {
+                    diagnostic.rows_completed += 1;
+                    diagnostic.sql_completed += 1;
+                }
+            });
+            result?;
         }
         Ok(())
     }
