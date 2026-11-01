@@ -203,6 +203,63 @@ impl Fixture {
         }
         panic!("semantic fixture stage did not record seed identities");
     }
+    fn prepare_publication(
+        &self,
+        paths: &[PathBuf],
+    ) -> (
+        EventCache,
+        crate::model::relation_stage::Batch,
+        crate::model::SemanticModelBatch,
+    ) {
+        let mut paths = paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
+        cache.prepare_facts_authority(&self.options).unwrap();
+        let runtime = crate::native_evidence::query_runtime_generation(&self.options).unwrap();
+        assert_eq!(
+            cache
+                .begin_semantic_stage_with_journal(&paths, &runtime, true)
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        for _ in 0..128 {
+            let batch = cache.semantic_batch(64).unwrap().unwrap();
+            if batch.paths.is_empty() {
+                continue;
+            }
+            let inputs = batch
+                .paths
+                .iter()
+                .map(|path| {
+                    crate::native_evidence::catalog_input(std::path::Path::new(path), &self.options)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            let prepared = crate::model::prepare_semantic_batch(
+                &self.options,
+                &mut cache,
+                &inputs,
+                &batch,
+                crate::model::now_ms(),
+            )
+            .unwrap();
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, prepared.prepared())
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            cache.end_scan();
+            cache.release_published_indexes();
+            if batch.phase == crate::model::relation_stage::Phase::Publication {
+                return (cache, batch, prepared);
+            }
+        }
+        panic!("semantic fixture stage did not reach publication");
+    }
     fn body(&self, query: &str) -> (u16, Value) {
         // Projection assertions observe the exact publication under test.
         // Viewer transport now explicitly schedules its native producer.
@@ -11562,6 +11619,249 @@ fn cold_catalog_search_identity_hints_preserve_harness_and_native_qualification(
     evidence.retire();
 }
 
+fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String, String, String) {
+    let catalog: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key=?1 AND lifecycle='current'",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let overview: String = db
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=semon_namespace() AND session_key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let (trace, generation): (String, String) = db
+        .query_row(
+            "SELECT metadata,generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    (catalog, overview, trace, generation)
+}
+
+#[test]
+fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() {
+    let fixture = Fixture::new();
+    let first = fixture.source("first");
+    let first_copy = fixture
+        .options
+        .claude_home
+        .join("projects/project/first-copy.jsonl");
+    fs::write(
+        &first_copy,
+        format!(
+            "{}\n",
+            json!({"type":"user","sessionId":"first","uuid":"first-copy","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt copy"}})
+        ),
+    )
+    .unwrap();
+    let second = fixture.source("second");
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let first_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='first' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first_catalog: crate::model::summary::CatalogRow =
+        serde_json::from_str(&first_metadata).unwrap();
+    assert_eq!(first_catalog.sources.len(), 2);
+    drop(db);
+
+    for (path, key, uuid) in [
+        (&first, "first", "updated-first"),
+        (&first_copy, "first", "updated-first-copy"),
+        (&second, "second", "updated-second"),
+    ] {
+        writeln!(
+            fs::OpenOptions::new().append(true).open(path).unwrap(),
+            "{}",
+            json!({"type":"user","sessionId":key,"uuid":uuid,"parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"updated native overview"}})
+        )
+        .unwrap();
+    }
+    let paths = [first.clone(), first_copy.clone(), second.clone()];
+    let (mut cache, batch, prepared) = fixture.prepare_publication(&paths);
+    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(batch.paths.len(), paths.len());
+    let prepared = prepared.prepared();
+    assert_eq!(prepared.rows.len(), 2);
+    assert!(prepared.rows.iter().all(|row| row.overview.is_some()));
+    let first_summary_bytes = serde_json::to_vec(prepared.rows[0].overview.as_ref().unwrap())
+        .unwrap()
+        .len();
+    assert!(first_summary_bytes > 0);
+
+    let db = fixture.db();
+    let before = ["first", "second"]
+        .map(|key| (key, semantic_publication_snapshot(&db, key)));
+    drop(db);
+
+    // This is a budget exercise using genuine producer summaries and receipts.
+    // The cap admits the first exact summary and makes the next encoded summary
+    // exceed the shared remaining byte budget.
+    crate::overview::cap_stage_summary_budget_for_test(first_summary_bytes);
+    let mut stage = fixture.stage();
+    assert_eq!(
+        stage.publish(&batch, prepared).unwrap().0,
+        crate::events::Outcome::Deferred
+    );
+
+    let db = fixture.db();
+    for (key, snapshot) in before {
+        assert_eq!(semantic_publication_snapshot(&db, key), snapshot);
+    }
+    drop(db);
+
+    let next = cache.semantic_batch(64).unwrap().unwrap();
+    assert_eq!(next.phase, crate::model::relation_stage::Phase::Publication);
+    let next_paths = next.paths.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let first_group = [first, first_copy]
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let second_group = [second]
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(
+        next_paths == first_group || next_paths == second_group,
+        "the next batch must contain one complete source-owner group"
+    );
+}
+
+#[test]
+fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
+    let fixture = Fixture::new();
+    let source = fixture.source("singleton");
+    fixture.publish_existing();
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&source).unwrap(),
+        "{}",
+        json!({"type":"user","sessionId":"singleton","uuid":"updated-singleton","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"updated native overview"}})
+    )
+    .unwrap();
+    let (cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
+    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(batch.paths.len(), 1);
+    let prepared = prepared.prepared();
+    assert_eq!(prepared.rows.len(), 1);
+    let summary_bytes = serde_json::to_vec(prepared.rows[0].overview.as_ref().unwrap())
+        .unwrap()
+        .len();
+    assert!(summary_bytes > 0);
+    let db = fixture.db();
+    let before = semantic_publication_snapshot(&db, "singleton");
+    drop(db);
+
+    // Reduce only this test publication's available bytes by one; the genuine
+    // serialized summary itself crosses the bounded writer's limit.
+    crate::overview::cap_stage_summary_budget_for_test(summary_bytes - 1);
+    let mut stage = fixture.stage();
+    assert!(matches!(
+        stage.publish(&batch, prepared),
+        Err(crate::events::StoreError::Configured(
+            crate::storage::StorageError::HistoryRetentionBounds
+        ))
+    ));
+    let db = fixture.db();
+    assert_eq!(semantic_publication_snapshot(&db, "singleton"), before);
+    drop(db);
+    let _ = cache;
+}
+
+#[test]
+fn semantic_stage_publishes_summary_and_trace_without_query_recipes() {
+    let fixture = Fixture::new();
+    let relative = fixture.codex_source_with_records(
+        "stage-query",
+        "stage-query",
+        None,
+        None,
+        1,
+        &[
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"synthetic prompt"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic answer"}]}}),
+        ],
+    );
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some([relative.clone()].into_iter().collect());
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    let source = fixture.options.codex_home.join(relative);
+    let (_cache, batch, prepared) = fixture.prepare_publication(std::slice::from_ref(&source));
+    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(prepared.prepared().rows.len(), 1);
+    let row = &prepared.prepared().rows[0];
+    assert!(row.query.is_some());
+    assert!(row.query_recipe.is_some());
+
+    let mut stage = fixture.stage();
+    assert_eq!(
+        stage.publish(&batch, prepared.prepared()).unwrap().0,
+        crate::events::Outcome::Written
+    );
+
+    let db = fixture.db();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='stage-query' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let catalog: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+    assert!(catalog.query.is_some());
+    let query_recipe: Option<String> = db
+        .query_row(
+            "SELECT query_recipe FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='stage-query' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(query_recipe, None);
+    let summary_text: String = db
+        .query_row(
+            "SELECT summary FROM main.session_overview WHERE namespace=semon_namespace() AND session_key='stage-query'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let summary: crate::overview::Summary = serde_json::from_str(&summary_text).unwrap();
+    let trace_text: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key='stage-query'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let trace: Value = serde_json::from_str(&trace_text).unwrap();
+    assert_eq!(
+        trace["content_generation"],
+        json!(crate::overview::content_generation(&summary))
+    );
+    let proof_query_recipe: Option<String> = db
+        .query_row(
+            "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=semon_namespace() AND session_key='stage-query' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(proof_query_recipe, None);
+}
+
 #[test]
 fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key() {
     use std::io::Write;
@@ -11725,8 +12025,9 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
         .clone();
     assert!(row.overview.is_some());
     assert!(row.trace.is_some());
+    assert!(row.query.is_some());
+    assert!(row.query_recipe.is_some());
     assert_ne!(row.sources, retained_sources);
-    row.query = None;
 
     let owner = crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&config)
         .unwrap();
@@ -11735,7 +12036,15 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
     let tx = db.transaction().unwrap();
     let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
     let mut measurements = crate::native_timing::Measurements::default();
-    crate::overview::publish_current_owned(&tx, &row, &mut measurements, Some(&trace)).unwrap();
+    let mut overview_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+    crate::overview::publish_current_stage_owned(
+        &tx,
+        &row,
+        &mut measurements,
+        &trace,
+        &mut overview_budget,
+    )
+    .unwrap();
     tx.commit().unwrap();
 
     let db = current.db();
@@ -11752,6 +12061,7 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
             .get("foreign_namespace_marker")
             .is_none()
     );
+    let updated_summary: crate::overview::Summary = serde_json::from_value(updated_summary).unwrap();
     let updated_trace: String = db
         .query_row(
             "SELECT metadata FROM main.session_trace_headers WHERE namespace=?1 AND session_key='shared-key'",
@@ -11761,6 +12071,26 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
         .unwrap();
     let updated_trace: Value = serde_json::from_str(&updated_trace).unwrap();
     assert!(updated_trace.get("foreign_namespace_marker").is_none());
+    assert_eq!(
+        updated_trace["content_generation"],
+        json!(crate::overview::content_generation(&updated_summary))
+    );
+    let current_query_recipe: Option<String> = db
+        .query_row(
+            "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key='shared-key' AND lifecycle='current'",
+            [current_namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_query_recipe, None);
+    let history_query_state: (Option<String>, bool) = db
+        .query_row(
+            "SELECT query_recipe,query_active=1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key='shared-key'",
+            [current_namespace],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(history_query_state, (None, false));
     let foreign_summary_after: String = db
         .query_row(
             "SELECT summary FROM main.session_overview WHERE namespace=?1 AND session_key='shared-key'",

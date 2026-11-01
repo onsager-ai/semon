@@ -2156,6 +2156,11 @@ fn error(error: rusqlite::Error) -> StoreError {
     {
         return refuse("semantic_physical_owner_source_budget");
     }
+    if let rusqlite::Error::ToSqlConversionFailure(cause) = &error
+        && cause.is::<crate::overview::SummaryPublicationBudgetOverflow>()
+    {
+        return refuse(PRESENTATION_CAPTURE_BUDGET);
+    }
     StoreError::Configured(failed(error))
 }
 fn head(db: &Connection) -> rusqlite::Result<Option<String>> {
@@ -2470,9 +2475,12 @@ impl Stage {
             .map(serde_json::to_string)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| StoreError::Data(e.to_string()))?;
-        if metadata.iter().map(String::len).sum::<usize>() > 1048576 {
+        let metadata_bytes = metadata.iter().map(String::len).sum::<usize>();
+        if metadata_bytes > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET {
             return Err(refuse("semantic_publication_metadata_budget"));
         }
+        let mut overview_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
         let claims_text =
             serde_json::to_string(&prepared.claims).map_err(|e| StoreError::Data(e.to_string()))?;
         let metadata_text =
@@ -2811,10 +2819,16 @@ impl Stage {
         publication_phase("trace_effects");
         let trace = super::trace::TraceWriter::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
+        let mut overview_measurements = crate::native_timing::Measurements::default();
         for row in &prepared.rows {
-            if let Some(projection) = &row.trace {
-                crate::causal_trace::publish_with_store(&trace, row, projection).map_err(error)?;
-            }
+            crate::overview::publish_current_stage_owned(
+                &tx,
+                row,
+                &mut overview_measurements,
+                &trace,
+                &mut overview_budget,
+            )
+            .map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_trace").map_err(error)?;

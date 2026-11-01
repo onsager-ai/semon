@@ -15,6 +15,118 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, io, sync::Arc};
 
+pub(crate) const SEMANTIC_OVERVIEW_METADATA_BUDGET: usize = 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct SummaryPublicationBudgetOverflow;
+
+impl std::fmt::Display for SummaryPublicationBudgetOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("semantic overview metadata budget exceeded")
+    }
+}
+
+impl std::error::Error for SummaryPublicationBudgetOverflow {}
+
+pub(crate) struct SummaryPublicationBudget {
+    remaining: usize,
+    #[cfg(test)]
+    test_cap_bytes: Option<usize>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static STAGE_SUMMARY_BUDGET_CAP_BYTES: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn cap_stage_summary_budget_for_test(bytes: usize) {
+    STAGE_SUMMARY_BUDGET_CAP_BYTES.with(|value| value.set(Some(bytes)));
+}
+
+impl SummaryPublicationBudget {
+    pub(crate) fn after_catalog_metadata(metadata_bytes: usize) -> Self {
+        Self {
+            remaining: SEMANTIC_OVERVIEW_METADATA_BUDGET.saturating_sub(metadata_bytes),
+            #[cfg(test)]
+            test_cap_bytes: STAGE_SUMMARY_BUDGET_CAP_BYTES.with(std::cell::Cell::take),
+        }
+    }
+
+    fn serialize(&mut self, summary: &Summary) -> rusqlite::Result<String> {
+        #[cfg(test)]
+        let remaining = self
+            .test_cap_bytes
+            .map_or(self.remaining, |cap| self.remaining.min(cap));
+        #[cfg(not(test))]
+        let remaining = self.remaining;
+
+        let mut writer = BoundedSummaryWriter::new(remaining);
+        if let Err(error) = serde_json::to_writer(&mut writer, summary) {
+            if writer.overflowed {
+                return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+                    SummaryPublicationBudgetOverflow,
+                )));
+            }
+            return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(error)));
+        }
+        let text = String::from_utf8(writer.bytes)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        self.remaining -= text.len();
+        #[cfg(test)]
+        if let Some(cap) = &mut self.test_cap_bytes {
+            *cap = cap.saturating_sub(text.len());
+        }
+        Ok(text)
+    }
+}
+
+struct BoundedSummaryWriter {
+    bytes: Vec<u8>,
+    limit: usize,
+    overflowed: bool,
+}
+
+impl BoundedSummaryWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            overflowed: false,
+        }
+    }
+}
+
+impl io::Write for BoundedSummaryWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.overflowed = true;
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "semantic overview metadata budget exceeded",
+            ));
+        }
+        let required = self.bytes.len() + bytes.len();
+        if required > self.bytes.capacity() {
+            let capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(required)
+                .min(self.limit);
+            self.bytes
+                .try_reserve_exact(capacity - self.bytes.len())
+                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_overview (
  namespace TEXT NOT NULL, session_key TEXT NOT NULL, last_ms INTEGER NOT NULL, state TEXT NOT NULL, summary TEXT NOT NULL,
@@ -114,8 +226,47 @@ fn publish_measured(
     let text = serde_json::to_string(summary)
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     measurements.record("summary_serialization", started, 1);
+    publish_measured_encoded(
+        tx,
+        key,
+        last,
+        summary.home["state"].as_str().unwrap_or("off"),
+        &text,
+        measurements,
+    )
+}
+
+fn publish_measured_bounded(
+    tx: &Transaction<'_>,
+    key: &str,
+    last: i64,
+    summary: &Summary,
+    budget: &mut SummaryPublicationBudget,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
     let started = measurements.start();
-    let changed = tx.prepare_cached("INSERT INTO main.session_overview VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,summary.home["state"].as_str().unwrap_or("off"),text])?;
+    let text = budget.serialize(summary)?;
+    measurements.record("summary_serialization", started, 1);
+    publish_measured_encoded(
+        tx,
+        key,
+        last,
+        summary.home["state"].as_str().unwrap_or("off"),
+        &text,
+        measurements,
+    )
+}
+
+fn publish_measured_encoded(
+    tx: &Transaction<'_>,
+    key: &str,
+    last: i64,
+    state: &str,
+    text: &str,
+    measurements: &mut crate::native_timing::Measurements,
+) -> rusqlite::Result<()> {
+    let started = measurements.start();
+    let changed = tx.prepare_cached("INSERT INTO main.session_overview VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,session_key) DO UPDATE SET last_ms=excluded.last_ms,state=excluded.state,summary=excluded.summary WHERE session_overview.summary IS NOT excluded.summary")?.execute(params![key,last,state,text])?;
     measurements.record("summary_upsert", started, 1);
     if changed > 0 {
         let started = measurements.start();
@@ -147,6 +298,47 @@ pub(crate) fn publish_current_owned(
     measurements: &mut crate::native_timing::Measurements,
     trace_store: Option<&crate::storage::sqlite::trace::TraceWriter<'_>>,
 ) -> rusqlite::Result<()> {
+    publish_current_owned_with_policy(
+        tx,
+        row,
+        measurements,
+        trace_store,
+        QueryRecipePolicy::Publish,
+        None,
+    )
+}
+
+pub(crate) fn publish_current_stage_owned(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    measurements: &mut crate::native_timing::Measurements,
+    trace_store: &crate::storage::sqlite::trace::TraceWriter<'_>,
+    budget: &mut SummaryPublicationBudget,
+) -> rusqlite::Result<()> {
+    publish_current_owned_with_policy(
+        tx,
+        row,
+        measurements,
+        Some(trace_store),
+        QueryRecipePolicy::TraceOnly,
+        Some(budget),
+    )
+}
+
+#[derive(Clone, Copy)]
+enum QueryRecipePolicy {
+    Publish,
+    TraceOnly,
+}
+
+fn publish_current_owned_with_policy(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    measurements: &mut crate::native_timing::Measurements,
+    trace_store: Option<&crate::storage::sqlite::trace::TraceWriter<'_>>,
+    query_recipe_policy: QueryRecipePolicy,
+    mut budget: Option<&mut SummaryPublicationBudget>,
+) -> rusqlite::Result<()> {
     let started = measurements.start();
     let history = crate::history_projection::catalog(tx, &row.key)?
         .map(|text| serde_json::from_str::<crate::model::summary::CatalogRow>(&text))
@@ -172,13 +364,24 @@ pub(crate) fn publish_current_owned(
                         .as_ref()
                         .is_some_and(|activity| activity.working);
                 }
-                publish_measured(
-                    tx,
-                    &row.key,
-                    history.last.unwrap_or(0),
-                    &prior,
-                    measurements,
-                )?;
+                if let Some(budget) = budget.as_deref_mut() {
+                    publish_measured_bounded(
+                        tx,
+                        &row.key,
+                        history.last.unwrap_or(0),
+                        &prior,
+                        budget,
+                        measurements,
+                    )?;
+                } else {
+                    publish_measured(
+                        tx,
+                        &row.key,
+                        history.last.unwrap_or(0),
+                        &prior,
+                        measurements,
+                    )?;
+                }
             }
             if let Some(current) = &row.trace {
                 let started = measurements.start();
@@ -189,7 +392,9 @@ pub(crate) fn publish_current_owned(
                     content_generation(&prior),
                 )?;
                 measurements.record("trace_update", started, 1);
-                if let Some(trace_generation) = trace_generation {
+                if let Some(trace_generation) = trace_generation
+                    && matches!(query_recipe_policy, QueryRecipePolicy::Publish)
+                {
                     let started = measurements.start();
                     crate::causal_trace::publish_current_query_owned(
                         tx,
@@ -217,11 +422,29 @@ pub(crate) fn publish_current_owned(
     if let Some(trace) = &row.trace {
         let started = measurements.start();
         let trace_store = trace_store.ok_or(rusqlite::Error::InvalidQuery)?;
-        crate::causal_trace::publish_owned(tx, trace_store, row, trace)?;
+        match query_recipe_policy {
+            QueryRecipePolicy::Publish => {
+                crate::causal_trace::publish_owned(tx, trace_store, row, trace)?
+            }
+            QueryRecipePolicy::TraceOnly => {
+                crate::causal_trace::publish_with_store(trace_store, row, trace)?
+            }
+        }
         measurements.record("trace_publish_inclusive", started, 1);
     }
     if let Some(summary) = &row.overview {
-        publish_measured(tx, &row.key, row.last.unwrap_or(0), summary, measurements)?;
+        if let Some(budget) = budget.as_deref_mut() {
+            publish_measured_bounded(
+                tx,
+                &row.key,
+                row.last.unwrap_or(0),
+                summary,
+                budget,
+                measurements,
+            )?;
+        } else {
+            publish_measured(tx, &row.key, row.last.unwrap_or(0), summary, measurements)?;
+        }
     }
     let started = measurements.start();
     tx.prepare_cached("DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1")?
