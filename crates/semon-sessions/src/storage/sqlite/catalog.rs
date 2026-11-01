@@ -582,7 +582,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key=?1)",
             [format!("history_original_header:{}", history.key)],
             |record| record.get::<_, bool>(0),
-        )?;
+        ).map_err(io::Error::other)?;
         if original {
             return Ok(false);
         }
@@ -593,7 +593,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
                 [&history.key],
                 |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
             )
-            .optional()?;
+            .optional()
+            .map_err(io::Error::other)?;
         let expected = crate::retention::source_generation(&history.sources)
             .map_err(io::Error::other)?;
         Ok(header.is_some_and(|(version, recorded, incomplete)| {
