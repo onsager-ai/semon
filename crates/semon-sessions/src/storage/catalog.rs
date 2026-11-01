@@ -28,9 +28,9 @@ impl std::ops::Deref for SelectedCatalogRow {
 
 pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 
-/// Ephemeral proof that one indexed prefix advanced inside an unchanged
-/// physical generation. The ordinary Catalog publisher carries this beside
-/// its observations; it is never stored as row metadata.
+/// Ephemeral proof that one indexed prefix advanced on the same file identity.
+/// The ordinary Catalog publisher carries this beside its observations; it is
+/// never stored as row metadata.
 pub(crate) const SOURCE_CONTINUATION_LIMIT: usize = 64;
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -49,24 +49,11 @@ impl VerifiedSourceContinuation {
         accepted: &crate::source_change::AppendEvidence,
         physical: &crate::events::Stat,
     ) -> Option<Self> {
-        let same_physical_stamp = |stat: &crate::events::Stat| {
-            (stat.dev, stat.ino, stat.modified_ns, stat.changed_ns)
-                == (
-                    physical.dev,
-                    physical.ino,
-                    physical.modified_ns,
-                    physical.changed_ns,
-                )
-        };
         if !accepted.qualifies(&prior.stat, physical)
-            || accepted.generation != crate::source_change::stat_generation(physical).ok()?
             || prior.stat.size != prior.offset
+            || current.stat != *physical
             || current.offset <= prior.offset
             || current.offset > physical.size
-            || current.offset > current.stat.size
-            || current.stat.size > physical.size
-            || !same_physical_stamp(&prior.stat)
-            || !same_physical_stamp(&current.stat)
         {
             return None;
         }
@@ -96,16 +83,255 @@ impl VerifiedSourceContinuation {
             && matches_ledger(old, &self.prior)
             && matches_ledger(new, &self.current)
             && self.accepted.before == self.prior.stat
-            && self.accepted.after.dev == old.dev
-            && self.accepted.after.ino == old.ino
-            && self.accepted.after.modified_ns == old.modified_ns
-            && self.accepted.after.changed_ns == old.changed_ns
+            && self.accepted.after == self.current.stat
             && self.current.offset > self.prior.offset
             && self.current.offset <= self.accepted.after.size
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
         &self.path
+    }
+}
+
+#[cfg(test)]
+mod source_continuation_tests {
+    use super::*;
+
+    const GENERATION: &str = "0123456789abcdef0123456789abcdef";
+
+    fn fixture() -> (
+        std::path::PathBuf,
+        crate::events::Ledger,
+        crate::events::Ledger,
+        crate::source_change::AppendEvidence,
+        crate::events::Stat,
+    ) {
+        let path = std::path::PathBuf::from("/source.jsonl");
+        let before = crate::events::Stat {
+            dev: 1,
+            ino: 2,
+            size: 10,
+            modified_ns: 3,
+            changed_ns: Some(4),
+        };
+        let physical = crate::events::Stat {
+            size: 20,
+            modified_ns: 30,
+            changed_ns: Some(40),
+            ..before
+        };
+        let prior = crate::events::Ledger {
+            stat: before,
+            offset: before.size,
+            prefix: [1; 32],
+            tail: [2; 32],
+        };
+        let current = crate::events::Ledger {
+            stat: physical,
+            offset: 18,
+            prefix: [3; 32],
+            tail: [4; 32],
+        };
+        let accepted = crate::source_change::AppendEvidence {
+            generation: GENERATION.into(),
+            before,
+            after: physical,
+        };
+        (path, prior, current, accepted, physical)
+    }
+
+    fn source(
+        ledger: &crate::events::Ledger,
+        path: &std::path::Path,
+        native_id: &str,
+        role: Option<serde_json::Value>,
+    ) -> CatalogSource {
+        let mut source = ledger.source(path, native_id);
+        source.native_role = role;
+        source
+    }
+
+    #[test]
+    fn catalog_continuation_accepts_opaque_generation_and_changed_stat_times() {
+        let (path, prior, current, accepted, physical) = fixture();
+        assert_ne!(prior.stat.modified_ns, physical.modified_ns);
+        assert_ne!(prior.stat.changed_ns, physical.changed_ns);
+
+        let proof =
+            VerifiedSourceContinuation::from_scan(&path, &prior, &current, &accepted, &physical)
+                .expect("a qualified append may change mtime/ctime and keep an opaque custody token");
+        let role = Some(serde_json::json!({"kind": "owner"}));
+        let old = source(&prior, &path, "native", role.clone());
+        let new = source(&current, &path, "native", role);
+
+        assert!(proof.advances(&old, &new));
+    }
+
+    #[test]
+    fn catalog_continuation_refuses_replacement_truncation_and_no_advance() {
+        let (path, prior, current, accepted, physical) = fixture();
+
+        let replaced = crate::events::Stat {
+            dev: 9,
+            ino: 10,
+            ..physical
+        };
+        let replaced_current = crate::events::Ledger {
+            stat: replaced,
+            ..current.clone()
+        };
+        let replaced_evidence = crate::source_change::AppendEvidence {
+            after: replaced,
+            ..accepted.clone()
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &replaced_current,
+            &replaced_evidence,
+            &replaced,
+        )
+        .is_none());
+
+        let truncated = crate::events::Stat {
+            size: 8,
+            modified_ns: 31,
+            changed_ns: Some(41),
+            ..prior.stat
+        };
+        let truncated_current = crate::events::Ledger {
+            stat: truncated,
+            offset: 8,
+            ..current.clone()
+        };
+        let truncated_evidence = crate::source_change::AppendEvidence {
+            after: truncated,
+            ..accepted.clone()
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &truncated_current,
+            &truncated_evidence,
+            &truncated,
+        )
+        .is_none());
+
+        let incomplete = crate::events::Ledger {
+            offset: prior.offset,
+            ..current
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &incomplete,
+            &accepted,
+            &physical,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn catalog_continuation_requires_exact_stats_identity_role_and_ledgers() {
+        let (path, prior, current, accepted, physical) = fixture();
+        let proof =
+            VerifiedSourceContinuation::from_scan(&path, &prior, &current, &accepted, &physical)
+                .unwrap();
+        let role = Some(serde_json::json!({"kind": "owner"}));
+        let old = source(&prior, &path, "native", role.clone());
+        let new = source(&current, &path, "native", role.clone());
+
+        let mut changed = old.clone();
+        changed.path.push("-replacement");
+        assert!(!proof.advances(&changed, &new));
+
+        let mut changed = new.clone();
+        changed.path.push("-replacement");
+        assert!(!proof.advances(&old, &changed));
+
+        let mut changed = new.clone();
+        changed.native_id.push_str("-replacement");
+        assert!(!proof.advances(&old, &changed));
+
+        let mut changed = new.clone();
+        changed.native_role = Some(serde_json::json!({"kind": "other"}));
+        assert!(!proof.advances(&old, &changed));
+
+        let mut changed = old.clone();
+        changed.prefix_sha256[0] ^= 1;
+        assert!(!proof.advances(&changed, &new));
+
+        let mut changed = new.clone();
+        changed.tail_sha256[0] ^= 1;
+        assert!(!proof.advances(&old, &changed));
+
+        let changed_before = crate::events::Stat {
+            modified_ns: prior.stat.modified_ns + 1,
+            ..prior.stat
+        };
+        let before_mismatch = crate::source_change::AppendEvidence {
+            before: changed_before,
+            ..accepted.clone()
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &current,
+            &before_mismatch,
+            &physical,
+        )
+        .is_none());
+
+        let after_mismatch = crate::events::Stat {
+            changed_ns: Some(physical.changed_ns.unwrap() + 1),
+            ..physical
+        };
+        let after_mismatch_evidence = crate::source_change::AppendEvidence {
+            after: after_mismatch,
+            ..accepted.clone()
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &current,
+            &after_mismatch_evidence,
+            &physical,
+        )
+        .is_none());
+
+        let current_mismatch = crate::events::Ledger {
+            stat: after_mismatch,
+            ..current
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &current_mismatch,
+            &accepted,
+            &physical,
+        )
+        .is_none());
+
+        let mut bad_old_identity = old;
+        bad_old_identity.native_id.push_str("-other");
+        assert!(!proof.advances(&bad_old_identity, &new));
+    }
+
+    #[test]
+    fn catalog_continuation_refuses_malformed_custody_generation() {
+        let (path, prior, current, accepted, physical) = fixture();
+        let malformed = crate::source_change::AppendEvidence {
+            generation: "untrusted".into(),
+            ..accepted
+        };
+        assert!(VerifiedSourceContinuation::from_scan(
+            &path,
+            &prior,
+            &current,
+            &malformed,
+            &physical,
+        )
+        .is_none());
     }
 }
 

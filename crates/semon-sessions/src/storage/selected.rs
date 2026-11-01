@@ -1151,6 +1151,8 @@ fn catalog_continuation_digest_is_bounded_and_deserialization_fails_closed() {
     };
     let physical = crate::events::Stat {
         size: 20,
+        modified_ns: 5,
+        changed_ns: Some(6),
         ..prior_stat
     };
     let prior = crate::events::Ledger {
@@ -1166,7 +1168,7 @@ fn catalog_continuation_digest_is_bounded_and_deserialization_fails_closed() {
         tail: [4; 32],
     };
     let accepted = crate::source_change::AppendEvidence {
-        generation: crate::source_change::stat_generation(&physical).unwrap(),
+        generation: "0123456789abcdef0123456789abcdef".into(),
         before: prior_stat,
         after: physical,
     };
