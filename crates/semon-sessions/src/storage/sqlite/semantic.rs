@@ -18,7 +18,8 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 const RELATION_EVENT_PAGE_LIMIT: usize = 16;
 const RELATION_OUTPUT_LIMIT: usize = 64;
 // Raw metadata reads in one relation batch, including Send/Xsm peers.
-const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
+const RELATION_EVENT_READ_BATCH_LIMIT: usize =
+    crate::model::relation_stage::SELECTOR_EVENT_READ_LIMIT;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 
 type RelationSourceStage = (bool, bool, bool, Option<i64>, Option<String>, bool);
@@ -33,20 +34,32 @@ fn relation_owner_source_paths(
     selected: &str,
     epoch: i64,
 ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
-    let mut paths = crate::events::store::semantic_stage::owner_closure_with(physical, selected)?
-        .into_iter()
-        .collect::<std::collections::BTreeSet<_>>();
+    let mut used = 0;
+    let mut paths = crate::events::store::semantic_stage::owner_closure_with(
+        physical,
+        selected,
+        &mut used,
+    )?
+    .into_iter()
+    .collect::<std::collections::BTreeSet<_>>();
     let owner_paths = paths.iter().cloned().collect::<Vec<_>>();
-    let context = crate::events::store::semantic_stage::context_with(
+    let context = crate::events::store::semantic_stage::context_with_budget(
         physical,
         &owner_paths,
         Phase::Relations,
         epoch,
+        &mut used,
+        &std::collections::BTreeMap::new(),
     )?;
     for parent in context.parent_paths(&owner_paths) {
         paths.extend(crate::events::store::semantic_stage::owner_closure_with(
-            physical, &parent,
+            physical,
+            &parent,
+            &mut used,
         )?);
+        if paths.len() > RELATION_OUTPUT_LIMIT {
+            return Err(crate::events::store::semantic_stage::context_budget());
+        }
     }
     Ok(paths)
 }
@@ -58,6 +71,7 @@ fn relation_context_budget_error(error: &rusqlite::Error) -> bool {
             if cause.is::<crate::events::store::semantic_stage::PhysicalContextBudget>()
                 || cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
                 || cause.is::<crate::model::relation_stage::SelectorMetadataBudget>()
+                || cause.is::<crate::model::relation_stage::SelectorEventReadBudget>()
     )
 }
 
@@ -67,6 +81,7 @@ fn relation_sender_context(
     physical: &impl crate::events::store::semantic_stage::ContextPort,
     sender_candidates: &std::collections::BTreeSet<(Option<String>, Option<String>)>,
     used: &mut usize,
+    event_reads: &mut usize,
     preloaded: &std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
 ) -> rusqlite::Result<(
     std::collections::BTreeSet<String>,
@@ -94,6 +109,7 @@ fn relation_sender_context(
                     harness: "claude".to_owned(),
                 },
                 used,
+                event_reads,
             )?;
             let Some(key) = selected.key.filter(|_| selected.count == 1) else {
                 continue;
@@ -173,14 +189,17 @@ fn agent_tool_use_ids(
 fn relation_spawn_call_context(
     db: &Connection,
     namespace: &str,
-    physical: &impl crate::events::store::semantic_stage::ContextPort,
+    physical: &(impl crate::events::store::semantic_stage::ContextPort
+          + crate::events::store::semantic_stage::OwnerClosurePort),
     epoch: i64,
     used: &mut usize,
+    budget: &mut RelationPageReadBudget,
     mut loaded_paths: std::collections::BTreeSet<String>,
     preloaded: &std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
 ) -> rusqlite::Result<(
     std::collections::BTreeSet<String>,
     std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+    std::collections::BTreeMap<String, Option<crate::model::relation_stage::Location>>,
 )> {
     use crate::model::relation_stage::{Selector, select_with};
 
@@ -199,6 +218,8 @@ fn relation_spawn_call_context(
     let mut selected_sources = std::collections::BTreeSet::new();
     let mut paths = std::collections::BTreeSet::new();
     let mut endpoints = preloaded.clone();
+    let mut claude_call_locations = std::collections::BTreeMap::new();
+    let mut expanded_paths = std::collections::BTreeSet::new();
 
     while let Some(id) = pending.pop_first() {
         if !selected_ids.insert(id.clone()) {
@@ -214,24 +235,82 @@ fn relation_spawn_call_context(
         };
         let selection = select_with(
             &mut lookup,
-            &Selector::ClaudeCall { id },
+            &Selector::ClaudeCall { id: id.clone() },
             used,
+            &mut budget.metadata_reads,
         )?;
         if selection.count != 1 {
+            claude_call_locations.insert(id, None);
             continue;
         }
         let location = selection.location.ok_or(rusqlite::Error::InvalidQuery)?;
         let endpoint = selection.endpoint.ok_or(rusqlite::Error::InvalidQuery)?;
         let path = location.source.path.to_string_lossy().into_owned();
-        if selected_sources.insert(path.clone()) {
-            let closure = crate::events::store::semantic_stage::owner_closure_with(physical, &path)?;
+        claude_call_locations.insert(id, Some(location.clone()));
+        if selected_sources.insert(path.clone()) && !expanded_paths.contains(&path) {
+            let closure = crate::events::store::semantic_stage::owner_closure_with(
+                physical, &path, used,
+            )?;
+            expanded_paths.extend(closure.iter().cloned());
             loaded_paths.extend(closure.iter().cloned());
-            paths.extend(closure);
+            paths.extend(closure.iter().cloned());
             if loaded_paths.len() > RELATION_OUTPUT_LIMIT {
                 return Err(crate::events::store::semantic_stage::context_budget());
             }
             if paths.len() > RELATION_OUTPUT_LIMIT {
                 return Err(crate::events::store::semantic_stage::context_budget());
+            }
+
+            let mut frontier = closure;
+            while !frontier.is_empty() {
+                let frontier_paths = frontier.iter().cloned().collect::<Vec<_>>();
+                let context = crate::events::store::semantic_stage::context_with_budget(
+                    physical,
+                    &frontier_paths,
+                    Phase::Relations,
+                    epoch,
+                    used,
+                    &endpoints,
+                )?;
+                let parents = context.parent_paths(&frontier_paths);
+                if parents.len() > RELATION_OUTPUT_LIMIT {
+                    return Err(crate::events::store::semantic_stage::context_budget());
+                }
+                for (key, endpoint) in context.endpoints {
+                    if endpoint.row.harness == "claude" {
+                        pending.extend(
+                            agent_tool_use_ids(&endpoint, &loaded_paths)
+                                .into_iter()
+                                .filter(|candidate| !selected_ids.contains(candidate)),
+                        );
+                    }
+                    endpoints.insert(key, endpoint);
+                }
+
+                let mut next_frontier = std::collections::BTreeSet::new();
+                for parent in parents {
+                    if expanded_paths.contains(&parent) {
+                        continue;
+                    }
+                    let closure = crate::events::store::semantic_stage::owner_closure_with(
+                        physical, &parent, used,
+                    )?;
+                    expanded_paths.extend(closure.iter().cloned());
+                    for parent_source in closure {
+                        if loaded_paths.insert(parent_source.clone()) {
+                            paths.insert(parent_source.clone());
+                            next_frontier.insert(parent_source);
+                            if loaded_paths.len() > RELATION_OUTPUT_LIMIT
+                                || paths.len() > RELATION_OUTPUT_LIMIT
+                            {
+                                return Err(
+                                    crate::events::store::semantic_stage::context_budget(),
+                                );
+                            }
+                        }
+                    }
+                }
+                frontier = next_frontier;
             }
         }
         endpoints.insert(endpoint.row.key.clone(), endpoint.clone());
@@ -241,30 +320,13 @@ fn relation_spawn_call_context(
                 .filter(|candidate| !selected_ids.contains(candidate)),
         );
 
-        let call_sources = paths.iter().cloned().collect::<Vec<_>>();
-        let context = crate::events::store::semantic_stage::context_with_budget(
-            physical,
-            &call_sources,
-            Phase::Relations,
-            epoch,
-            used,
-            &endpoints,
-        )?;
-        for (key, endpoint) in context.endpoints {
-            pending.extend(
-                agent_tool_use_ids(&endpoint, &loaded_paths)
-                    .into_iter()
-                    .filter(|candidate| !selected_ids.contains(candidate)),
-            );
-            endpoints.insert(key, endpoint);
-        }
         if pending.len() + selected_ids.len() > RELATION_OUTPUT_LIMIT {
             return Err(crate::events::store::semantic_stage::context_budget());
         }
     }
 
     endpoints.retain(|key, _| !preloaded.contains_key(key));
-    Ok((paths, endpoints))
+    Ok((paths, endpoints, claude_call_locations))
 }
 
 struct RelationPage {
@@ -2470,6 +2532,11 @@ impl crate::model::relation_stage::SelectorLookup for AdmittedLookup<'_> {
             crate::model::relation_stage::SelectorMetadataBudget,
         ))
     }
+    fn event_read_budget(&self) -> Self::Error {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(
+            crate::model::relation_stage::SelectorEventReadBudget,
+        ))
+    }
     fn native_key(
         &self,
         native: &str,
@@ -3642,10 +3709,12 @@ impl Stage {
             replay: Vec::new(),
         };
         let mut used = 0;
+        let mut event_reads = 0;
         let result = crate::model::relation_stage::select_with(
             &mut lookup,
             selector,
             &mut used,
+            &mut event_reads,
         );
         let replay = lookup.replay;
         if !replay.is_empty() {
@@ -4210,12 +4279,13 @@ impl Stage {
                         result_phase = Phase::Identity;
                         let seeds = tx.prepare("SELECT source_path FROM main.catalog_semantic_sources WHERE namespace=?1 AND identity_done=0 ORDER BY source_path LIMIT ?2").map_err(error)?.query_map(params![ns,limit.clamp(1,64) as i64], |r| r.get::<_,String>(0)).map_err(error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(error)?;
                         let mut selected = std::collections::BTreeSet::new();
+                        let mut used = 0usize;
                         for seed in seeds {
                             if selected.contains(&seed) {
                                 continue;
                             }
                             let group = crate::events::store::semantic_stage::owner_closure_with(
-                                &physical, &seed,
+                                &physical, &seed, &mut used,
                             )
                             .map_err(error)?;
                             if selected.len()
@@ -4402,12 +4472,17 @@ impl Stage {
                 if page.primary_events == 0 && page.budget_blocked {
                     return Err(refuse("semantic_source_budget"));
                 }
+                relation_context_bytes = relation_context_bytes
+                    .checked_add(relation_read_budget.metadata_bytes)
+                    .filter(|bytes| *bytes <= RELATION_METADATA_BATCH_LIMIT)
+                    .ok_or_else(|| refuse("semantic_source_budget"))?;
                 let (sender_paths, sender_endpoints) = match relation_sender_context(
                     &tx,
                     ns,
                     &physical,
                     &page.sender_candidates,
                     &mut relation_context_bytes,
+                    &mut relation_read_budget.metadata_reads,
                     &context.endpoints,
                 ) {
                     Ok(sender_context) => sender_context,
@@ -4432,9 +4507,17 @@ impl Stage {
                 }
                 let mut companions = std::collections::BTreeSet::new();
                 for actor in &actors {
-                    match crate::events::store::semantic_stage::owner_closure_with(&physical, actor)
-                    {
-                        Ok(paths) => companions.extend(paths),
+                    match crate::events::store::semantic_stage::owner_closure_with(
+                        &physical,
+                        actor,
+                        &mut relation_context_bytes,
+                    ) {
+                        Ok(paths) => {
+                            companions.extend(paths);
+                            if companions.len() > RELATION_OUTPUT_LIMIT {
+                                return Err(refuse("semantic_source_budget"));
+                            }
+                        }
                         Err(source_error)
                             if sender_paths.contains(actor)
                                 && relation_context_budget_error(&source_error) =>
@@ -4469,23 +4552,26 @@ impl Stage {
                 companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
                 let mut loaded_paths = companions.clone();
                 loaded_paths.extend(paths.iter().cloned());
-                let (spawn_paths, spawn_endpoints) = match relation_spawn_call_context(
-                    &tx,
-                    ns,
-                    &physical,
-                    epoch,
-                    &mut relation_context_bytes,
-                    loaded_paths,
-                    &context.endpoints,
-                ) {
-                    Ok(spawn_context) => spawn_context,
-                    Err(source_error) if relation_context_budget_error(&source_error) => {
-                        return Err(refuse("semantic_source_budget"));
-                    }
-                    Err(source_error) => return Err(error(source_error)),
-                };
+                let (spawn_paths, spawn_endpoints, call_locations) =
+                    match relation_spawn_call_context(
+                        &tx,
+                        ns,
+                        &physical,
+                        epoch,
+                        &mut relation_context_bytes,
+                        &mut relation_read_budget,
+                        loaded_paths,
+                        &context.endpoints,
+                    ) {
+                        Ok(spawn_context) => spawn_context,
+                        Err(source_error) if relation_context_budget_error(&source_error) => {
+                            return Err(refuse("semantic_source_budget"));
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    };
                 companions.extend(spawn_paths);
                 context.endpoints.extend(spawn_endpoints);
+                context.claude_call_locations.extend(call_locations);
                 // Sender sources carry their exact claims and context, while
                 // this receipt page remains the only relation cursor.
                 paths = vec![selected.clone()];

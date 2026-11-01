@@ -603,6 +603,12 @@ pub(super) fn select(
         fn invalid(&self, _: &'static str) -> StorageError {
             StorageError::ScopeChanged
         }
+        fn metadata_budget(&self) -> StorageError {
+            StorageError::Busy
+        }
+        fn event_read_budget(&self) -> StorageError {
+            StorageError::Busy
+        }
         fn native_key(&self, native: &str, harness: &str) -> Result<Selection, StorageError> {
             let key = self
                 .identities
@@ -790,7 +796,10 @@ pub(super) fn select(
             hints: Vec::new(),
             replay: Vec::new(),
         };
-        return relation_stage::select_with(&mut lookup, selector).map(Some);
+        let mut used = 0;
+        let mut event_reads = 0;
+        return relation_stage::select_with(&mut lookup, selector, &mut used, &mut event_reads)
+            .map(Some);
     }
     let events = super::semantic_events::project(tx, &context)?;
     let generation = model_cache::generation(tx)?;
@@ -839,7 +848,9 @@ pub(super) fn select(
         hints,
         replay: Vec::new(),
     };
-    let result = relation_stage::select_with(&mut lookup, selector);
+    let mut used = 0;
+    let mut event_reads = 0;
+    let result = relation_stage::select_with(&mut lookup, selector, &mut used, &mut event_reads);
     if !lookup.replay.is_empty() {
         let mut stage = load(tx, true)?.ok_or(StorageError::Conflict)?;
         if stage.epoch != epoch {
