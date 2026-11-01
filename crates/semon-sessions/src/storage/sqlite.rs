@@ -226,7 +226,17 @@ mod tests {
             let namespace = LogicalSourceNamespace::new("authorized-source").unwrap();
             let source =
                 crate::storage::HostSource::new(namespace.clone(), "a".repeat(64)).unwrap();
-            drop(crate::events::EventCache::open_scoped(&cache, &source).unwrap());
+            let mut producer = crate::events::EventCache::open_scoped(&cache, &source).unwrap();
+            producer
+                .publish_catalog_projection(
+                    &crate::slot_projection::Publication {
+                        rows: &[],
+                        transcripts: None,
+                        observations: None,
+                    },
+                    None,
+                )
+                .unwrap();
             let database = crate::events::EventCache::path(&cache);
             let epoch = Connection::open(&database)
                 .unwrap()
@@ -244,15 +254,6 @@ mod tests {
             let db = semantic::Stage::open(semantic::SemanticStaging::admit(&config).unwrap())
                 .unwrap()
                 .into_test_connection();
-            for (key, value) in [
-                (
-                    "catalog_version",
-                    crate::model::summary::CATALOG_VERSION.to_string(),
-                ),
-                ("catalog_generation", "a".repeat(64)),
-            ] {
-                db.execute("INSERT INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (key, value)).unwrap();
-            }
             Self { root, config, db }
         }
         fn config(&self) -> StoreConfig {

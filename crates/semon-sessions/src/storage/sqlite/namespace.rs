@@ -182,7 +182,17 @@ mod tests {
                 "a".repeat(64),
             )
             .unwrap();
-            drop(EventCache::open_scoped(&cache, &source).unwrap());
+            let mut producer = EventCache::open_scoped(&cache, &source).unwrap();
+            producer
+                .publish_catalog_projection(
+                    &crate::slot_projection::Publication {
+                        rows: &[],
+                        transcripts: None,
+                        observations: None,
+                    },
+                    None,
+                )
+                .unwrap();
             let database = EventCache::path(&cache);
             let epoch = Connection::open(&database)
                 .unwrap()
@@ -197,21 +207,6 @@ mod tests {
                 namespace: LogicalSourceNamespace::new("source-A").unwrap(),
                 expected_stream_epoch: Some(epoch),
             };
-            // Source metadata is written through the current qualified writer.
-            let db = super::super::semantic::Stage::open(
-                super::super::semantic::SemanticStaging::admit(&config).unwrap(),
-            )
-            .unwrap()
-            .into_test_connection();
-            for (key, value) in [
-                (
-                    "catalog_version",
-                    crate::model::summary::CATALOG_VERSION.to_string(),
-                ),
-                ("catalog_generation", "a".repeat(64)),
-            ] {
-                db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", (key, value)).unwrap();
-            }
             Self { root, config }
         }
         fn db(&self) -> Connection {
