@@ -117,7 +117,8 @@ impl SearchPublicationStore for Effects<'_, '_> {
             eprintln!("PG_SEARCH_PUBLICATION_REFUSED boundary=count_write_consistency");
             return Err(StorageError::ScopeChanged);
         }
-        boundary(&tx)
+        boundary(&tx)?;
+        Ok(())
     }
 }
 
@@ -270,9 +271,8 @@ pub(super) fn publish_retained_history(
         composite_bytes = composite_bytes
             .checked_add(metadata_bytes)
             .filter(|total| *total <= crate::catalog_search::MAX_PUBLICATION_BYTES)
-            .ok_or_else(|| {
+            .ok_or(StorageError::ScopeChanged).inspect_err(|_| {
                 refusal!("composite_bytes_bound");
-                StorageError::ScopeChanged
             })?;
         catalog_rows.push((key_digest, row));
     }
@@ -318,9 +318,8 @@ pub(super) fn publish_retained_history(
             })?;
         let original_header_length = usize::try_from(
             row.get::<_, Option<i64>>(2)
-                .ok_or_else(|| {
+                .ok_or(StorageError::ScopeChanged).inspect_err(|_| {
                     refusal!("original_header_length_missing");
-                    StorageError::ScopeChanged
                 })?,
         )
         .map_err(|_| {
@@ -381,9 +380,8 @@ pub(super) fn publish_retained_history(
         let metadata: Vec<u8> = header.get(18);
         let original_header: Vec<u8> = header
             .get::<_, Option<Vec<u8>>>(19)
-            .ok_or_else(|| {
+            .ok_or(StorageError::ScopeChanged).inspect_err(|_| {
                 refusal!("original_header_bytes_missing");
-                StorageError::ScopeChanged
             })?;
         let recipe_generation: Vec<u8> = header.get(20);
         let source_generation: Option<Vec<u8>> = header.get(21);
@@ -429,18 +427,16 @@ pub(super) fn publish_retained_history(
             .filter(|source| {
                 source.len() == 64 && source.iter().all(|byte| byte.is_ascii_hexdigit())
             })
-            .ok_or_else(|| {
+            .ok_or(StorageError::ScopeChanged).inspect_err(|_| {
                 refusal!("recorded_source_generation_shape");
-                StorageError::ScopeChanged
             })?;
         let original_header: Option<crate::storage::catalog::OriginalHeader> =
             serde_json::from_slice(&original_header).map_err(|_| {
                 refusal!("original_header_decode");
                 StorageError::ScopeChanged
             })?;
-        let original_header = original_header.ok_or_else(|| {
+        let original_header = original_header.ok_or(StorageError::ScopeChanged).inspect_err(|_| {
             refusal!("original_header_value_missing");
-            StorageError::ScopeChanged
         })?;
         let recorded_source_generation = std::str::from_utf8(source_generation).map_err(|_| {
             refusal!("recorded_source_generation_utf8");
@@ -564,16 +560,15 @@ pub(super) fn publish_retained_history(
         tx: RefCell::new(&mut *tx),
         generation,
     };
-    crate::catalog_search::publish_scoped_rows_port(&effects, &keys, &rows, 64, |phase, units| {
+    crate::catalog_search::publish_scoped_rows_port(&effects, &keys, &rows, 64, |_phase, _units| {
         #[cfg(test)]
-        eprintln!("PG_RETAINED_SEARCH_PHASE phase={phase} units={units}");
+        eprintln!("PG_RETAINED_SEARCH_PHASE phase={_phase} units={_units}");
     })
-    .map_err(|error| {
+    .inspect_err(|_error| {
         #[cfg(test)]
-        if matches!(&error, StorageError::ScopeChanged) {
+        if matches!(_error, StorageError::ScopeChanged) {
             eprintln!("PG_RETAINED_SEARCH_REFUSED boundary=scoped_publisher");
         }
-        error
     })?;
     Ok(())
 }
