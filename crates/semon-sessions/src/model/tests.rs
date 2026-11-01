@@ -4652,7 +4652,9 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
                     |row| row.get::<_, bool>(0),
                 )
                 .unwrap();
-            if epoch > append_epoch.expect("append captured the active epoch") {
+            if reset_epoch.is_none()
+                && epoch > append_epoch.expect("append captured the active epoch")
+            {
                 assert_eq!(phase, "indexing", "late stat mismatch resets the epoch");
                 reset_epoch = Some(epoch);
             }
