@@ -1011,6 +1011,7 @@ mod tests {
         manifest: &transfer::SnapshotManifest,
         options: &crate::Options,
         generation: &str,
+        header_only: bool,
     ) {
         // Change real applied rows, then call the public admission against the
         // actual frozen source. Restore exact original values before asserting.
@@ -1096,6 +1097,9 @@ mod tests {
                 "UPDATE owner_generation='ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'::bytea",
             ),
         ] {
+            if header_only && !case.contains("retained-only header") {
+                continue;
+            }
             let table = format!("semon_pg_native_{table}");
             let original: String = pool.transaction(&config.namespace,TxnKind::Transfer,control,|tx| {
                 let ns = config.namespace.as_str().as_bytes();
@@ -1133,6 +1137,85 @@ mod tests {
                 "{case} must roll back head, operation and import grant"
             );
         }
+    }
+
+    #[test]
+    fn pg_current_transfer225_search_incomplete_retained_header_refusals() {
+        let root = root();
+        let source = sqlite(&root, "pg-incomplete-search-source");
+        let (options, input) =
+            crate::storage::transfer::reported::tests::seed_catalog_input(&source, &root);
+        let original_facts = crate::facts::read_facts(options.facts.as_ref().unwrap()).unwrap();
+        let mut facts = original_facts.clone();
+        // Real producer metadata exceeds the search document bound. No posting
+        // or readiness rows are fabricated to create this incomplete owner.
+        facts.repos.insert("/sanitized".into(), Some("x".repeat(8193)));
+        crate::write_facts(options.facts.as_ref().unwrap(), &facts, &options.source).unwrap();
+        let mut cache = crate::storage::transfer::reported::tests::cache(&source);
+        cache
+            .ingest(&"7".repeat(64), &input.full_path(&options), "claude")
+            .unwrap();
+        cache.flush_cold_writes().unwrap();
+        crate::storage::transfer::reported::tests::begin_active_catalog(
+            &mut cache,
+            &[input.full_path(&options).to_str().unwrap().to_owned()],
+            "transfer-real-model",
+            true,
+        );
+        let (initial, _) =
+            publish_catalog_with_recipes(&mut cache, &options, std::slice::from_ref(&input));
+        assert_eq!(initial[0].repo.as_deref().unwrap().len(), 8193);
+        drop(cache);
+        crate::write_facts(
+            options.facts.as_ref().unwrap(),
+            &original_facts,
+            &options.source,
+        )
+        .unwrap();
+        let _ = advance_catalog_with_recipes(&source, &options);
+        let (pool, _) = super::super::super::tests::fixture(|limits| {
+            limits.idle_timeout = std::time::Duration::from_secs(1);
+        });
+        let control = PgCancellation::default();
+        let config = StoreConfig {
+            backend: crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            },
+            namespace: source.namespace.clone(),
+            expected_stream_epoch: source.expected_stream_epoch.clone(),
+        };
+        config.create_native_store().unwrap();
+        let manifest = stage(&source, &config, &[121; 32]);
+        std::fs::remove_dir_all(&options.claude_home).unwrap();
+        apply(&config, &manifest);
+        let generation = source.catalog_generation().unwrap();
+        pool.transaction(&config.namespace,TxnKind::ReadSnapshot,&control,|tx| {
+            let ns = config.namespace.as_str().as_bytes();
+            let row = tx.driver.query_one("SELECT d.complete,(SELECT count(*) FROM semon_pg_native_catalog_search_memberships m WHERE m.namespace_digest=d.namespace_digest AND m.namespace=d.namespace AND m.generation=d.generation AND m.key_digest=d.key_digest AND m.session_key=d.session_key) FROM semon_pg_native_catalog_search_documents d WHERE d.namespace_digest=sha256($1::bytea) AND d.namespace=$1 AND d.generation=$2 AND d.key_digest=sha256($3::bytea) AND d.session_key=$3 AND d.scope='retained_history'::bytea AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=d.namespace_digest AND c.namespace=d.namespace AND c.generation=d.generation AND c.key_digest=d.key_digest AND c.session_key=d.session_key)",&[&ns,&generation.as_bytes(),&initial[0].key.as_bytes()]).map_err(sqlstate::error)?;
+            assert!(!row.get::<_,bool>(0),"real retained document must be incomplete");
+            assert_eq!(row.get::<_,i64>(1),0,"incomplete retained owner has zero postings");
+            Ok(())
+        }).unwrap();
+        search_admission_corruption_refusals(
+            &config,
+            &pool,
+            &control,
+            &source,
+            &manifest,
+            &options,
+            &generation,
+            true,
+        );
+        assert_eq!(
+            config
+                .transfer_inbox()
+                .admit_catalog_from(&source.transfer_inbox(), &manifest, &options)
+                .unwrap(),
+            generation
+        );
+        eprintln!("transfer_search_incomplete_retained_header_refusals passed");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1454,6 +1537,7 @@ mod tests {
             &manifest,
             &options,
             &source.catalog_generation().unwrap(),
+            false,
         );
         let admitted = config
             .transfer_inbox()
