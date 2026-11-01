@@ -6741,7 +6741,8 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     let expected_history =
                         vec![recovered["entries"][0].clone(), next["entries"][0].clone()];
                     assert_eq!(
-                        fresh["entries"].as_array().unwrap(), &expected_history,
+                        fresh["entries"].as_array().unwrap(),
+                        &expected_history,
                         "{scope}/{mutation}: {fresh}"
                     );
                     assert_eq!(
