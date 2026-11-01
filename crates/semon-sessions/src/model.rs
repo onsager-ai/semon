@@ -7720,7 +7720,9 @@ impl PreparedSources {
             .ok_or_else(|| io::Error::other("publication Source fence missing or changed"))?;
         let witness = self.withdrawal_fence_witness(&fence.foreign_sources)?;
         if fence.witness != witness {
-            return Err(io::Error::other("publication Source fence missing or changed"));
+            return Err(io::Error::other(
+                "publication Source fence missing or changed",
+            ));
         }
 
         // Match the established Facts-first, sorted-path lock order. Foreign
@@ -8265,8 +8267,7 @@ fn prepare_sources_selected(
                 }
             }
             validate_foreign_prompt_source_witnesses(cache, &foreign_sources)?;
-            prepared
-                .retain_withdrawal_fence_with_foreign_sources(options, foreign_sources)?;
+            prepared.retain_withdrawal_fence_with_foreign_sources(options, foreign_sources)?;
             Ok(*prepared)
         }
         _ => Err(io::Error::other(
