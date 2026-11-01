@@ -11203,18 +11203,6 @@ mod tests {
                 0,
                 "the stale prepared model is retired with its epoch"
             );
-            let reset_progress: (bool, bool, bool, bool, bool, bool) = f.db().query_row(
-                "SELECT index_done,events_done,identity_done,relation_done,publication_done,ack_done FROM catalog_semantic_sources WHERE namespace='source-a' AND source_path=?1",
-                [&path],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
-            )
-            .unwrap();
-            assert_eq!(
-                reset_progress,
-                (false, false, false, false, false, false),
-                "the changed source starts with no stale Index, identity, or readiness"
-            );
-
             let mut reindexed = false;
             let mut final_model = None;
             for _ in 0..128 {
@@ -11235,6 +11223,19 @@ mod tests {
                 assert_eq!(selected.len(), batch.paths.len());
                 if batch.phase == Phase::Indexing {
                     assert_eq!(batch.paths, vec![path.clone()]);
+                    // Reset cleanup is paged; the source must be clear before
+                    // the new epoch yields real Indexing work.
+                    let reset_progress: (bool, bool, bool, bool, bool, bool) = f.db().query_row(
+                        "SELECT index_done,events_done,identity_done,relation_done,publication_done,ack_done FROM catalog_semantic_sources WHERE namespace='source-a' AND source_path=?1",
+                        [&path],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        reset_progress,
+                        (false, false, false, false, false, false),
+                        "the changed source starts with no stale Index, identity, or readiness"
+                    );
                     reindexed = true;
                 }
                 let model = cache

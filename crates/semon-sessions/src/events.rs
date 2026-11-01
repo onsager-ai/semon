@@ -2872,22 +2872,6 @@ impl EventCache {
             .flatten()
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_session_catalog(
-        &mut self,
-        rows: &[crate::model::summary::CatalogRow],
-        expected_generation: Option<&str>,
-    ) {
-        self.publish_session_projection(
-            &crate::slot_projection::Publication {
-                rows,
-                transcripts: None,
-                observations: None,
-            },
-            expected_generation,
-        );
-    }
-
     pub(crate) fn publish_session_projection(
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
