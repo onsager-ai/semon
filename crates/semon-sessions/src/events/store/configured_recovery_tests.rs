@@ -136,7 +136,8 @@ mod current_recovery {
                 &p_batch,
                 1_790_000_000_000,
             )
-            .unwrap();
+            .unwrap()
+            .expect("indexing batch is recorded");
         let (p_done, q_done): (bool, bool) = {
             let db = f.db();
             db.query_row(
@@ -222,7 +223,8 @@ mod current_recovery {
             assert_eq!(selected.len(), batch.paths.len());
             let model = cache
                 .prepare_semantic_model_batch(&options, &selected, &batch, 1_790_000_000_000)
-                .unwrap();
+                .unwrap()
+                .expect("recovery batch is recorded");
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 publication = Some((batch, model));
                 break;

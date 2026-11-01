@@ -1339,10 +1339,17 @@ impl NativeEvidence {
             cache.prepare_semantic_model_batch(&catalog_options, &inputs, &batch, now)
         } else {
             model::prepare_semantic_batch(&catalog_options, cache, &inputs, &batch, now)
+                .map(Some)
         };
         cache.scan_byte_budget = None;
         let prepared = match prepared {
-            Ok(prepared) => prepared,
+            Ok(Some(prepared)) => prepared,
+            Ok(None) => {
+                cache.end_scan();
+                cache.release_published_indexes();
+                work.texts.release_published_derivations();
+                return Ok(true);
+            }
             Err(error) if model::relation_stage::source_generation_changed(&error) => {
                 // Scanning committed the newer Ledger and exact dirty claim.
                 // The next bounded batch resets the old epoch before replay.
@@ -4528,6 +4535,135 @@ mod catalog_owner_tests {
             }
         }
         panic!("bounded fixture observation did not finish");
+    }
+
+    #[test]
+    fn deferred_publication_record_keeps_native_producer_pending_in_same_epoch() {
+        use rusqlite::OptionalExtension;
+
+        let (root, options, first) = audit_fixture();
+        let second = crate::Input {
+            root: crate::InputRoot::Codex,
+            path: "sessions/2026/10/01/rollout-audit-second.jsonl".into(),
+        };
+        fs::write(
+            second.full_path(&options),
+            "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"audit-second\"}}\n",
+        )
+        .unwrap();
+
+        let evidence = NativeEvidence::new(options.clone());
+        let database = cold_search_connection(&options);
+        let paths = [&first, &second]
+            .into_iter()
+            .map(|input| input.full_path(&options).to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let original_epoch = {
+            let mut work = lock(&evidence.work);
+            let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+            cache
+                .ingest(&"a".repeat(64), &first.full_path(&options), "codex")
+                .unwrap();
+            cache
+                .ingest(&"b".repeat(64), &second.full_path(&options), "codex")
+                .unwrap();
+            assert_eq!(
+                cache
+                    .begin_semantic_stage(
+                        &paths,
+                        &query_runtime_generation(&options).unwrap(),
+                    )
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
+            work.events = Some(cache);
+            database
+                .query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+
+        crate::storage::sqlite::semantic::force_publication_record_budget_once();
+        let mut work = lock(&evidence.work);
+        let mut deferred = false;
+        for _ in 0..24 {
+            let complete = evidence.refresh_catalog(&mut work, model::now_ms()).unwrap();
+            let hint: Option<String> = database
+                .query_row(
+                    "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_semantic_group_admission'",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            if let Some(hint) = hint {
+                let hint: serde_json::Value = serde_json::from_str(&hint).unwrap();
+                assert_eq!(hint["epoch"].as_i64(), Some(original_epoch));
+                assert_eq!(hint["max_groups"].as_u64(), Some(1));
+                assert!(!complete, "a deferred owner record is still pending work");
+                deferred = true;
+                break;
+            }
+            assert!(!complete, "the producer completed before its publication deferral");
+        }
+        assert!(deferred, "native producer did not reach the injected record overflow");
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=semon_namespace()",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            original_epoch,
+            "deferral keeps the active stage instead of resetting it"
+        );
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace() AND lifecycle='current'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0,
+            "record deferral publishes no Current rows"
+        );
+        assert!(evidence.catalog_pending(&work));
+
+        let mut complete = false;
+        for _ in 0..24 {
+            complete = evidence.refresh_catalog(&mut work, model::now_ms()).unwrap();
+            if complete {
+                break;
+            }
+        }
+        assert!(complete, "producer did not continue and finish the packed groups");
+        assert!(!evidence.catalog_pending(&work));
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace() AND lifecycle='current'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            2
+        );
+        assert!(!database
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_semantic_group_admission')",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap());
+        drop(work);
+        drop(database);
+        drop(evidence);
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn search_publication_state(

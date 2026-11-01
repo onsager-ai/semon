@@ -564,7 +564,8 @@ pub(crate) fn finish_catalog(
         }
         let model = cache
             .prepare_semantic_model_batch(options, inputs, &batch, 1_790_000_000_000)
-            .unwrap();
+            .unwrap()
+            .expect("reported transfer batch is recorded");
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             assert!(
                 model.prepared().rows.is_empty()

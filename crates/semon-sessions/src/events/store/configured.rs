@@ -3990,7 +3990,8 @@ mod tests {
             }
             let model = cache
                 .prepare_semantic_model_batch(options, &batch_inputs, &batch, 1_790_000_000_000)
-                .unwrap();
+                .unwrap()
+                .expect("publication fixture fits the bounded model batch");
             if batch.phase == crate::model::relation_stage::Phase::Publication {
                 return (batch, model);
             }
@@ -9610,12 +9611,62 @@ mod tests {
                 );
                 let model = cache
                     .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
+                    .unwrap()
+                    .expect("publication fixture fits the bounded model batch");
                 if batch.phase == Phase::Publication {
                     return (batch, model);
                 }
             }
             panic!("lifecycle producer failed to reach publication")
+        }
+
+        fn ready_without_publication_receipt(
+            cache: &mut EventCache,
+            f: &Fixture,
+            options: &crate::Options,
+            inputs: &[crate::Input],
+        ) -> (Batch, crate::model::SemanticModelBatch) {
+            let paths = inputs
+                .iter()
+                .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let runtime = crate::native_evidence::query_runtime_generation(options).unwrap();
+            assert_eq!(
+                begin_active_stage(cache, f, &paths, &runtime).unwrap(),
+                Outcome::Written
+            );
+            for _ in 0..128 {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                if batch.paths.is_empty() {
+                    continue;
+                }
+                let selected = inputs
+                    .iter()
+                    .filter(|input| {
+                        batch
+                            .paths
+                            .contains(&input.full_path(options).to_string_lossy().into_owned())
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(selected.len(), batch.paths.len());
+                let model = crate::model::prepare_semantic_batch(
+                    options,
+                    cache,
+                    &selected,
+                    &batch,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                if batch.phase == Phase::Publication {
+                    return (batch, model);
+                }
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                    Outcome::Written
+                );
+            }
+            panic!("lifecycle producer failed to reach an unrecorded publication")
         }
         fn publish(
             cache: &mut EventCache,
@@ -10376,6 +10427,7 @@ mod tests {
             #[derive(Default)]
             pub(super) struct Progress {
                 pub(super) publications: usize,
+                pub(super) publication_record_deferrals: usize,
                 pub(super) frontier_paged: bool,
                 pub(super) restarted_frontier: bool,
                 pub(super) restarted_between_groups: bool,
@@ -10475,9 +10527,13 @@ mod tests {
                         batch.paths.len(),
                         "all selected physical sources supplied"
                     );
-                    let model = cache
+                    let Some(model) = cache
                         .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                        .unwrap();
+                        .unwrap()
+                    else {
+                        progress.publication_record_deferrals += 1;
+                        continue;
+                    };
                     if batch.phase != Phase::Publication {
                         continue;
                     }
@@ -10947,7 +11003,8 @@ mod tests {
                 assert_eq!(selected.len(), batch.paths.len());
                 let model = cache
                     .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
+                    .unwrap()
+                    .expect("publication fixture fits the bounded model batch");
                 if batch.phase == Phase::Publication {
                     held = Some((batch, model));
                     break;
@@ -11057,7 +11114,8 @@ mod tests {
                 }
                 let model = cache
                     .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
+                    .unwrap()
+                    .expect("publication fixture fits the bounded model batch");
                 if batch.phase == Phase::Publication {
                     final_model = Some((batch, model));
                     break;
@@ -11246,7 +11304,8 @@ mod tests {
                                 &batch,
                                 1_790_000_000_000,
                             )
-                            .unwrap();
+                            .unwrap()
+                            .expect("bounded batch is recorded");
                     }
                     Ok(None) => panic!("real progressive stage disappeared"),
                 }
@@ -11349,7 +11408,8 @@ mod tests {
                 }
                 let model = cache
                     .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                    .unwrap();
+                    .unwrap()
+                    .expect("publication fixture fits the bounded model batch");
                 if batch.phase == Phase::Publication {
                     final_model = Some((batch, model));
                     break;
@@ -12653,7 +12713,8 @@ mod tests {
                         .collect::<Vec<_>>();
                     ordinary
                         .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                        .unwrap();
+                        .unwrap()
+                        .expect("indexing batch is recorded");
                 }
             }
             assert!(
@@ -13209,7 +13270,8 @@ mod tests {
                 }
                 if !batch.paths.is_empty() {
                     old.prepare_semantic_model_batch(options, &inputs, &batch, 1_790_000_000_000)
-                        .unwrap();
+                        .unwrap()
+                        .expect("stale-holder indexing batch is recorded");
                 }
             }
             assert!(reached);
@@ -13458,7 +13520,8 @@ mod tests {
                                     &batch,
                                     1_790_000_000_000,
                                 )
-                                .unwrap();
+                                .unwrap()
+                                .expect("bounded filename batch is recorded");
                         }
                         Ok(None) => panic!("filename owner stage disappeared"),
                     }
@@ -13657,7 +13720,8 @@ mod tests {
                         .collect::<Vec<_>>();
                     ordinary
                         .prepare_semantic_model_batch(options, &selected, &batch, 1_790_000_000_000)
-                        .unwrap();
+                        .unwrap()
+                        .expect("filename indexing batch is recorded");
                 }
             }
             assert!(
@@ -13873,6 +13937,16 @@ mod tests {
                     .collect()
             }
 
+            fn oversized_query(prepared: &mut crate::model::PreparedSources, bytes: usize) {
+                assert!(!prepared.rows.is_empty());
+                for row in &mut prepared.rows {
+                    assert!(row.trace.is_some());
+                    row.query = Some(serde_json::json!({
+                        "oversized_fixture": "x".repeat(bytes)
+                    }));
+                }
+            }
+
             fn admit_independent_inputs(
                 cache: &mut EventCache,
                 options: &crate::Options,
@@ -14025,7 +14099,8 @@ mod tests {
                 );
                 let retry_model = cache
                     .prepare_semantic_model_batch(options, &selected, &retry, 1_790_000_000_000)
-                    .unwrap();
+                    .unwrap()
+                    .expect("retry fixture fits the bounded model batch");
                 assert_eq!(
                     cache
                         .publish_semantic_catalog(&retry, retry_model.prepared())
@@ -14058,6 +14133,224 @@ mod tests {
                 assert_ne!(resumed_epoch, batch.epoch);
                 assert_eq!(hint(&f, "source-a"), Some((resumed_epoch, 1)));
                 assert_eq!(resumed.semantic_batch(64).unwrap().unwrap().paths.len(), 1);
+            }
+
+            #[test]
+            fn later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(66);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (first, first_model) = ready(&mut cache, &f, options, &inputs);
+                assert_eq!(first.phase, Phase::Publication);
+                assert_eq!(first.paths.len(), 64);
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&first, first_model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Written
+                );
+
+                let prior_receipt: (i64, String) = f
+                    .db()
+                    .query_row(
+                        "SELECT epoch,paths FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(prior_receipt.0, first.epoch);
+                let mut prior_paths: Vec<String> =
+                    serde_json::from_str(&prior_receipt.1).unwrap();
+                prior_paths.sort();
+                let mut first_paths = first.paths.clone();
+                first_paths.sort();
+                assert_eq!(prior_paths, first_paths);
+
+                let later = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(later.phase, Phase::Publication);
+                assert_eq!(later.epoch, first.epoch);
+                assert_eq!(later.paths.len(), 2);
+                let selected = selected_inputs(&inputs, options, &later);
+                let mut oversized = crate::model::prepare_semantic_batch(
+                    options,
+                    &mut cache,
+                    &selected,
+                    &later,
+                    1_790_000_000_000,
+                )
+                .unwrap();
+                oversized_query(oversized.prepared_mut_for_test(), 1_100_000);
+                assert_eq!(
+                    cache.record_semantic_batch(&later, oversized.prepared()).unwrap(),
+                    Outcome::Deferred,
+                    "the prior successful group's receipt does not block a later record"
+                );
+                assert_eq!(hint(&f, "source-a"), Some((first.epoch, 1)));
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT epoch,paths FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                            [],
+                            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                        )
+                        .unwrap(),
+                    prior_receipt,
+                    "deferring a later group preserves the old group's receipt"
+                );
+
+                let retry = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(retry.phase, Phase::Publication);
+                assert_eq!(retry.epoch, first.epoch);
+                assert_eq!(retry.paths.len(), 1);
+                let retry_inputs = selected_inputs(&inputs, options, &retry);
+                let retry_model = cache
+                    .prepare_semantic_model_batch(
+                        options,
+                        &retry_inputs,
+                        &retry,
+                        1_790_000_000_000,
+                    )
+                    .unwrap()
+                    .expect("halved publication record fits");
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&retry, retry_model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Written
+                );
+                let final_batch = cache.semantic_batch(64).unwrap().unwrap();
+                assert_eq!(final_batch.phase, Phase::Publication);
+                assert_eq!(final_batch.paths.len(), 1);
+                let final_inputs = selected_inputs(&inputs, options, &final_batch);
+                let final_model = cache
+                    .prepare_semantic_model_batch(
+                        options,
+                        &final_inputs,
+                        &final_batch,
+                        1_790_000_000_000,
+                    )
+                    .unwrap()
+                    .expect("final publication record fits");
+                assert_eq!(
+                    cache
+                        .publish_semantic_catalog(&final_batch, final_model.prepared())
+                        .unwrap()
+                        .0,
+                    Outcome::Written
+                );
+                let done = cache.semantic_batch(64).unwrap().unwrap();
+                assert!(done.paths.is_empty());
+                assert_eq!(cache.finish_semantic_stage(done.epoch).unwrap(), Outcome::Written);
+                assert_eq!(hint(&f, "source-a"), None);
+            }
+
+            #[test]
+            fn recorded_same_selection_blocks_permuted_oversized_request() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(2);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, mut model) = ready(&mut cache, &f, options, &inputs);
+                let receipt: (i64, String) = f
+                    .db()
+                    .query_row(
+                        "SELECT epoch,paths FROM storage_semantic_model_batches WHERE namespace='source-a'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap();
+                assert_eq!(receipt.0, batch.epoch);
+                let before = shared_state(&f);
+                let mut permuted = batch.clone();
+                permuted.paths.reverse();
+                permuted.source_claims.reverse();
+                let prepared = model.prepared_mut_for_test();
+                prepared.claims.reverse();
+                oversized_query(prepared, 1_100_000);
+                assert_eq!(
+                    cache
+                        .record_semantic_batch(&permuted, prepared)
+                        .unwrap(),
+                    Outcome::Conflict,
+                    "sorted physical selections bind the same recorded request"
+                );
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+            }
+
+            #[test]
+            fn oversized_identity_or_claim_mismatch_does_not_write_a_hint() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(2);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, mut model) = ready(&mut cache, &f, options, &inputs);
+                oversized_query(model.prepared_mut_for_test(), 1_100_000);
+                let before = shared_state(&f);
+
+                let prepared = model.prepared_mut_for_test();
+                let original_name = prepared.rows[0].name.clone();
+                let original_claims = prepared.claims.clone();
+                prepared.rows[0].name.push_str(" changed identity");
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, prepared).unwrap(),
+                    Outcome::Conflict
+                );
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+
+                prepared.rows[0].name = original_name;
+                prepared.claims.clear();
+                assert_eq!(
+                    cache.record_semantic_batch(&batch, prepared).unwrap(),
+                    Outcome::Conflict
+                );
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+
+                prepared.claims = original_claims;
+                let original_trace = prepared.rows[0].trace.take();
+                let error = cache
+                    .record_semantic_batch(&batch, prepared)
+                    .unwrap_err();
+                assert!(error.to_string().contains("semantic_publication_trace_missing"));
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+                prepared.rows[0].trace = original_trace;
+            }
+
+            #[test]
+            fn one_oversized_record_refuses_without_a_receipt_or_hint() {
+                let (f, _, options, _) = model_sources();
+                let options = &options[0];
+                let inputs = inputs(1);
+                let mut cache = open(&f.config);
+                admit_independent_inputs(&mut cache, options, &inputs);
+                let (batch, mut model) =
+                    ready_without_publication_receipt(&mut cache, &f, options, &inputs);
+                assert_eq!(batch.phase, Phase::Publication);
+                assert_eq!(batch.paths.len(), 1);
+                oversized_query(model.prepared_mut_for_test(), 2_100_000);
+                let before = shared_state(&f);
+                assert!(cache.record_semantic_batch(&batch, model.prepared()).is_err());
+                assert_eq!(shared_state(&f), before);
+                assert_eq!(hint(&f, "source-a"), None);
+                assert_eq!(
+                    f.db()
+                        .query_row(
+                            "SELECT count(*) FROM storage_semantic_model_batches WHERE namespace='source-a' AND epoch=?1",
+                            [batch.epoch],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                    0
+                );
             }
 
             #[test]
