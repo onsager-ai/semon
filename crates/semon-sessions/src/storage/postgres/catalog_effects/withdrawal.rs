@@ -160,6 +160,24 @@ pub(in crate::storage::postgres) fn remove(
     if removed.len() > 64 {
         return defer(tx, files, &deferred);
     }
+    let removed_digests = removed
+        .iter()
+        .map(|key| digest(key.as_bytes()))
+        .collect::<Vec<_>>();
+    // A non-original History owner is a composition of prior History and the
+    // Current row. Direct withdrawal only captures the Current preimage, so
+    // leave these removals to the ordinary producer that can preserve both.
+    let needs_composition: bool = tx
+        .driver
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[]) AND NOT original)",
+            &[&ns, &previous.as_bytes(), &removed_digests],
+        )
+        .map_err(sqlstate::error)?
+        .get(0);
+    if needs_composition {
+        return defer(tx, files, &deferred);
+    }
     let generation = format!("{:x}", Sha256::digest(&operation));
     let stages=tx.driver.query("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     let Some(stage) = stages.first() else {
@@ -173,10 +191,6 @@ pub(in crate::storage::postgres) fn remove(
         .checked_add(1)
         .ok_or(StorageError::ScopeChanged)?;
     let runtime: Vec<u8> = stage.get(1);
-    let removed_digests = removed
-        .iter()
-        .map(|k| digest(k.as_bytes()))
-        .collect::<Vec<_>>();
     let empty_publication = crate::slot_projection::Publication {
         rows: &[],
         transcripts: None,
