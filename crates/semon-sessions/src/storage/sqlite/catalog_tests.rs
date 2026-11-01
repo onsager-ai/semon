@@ -124,10 +124,7 @@ impl Fixture {
         drop(work);
         evidence.retire();
     }
-    fn begin_relation_stage(
-        &self,
-        paths: &[String],
-    ) -> crate::model::relation_stage::Batch {
+    fn begin_relation_stage(&self, paths: &[String]) -> crate::model::relation_stage::Batch {
         assert!(!paths.is_empty());
         let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
         cache.prepare_facts_authority(&self.options).unwrap();
@@ -10462,8 +10459,7 @@ fn codex_relation_corrupt_context_after_prefix_is_fatal() {
             |row| row.get(0),
         )
         .unwrap();
-    let _: crate::model::relation_stage::Endpoint =
-        serde_json::from_str(&valid_metadata).unwrap();
+    let _: crate::model::relation_stage::Endpoint = serde_json::from_str(&valid_metadata).unwrap();
     db.execute(
         "UPDATE main.catalog_semantic_endpoints SET metadata='{}' WHERE session_key=?1",
         [&corrupt_owner],
