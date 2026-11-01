@@ -3218,7 +3218,20 @@ impl EventCache {
         if self.store.is_none() {
             return Ok(());
         }
-        self.gone.extend(gone);
+        let reappeared = self.gone.iter().any(|(path, _)| seen.contains(path));
+        if reappeared {
+            self.gone.retain(|(path, _)| !seen.contains(path));
+            self.gone.extend(gone);
+            self.gone.sort_by(|a, b| a.0.cmp(&b.0));
+            self.gone.dedup_by(|a, b| a.0 == b.0);
+        } else if self.gone.is_empty() {
+            self.gone = gone;
+        } else {
+            // Keep a Deferred request's exact file set stable so its
+            // operation-derived custody generation can resume. Re-observe
+            // these additional removals on the next retain step.
+            self.retention_base.extend(gone);
+        }
         if self.gone.is_empty() || self.busy {
             return Ok(());
         }
@@ -3230,7 +3243,8 @@ impl EventCache {
             Some(Ok(Outcome::Stale)) => {
                 return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
             }
-            Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
+            Some(Ok(Outcome::Written | Outcome::Conflict)) => self.gone.clear(),
+            Some(Ok(Outcome::Deferred)) => *dirty |= !self.gone.is_empty(),
             Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
