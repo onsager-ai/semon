@@ -2420,6 +2420,20 @@ impl<'a> Builder<'a> {
             .is_none_or(|refs| refs.contains(&at))
     }
 
+    /// A selected progress receipt also selects its paired child send. The
+    /// current source files and `progress` mapping supply this exact Ref.
+    fn select_paired_progress_sends(&mut self) {
+        let Some(selected) = &mut self.matching_refs else {
+            return;
+        };
+        let sends = self
+            .progress
+            .iter()
+            .filter_map(|(send, receipt)| selected.contains(receipt).then_some(*send))
+            .collect::<Vec<_>>();
+        selected.extend(sends);
+    }
+
     fn matching_relation_selected(&self, at: Option<Ref>, source_path: Option<&str>) -> bool {
         let Some(paths) = &self.matching_header_paths else {
             return true;
@@ -9291,6 +9305,7 @@ fn build_sources_inner(
             "observed_parents",
             builder.observed_parents(options, &pids, &lock_pids.clone().unwrap_or_default())
         );
+        builder.select_paired_progress_sends();
         timed!("relays", builder.relays()?);
         timed!("codex_relays", builder.codex_relays()?);
     }
