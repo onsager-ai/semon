@@ -2510,13 +2510,31 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
 #[test]
 fn large_families_repair_one_owner_without_replacing_related_publications() {
     let fixture = Fixture::new();
-    fixture.source("root");
+    let mut paths = std::collections::BTreeSet::new();
     for i in 0..80 {
-        fixture.source(&format!("run-{i:03}"));
+        paths.insert(fixture.codex_source(&format!("run-{i:03}"), Some("root"), 1));
     }
-    fixture.publish(0);
+    paths.insert(fixture.codex_source("root", None, 2));
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some(paths);
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &crate::Options::default().source,
+    )
+    .unwrap();
+    fixture.publish_existing();
     let db = fixture.db();
-    db.execute("UPDATE session_catalog SET parent_key='root',metadata=json_set(metadata,'$.parent','root') WHERE session_key LIKE 'run-%'",[]).unwrap();
+    assert_eq!(
+        db.query_row(
+            "SELECT count(*) FROM session_catalog WHERE lifecycle='current' AND session_key LIKE 'run-%' AND parent_key='root'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .unwrap(),
+        80,
+        "fixture family must come from native parent_thread_id headers"
+    );
     db.execute_batch("DELETE FROM session_overview; DELETE FROM session_trace_headers; DELETE FROM session_trace_turns; DELETE FROM session_trace_edges; INSERT OR REPLACE INTO meta SELECT namespace,'overview_needed:'||session_key,'1' FROM session_catalog;").unwrap();
     drop(EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap());
     let refs = crate::overview_repair_sources(&fixture.options, "root")
@@ -6625,32 +6643,186 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
             assert_eq!(stale.status, 409);
             assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
             if mutation == "append" {
-                // Publishing the natural append admits its new recipes;
-                // the old projection cursor still cannot select them.
+                // Current admits the new recipes. Retained History keeps the
+                // original recipes and cursor under its own immutable scope.
                 fixture.publish_existing();
+                let provider_calls_before_fresh = provider.calls.load(Ordering::Relaxed);
+                crate::events::CACHE_READS.with(|reads| reads.set(0));
+                crate::events::PARSED.with(|parsed| parsed.set(0));
+                crate::events::SOURCE_HASHED_BYTES.with(|bytes| bytes.set(0));
                 let fresh = get(
                     &format!("sid=pinned&scope={scope}&after=0&limit=100"),
                     crate::SessionSourceReadMode::LocalOrPinnedProvider,
                 );
-                assert_eq!(fresh.status, 200);
-                let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
-                assert!(
-                    fresh["entries"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .any(|entry| entry["text"] == "natural appended answer")
-                );
-                assert_ne!(fresh["projection"]["generation"], generation);
                 assert_eq!(
-                    get(
-                        &continuation,
-                        crate::SessionSourceReadMode::LocalOrPinnedProvider
-                    )
-                    .status,
-                    409
+                    fresh.status,
+                    200,
+                    "{scope}/{mutation}: {}",
+                    String::from_utf8_lossy(&fresh.body)
                 );
-                assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+                let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
+                let fresh_sources = fresh["content_observation"]["sources"]
+                    .as_array()
+                    .unwrap();
+                assert_eq!(fresh_sources.len(), 1, "{scope}/{mutation}: {fresh}");
+                assert!(
+                    fresh["observation"]["source_bytes"].as_u64().unwrap() <= 8192,
+                    "{scope}/{mutation}: selected reads must stay within the source-byte budget: {fresh}"
+                );
+                assert_eq!(
+                    crate::events::CACHE_READS.with(std::cell::Cell::get),
+                    0,
+                    "{scope}/{mutation}: selected reads cannot restore the complete Event Index"
+                );
+                assert_eq!(
+                    crate::events::PARSED.with(std::cell::Cell::get),
+                    0,
+                    "{scope}/{mutation}: selected reads cannot replay the complete Event Index"
+                );
+                assert!(
+                    crate::events::SOURCE_HASHED_BYTES.with(std::cell::Cell::get)
+                        <= 2 * crate::source_chunks::SIZE as u64,
+                    "{scope}/{mutation}: selected reads must hash only covering source chunks"
+                );
+                let provider_reads = provider
+                    .calls
+                    .load(Ordering::Relaxed)
+                    .saturating_sub(provider_calls_before_fresh);
+                let provider_request_limit =
+                    fresh["limits"]["source_requests"].as_u64().unwrap();
+                assert!(
+                    u64::try_from(provider_reads).unwrap() <= provider_request_limit,
+                    "{scope}/{mutation}: provider reads exceeded the page request budget"
+                );
+
+                if scope == "current" {
+                    let entries = fresh["entries"].as_array().unwrap();
+                    assert_eq!(entries.len(), 3, "{scope}/{mutation}: {fresh}");
+                    assert_eq!(
+                        entries[0]["text"],
+                        "original pinned prompt",
+                        "{scope}/{mutation}"
+                    );
+                    assert_eq!(
+                        entries[1]["text"],
+                        "original pinned answer",
+                        "{scope}/{mutation}"
+                    );
+                    assert_eq!(
+                        entries[2]["text"],
+                        "natural appended answer",
+                        "{scope}/{mutation}"
+                    );
+                    assert_ne!(
+                        fresh["projection"]["generation"],
+                        generation,
+                        "{scope}/{mutation}"
+                    );
+                    assert!(
+                        fresh_sources[0]["source"]["offset"].as_u64().unwrap()
+                            > provider.source.offset,
+                        "{scope}/{mutation}: Current must expose the appended source prefix"
+                    );
+                    let stale = get(
+                        &continuation,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(
+                        stale.status,
+                        409,
+                        "{scope}/{mutation}: old Current cursor must be fenced"
+                    );
+                    assert!(
+                        serde_json::from_slice::<Value>(&stale.body)
+                            .unwrap()
+                            .get("entries")
+                            .is_none(),
+                        "{scope}/{mutation}: stale Current cursor cannot return entries"
+                    );
+                    assert_eq!(
+                        provider.calls.load(Ordering::Relaxed),
+                        provider_calls_before_fresh,
+                        "{scope}/{mutation}: Current and stale-cursor reads must not use the old provider"
+                    );
+                } else {
+                    assert_eq!(scope, "retained_history", "{scope}/{mutation}");
+                    let expected_history = vec![
+                        recovered["entries"][0].clone(),
+                        next["entries"][0].clone(),
+                    ];
+                    assert_eq!(
+                        fresh["entries"],
+                        expected_history,
+                        "{scope}/{mutation}: {fresh}"
+                    );
+                    assert_eq!(
+                        fresh["projection"]["generation"],
+                        generation,
+                        "{scope}/{mutation}: History must keep the original generation"
+                    );
+                    assert_eq!(
+                        fresh["projection"]["total"],
+                        2,
+                        "{scope}/{mutation}: History must keep the original transcript length"
+                    );
+                    assert_eq!(
+                        fresh_sources[0]["source"],
+                        recovered["content_observation"]["sources"][0]["source"],
+                        "{scope}/{mutation}: History must retain the original source reference"
+                    );
+                    assert_eq!(
+                        fresh_sources[0]["source"]["offset"].as_u64(),
+                        Some(provider.source.offset),
+                        "{scope}/{mutation}: History must remain pinned to the original prefix"
+                    );
+                    assert!(
+                        !fresh.to_string().contains("natural appended answer"),
+                        "{scope}/{mutation}: retained History cannot expose the Current append"
+                    );
+                    let history_next = get(
+                        &continuation,
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(
+                        history_next.status,
+                        200,
+                        "{scope}/{mutation}: {}",
+                        String::from_utf8_lossy(&history_next.body)
+                    );
+                    let history_next: Value = serde_json::from_slice(&history_next.body).unwrap();
+                    assert_eq!(
+                        history_next["entries"][0],
+                        next["entries"][0],
+                        "{scope}/{mutation}: History cursor must keep the original answer"
+                    );
+                    assert!(
+                        !history_next.to_string().contains("natural appended answer"),
+                        "{scope}/{mutation}: retained History cursor cannot expose the Current append"
+                    );
+                    let provider_calls_before_wrong_generation =
+                        provider.calls.load(Ordering::Relaxed);
+                    let stale = get(
+                        &continuation.replace(generation, "wrong"),
+                        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+                    );
+                    assert_eq!(
+                        stale.status,
+                        409,
+                        "{scope}/{mutation}: wrong History cursor must be fenced"
+                    );
+                    assert!(
+                        serde_json::from_slice::<Value>(&stale.body)
+                            .unwrap()
+                            .get("entries")
+                            .is_none(),
+                        "{scope}/{mutation}: stale History cursor cannot return entries"
+                    );
+                    assert_eq!(
+                        provider.calls.load(Ordering::Relaxed),
+                        provider_calls_before_wrong_generation,
+                        "{scope}/{mutation}: stale History cursor must be rejected before source reads"
+                    );
+                }
             }
         }
     }
