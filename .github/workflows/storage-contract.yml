@@ -91,6 +91,8 @@ jobs:
           result=0
           for test in \
             catalog::tests::full_catalog_large_source_progress_keeps_custody_until_a_real_append \
+            storage::sqlite::transfer::catalog::tests::current_transfer225_search_bounded_document_and_state_refusals \
+            storage::transfer::reported::tests::current_transfer225_real_catalog_materializes_and_reverses_without_granting_publication \
             catalog::tests::large_families_repair_one_owner_without_replacing_related_publications \
             catalog::tests::pinned_provider_recovers_stale_codex_pages_and_fences_continuations \
             storage::catalog::catalog_history_classification_rejects_duplicate_current_source_paths \
