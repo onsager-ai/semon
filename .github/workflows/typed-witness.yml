@@ -1,6 +1,9 @@
 name: Typed native witness measurement
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - task/477-typed-witness-measurement-20261101
 permissions:
   contents: read
 concurrency:
