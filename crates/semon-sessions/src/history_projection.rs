@@ -43,7 +43,29 @@ pub(crate) fn qualified_header(
     recorded_source_generation: &str,
     incomplete: bool,
 ) -> bool {
-    version == VERSION && recorded_source_generation == expected_source_generation && !incomplete
+    source_qualified_header(expected_source_generation, version, recorded_source_generation)
+        && !incomplete
+}
+
+/// A supported, exact History source cohort can expose compact identity even
+/// when composition omitted some recipes. Callers must also prove that this is
+/// a non-original composite with a selected Current Catalog owner.
+pub(crate) fn incomplete_composite_identity_header(
+    expected_source_generation: &str,
+    version: u32,
+    recorded_source_generation: &str,
+    incomplete: bool,
+) -> bool {
+    source_qualified_header(expected_source_generation, version, recorded_source_generation)
+        && incomplete
+}
+
+fn source_qualified_header(
+    expected_source_generation: &str,
+    version: u32,
+    recorded_source_generation: &str,
+) -> bool {
+    version == VERSION && recorded_source_generation == expected_source_generation
 }
 
 fn data(error: impl std::error::Error + Send + Sync + 'static) -> rusqlite::Error {

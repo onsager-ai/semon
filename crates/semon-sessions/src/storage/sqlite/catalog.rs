@@ -564,6 +564,49 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool> {
         crate::history_projection::qualified(self.0, row).map_err(io::Error::other)
     }
+    fn composite_history_identity_qualified(
+        &self,
+        current: &SelectedCatalogRow,
+        history: &CatalogRow,
+    ) -> io::Result<bool> {
+        if current.owner != Some(CatalogObservationOwner::Catalog)
+            || current.lifecycle != crate::model::summary::CatalogLifecycle::Current
+            || current.key != history.key
+            || current.harness != history.harness
+            || history.sources.is_empty()
+            || history.sources.len() > 64
+        {
+            return Ok(false);
+        }
+        let original = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key=?1)",
+            [format!("history_original_header:{}", history.key)],
+            |record| record.get::<_, bool>(0),
+        )?;
+        if original {
+            return Ok(false);
+        }
+        let header: Option<crate::storage::catalog::HistoryRecipeHeader> = self
+            .0
+            .query_row(
+                "SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key=?1",
+                [&history.key],
+                |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
+            )
+            .optional()?;
+        let expected = crate::retention::source_generation(&history.sources)
+            .map_err(io::Error::other)?;
+        Ok(header.is_some_and(|(version, recorded, incomplete)| {
+            recorded.as_deref().is_some_and(|recorded| {
+                crate::history_projection::incomplete_composite_identity_header(
+                    &expected,
+                    version,
+                    recorded,
+                    incomplete,
+                )
+            })
+        }))
+    }
     fn selected_details(
         &self,
         key: &str,

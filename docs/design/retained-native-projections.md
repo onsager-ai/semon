@@ -444,6 +444,11 @@ remain independent requirements; neither owner can borrow the other's authority.
 Same-key composite History preserves its captured Current display lifecycle while
 Current remains, then displays Retained after Current disappears. Original History
 displays Retained even when the key is reused by a Current owner.
+An explicit same-key retained-history identity read may still expose compact
+identity metadata from an incomplete composite History when its supported header
+matches the exact source generation and the selected row is its same-harness
+Current Catalog owner. Original History cannot use this exception; it grants no
+History recipe or transcript qualification.
 
 ## Physical owner groups in semantic staging (qualification pending)
 

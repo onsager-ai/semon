@@ -742,6 +742,14 @@ pub(crate) trait CatalogSnapshot {
     fn has_history(&self, key: &str) -> io::Result<bool>;
     fn history_catalog(&self, key: &str) -> io::Result<Option<String>>;
     fn history_qualified(&self, row: &CatalogRow) -> io::Result<bool>;
+    /// Qualify compact identity for an incomplete, non-original composite
+    /// History row. The selected row must be its same-key, same-harness
+    /// Current Catalog owner. This does not qualify History recipe contents.
+    fn composite_history_identity_qualified(
+        &self,
+        current: &SelectedCatalogRow,
+        history: &CatalogRow,
+    ) -> io::Result<bool>;
     /// Read only the payload belonging to the store-issued exact observation.
     /// This never selects a cohort from a display lifecycle or latest header.
     #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.

@@ -1027,7 +1027,17 @@ pub(crate) fn read_page_snapshot_with_search(
                     continue;
                 }
                 if request.sid.as_deref() == Some(current.key.as_str()) {
-                    if !transaction.history_qualified(&history)? {
+                    let history_qualified = transaction.history_qualified(&history)?;
+                    let composite_identity_qualified = !history_qualified
+                        && current.owner
+                            == Some(crate::storage::catalog::CatalogObservationOwner::Catalog)
+                        && current.lifecycle
+                            == crate::model::summary::CatalogLifecycle::Current
+                        && current.key == history.key
+                        && current.harness == history.harness
+                        && transaction
+                            .composite_history_identity_qualified(current, &history)?;
+                    if !history_qualified && !composite_identity_qualified {
                         return Ok(error(
                             503,
                             "catalog_unavailable",

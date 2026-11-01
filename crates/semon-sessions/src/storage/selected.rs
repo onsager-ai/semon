@@ -1059,6 +1059,13 @@ impl crate::storage::catalog::CatalogSnapshot for ImmutableCatalog<'_> {
     fn history_qualified(&self, row: &crate::model::summary::CatalogRow) -> io::Result<bool> {
         Ok(row.key == self.row.key)
     }
+    fn composite_history_identity_qualified(
+        &self,
+        _: &super::catalog::SelectedCatalogRow,
+        _: &crate::model::summary::CatalogRow,
+    ) -> io::Result<bool> {
+        Ok(false)
+    }
     fn selected_details(
         &self,
         key: &str,

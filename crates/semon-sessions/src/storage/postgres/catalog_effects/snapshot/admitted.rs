@@ -714,6 +714,74 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         tx.check().map_err(failed)?;
         Ok(qualified)
     }
+    fn composite_history_identity_qualified(
+        &self,
+        current: &SelectedCatalogRow,
+        history: &CatalogRow,
+    ) -> io::Result<bool> {
+        if current.owner != Some(CatalogObservationOwner::Catalog)
+            || current.lifecycle != crate::model::summary::CatalogLifecycle::Current
+            || current.key != history.key
+            || current.harness != history.harness
+            || history.sources.is_empty()
+            || history.sources.len() > 64
+        {
+            return Ok(false);
+        }
+        self.require_current()?;
+        let Some(owner) = self.owner(&history.key).map_err(failed)? else {
+            return Ok(false);
+        };
+        if owner.original || !owner.has_current {
+            return Ok(false);
+        }
+        let tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        tx.check().map_err(failed)?;
+        let namespace = tx.namespace.as_str().as_bytes();
+        let rows = tx
+            .driver
+            .query(
+                "SELECT session_key=$4,CASE WHEN octet_length(source_generation)=64 THEN source_generation END,version,incomplete FROM semon_pg_native_catalog_history_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3",
+                &[
+                    &namespace,
+                    &owner.generation.as_bytes(),
+                    &digest(history.key.as_bytes()),
+                    &history.key.as_bytes(),
+                ],
+            )
+            .map_err(sqlstate::error)
+            .map_err(failed)?;
+        if rows.len() > 1 {
+            return Err(failed(StorageError::ScopeChanged));
+        }
+        let Some(header) = rows.first() else {
+            return Ok(false);
+        };
+        if !header.get::<_, bool>(0) {
+            return Err(failed(StorageError::ScopeChanged));
+        }
+        let qualified = match header.get::<_, Option<Vec<u8>>>(1) {
+            Some(generation) => {
+                let generation = String::from_utf8(generation).map_err(io::Error::other)?;
+                let version = u32::try_from(header.get::<_, i64>(2))
+                    .map_err(|_| failed(StorageError::ScopeChanged))?;
+                let expected = crate::retention::source_generation(&history.sources)
+                    .map_err(io::Error::other)?;
+                crate::history_projection::incomplete_composite_identity_header(
+                    &expected,
+                    version,
+                    &generation,
+                    header.get(3),
+                )
+            }
+            None => false,
+        };
+        tx.check().map_err(failed)?;
+        Ok(qualified)
+    }
     fn selected_details(
         &self,
         key: &str,

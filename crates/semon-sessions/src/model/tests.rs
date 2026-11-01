@@ -12359,6 +12359,135 @@ fn partial_lineage_unsupported_recipes_remain_visible_and_block_eviction() {
             .iter()
             .all(|entry| entry["text"] != "unsupported old native prompt")
     );
+    let source_generation: String = connection
+        .query_row(
+            "SELECT source_generation FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut mismatched_generation = source_generation;
+    let replacement = if mismatched_generation.starts_with('0') {
+        "1"
+    } else {
+        "0"
+    };
+    mismatched_generation.replace_range(0..1, replacement);
+    connection
+        .execute(
+            "UPDATE main.session_history_projections SET version=version+1 WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        crate::session_catalog_page(
+            &home.options,
+            "fixture",
+            "sid=root&scope=retained_history&limit=1",
+        )
+        .status,
+        503,
+        "unsupported History headers cannot use the incomplete identity exception"
+    );
+    connection
+        .execute(
+            "UPDATE main.session_history_projections SET version=version-1,source_generation=?1 WHERE namespace=semon_namespace() AND session_key='root'",
+            [&mismatched_generation],
+        )
+        .unwrap();
+    assert_eq!(
+        crate::session_catalog_page(
+            &home.options,
+            "fixture",
+            "sid=root&scope=retained_history&limit=1",
+        )
+        .status,
+        503,
+        "mismatched History source generations cannot use the incomplete identity exception"
+    );
+}
+
+#[test]
+fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
+    let home = Home::new();
+    let publish = || {
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let complete = (0..128).any(|_| {
+            evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap()
+        });
+        evidence.retire();
+        assert!(complete, "the ordinary producer must finish this fixture");
+    };
+    home.top("root", &[human("root", ts(0, 0), "original prompt")]);
+    publish();
+    home.top("root", &[human("root", ts(1, 0), "replacement prompt")]);
+    publish();
+
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let original_marker: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=semon_namespace() AND key='history_original_header:root')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(original_marker, "fixture must retain original History custody");
+    let history_metadata: String = connection
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: summary::CatalogRow = serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(history.lifecycle, summary::CatalogLifecycle::Retained);
+    let (version, recorded_generation): (u32, String) = connection
+        .query_row(
+            "SELECT version,source_generation FROM main.session_history_projections WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(version, crate::slot_projection::VERSION);
+    assert_eq!(
+        recorded_generation,
+        crate::retention::source_generation(&history.sources).unwrap()
+    );
+    assert_eq!(
+        crate::session_catalog_identity(&home.options, "fixture", "root")
+            .unwrap()
+            .unwrap()
+            .harness,
+        history.harness
+    );
+
+    // PostgreSQL retains captured History metadata with its original lifecycle.
+    // Exercise that shape while preserving SQLite's original-owner marker.
+    connection
+        .execute(
+            "UPDATE main.session_history_catalog SET metadata=json_set(metadata,'$.lifecycle','current') WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE main.session_history_projections SET incomplete=1 WHERE namespace=semon_namespace() AND session_key='root'",
+            [],
+        )
+        .unwrap();
+    let page = crate::session_catalog_page(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&limit=1",
+    );
+    assert_eq!(page.status, 503, "original History cannot use composite identity qualification");
 }
 
 #[test]
