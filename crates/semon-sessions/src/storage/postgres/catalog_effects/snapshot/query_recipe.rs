@@ -31,9 +31,6 @@ impl Snapshot<'_, '_> {
         row: &mut CatalogRow,
         history: bool,
     ) -> Result<usize, StorageError> {
-        if !crate::query_projection::SelectedRecipe::detached(row) {
-            return Ok(0);
-        }
         let owner = if history {
             CatalogObservationOwner::History
         } else {
@@ -41,14 +38,13 @@ impl Snapshot<'_, '_> {
         };
         let load = || {
             let observation = self.query_recipe_observation(owner, row)?;
-            let (recipe, bytes) = self.load_query_recipe_with_bytes(&observation)?;
-            Ok::<_, Error>((recipe.ok_or(Error::MissingPayload)?, bytes))
+            self.load_query_recipe_with_bytes(&observation)
         };
         let (recipe, bytes) = load().map_err(|error| match error {
             Error::Storage(error) => error,
             _ => StorageError::ScopeChanged,
         })?;
-        row.query_recipe = Some(recipe);
+        row.query_recipe = recipe;
         Ok(bytes)
     }
 
@@ -112,6 +108,8 @@ impl Snapshot<'_, '_> {
             .map_err(Error::from)
     }
 
+    /// None means authenticated inline metadata (or no Query observation)
+    /// with no external cell. A detached reference never resolves to None.
     pub(in crate::storage::postgres) fn load_query_recipe(
         &self,
         observation: &QueryRecipeObservation,
@@ -201,7 +199,10 @@ impl Snapshot<'_, '_> {
             return Err(Error::ObservationChanged);
         }
         tx.check()?;
-        if observation.row().query.is_none() {
+        // The current ordinary producer still stores inline selected values
+        // with no external cell. Their metadata has already authenticated;
+        // they must not conceal an unexpected or over-budget recipe cell.
+        if !crate::query_projection::SelectedRecipe::detached(observation.row()) {
             return if payload.is_none() {
                 Ok((None, 0))
             } else {

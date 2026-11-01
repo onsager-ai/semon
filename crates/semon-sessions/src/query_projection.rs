@@ -43,8 +43,9 @@ impl SelectedRecipe {
         })
     }
 
-    // Producers still carry inline selected values before publication. Stored
-    // detached observations must acquire their typed payload from their owner.
+    // Ordinary producers still publish inline selected values while detached
+    // publication is inactive. Stored observations authenticate either shape
+    // before these accessors inspect inline values or an attached payload.
     pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
         row.query_recipe
             .as_ref()

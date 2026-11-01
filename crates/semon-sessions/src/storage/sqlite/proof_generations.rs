@@ -1578,9 +1578,6 @@ pub(crate) fn attach_query_recipe(
     row: &mut CatalogRow,
 ) -> Result<usize, StorageError> {
     use crate::storage::query::QueryRecipeLoadError as Error;
-    if !crate::query_projection::SelectedRecipe::detached(row) {
-        return Ok(0);
-    }
     let current = reader.runtime_binding_at(db)?;
     let observation = query_recipe_observation(db, &current, owner, row)?;
     let (recipe, bytes) =
@@ -1588,12 +1585,14 @@ pub(crate) fn attach_query_recipe(
             Error::Storage(error) => error,
             _ => StorageError::ScopeChanged,
         })?;
-    row.query_recipe = Some(recipe.ok_or(StorageError::ScopeChanged)?);
+    row.query_recipe = recipe;
     Ok(bytes)
 }
 
 /// The reader owns the admitted snapshot. A token never reselects another
 /// residence when its original owner, generation or grant no longer qualifies.
+/// None means authenticated inline metadata (or no Query observation) with no
+/// external cell. A detached reference never resolves to None.
 pub(crate) fn load_query_recipe(
     db: &Connection,
     reader: &NativeReaderBinding,
@@ -1785,7 +1784,9 @@ fn load_query_recipe_with_bytes(
             payload
         }
     };
-    if selected.query.is_none() {
+    // Inline selected metadata remains the ordinary producer's current
+    // representation. It has authenticated above and owns no external cell.
+    if !crate::query_projection::SelectedRecipe::detached(selected) {
         return if payload.is_none() {
             Ok((None, 0))
         } else {
