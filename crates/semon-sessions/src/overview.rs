@@ -131,8 +131,7 @@ impl io::Write for BoundedSummaryWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
             self.overflowed = true;
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "semantic overview metadata budget exceeded",
             ));
         }
@@ -146,7 +145,7 @@ impl io::Write for BoundedSummaryWriter {
                 .min(self.limit);
             self.bytes
                 .try_reserve_exact(capacity - self.bytes.len())
-                .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
+                .map_err(io::Error::other)?;
         }
         self.bytes.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -479,7 +478,7 @@ fn publish_current_owned_with_policy(
     // Stage must prove that the whole summary fits the remaining shared
     // metadata budget before deriving or publishing its Trace digest. Keep the
     // bounded encoding for the later Overview upsert so it is charged once.
-    let encoded_summary = match (&row.overview, budget.as_deref_mut()) {
+    let encoded_summary = match (&row.overview, budget) {
         (Some(summary), Some(budget)) => {
             let started = measurements.start();
             let text = budget.serialize(summary)?;

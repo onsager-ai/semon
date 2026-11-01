@@ -21,6 +21,10 @@ const RELATION_OUTPUT_LIMIT: usize = 64;
 const RELATION_EVENT_READ_BATCH_LIMIT: usize = 64;
 const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 
+type RelationSourceStage = (bool, bool, bool, Option<i64>, Option<String>, bool);
+type PresentationStage = (String, Option<String>, Option<String>, i64, bool);
+type SemanticBatchStage = (i64, String, Option<String>, String, i64, Option<String>);
+
 fn relation_owner_source_paths(
     physical: &(
          impl crate::events::store::semantic_stage::OwnerClosurePort
@@ -165,7 +169,7 @@ struct RelationScope {
 fn relation_location_key(
     location: &crate::model::relation_stage::Location,
 ) -> rusqlite::Result<String> {
-    let kind = serde_json::to_value(&location.kind)
+    let kind = serde_json::to_value(location.kind)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or(rusqlite::Error::InvalidQuery)?;
@@ -280,7 +284,7 @@ fn relation_scope(
                 complete = false;
                 break;
             }
-            let stage: Option<(bool, bool, bool, Option<i64>, Option<String>, bool)> = db
+            let stage: Option<RelationSourceStage> = db
                 .query_row(
                     "SELECT index_done=1,events_done=1,identity_done=1,claim,ledger,relation_done=1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2",
                     params![namespace, path],
@@ -2543,7 +2547,7 @@ impl Stage {
         if batch.phase != Phase::Publication || self.epoch != Some(batch.epoch) {
             return Ok((Outcome::Conflict, None));
         }
-        let stage: Option<(String, Option<String>, Option<String>, i64, bool)> = tx
+        let stage: Option<PresentationStage> = tx
             .query_row(
                 "SELECT runtime,generation,original_generation,revision,resetting FROM main.catalog_semantic_stage WHERE namespace=?1 AND epoch=?2 AND phase='publication'",
                 params![ns, batch.epoch],
@@ -3927,7 +3931,7 @@ impl Stage {
             .map_err(error)?;
         self.source.validate(&tx).map_err(StoreError::Configured)?;
         let ns = self.source.config.namespace.as_str();
-        let stage: Option<(i64,String,Option<String>,String,i64,Option<String>)> = tx.query_row("SELECT epoch,phase,generation,runtime,revision,original_generation FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(error)?;
+        let stage: Option<SemanticBatchStage> = tx.query_row("SELECT epoch,phase,generation,runtime,revision,original_generation FROM main.catalog_semantic_stage WHERE namespace=?1", [ns], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?))).optional().map_err(error)?;
         let Some((epoch, mut phase, base_generation, runtime, stage_revision, original_generation)) =
             stage
         else {
