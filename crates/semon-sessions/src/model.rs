@@ -9248,6 +9248,16 @@ fn build_sources_inner(
                 let continuations = cache.take_source_continuations(rows);
                 if let Some(observations) = presentation.as_mut() {
                     observations.set_source_continuations(continuations)?;
+                } else if !continuations.is_empty() {
+                    // Large Catalogs do not capture the bounded runtime cohort,
+                    // but still carry request-local continuation proofs through
+                    // the existing digest-bearing publication envelope.
+                    let mut proof_only =
+                        crate::storage::selected::PresentationObservations::default();
+                    proof_only.set_source_continuations(continuations)?;
+                    if proof_only.verified_continuations().is_some() {
+                        presentation = Some(proof_only);
+                    }
                 }
             } else {
                 cache.discard_source_continuations();

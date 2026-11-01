@@ -2246,6 +2246,233 @@ fn archived_overview_repair_reuses_exact_indexes_for_large_native_sources() {
 }
 
 #[test]
+fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
+    use std::io::Write;
+
+    let fixture = Fixture::new();
+    fixture.publish(64);
+    let path = fixture.source("large-continuation");
+    let padding = "x".repeat(14 * 1024 * 1024);
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        for _ in 0..2 {
+            writeln!(file, "{}", json!({"type":"system","padding":padding})).unwrap();
+        }
+    }
+    let physical_size = fs::metadata(&path).unwrap().len();
+    let selected_read = |fixture: &Fixture| {
+        let reply = crate::session_transcript_range(
+            &fixture.options,
+            "source",
+            "sid=session-00000&limit=1",
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        let value: Value = serde_json::from_slice(&reply.body).unwrap();
+        json!({
+            "details": {
+                "turns": value["session"]["details"]["turns"],
+                "live_observation": value["session"]["details"]["live_observation"],
+                "content_generation": value["session"]["details"]["content_generation"],
+            },
+            "entries": value["entries"],
+            "projection_generation": value["projection"]["generation"],
+            "projection_total": value["projection"]["total"],
+        })
+    };
+    let unrelated_snapshot = |db: &Connection| {
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='session-00000'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        let mut statement = db
+            .prepare("SELECT source_path,lifecycle FROM main.session_catalog_sources WHERE namespace=semon_namespace() AND session_key='session-00000' ORDER BY source_path")
+            .unwrap();
+        let scope = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+            .unwrap();
+        let runtime = row
+            .query
+            .as_ref()
+            .and_then(|query| query.get("runtime"))
+            .cloned();
+        let grant: Option<(String, i64, String, Option<String>)> = db
+            .query_row(
+                "SELECT metadata_digest,admission,stream,direct_capture FROM main.storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='session-00000' AND owner_kind='catalog'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .unwrap();
+        (row.sources, scope, runtime, grant)
+    };
+
+    let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let mut previous_offset = None;
+    let mut partial_seen = false;
+    let mut advances = 0;
+    let mut unrelated_before = None;
+    let mut selected_before = None;
+    let mut completed_source = None;
+    let mut complete = false;
+    for _ in 0..32 {
+        let ready = evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap();
+        let db = fixture.db();
+        let count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace()",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current_metadata: Option<String> = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let current_source = current_metadata
+            .as_deref()
+            .map(|metadata| {
+                serde_json::from_str::<crate::model::summary::CatalogRow>(metadata).unwrap()
+            })
+            .and_then(|row| {
+                row.sources
+                    .into_iter()
+                    .find(|source| source.path == path)
+            });
+        let history_metadata: Option<String> = db
+            .query_row(
+                "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert!(
+            history_metadata.is_none(),
+            "unchanged physical-generation progress entered History before EOF"
+        );
+
+        if let Some(source) = current_source {
+            assert_eq!(count, 65, "exercise the full Catalog path above 64 rows");
+            assert_eq!(source.size, physical_size);
+            assert!(source.offset <= source.size);
+            if let Some(previous) = previous_offset {
+                assert!(source.offset >= previous);
+                advances += usize::from(source.offset > previous);
+            }
+            previous_offset = Some(source.offset);
+            partial_seen |= source.offset < source.size;
+
+            let snapshot = unrelated_snapshot(&db);
+            assert!(!snapshot.1.is_empty());
+            assert!(snapshot.2.is_some(), "unrelated row keeps its runtime observation");
+            assert!(
+                snapshot.3.as_ref().is_some_and(|grant| grant.3.is_none()),
+                "large Catalog keeps the existing runtime-capture bound"
+            );
+            if let Some(previous) = &unrelated_before {
+                assert_eq!(&snapshot, previous, "unrelated source scope/runtime/grant changed");
+            } else {
+                unrelated_before = Some(snapshot);
+                completed_source = Some(source);
+                drop(db);
+                drop(work);
+                selected_before = Some(selected_read(&fixture));
+                work = crate::viewer::lock(&evidence.work);
+                if ready {
+                    complete = true;
+                    break;
+                }
+                continue;
+            }
+            completed_source = Some(source.clone());
+            if ready {
+                assert_eq!(source.offset, source.size, "final Catalog source reaches EOF");
+                complete = true;
+                break;
+            }
+        } else if ready {
+            panic!("completed Catalog omitted its large source");
+        }
+    }
+    drop(work);
+    evidence.retire();
+    assert!(complete, "full Catalog source did not finish bounded indexing");
+    assert!(partial_seen, "large source never published a partial prefix");
+    assert!(advances > 0, "large source never advanced its indexed prefix");
+    let original_source = completed_source.expect("completed Catalog source");
+    assert_eq!(original_source.offset, physical_size);
+    assert_eq!(
+        selected_read(&fixture),
+        selected_before
+            .as_ref()
+            .expect("selected read captured during partial publication")
+            .clone(),
+        "unrelated selected read changed during source continuation"
+    );
+
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{}",
+        json!({"type":"user","sessionId":"large-continuation","uuid":"post-index-append","parentUuid":"large-continuation","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized real append"}})
+    )
+    .unwrap();
+    let appended_size = fs::metadata(&path).unwrap().len();
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let history_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: crate::model::summary::CatalogRow = serde_json::from_str(&history_metadata).unwrap();
+    let history_source = history
+        .sources
+        .iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    assert_eq!(history_source, &original_source, "real append retains original custody");
+    let current_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current: crate::model::summary::CatalogRow = serde_json::from_str(&current_metadata).unwrap();
+    let current_source = current
+        .sources
+        .iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    assert_eq!(current_source.size, appended_size);
+    assert_eq!(current_source.offset, appended_size);
+    assert_ne!(current_source.prefix_sha256, original_source.prefix_sha256);
+    assert_eq!(unrelated_snapshot(&db), unrelated_before.unwrap());
+    drop(db);
+    assert_eq!(
+        selected_read(&fixture),
+        selected_before.expect("selected read captured during partial publication")
+    );
+}
+
+#[test]
 fn large_families_repair_one_owner_without_replacing_related_publications() {
     let fixture = Fixture::new();
     fixture.source("root");
