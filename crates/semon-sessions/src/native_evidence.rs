@@ -2148,7 +2148,8 @@ impl NativeEvidence {
                 }
                 work.catalog_snapshot = Some(snapshot);
                 work.observed_catalog_generation = Some(generation);
-                return Ok(true);
+                work.pending_sources = !cache.pending_catalog_sources(1)?.is_empty();
+                return Ok(!work.pending_sources);
             }
             CatalogPreparation::Reconcile => {}
         }
@@ -2177,7 +2178,8 @@ impl NativeEvidence {
         work.observed_catalog_generation = generation;
         cache.release_published_indexes();
         work.texts.release_published_derivations();
-        Ok(true)
+        work.pending_sources = !cache.pending_catalog_sources(1)?.is_empty();
+        Ok(!work.pending_sources)
     }
 
     /// Native queries refresh this owner's source cache and coherent cohort.
