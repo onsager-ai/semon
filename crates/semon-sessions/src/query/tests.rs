@@ -3648,7 +3648,9 @@ fn selected_transcript_refuses_invalid_observation_and_missing_proofs_before_sou
             assert!(logs[0].contains("stage=header_missing"));
             assert!(logs[0].contains("raw=not_collected"));
         } else {
-            assert_eq!(error.code, "io");
+            // The authenticated Catalog row refuses the tampered observation
+            // before any native transcript proof or source read is admitted.
+            assert_eq!(error.code, "unavailable");
         }
         assert_eq!(archive.calls.load(Ordering::Relaxed), 0);
         assert!(query.native.is_none());
