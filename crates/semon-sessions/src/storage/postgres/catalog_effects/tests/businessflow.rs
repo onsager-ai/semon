@@ -5992,7 +5992,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .unwrap();
     }
     let mut bulk_generation = String::new();
-    for chunk in bulk.chunks(30) {
+    let bulk_chunk_count = bulk.chunks(30).len();
+    for (chunk_index, chunk) in bulk.chunks(30).enumerate() {
+        eprintln!(
+            "PG_VERTICAL140_BULK chunk_index={} chunk_count={} source_count={}",
+            chunk_index + 1,
+            bulk_chunk_count,
+            chunk.len()
+        );
         bulk_generation = stage_publish(&mut moved_cache, chunk, 1790812806000).0;
     }
     let store_at = |generation: &str| super::super::snapshot::query::QueryCatalog {

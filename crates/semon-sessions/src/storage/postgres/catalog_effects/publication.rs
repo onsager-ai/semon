@@ -499,7 +499,20 @@ pub(in crate::storage::postgres) fn publish(
             crate::CatalogReadScope::Current,
             crate::CatalogReadScope::RetainedHistory,
         ] {
-            effects.counts(scope)?;
+            #[cfg(test)]
+            let scope_name = match &scope {
+                crate::CatalogReadScope::Current => "current",
+                crate::CatalogReadScope::RetainedHistory => "retained_history",
+            };
+            #[cfg(test)]
+            eprintln!("PG_SEARCH_CHECK check=counts scope={scope_name} state=begin");
+            let result = effects.counts(scope);
+            #[cfg(test)]
+            eprintln!(
+                "PG_SEARCH_CHECK check=counts scope={scope_name} state={}",
+                if result.is_ok() { "complete" } else { "refused" }
+            );
+            result?;
         }
     }
     super::search::publish_state(tx, &generation)?;
