@@ -162,10 +162,17 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         assert_eq!(view.selected_query_recipe(&token).unwrap(), expected);
         let mut selected = view.catalog(&row.key, false)?.unwrap();
         let metadata = serde_json::to_string(&selected).unwrap();
-        assert_eq!(view.attach_query_recipe(&mut selected, false)?, payload.len());
+        assert_eq!(
+            view.attach_query_recipe(&mut selected, false)?,
+            payload.len()
+        );
         assert_eq!(selected.query_recipe.as_ref(), Some(&expected));
         assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
-        assert!(crate::storage::query::history_window(&selected, None).unwrap().member);
+        assert!(
+            crate::storage::query::history_window(&selected, None)
+                .unwrap()
+                .member
+        );
         Ok(())
     })
     .unwrap();
@@ -410,6 +417,18 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
         row,
     )
     .unwrap();
+    let mut selected = row.clone();
+    assert_eq!(
+        crate::storage::sqlite::proof_generations::attach_query_recipe(
+            &tx, &reader, Owner::Catalog, &mut selected,
+        ).unwrap(),
+        payload.len(),
+    );
+    assert_eq!(selected.query_recipe.as_ref(), Some(expected));
+    assert_eq!(serde_json::to_string(&selected).unwrap(), compact.metadata);
+    assert!(crate::storage::sqlite::proof_generations::attach_query_recipe(
+        &tx, &reader, Owner::History, &mut selected,
+    ).is_err());
     let source_proof = match source_observation.residence {
         QueryRecipeResidence::Immutable { generation, .. } => generation,
         _ => panic!("ordinary semantic publication must own the immutable recipe"),

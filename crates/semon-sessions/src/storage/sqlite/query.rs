@@ -149,6 +149,7 @@ impl QueryCatalogStore for SqliteQueryCatalog {
             .map_err(storage_error)?;
         read(
             &db,
+            &self.binding,
             &self.options,
             now,
             bytes_left,
@@ -274,8 +275,10 @@ fn load_catalog_row(
     Ok(Some(row))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read(
     db: &Connection,
+    reader: &crate::storage::NativeReaderBinding,
     options: &Options,
     now: i64,
     bytes_left: &mut usize,
@@ -390,8 +393,12 @@ fn read(
         // A missing Current row leaves a finite History candidate eligible;
         // an eligible Current row takes priority.
         if (cutoff.is_none() || !current_eligible)
-            && let Some(row) = load_catalog_row(db, &key, true, bytes_left)?
+            && let Some(mut row) = load_catalog_row(db, &key, true, bytes_left)?
         {
+            let bytes = super::proof_generations::attach_query_recipe(
+                db, reader, crate::storage::catalog::CatalogObservationOwner::History, &mut row,
+            ).map_err(unavailable)?;
+            spend(bytes_left, bytes)?;
             let member = history_window(&row, cutoff).map_err(unavailable)?.member;
             if select_history(cutoff, current_eligible, true, member) {
                 history_selected.insert(key.clone());

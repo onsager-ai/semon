@@ -31,7 +31,7 @@ impl Snapshot<'_, '_> {
         row: &mut CatalogRow,
         history: bool,
     ) -> Result<usize, StorageError> {
-        if row.query.as_ref().is_none_or(|query| query["selected"].get("version").is_none()) {
+        if !crate::query_projection::SelectedRecipe::detached(row) {
             return Ok(0);
         }
         let owner = if history {
@@ -116,7 +116,8 @@ impl Snapshot<'_, '_> {
         &self,
         observation: &QueryRecipeObservation,
     ) -> Result<Option<crate::query_projection::SelectedRecipe>, Error> {
-        self.load_query_recipe_with_bytes(observation).map(|(recipe, _)| recipe)
+        self.load_query_recipe_with_bytes(observation)
+            .map(|(recipe, _)| recipe)
     }
 
     fn load_query_recipe_with_bytes(

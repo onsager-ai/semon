@@ -7,7 +7,11 @@ use crate::{
     },
     storage::StorageError,
 };
-use std::{cell::{Cell, RefCell}, collections::BTreeSet, io};
+use std::{
+    cell::{Cell, RefCell},
+    collections::BTreeSet,
+    io,
+};
 
 pub(super) fn component_paths(
     tx: &mut PgTxn<'_>,
@@ -120,6 +124,11 @@ impl LifecycleStore for Lookup<'_, '_> {
         self.keys("SELECT session_key FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND source_path=$3 AND $4::bytea IS NOT NULL ORDER BY session_key LIMIT 65", path.as_bytes(), b"")
     }
     fn owner(&self, key: &str) -> io::Result<CatalogRow> {
+        let charged = self.charged_owners.borrow();
+        if charged.len() >= 64 && !charged.contains(key) {
+            return Err(io::Error::other(StorageError::Busy));
+        }
+        drop(charged);
         let mut tx = self.tx.borrow_mut();
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes().to_vec();
@@ -141,17 +150,21 @@ impl LifecycleStore for Lookup<'_, '_> {
             &mut tx,
             &self.generation,
             |snapshot| snapshot.attach_query_recipe(&mut row, false),
-        ).map_err(io::Error::other)?;
+        )
+        .map_err(io::Error::other)?;
         if self.charged_owners.borrow_mut().insert(key.to_owned()) {
-            let bytes = self.recipe_bytes.get().saturating_add(bytes.len()).saturating_add(payload_bytes);
+            let bytes = self
+                .recipe_bytes
+                .get()
+                .saturating_add(bytes.len())
+                .saturating_add(payload_bytes);
             if bytes > 1048576 {
                 return Err(io::Error::other(StorageError::Busy));
             }
             self.recipe_bytes.set(bytes);
         }
         // Relationship incidence is indexed from the saved selected edges.
-        if crate::query_projection::SelectedRecipe::edges_for(&row).is_none()
-        {
+        if crate::query_projection::SelectedRecipe::edges_for(&row).is_none() {
             return Err(io::Error::other(StorageError::NamespaceUpgradePending));
         }
         Ok(row)

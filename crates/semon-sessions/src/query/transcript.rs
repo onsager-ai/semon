@@ -781,7 +781,17 @@ fn read_inner(
     if scope == crate::CatalogReadScope::Current && !current {
         return Ok(None);
     }
-    let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
+    let mut row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
+    crate::storage::sqlite::proof_generations::attach_query_recipe(
+        &tx,
+        &binding,
+        if history.is_some() {
+            crate::storage::catalog::CatalogObservationOwner::History
+        } else {
+            crate::storage::catalog::CatalogObservationOwner::Catalog
+        },
+        &mut row,
+    ).map_err(unavailable)?;
     if row.sources.iter().any(|source| {
         !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now))
     }) {
@@ -1159,8 +1169,7 @@ fn read_inner(
                     {
                         vec![]
                     } else {
-                        let recipe = saved["selected"]["edges"]
-                            .as_array()
+                        let recipe = crate::query_projection::SelectedRecipe::edges_for(&row)
                             .and_then(|edges| {
                                 edges
                                     .iter()
