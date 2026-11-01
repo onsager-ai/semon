@@ -10259,7 +10259,6 @@ fn codex_child_page_keeps_a_done_parent_context_only() {
     let mut facts = crate::read_facts(facts_path).unwrap();
     facts.codex_rollouts = Some([parent.clone(), child.clone()].into_iter().collect());
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
-    fixture.publish_existing();
 
     let parent_path = fixture
         .options
@@ -10273,7 +10272,48 @@ fn codex_child_page_keeps_a_done_parent_context_only() {
         .join(child)
         .to_string_lossy()
         .into_owned();
+    let staged_batch = fixture.begin_relation_stage(&[parent_path.clone(), child_path.clone()]);
+    assert_eq!(
+        staged_batch.phase,
+        crate::model::relation_stage::Phase::Relations
+    );
+    assert_eq!(staged_batch.paths.len(), 2);
+    assert_eq!(
+        staged_batch
+            .paths
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([parent_path.clone(), child_path.clone()])
+    );
     let db = fixture.db();
+    let staged_sources = db
+        .prepare(
+            "SELECT source_path,index_done=1,events_done=1,identity_done=1 FROM main.catalog_semantic_sources ORDER BY source_path",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, bool>(2)?,
+                row.get::<_, bool>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(staged_sources.len(), 2);
+    assert_eq!(
+        staged_sources
+            .iter()
+            .map(|(path, _, _, _)| path.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([parent_path.clone(), child_path.clone()])
+    );
+    assert!(staged_sources.iter().all(
+        |(_, index_done, events_done, identity_done)| *index_done && *events_done && *identity_done
+    ));
     db.execute(
         "UPDATE main.catalog_semantic_sources SET relation_done=1,relation_after=''",
         [],
