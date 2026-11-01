@@ -10469,7 +10469,10 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
     assert_eq!(batch.paths.len(), 64);
     assert!(!batch.paths.contains(&unrelated_path));
     let expected_children = child_paths.iter().cloned().collect::<Vec<_>>();
-    assert_eq!(batch.context.matching_header_paths, Some(expected_children.clone()));
+    assert_eq!(
+        batch.context.matching_header_paths,
+        Some(expected_children.clone())
+    );
     assert_eq!(batch.relation_cursors.len(), 32);
     assert_eq!(
         batch
