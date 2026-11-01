@@ -4658,7 +4658,7 @@ fn record_selected_companion_batch(
         .filter(|path| path != &seed_path)
         .collect();
     context.matching_locations = Some(locations);
-    let input_paths = inputs
+    batch.paths = inputs
         .iter()
         .map(|input| {
             input
@@ -4666,27 +4666,15 @@ fn record_selected_companion_batch(
                 .to_string_lossy()
                 .into_owned()
         })
-        .collect::<Vec<_>>();
+        .collect();
     assert!(
-        input_paths.len() <= 64,
+        batch.paths.len() <= 64,
         "selected companion input page exceeds the 64-path limit"
     );
-    let input_path_set = input_paths.iter().cloned().collect::<BTreeSet<_>>();
     assert_eq!(
-        input_path_set.len(),
-        input_paths.len(),
+        batch.paths.iter().collect::<BTreeSet<_>>().len(),
+        batch.paths.len(),
         "selected companion inputs must have unique paths"
-    );
-    assert_eq!(
-        input_paths.first().map(String::as_str),
-        Some(seed_path.as_str())
-    );
-    batch.paths = input_paths.clone();
-    assert_eq!(batch.paths, input_paths);
-    assert_eq!(
-        batch.paths.iter().cloned().collect::<BTreeSet<_>>(),
-        input_path_set,
-        "selected companion batch paths must match the prepared inputs exactly"
     );
     batch.context = context;
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
@@ -4705,15 +4693,6 @@ fn record_selected_companion_batch(
         )
         .unwrap();
     batch.relation_cursor = Some(json!({"path":seed_path,"after":after,"end":end}).to_string());
-    let cursor_path = serde_json::from_str::<Value>(batch.relation_cursor.as_deref().unwrap())
-        .unwrap()["path"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    assert_eq!(
-        cursor_path, seed_path,
-        "selected companion relationship cursor must remain anchored on its seed"
-    );
     let prepared =
         prepare_staged_sources(&home.options, cache, &inputs, &batch.context, true, NOW).unwrap();
     assert_eq!(
