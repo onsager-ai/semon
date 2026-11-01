@@ -123,6 +123,7 @@ jobs:
         run: |
           result=0
           for test in \
+            events::store::configured::tests::domain52::configured_semantic_domain61_announced_ledger_change_restarts_stage \
             events::store::configured::tests::current_recovery::recovery_semantic_index_revision_drift_resets_stale_reduction_witness \
             model::tests::native_start_turn_ids_disambiguate_equal_filename_offsets_and_anchor_slots \
             model::tests::native_handoff_restart_reads_candidates_and_repairs_locations_without_event_replay \
