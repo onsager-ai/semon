@@ -5247,7 +5247,7 @@ fn invalidate_companion_fixture_sources(home: &Home, paths: &[String]) {
     let config = home
         .options
         .source
-        .config(EventCache::path(&home.options.cache))
+        .config(&home.options.cache)
         .unwrap();
     let mut observations = config.source_observations().unwrap();
     let expected = observations.claims(paths).unwrap();

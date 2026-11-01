@@ -4304,6 +4304,7 @@ mod catalog_owner_tests {
             epoch: 7,
             phase: model::relation_stage::Phase::Indexing,
             paths: vec![input.full_path(&options).to_string_lossy().into_owned()],
+            source_claims: Vec::new(),
             source_revision: 9,
             base_generation: Some("private-generation-value".into()),
             runtime: "private-runtime-value".into(),
@@ -4716,7 +4717,7 @@ mod catalog_owner_tests {
 
     #[test]
     fn configured_semantic_read_does_not_gain_implicit_raw_ingestion() {
-        use crate::storage::{StoreBackend, native_events::NativeEventStore};
+        use crate::storage::StoreBackend;
 
         let (root, mut options, input) = audit_fixture();
         let raw_path = input.full_path(&options);
@@ -4758,7 +4759,7 @@ mod catalog_owner_tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
-        let mut journal = config.source_observations().unwrap();
+        let journal = config.source_observations().unwrap();
         let claim_before = journal.claims(std::slice::from_ref(&path)).unwrap();
 
         append_audit_record(&options, &input);

@@ -175,7 +175,10 @@ fn relation_scope(
                 || !identity_done
                 || claim != *observed
                 || staged_ledger.as_deref() != Some(ledger.as_str())
-                || !crate::events::selected_roles_current(db, std::slice::from_ref(source))?
+                || !crate::events::EventCache::selected_roles_current(
+                    db,
+                    std::slice::from_ref(source),
+                )?
                 || locations.iter().any(|location| {
                     location.source.path == source.path && location.source != *source
                 })
