@@ -10350,19 +10350,28 @@ fn codex_child_page_keeps_a_done_multisource_parent_as_context_only() {
 fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
     let mut fixture = Fixture::new();
     fixture.options.claude_home = fixture.root.join("zzz-claude");
-    let parent_relatives = (0..63)
-        .map(|n| {
-            fixture.codex_source_with_records(
-                &format!("parent-{n:02}"),
-                "wide-parent",
-                None,
-                None,
-                1,
-                &[],
-            )
-        })
-        .collect::<Vec<_>>();
-    let child = fixture.codex_source("000-child", Some("wide-parent"), 2);
+    let mut parent_relatives = Vec::new();
+    let mut child_relatives = Vec::new();
+    for n in 0..32 {
+        let parent_id = format!("parent-{n:02}");
+        let child_id = format!("child-{n:02}");
+        parent_relatives.push(fixture.codex_source_with_records(
+            &format!("parent-{n:02}"),
+            &parent_id,
+            None,
+            None,
+            1,
+            &[],
+        ));
+        child_relatives.push(fixture.codex_source_with_records(
+            &format!("child-{n:02}"),
+            &child_id,
+            Some(&parent_id),
+            None,
+            2,
+            &[],
+        ));
+    }
     let unrelated_claude = fixture.source("unrelated");
     let facts_path = fixture.options.facts.as_ref().unwrap();
     let mut facts = crate::read_facts(facts_path).unwrap();
@@ -10370,7 +10379,7 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         .iter()
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    codex_paths.insert(child.clone());
+    codex_paths.extend(child_relatives.iter().cloned());
     facts.codex_rollouts = Some(codex_paths);
     crate::write_facts(facts_path, &facts, &fixture.options.source).unwrap();
     fixture.publish_existing();
@@ -10386,16 +10395,22 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
                 .into_owned()
         })
         .collect::<Vec<_>>();
-    let child_path = fixture
-        .options
-        .codex_home
-        .join(child)
-        .to_string_lossy()
-        .into_owned();
+    let child_paths = child_relatives
+        .iter()
+        .map(|path| {
+            fixture
+                .options
+                .codex_home
+                .join(path)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
     let unrelated_path = unrelated_claude.to_string_lossy().into_owned();
     let expected_paths = parent_paths
-        .into_iter()
-        .chain(std::iter::once(child_path.clone()))
+        .iter()
+        .cloned()
+        .chain(child_paths.iter().cloned())
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(expected_paths.len(), 64);
 
@@ -10405,9 +10420,16 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         [],
     )
     .unwrap();
+    for child_path in &child_paths {
+        db.execute(
+            "UPDATE main.catalog_semantic_sources SET relation_done=0 WHERE source_path=?1",
+            [child_path],
+        )
+        .unwrap();
+    }
     db.execute(
-        "UPDATE main.catalog_semantic_sources SET relation_done=0 WHERE source_path IN (?1,?2)",
-        [&child_path, &unrelated_path],
+        "UPDATE main.catalog_semantic_sources SET relation_done=0 WHERE source_path=?1",
+        [&unrelated_path],
     )
     .unwrap();
     db.execute(
@@ -10415,14 +10437,23 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
         [],
     )
     .unwrap();
-    let first_pending: String = db
-        .query_row(
-            "SELECT source_path FROM main.catalog_semantic_sources WHERE relation_done=0 ORDER BY source_path LIMIT 1",
-            [],
-            |row| row.get(0),
+    let pending_paths = db
+        .prepare(
+            "SELECT source_path FROM main.catalog_semantic_sources WHERE relation_done=0 ORDER BY source_path",
         )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(first_pending, child_path);
+    let expected_pending = child_paths
+        .iter()
+        .cloned()
+        .chain(std::iter::once(unrelated_path.clone()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(pending_paths, expected_pending);
     drop(db);
 
     let mut stage = fixture.stage();
@@ -10435,13 +10466,36 @@ fn codex_relation_closure_excludes_unrelated_pending_claude_source() {
             .collect::<std::collections::BTreeSet<_>>(),
         expected_paths
     );
+    assert_eq!(batch.paths.len(), 64);
     assert!(!batch.paths.contains(&unrelated_path));
+    let expected_children = child_paths.iter().cloned().collect::<Vec<_>>();
+    assert_eq!(batch.context.matching_header_paths, Some(expected_children.clone()));
+    assert_eq!(batch.relation_cursors.len(), 32);
     assert_eq!(
-        batch.context.matching_header_paths,
-        Some(vec![child_path.clone()])
+        batch
+            .relation_cursors
+            .iter()
+            .map(|cursor| cursor.path.clone())
+            .collect::<Vec<_>>(),
+        expected_children
     );
-    assert_eq!(batch.relation_cursors.len(), 1);
-    assert_eq!(batch.relation_cursors[0].path, child_path);
+    for parent in &parent_paths {
+        assert!(batch.paths.contains(parent));
+        assert!(
+            !batch
+                .context
+                .matching_header_paths
+                .as_ref()
+                .unwrap()
+                .contains(parent)
+        );
+        assert!(
+            !batch
+                .relation_cursors
+                .iter()
+                .any(|cursor| &cursor.path == parent)
+        );
+    }
     assert_eq!(
         batch
             .source_claims
