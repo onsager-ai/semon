@@ -5724,6 +5724,30 @@ impl<'a> Builder<'a> {
                     .insert(key, (inputs, derived.clone()));
                 derived
             });
+            #[cfg(test)]
+            if crate::storage::sqlite::staged_failure_probe_enabled()
+                && self.sessions[index].files.len() > 1
+            {
+                let owner = crate::native_timing::id(Path::new(&self.sessions[index].key));
+                let files = self.sessions[index]
+                    .files
+                    .iter()
+                    .map(|file| {
+                        (
+                            crate::native_timing::id(Path::new(&self.files[*file].id)),
+                            self.files[*file].summary.events.len(),
+                            self.copied.iter().filter(|at| at.0 == *file).count(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "staged_multisource_turns owner={owner} staged={} matching={} files={files:?} entries={} derived_turns={}",
+                    self.staged_epoch.is_some(),
+                    self.matching_refs.is_some(),
+                    self.entries(index).len(),
+                    derived.turns.len(),
+                );
+            }
             self.sessions[index].out = derived.out;
             transcripts.insert(self.sessions[index].key.clone(), derived.transcript);
             turns.extend(derived.turns);
