@@ -6041,6 +6041,43 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
                 "staged_first_missing_turn oracle_ordinal={ordinal} oracle_owner_turn_count={oracle_owner_turn_count} header_present={} header_count={header_count} header_details_turns={header_details_turns:?} persisted_turn_row_count={persisted_turn_row_count} catalog_source_count={catalog_source_count} catalog_current_source_count={catalog_current_source_count}",
                 header_count > 0,
             );
+            let trace_source: Option<String> = db
+                .query_row(
+                    "SELECT source_generation FROM main.session_trace_headers WHERE namespace=?1 AND session_key=?2",
+                    rusqlite::params![namespace.as_str(), &missing.sid],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap()
+                .flatten();
+            let owner_generation = |table: &str| {
+                let metadata: Option<String> = db
+                    .query_row(
+                        &format!("SELECT metadata FROM main.{table} WHERE namespace=?1 AND session_key=?2"),
+                        rusqlite::params![namespace.as_str(), &missing.sid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap();
+                metadata
+                    .and_then(|text| serde_json::from_str::<summary::CatalogRow>(&text).ok())
+                    .and_then(|row| crate::retention::source_generation(&row.sources).ok())
+            };
+            let history_source = owner_generation("session_history_catalog");
+            let current_source = owner_generation("session_catalog");
+            let original: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2)",
+                    rusqlite::params![namespace.as_str(), format!("history_original_header:{}", missing.sid)],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            eprintln!(
+                "staged_missing_turn_observation history_present={} original_header={original} trace_matches_history={:?} trace_matches_current={:?}",
+                history_source.is_some(),
+                trace_source.as_ref().zip(history_source.as_ref()).map(|(trace, history)| trace == history),
+                trace_source.as_ref().zip(current_source.as_ref()).map(|(trace, current)| trace == current),
+            );
         }
     }
     for turn in &oracle.turns {
