@@ -8419,7 +8419,8 @@ fn validate_foreign_prompt_source_witnesses(
     if ledgers.len() != paths.len() {
         return Err(io::Error::other(relation_stage::SourceGenerationChanged));
     }
-    for ((path, source), ledger) in paths.iter().zip(sources).zip(ledgers) {
+    for (source, ledger) in sources.iter().zip(ledgers) {
+        let path = &source.path;
         let Some(ledger) = ledger else {
             return Err(io::Error::other(relation_stage::SourceGenerationChanged));
         };
