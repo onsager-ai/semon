@@ -3503,9 +3503,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                                 )
                             },
                         );
-                    let parked_agent = row.harness == "claude"
-                        && (source.path == claude_agent || source.path == claude_agent191);
-                    if !source.path.exists() && (row.harness == "copilot" || parked_agent) {
+                    let parked_claude_source = row.harness == "claude"
+                        && (source.path == claude_agent
+                            || source.path == claude_agent191
+                            || source.path == composite_b_path);
+                    if !source.path.exists() && (row.harness == "copilot" || parked_claude_source) {
                         // The fixture's host independently retained these
                         // bytes outside the input roots. Source cannot certify
                         // a vanished local carrier.
@@ -6968,8 +6970,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        pg_parent_transcript["total"],
-        sqlite_parent_transcript["projection"]["total"],
+        pg_parent_transcript["total"], sqlite_parent_transcript["projection"]["total"],
         "retained parent transcript totals match SQLite"
     );
     assert_eq!(
