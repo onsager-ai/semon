@@ -7834,6 +7834,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 let physical = snapshot
                     .catalog(composite_key, true)?
                     .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(
+                    physical.lifecycle,
+                    crate::model::summary::CatalogLifecycle::Current,
+                    "persisted composite History metadata keeps its captured Current lifecycle"
+                );
                 assert!(physical.sources.contains(&composite_current_source));
                 assert!(physical.sources.contains(&composite_withdrawn_source));
                 assert_eq!(physical.sources.len(), 2);
@@ -7925,7 +7930,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["key"] == composite_key)
+            .any(|item| item["key"] == composite_key && item["lifecycle"] == "retained")
     );
 
     // A retained-only owner remains readable from its publication proof when

@@ -695,8 +695,13 @@ impl History<'_, '_> {
         let (history, recipe) =
             self.validate_withdrawn_composite(current, &owner_generation, &metadata)?;
         if self.withdrawn_composite_complete(&current.key, &metadata, &history, &recipe)? {
+            // The stored composite metadata keeps its captured Current
+            // lifecycle. This receipt is the detached retained Search
+            // projection for a withdrawn owner whose successor has no Current.
+            let mut search_row = history;
+            search_row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
             return Ok(WithdrawnComposite::Complete {
-                row: Box::new(history),
+                row: Box::new(search_row),
                 metadata_bytes: metadata.len(),
             });
         }
