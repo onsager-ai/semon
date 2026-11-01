@@ -34,9 +34,7 @@ pub(crate) fn companion_diag_hash(value: &str) -> String {
 }
 
 #[cfg(test)]
-pub(crate) fn companion_diag_cursors(
-    cursors: &[model::relation_stage::RelationCursor],
-) -> String {
+pub(crate) fn companion_diag_cursors(cursors: &[model::relation_stage::RelationCursor]) -> String {
     let Some(first) = cursors.first() else {
         return "none".to_owned();
     };

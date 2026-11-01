@@ -1717,7 +1717,11 @@ fn relation_scope(
         companions: std::collections::BTreeMap::new(),
     };
     let selected_paths = if batch.relation_cursors.is_empty() {
-        batch.paths.iter().map(String::as_str).collect::<BTreeSet<_>>()
+        batch
+            .paths
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
     } else {
         batch
             .relation_cursors

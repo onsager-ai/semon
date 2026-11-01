@@ -4841,7 +4841,12 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
     assert_eq!(inputs.len(), 3);
     let paths = inputs
         .iter()
-        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
@@ -4875,14 +4880,8 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
                     .into_owned(),
             })
             .collect::<Vec<_>>();
-        let prepared = prepare_semantic_batch(
-            &home.options,
-            &mut cache,
-            &batch_inputs,
-            &batch,
-            NOW,
-        )
-        .unwrap();
+        let prepared =
+            prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
         assert_eq!(
             cache
                 .record_semantic_batch(&batch, prepared.prepared())
@@ -4906,8 +4905,8 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
                 .into_owned(),
         })
         .collect::<Vec<_>>();
-    let prepared = prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW)
-        .unwrap();
+    let prepared =
+        prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
     assert!(!prepared.prepared().relationships.relations.is_empty());
     cache.end_scan();
     cache.release_published_indexes();
@@ -4918,9 +4917,7 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
             .prepare("SELECT source_path,relation_after,relation_done FROM main.catalog_semantic_sources ORDER BY source_path")
             .unwrap();
         statement
-            .query_map([], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap()

@@ -4004,15 +4004,9 @@ impl Stage {
                         break;
                     }
                     let had_locations = context.matching_locations.is_some();
-                    let location_count = context
-                        .matching_locations
-                        .as_ref()
-                        .map_or(0, Vec::len);
+                    let location_count = context.matching_locations.as_ref().map_or(0, Vec::len);
                     let had_headers = context.matching_header_paths.is_some();
-                    let header_count = context
-                        .matching_header_paths
-                        .as_ref()
-                        .map_or(0, Vec::len);
+                    let header_count = context.matching_header_paths.as_ref().map_or(0, Vec::len);
                     context
                         .matching_locations
                         .get_or_insert_with(Vec::new)
