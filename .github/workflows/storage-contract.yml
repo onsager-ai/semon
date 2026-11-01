@@ -90,6 +90,7 @@ jobs:
         run: |
           result=0
           for test in \
+            catalog::tests::full_catalog_large_source_progress_keeps_custody_until_a_real_append \
             storage::catalog::catalog_history_classification_rejects_duplicate_current_source_paths \
             storage::selected::catalog_continuation_digest_is_bounded_and_deserialization_fails_closed \
             catalog::tests::retained_history_list_keeps_indexed_fields_and_positions_across_append \

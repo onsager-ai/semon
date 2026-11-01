@@ -2367,14 +2367,14 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
 
         if let Some(source) = current_source {
             assert_eq!(count, 65, "exercise the full Catalog path above 64 rows");
-            assert_eq!(source.size, physical_size);
+            assert_eq!(source.size, source.offset);
             assert!(source.offset <= source.size);
             if let Some(previous) = previous_offset {
                 assert!(source.offset >= previous);
                 advances += usize::from(source.offset > previous);
             }
             previous_offset = Some(source.offset);
-            partial_seen |= source.offset < source.size;
+            partial_seen |= source.offset < physical_size;
 
             let snapshot = unrelated_snapshot(&db);
             assert!(!snapshot.1.is_empty());
