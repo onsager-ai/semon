@@ -9660,9 +9660,6 @@ fn build_sources_inner(
             }
         }
         crate::query_projection::complete_recipes(rows)?;
-        if let Some(relationships) = staged_relationships {
-            crate::query_projection::complete_staged_recipes(rows, &relationships.relations)?;
-        }
     }
     let mut presentation = presentation
         .map(|observations| {
@@ -9798,6 +9795,12 @@ fn build_sources_inner(
                         *captured = recorded;
                     }
                 }
+            }
+            if staged_relationships.is_some() {
+                crate::query_projection::complete_staged_recipes(
+                    catalog.as_mut().expect("source catalog captured"),
+                    &relationships.relations,
+                )?;
             }
             if ordinary_current_sources {
                 let rows = catalog.as_deref().unwrap_or_default();
