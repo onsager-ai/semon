@@ -639,7 +639,11 @@ impl Relation {
         let witness = prior
             .source_turn
             .merge(&self.source_turn)
-            .ok_or_else(|| io::Error::other("conflicting staged parent turn"))?;
+            .ok_or_else(|| {
+                #[cfg(test)]
+                eprintln!("semantic_relation_merge_refusal stage=source_turn");
+                io::Error::other("conflicting staged parent turn")
+            })?;
         let mut before = prior.clone();
         let mut merged = self.clone();
         before.source_turn = OriginTurn::default();
@@ -659,6 +663,11 @@ impl Relation {
                 .filter(|key| before.get(*key) != after.get(*key))
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>();
+            #[cfg(test)]
+            eprintln!(
+                "semantic_relation_merge_refusal stage=fields changed_fields={}",
+                fields.iter().copied().collect::<Vec<_>>().join(",")
+            );
             return Err(io::Error::other(format!(
                 "conflicting staged native relationship: kind={} fields={}",
                 self.kind,

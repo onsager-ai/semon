@@ -89,20 +89,45 @@ impl OwnerStore for Owners<'_> {
         Ok(())
     }
     fn relation(&self, relation: &Relation) -> rusqlite::Result<()> {
-        let old: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional()?;
+        let old: Option<Option<String>> = self.db.query_row("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",params![self.namespace,relation.id],|r|r.get(0)).optional().map_err(|error| {
+            #[cfg(test)]
+            eprintln!("semantic_relation_record_refusal stage=prior_read");
+            error
+        })?;
         let merged = if let Some(old) = old {
-            let old = old.ok_or(rusqlite::Error::InvalidQuery)?;
-            relation
-                .merge_prior(&serde_json::from_str(&old).map_err(invalid)?)
-                .map_err(invalid)?
+            let old = old.ok_or_else(|| {
+                #[cfg(test)]
+                eprintln!("semantic_relation_record_refusal stage=prior_metadata_unavailable");
+                rusqlite::Error::InvalidQuery
+            })?;
+            let prior = serde_json::from_str(&old).map_err(|error| {
+                #[cfg(test)]
+                eprintln!("semantic_relation_record_refusal stage=prior_decode");
+                invalid(error)
+            })?;
+            relation.merge_prior(&prior).map_err(|error| {
+                #[cfg(test)]
+                eprintln!("semantic_relation_record_refusal stage=merge");
+                invalid(error)
+            })?
         } else {
             relation.clone()
         };
-        let metadata = serde_json::to_string(&merged).map_err(invalid)?;
+        let metadata = serde_json::to_string(&merged).map_err(|error| {
+            #[cfg(test)]
+            eprintln!("semantic_relation_record_refusal stage=serialize");
+            invalid(error)
+        })?;
         if metadata.len() > 1048576 {
+            #[cfg(test)]
+            eprintln!("semantic_relation_record_refusal stage=metadata_size");
             return Err(rusqlite::Error::InvalidQuery);
         }
-        self.db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,relation_id) DO UPDATE SET metadata=excluded.metadata",params![self.namespace,merged.id,merged.from,merged.to,metadata])?;
+        self.db.execute("INSERT INTO main.catalog_semantic_relations(namespace,relation_id,from_key,to_key,metadata) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,relation_id) DO UPDATE SET metadata=excluded.metadata",params![self.namespace,merged.id,merged.from,merged.to,metadata]).map_err(|error| {
+            #[cfg(test)]
+            eprintln!("semantic_relation_record_refusal stage=upsert");
+            error
+        })?;
         Ok(())
     }
     fn dependency(&self, path: &str, harness: &str, native: &str) -> rusqlite::Result<()> {
