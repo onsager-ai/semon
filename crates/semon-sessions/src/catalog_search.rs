@@ -561,7 +561,7 @@ fn insert_row(
 fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<String>, bool)> {
     prepared_fields_port(row).map_err(|_| rusqlite::Error::InvalidQuery)
 }
-fn prepared_fields_port(
+pub(crate) fn prepared_fields_port(
     row: &CatalogRow,
 ) -> Result<(String, BTreeSet<String>, bool), serde_json::Error> {
     let fields = fields(row);

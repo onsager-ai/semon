@@ -134,6 +134,16 @@ const TABLES: &[Table] = &[
         key: "generation,scope,gram",
     },
     Table {
+        name: "catalog_search_coverage",
+        columns: "generation bytea,scope bytea,incomplete bigint",
+        key: "generation,scope",
+    },
+    Table {
+        name: "catalog_search_publications",
+        columns: "generation bytea,scope bytea,version bytea,search_generation bytea,backfill_complete boolean,incomplete bigint",
+        key: "generation,scope",
+    },
+    Table {
         name: "catalog_search_headers",
         columns: "source_path bytea,folded_id bytea",
         key: "source_path_digest",

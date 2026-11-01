@@ -60,7 +60,10 @@ pub enum CatalogRowKind {
     TraceTurn,
     TraceEdge,
     TraceBookmark,
+    SearchMembership,
     SearchDocument,
+    SearchCoverage,
+    SearchPublication,
     SearchCount,
     Dependency,
     Description,
@@ -86,7 +89,10 @@ impl CatalogRowKind {
         Self::TraceTurn,
         Self::TraceEdge,
         Self::TraceBookmark,
+        Self::SearchMembership,
         Self::SearchDocument,
+        Self::SearchCoverage,
+        Self::SearchPublication,
         Self::SearchCount,
         Self::Dependency,
         Self::Description,
@@ -110,7 +116,7 @@ impl CatalogRowKind {
             Self::History | Self::HistoryOriginal => Category::CatalogHistory,
             Self::Recipe | Self::HistoryRecipe => Category::Recipes,
             Self::Slot | Self::HistorySlot => Category::Slots,
-            Self::SearchDocument | Self::SearchCount => Category::Search,
+            Self::SearchMembership | Self::SearchDocument | Self::SearchCount | Self::SearchCoverage | Self::SearchPublication => Category::Search,
             _ => Category::Trace,
         }
     }
@@ -124,6 +130,7 @@ impl CatalogRowKind {
             | Self::HistorySlot
             | Self::TraceTurn
             | Self::TraceEdge
+            | Self::SearchMembership
             | Self::SearchDocument
             | Self::SearchCount => &[0, 1],
             Self::TraceBookmark | Self::Dependency => &[0, 1, 2],
@@ -286,8 +293,29 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
         TraceBookmark => {
             let _: (String, String, String) = serde_json::from_value(v).map_err(bad)?;
         }
+        SearchMembership => {
+            let (_, gram, current, history): (String, String, Option<i64>, Option<i64>) = serde_json::from_value(v).map_err(bad)?;
+            if gram.is_empty() || gram.len() > 12 || history.is_none() || current.is_some_and(|last| Some(last) != history) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
         SearchDocument => {
-            let _: (String, String, String, bool) = serde_json::from_value(v).map_err(bad)?;
+            let (scope, _, fields, _): (String, String, String, bool) = serde_json::from_value(v).map_err(bad)?;
+            if !search_scope(&scope) || fields.len() > MAX_PAGE_BYTES {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        SearchCoverage => {
+            let (scope, incomplete): (String, i64) = serde_json::from_value(v).map_err(bad)?;
+            if !search_scope(&scope) || incomplete < 0 {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+        SearchPublication => {
+            let (scope, version, search_generation, backfill_complete, incomplete): (String, String, String, bool, i64) = serde_json::from_value(v).map_err(bad)?;
+            if !search_scope(&scope) || version != crate::catalog_search::VERSION || search_generation != *generation || !backfill_complete || incomplete < 0 {
+                return Err(StorageError::ScopeChanged);
+            }
         }
         Dependency => {
             let _: (String, String, String) = serde_json::from_value(v).map_err(bad)?;
@@ -300,8 +328,32 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
             let _: serde_json::Value = serde_json::from_str(&metadata).map_err(bad)?;
         }
         SearchCount => {
-            let _: (String, String, u64) = serde_json::from_value(v).map_err(bad)?;
+            let (scope, gram, members): (String, String, i64) = serde_json::from_value(v).map_err(bad)?;
+            if !search_scope(&scope) || gram.is_empty() || gram.len() > 12 || members <= 0 {
+                return Err(StorageError::ScopeChanged);
+            }
         }
+    }
+    Ok(())
+}
+
+fn search_scope(scope: &str) -> bool {
+    matches!(scope, "current" | "retained_history")
+}
+
+/// Reuse the producer's normalization and compare the entire bounded posting
+/// set. Transfer validates content; it never rebuilds a missing index.
+pub(crate) fn verify_search_document(
+    metadata: &str,
+    key: &str,
+    fields: &str,
+    complete: bool,
+    postings: Vec<(String, i64)>,
+) -> Result<(), StorageError> {
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+    let (expected_fields, expected_grams, expected_complete) = crate::catalog_search::prepared_fields_port(&row).map_err(|_| StorageError::ScopeChanged)?;
+    if row.key != key || fields != expected_fields || complete != expected_complete || postings.len() != if complete { expected_grams.len() } else { 0 } || postings.iter().any(|(gram,last)| !expected_grams.contains(gram) || *last != row.last.unwrap_or(0)) {
+        return Err(StorageError::ScopeChanged);
     }
     Ok(())
 }
@@ -479,6 +531,51 @@ mod tests {
                 serde_json::json!("e".repeat(64)),
             ],
         }
+    }
+
+    #[test]
+    fn current_transfer225_search_records_bind_scope_generation_and_timestamps() {
+        let record = |kind, values| TransferRecord::CatalogRow { generation: "a".repeat(64), kind, values };
+        for (kind, values) in [
+            (CatalogRowKind::SearchMembership,serde_json::json!(["key","漢",7,7])),
+            (CatalogRowKind::SearchMembership,serde_json::json!(["key","漢",null,7])),
+            (CatalogRowKind::SearchCoverage,serde_json::json!(["retained_history",2])),
+            (CatalogRowKind::SearchPublication,serde_json::json!(["current",crate::catalog_search::VERSION,"a".repeat(64),true,2])),
+        ] {
+            let original = record(kind,values.as_array().unwrap().clone());
+            validate(&original).unwrap();
+            let decoded = serde_json::from_slice(&serde_json::to_vec(&original).unwrap()).unwrap();
+            validate(&decoded).unwrap();
+        }
+        for (kind, values) in [
+            (CatalogRowKind::SearchMembership,serde_json::json!(["key","x",7,8])),
+            (CatalogRowKind::SearchMembership,serde_json::json!(["key","x",7,null])),
+            (CatalogRowKind::SearchMembership,serde_json::json!(["key","x",null,null])),
+            (CatalogRowKind::SearchCoverage,serde_json::json!(["unknown",0])),
+            (CatalogRowKind::SearchCoverage,serde_json::json!(["current",-1])),
+            (CatalogRowKind::SearchPublication,serde_json::json!(["current",crate::catalog_search::VERSION,"b".repeat(64),true,0])),
+            (CatalogRowKind::SearchPublication,serde_json::json!(["current",crate::catalog_search::VERSION,"a".repeat(64),false,0])),
+            (CatalogRowKind::SearchPublication,serde_json::json!(["current","unsupported","a".repeat(64),true,0])),
+        ] {
+            assert!(validate(&record(kind,values.as_array().unwrap().clone())).is_err());
+        }
+    }
+
+    #[test]
+    fn current_transfer225_search_document_requires_complete_exact_posting_set() {
+        let metadata = metadata("Name 漢字".to_owned());
+        let row = serde_json::from_str(&metadata).unwrap();
+        let (fields,grams,complete) = crate::catalog_search::prepared_fields_port(&row).unwrap();
+        let postings = grams.into_iter().map(|g| (g,0)).collect::<Vec<_>>();
+        verify_search_document(&metadata,"key",&fields,complete,postings.clone()).unwrap();
+        let mut missing = postings.clone(); missing.pop();
+        assert!(verify_search_document(&metadata,"key",&fields,complete,missing).is_err());
+        let mut extra = postings.clone(); extra.push(("bad".to_owned(),0));
+        assert!(verify_search_document(&metadata,"key",&fields,complete,extra).is_err());
+        let mut changed = postings.clone(); changed[0].1=1;
+        assert!(verify_search_document(&metadata,"key",&fields,complete,changed).is_err());
+        assert!(verify_search_document(&metadata,"key","[]",complete,postings.clone()).is_err());
+        assert!(verify_search_document(&metadata,"key",&fields,!complete,postings).is_err());
     }
 
     #[test]

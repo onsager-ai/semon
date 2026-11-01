@@ -74,6 +74,9 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
             "semon_pg_native_catalog_trace_bookmarks",
             "session_key,target,edge_id",
         ),
+        SearchMembership => (SEARCH_MEMBERSHIPS,"session_key,gram,current_last_ms,history_last_ms"),
+        SearchCoverage => ("semon_pg_native_catalog_search_coverage","scope,incomplete"),
+        SearchPublication => ("semon_pg_native_catalog_search_publications","scope,version,search_generation,backfill_complete,incomplete"),
         SearchDocument => (
             "semon_pg_native_catalog_search_documents",
             "scope,session_key,fields,complete",
@@ -84,6 +87,8 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
         ),
     }
 }
+const SEARCH_MEMBERSHIPS: &str = "(SELECT m.namespace,m.namespace_digest,m.generation,m.session_key,m.gram,CASE WHEN EXISTS(SELECT 1 FROM semon_pg_native_catalog_search_documents d WHERE d.namespace_digest=m.namespace_digest AND d.namespace=m.namespace AND d.generation=m.generation AND d.key_digest=m.key_digest AND d.session_key=m.session_key AND d.scope='current'::bytea) THEN m.last_ms END AS current_last_ms, m.last_ms AS history_last_ms FROM semon_pg_native_catalog_search_memberships m) AS search_memberships";
+
 const HISTORY: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,h.session_key,h.metadata,h.query_recipe,h.recipe_generation,coalesce(h.source_generation,''::bytea) AS source_generation,h.version,h.total,h.incomplete FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key) AS history";
 const HISTORY_SLOTS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,s.session_key,s.slot,s.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_slots s ON s.namespace_digest=o.namespace_digest AND s.namespace=o.namespace AND s.generation=o.owner_generation AND s.key_digest=o.key_digest AND s.session_key=o.session_key) AS history_slots";
 const HISTORY_PROGRESS: &str = "(SELECT o.namespace,o.namespace_digest,o.generation,p.session_key,p.metadata FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_progress p ON p.namespace_digest=o.namespace_digest AND p.namespace=o.namespace AND p.generation=o.owner_generation AND p.key_digest=o.key_digest AND p.session_key=o.session_key) AS history_progress";
@@ -143,6 +148,14 @@ fn verify_authority(
                 return Err(StorageError::ScopeChanged);
             }
         }
+        SearchDocument => {
+            let generation = super::super::model_cache::generation(tx.0)?.or(tx.get(catalog_rows::IMPORTED_GENERATION,64)?.map(|b| String::from_utf8(b).map_err(|_| StorageError::ScopeChanged)).transpose()?).ok_or(StorageError::ScopeChanged)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM (SELECT metadata,0 AS priority FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 UNION ALL SELECT h.metadata,1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND o.key_digest=sha256($3::bytea) AND o.session_key=$3) rows ORDER BY priority LIMIT 1", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let metadata = decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
+            let rows = tx.0.driver.query("SELECT gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3 ORDER BY gram LIMIT 1025", &[&ns,&generation.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let postings = rows.into_iter().map(|r| Ok((decode(r.get(0))?,r.get(1)))).collect::<Result<Vec<_>,StorageError>>()?;
+            catalog_rows::verify_search_document(&metadata,text(1)?,text(2)?,values[3].as_bool().ok_or(StorageError::ScopeChanged)?,postings)?;
+        }
         _ => {}
     }
     Ok(())
@@ -182,6 +195,9 @@ pub(super) fn capture(
 ) -> Result<transfer::CaptureProgress, StorageError> {
     let index = usize::from(state.native_family - 32);
     let Some(kind) = CatalogRowKind::ALL.get(index).copied() else {
+        if let Some(generation) = super::super::model_cache::generation(tx.0)? {
+            super::super::catalog_effects::search::verify_state(tx.0,&generation)?;
+        }
         transfer::reported::finish_capture(tx, state)?;
         return Ok(state.progress());
     };
@@ -341,6 +357,14 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
     use CatalogRowKind::*;
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let text = |i: usize| values[i].as_str().ok_or(StorageError::ScopeChanged);
+    if *kind == SearchMembership {
+        let current = values[2].as_i64();
+        let history = values[3].as_i64().ok_or(StorageError::ScopeChanged)?;
+        let eligible: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3)", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes()]).map_err(sqlstate::error)?.get(0);
+        if eligible != current.is_some() { return Err(StorageError::ScopeChanged); }
+        tx.0.driver.execute("INSERT INTO semon_pg_native_catalog_search_memberships(namespace,generation,key_digest,session_key,gram,last_ms) VALUES($1,$2,sha256($3::bytea),$3,$4,$5)", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes(),&history]).map_err(sqlstate::error)?;
+        return Ok(());
+    }
     if *kind == HistoryOriginal {
         let changed = tx.0.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET original_header=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&generation.as_bytes(),&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
         if changed != 1 {
@@ -461,6 +485,8 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             "scope,session_key,fields,complete",
         ),
         SearchCount => ("catalog_search_counts", "scope,gram,members"),
+        SearchCoverage => ("catalog_search_coverage", "scope,incomplete"),
+        SearchPublication => ("catalog_search_publications", "scope,version,search_generation,backfill_complete,incomplete"),
         _ => return Err(StorageError::InvalidArguments),
     };
     let mut names = vec!["namespace", "generation"];
@@ -483,11 +509,12 @@ pub(super) fn apply(tx: &mut Inbox<'_, '_>, record: &TransferRecord) -> Result<(
             "epoch",
             "admission",
             "source_revision",
+            "incomplete",
         ]
-        .contains(&name)
+        .contains(&name) && !(*kind == SearchPublication && name == "version")
         {
             Box::new(value.as_i64().ok_or(StorageError::ScopeChanged)?)
-        } else if name == "complete" {
+        } else if matches!(name,"complete" | "backfill_complete") {
             Box::new(value.as_bool().ok_or(StorageError::ScopeChanged)?)
         } else {
             Box::new(value.as_str().map(|s| s.as_bytes().to_vec()))
