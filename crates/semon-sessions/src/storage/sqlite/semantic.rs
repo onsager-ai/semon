@@ -4359,16 +4359,17 @@ impl Stage {
                                 .ok()
                                 .map(|bytes| max_bytes.max(bytes.len()))
                         });
-                    let transcript_slot_bytes = prepared.transcripts.iter().try_fold(
-                        0usize,
-                        |total, projection| {
-                            projection.slots.iter().try_fold(total, |total, slot| {
-                                serde_json::to_vec(slot)
-                                    .ok()
-                                    .map(|bytes| total.saturating_add(bytes.len()))
-                            })
-                        },
-                    );
+                    let transcript_slot_bytes =
+                        prepared
+                            .transcripts
+                            .iter()
+                            .try_fold(0usize, |total, projection| {
+                                projection.slots.iter().try_fold(total, |total, slot| {
+                                    serde_json::to_vec(slot)
+                                        .ok()
+                                        .map(|bytes| total.saturating_add(bytes.len()))
+                                })
+                            });
                     let show_bytes = |value: Option<usize>| {
                         value.map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
                     };
