@@ -1149,7 +1149,9 @@ mod tests {
         let mut facts = original_facts.clone();
         // Real producer metadata exceeds the search document bound. No posting
         // or readiness rows are fabricated to create this incomplete owner.
-        facts.repos.insert("/sanitized".into(), Some("x".repeat(8193)));
+        facts
+            .repos
+            .insert("/sanitized".into(), Some("x".repeat(8193)));
         crate::write_facts(options.facts.as_ref().unwrap(), &facts, &options.source).unwrap();
         let mut cache = crate::storage::transfer::reported::tests::cache(&source);
         cache
