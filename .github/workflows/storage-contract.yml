@@ -119,7 +119,8 @@ jobs:
             events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_record_refuses_without_a_receipt_or_hint \
             events::store::configured::tests::domain52::presentation_capture_overflow::overflow_rejects_a_missing_exact_model_receipt \
             events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_physical_group_keeps_its_receipt_and_stays_pending \
-            native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch; do
+            native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch \
+            storage::sqlite::source_journal::tests::configured_catalog_pending_selector_respects_large_exclusion_union; do
             case_number=$((case_number+1))
             case_log="$RUNNER_TEMP/477-focused-$case_number.log"
             case_result=0
