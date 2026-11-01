@@ -502,6 +502,23 @@ impl IndexStore for ConfiguredIndex {
         self.reported_selection = Some(ids.clone());
         Ok(runs)
     }
+    fn load_all_reported_runs(
+        &mut self,
+    ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError> {
+        let mut runs = Vec::new();
+        self.native
+            .export_reported_runs(
+                || Ok(()),
+                |_| Ok(()),
+                |run| {
+                    runs.push(run);
+                    Ok(())
+                },
+            )
+            .map_err(StoreError::Configured)?;
+        self.reported_selection = None;
+        Ok(runs)
+    }
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
         self.native.file_ledgers()
     }

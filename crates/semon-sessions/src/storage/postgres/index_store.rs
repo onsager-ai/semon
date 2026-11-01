@@ -492,6 +492,14 @@ impl IndexStore for NativeIndex {
         self.selection = Some(ids.clone());
         Ok(loaded.runs)
     }
+    fn load_all_reported_runs(
+        &mut self,
+    ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError> {
+        let loaded = reported_facts::load(&self.pool, &self.namespace, None, &self.control)
+            .map_err(err)?;
+        self.selection = None;
+        Ok(loaded.runs)
+    }
     fn save_runs(
         &mut self,
         runs: &[crate::facts::ReportedRunSnapshot],

@@ -2573,6 +2573,19 @@ impl IndexStore for SqliteStore {
         Ok(runs)
     }
 
+    fn load_all_reported_runs(&mut self) -> Result<Vec<ReportedRunSnapshot>, StoreError> {
+        let transaction = self.connection.unchecked_transaction().map_err(failure)?;
+        if !current(&transaction).map_err(failure)? {
+            return Err(StoreError::Failed(
+                "session index version changed".to_owned(),
+            ));
+        }
+        let runs = read_runs(&transaction).map_err(failure)?;
+        transaction.commit().map_err(failure)?;
+        self.selected_runs = None;
+        Ok(runs)
+    }
+
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
         let transaction = self.connection.unchecked_transaction().map_err(failure)?;
         read_file_ledgers(&transaction)

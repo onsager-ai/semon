@@ -580,6 +580,10 @@ mod tests {
         assert_eq!(again.runs, runs);
         assert_eq!(again.stamp, Some(stamp));
         assert_eq!(again.revision, 0);
+        let mut cache = EventCache::open_pg_native(pool.clone(), source.clone(), control.clone())
+            .unwrap();
+        cache.load_all_reported_runs().unwrap();
+        assert_eq!(cache.reported_runs().cloned().collect::<Vec<_>>(), runs);
         crate::events::CACHE_READS
             .with(|reads| assert_eq!(reads.get(), 0, "PG phase opened SQLite"));
         #[cfg(target_os = "linux")]

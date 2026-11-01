@@ -1383,6 +1383,11 @@ pub(crate) trait IndexStore: Send {
         ids: &BTreeSet<String>,
     ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError>;
 
+    /// Every persisted reported run, for a local Facts snapshot.
+    fn load_all_reported_runs(
+        &mut self,
+    ) -> Result<Vec<crate::facts::ReportedRunSnapshot>, StoreError>;
+
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError>;
 
     /// Drops files' rows. A file given with a ledger loses its rows only if
@@ -2025,6 +2030,20 @@ impl EventCache {
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
             .select_reported_runs(ids)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        self.set_reported_runs(runs);
+        Ok(())
+    }
+
+    /// Loads the complete retained report history from the admitted store.
+    /// Install it only after the adapter's consistent read has completed.
+    pub(crate) fn load_all_reported_runs(&mut self) -> io::Result<()> {
+        self.require_current_store()?;
+        let runs = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+            .load_all_reported_runs()
             .map_err(|error| io::Error::other(error.to_string()))?;
         self.set_reported_runs(runs);
         Ok(())
