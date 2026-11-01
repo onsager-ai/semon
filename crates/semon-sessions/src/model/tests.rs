@@ -2220,6 +2220,75 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
 }
 
 #[test]
+fn causal_peer_name_does_not_follow_a_reused_cross_harness_key() {
+    let home = relay_home();
+    let built = home.build_query();
+    let root = turns_of(&built, "beta")[0];
+    let query = format!(
+        "sid=beta&turn={}&scope=retained_history",
+        crate::viewer::percent_encode(&root.id)
+    );
+    let read = || {
+        let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        serde_json::from_slice::<Value>(&reply.body).unwrap()
+    };
+    let before = read();
+    assert_eq!(before["participants"]["alpha"], "Alpha");
+
+    fs::remove_file(
+        home.options
+            .claude_home
+            .join("projects/-work-proj/alpha.jsonl"),
+    )
+    .unwrap();
+    home.codex(
+        "alpha",
+        json!({}),
+        &[codex_user(ts(5, 4), "Synthetic Codex replacement")],
+    );
+    home.lines(
+        "codex/session_index.jsonl",
+        &[json!({"id":"alpha","thread_name":"Codex Alpha","updated_at":"2026-09-24T00:02:00Z"})],
+    );
+    home.build_query();
+
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let current_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key='alpha' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current: crate::model::summary::CatalogRow =
+        serde_json::from_str(&current_metadata).unwrap();
+    assert_eq!(current.harness, "codex");
+    assert_eq!(current.name, "Codex Alpha");
+    let history_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_history_catalog WHERE session_key='alpha'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(history.harness, "claude");
+    drop(db);
+
+    let after = read();
+    assert_eq!(after["participants"]["alpha"], "Alpha");
+    assert_eq!(after["turns"], before["turns"]);
+    assert_eq!(after["sessions"], before["sessions"]);
+}
+
+#[test]
 fn failed_and_denied_sends_are_failed_relays_with_no_receiver() {
     let home = relay_home();
     let built = home.build_query();

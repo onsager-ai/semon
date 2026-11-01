@@ -823,100 +823,83 @@ pub(crate) fn session_causal_trace_with_gate(
             } else {
                 "catalog"
             };
-            let mut participant_name_harness = row.harness.clone();
+            let participant_name_harness = row.harness.clone();
             let mut participant_name_native_id = None;
             let mut participant_name_source = source.clone();
             if history_selected
                 && let Some((current, current_source)) = current_candidate.as_ref()
             {
-                let selected_history = crate::catalog::catalog_selection_in_snapshot(
-                    options,
-                    source_key,
-                    &sid,
-                    crate::CatalogReadScope::RetainedHistory,
-                    &snapshot,
-                )
-                .map_err(|error| {
-                    if error == crate::CatalogIdentityError::ScopeChanged {
-                        409
-                    } else {
-                        503
-                    }
-                })?;
-                if let Some((history_identity, _)) = selected_history {
-                    if history_identity.generation != identity.generation {
-                        return Err(409);
-                    }
-                    if history_identity.catalog_key != sid
-                        || history_identity.harness != row.harness
-                        || history_identity.read_scope != crate::CatalogReadScope::RetainedHistory
+                let history_native_id = match row.native_ids.as_slice() {
+                    [native_id]
+                        if !native_id.is_empty()
+                            && !row.sources.is_empty()
+                            && row
+                                .sources
+                                .iter()
+                                .all(|source| &source.native_id == native_id) =>
                     {
-                        return Err(503);
+                        Some(native_id.as_str())
                     }
-                    if history_identity.owner_qualification
-                        == crate::CatalogOwnerQualification::Qualified
-                        && let Some(native_id) = history_identity.native_id.as_deref()
+                    _ => None,
+                };
+                if let Some(native_id) = history_native_id {
+                    participant_name_native_id = Some(native_id.to_owned());
+                    if current.harness == row.harness
+                        && current.sources.iter().any(|source| source.native_id == native_id)
                     {
-                        participant_name_harness = history_identity.harness.clone();
-                        participant_name_native_id = Some(native_id.to_owned());
-                        if current.harness == history_identity.harness
-                            && current.sources.iter().any(|source| source.native_id == native_id)
-                        {
-                            if !crate::native_resolution::valid_resolution_arguments(
-                                source_key,
-                                &history_identity.harness,
+                        if !crate::native_resolution::valid_resolution_arguments(
+                            source_key,
+                            &row.harness,
+                            native_id,
+                        ) {
+                            return Err(503);
+                        }
+                        let navigation = crate::storage::navigation_store(binding.clone());
+                        let observation =
+                            crate::storage::navigation::NativeNavigationStore::native_resolution(
+                                navigation.as_ref(),
+                                &row.harness,
                                 native_id,
-                            ) {
-                                return Err(503);
-                            }
-                            let navigation = crate::storage::navigation_store(binding.clone());
-                            let observation =
-                                crate::storage::navigation::NativeNavigationStore::native_resolution(
-                                    navigation.as_ref(),
-                                    &history_identity.harness,
-                                    native_id,
-                                    crate::CatalogReadScope::Current,
-                                    Some(&identity.generation),
-                                )
-                                .map_err(|error| match error {
-                                    crate::storage::StorageError::ScopeChanged
-                                    | crate::storage::StorageError::NamespaceMismatch => 409,
-                                    _ => 503,
-                                })?;
-                            if let Some(encoded) = &observation.metadata {
-                                if encoded.len() > bytes_left {
-                                    return Err(413);
-                                }
-                                bytes_left -= encoded.len();
-                            }
-                            let mut resolution = crate::CatalogNativeResolution {
-                                state: crate::CatalogNativeResolutionState::Unavailable,
-                                source_key: source_key.to_owned(),
-                                harness: history_identity.harness.clone(),
-                                native_id: native_id.to_owned(),
-                                read_scope: crate::CatalogReadScope::Current,
-                                catalog_key: None,
-                                generation: None,
-                            };
-                            crate::native_resolution::apply_observation(
-                                &mut resolution,
-                                Some(options),
-                                &observation,
+                                crate::CatalogReadScope::Current,
+                                Some(&identity.generation),
                             )
-                            .map_err(|_| 503u16)?;
-                            if resolution.state == crate::CatalogNativeResolutionState::Resolved
-                                && resolution.catalog_key.as_deref() == Some(sid.as_str())
-                                && resolution.harness == history_identity.harness
-                                && resolution.native_id == native_id
-                                && resolution.read_scope == crate::CatalogReadScope::Current
-                                && resolution.generation.as_deref()
-                                    == Some(identity.generation.as_str())
-                            {
-                                participant_name = current.name.clone();
-                                participant_name_scope = "current";
-                                participant_name_harness = current.harness.clone();
-                                participant_name_source.clone_from(current_source);
+                            .map_err(|error| match error {
+                                crate::storage::StorageError::ScopeChanged
+                                | crate::storage::StorageError::NamespaceMismatch => 409,
+                                _ => 503,
+                            })?;
+                        if let Some(encoded) = &observation.metadata {
+                            if encoded.len() > bytes_left {
+                                return Err(413);
                             }
+                            bytes_left -= encoded.len();
+                        }
+                        let mut resolution = crate::CatalogNativeResolution {
+                            state: crate::CatalogNativeResolutionState::Unavailable,
+                            source_key: source_key.to_owned(),
+                            harness: row.harness.clone(),
+                            native_id: native_id.to_owned(),
+                            read_scope: crate::CatalogReadScope::Current,
+                            catalog_key: None,
+                            generation: None,
+                        };
+                        crate::native_resolution::apply_observation(
+                            &mut resolution,
+                            Some(options),
+                            &observation,
+                        )
+                        .map_err(|_| 503u16)?;
+                        if resolution.state == crate::CatalogNativeResolutionState::Resolved
+                            && resolution.catalog_key.as_deref() == Some(sid.as_str())
+                            && resolution.harness == row.harness
+                            && resolution.native_id == native_id
+                            && resolution.read_scope == crate::CatalogReadScope::Current
+                            && resolution.generation.as_deref()
+                                == Some(identity.generation.as_str())
+                        {
+                            participant_name = current.name.clone();
+                            participant_name_scope = "current";
+                            participant_name_source.clone_from(current_source);
                         }
                     }
                 }
