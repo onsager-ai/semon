@@ -10465,7 +10465,6 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
     let lead_source = source_for("lead.jsonl");
     let leaf_source = source_for("agent-leaf.jsonl");
     let selected_spawn = stable_id("s", "spawn:claude:leaf");
-    let expected_page = BTreeSet::from([selected_spawn.clone()]);
     let full_spawn = full
         .relationships
         .relations
@@ -10483,6 +10482,10 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
     assert!(
         expected_origin.is_object(),
         "full spawn has a prompt origin"
+    );
+    assert!(
+        expected_origin["field"].is_object(),
+        "full spawn origin has its exact native prompt descriptor"
     );
 
     let batch = staged_claude_header_batch(&home, &mut cache, &leaf_source.path);
@@ -10507,6 +10510,70 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
             .iter()
             .any(|path| std::path::Path::new(path) == tm.source.path.as_path())
     );
+    let matching_headers: BTreeSet<_> = batch
+        .context
+        .matching_header_paths
+        .as_ref()
+        .expect("the selected relation page carries its exact header")
+        .iter()
+        .cloned()
+        .collect();
+    let matching_locations = batch
+        .context
+        .matching_locations
+        .as_ref()
+        .expect("the selected relation page carries its exact event locations");
+    let location_matches = |candidate: &relation_stage::Location| {
+        matching_locations.iter().any(|selected| {
+            candidate.source == selected.source
+                && candidate.offset == selected.offset
+                && candidate.block == selected.block
+                && candidate.kind == selected.kind
+                && candidate.occurrence == selected.occurrence
+        })
+    };
+    let expected_page: BTreeSet<_> = full
+        .relationships
+        .relations
+        .iter()
+        .filter(|(_, relation)| {
+            let header_selected = relation.kind == "spawn"
+                && relation.to.as_ref().is_some_and(|owner| {
+                    full.rows
+                        .iter()
+                        .find(|row| &row.key == owner)
+                        .is_some_and(|row| {
+                            row.sources.iter().any(|source| {
+                                matching_headers
+                                    .contains(&source.path.to_string_lossy().into_owned())
+                            })
+                        })
+                });
+            let location_selected = relation
+                .placements
+                .iter()
+                .any(|placement| location_matches(&placement.at))
+                || relation.after.iter().any(location_matches);
+            header_selected || location_selected
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    assert!(expected_page.contains(&selected_spawn));
+    let nested_relay = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| {
+            relation.kind == "relay"
+                && relation.from == "leaf"
+                && relation.to.as_deref() == Some("mid")
+        })
+        .expect("full build contains the selected leaf-to-mid relay");
+    assert!(
+        expected_page.contains(&nested_relay.id),
+        "matching send and receipt select the leaf-to-mid relay"
+    );
+    assert_eq!(expected_page.len(), 2, "the exact batch selects both relations");
 
     let inputs_for = |paths: &[String]| {
         paths
@@ -10577,10 +10644,23 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
             })
             .collect::<BTreeMap<_, _>>()
     };
-    let expected_witnesses = BTreeMap::from([(
-        selected_spawn.clone(),
-        (full_spawn.source_turn.clone(), expected_origin.clone()),
-    )]);
+    let expected_witnesses: BTreeMap<_, _> = expected_page
+        .iter()
+        .map(|id| {
+            let relation = &full.relationships.relations[id];
+            (
+                id.clone(),
+                (
+                    relation.source_turn.clone(),
+                    relation
+                        .query_content
+                        .get("origin")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+            )
+        })
+        .collect();
     assert_eq!(
         selected_witnesses(forward.prepared()),
         expected_witnesses,
