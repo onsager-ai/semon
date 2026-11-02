@@ -6106,6 +6106,95 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         reject_marker(invalid, field);
     }
 
+    let live_blocker = || {
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap()
+    };
+    let assert_hint_unchanged = || {
+        let current: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+                [namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, hint_text, "live fence checks preserve refusal bytes");
+    };
+
+    let source_revision: i64 = db
+        .query_row(
+            "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.storage_source_journal SET revision=revision+1 WHERE namespace=?1",
+            [namespace],
+        )
+        .unwrap(),
+        1
+    );
+    let advanced_revision: i64 = db
+        .query_row(
+            "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(advanced_revision, source_revision + 1);
+    assert_hint_unchanged();
+    assert_eq!(live_blocker(), None, "journal revision fences the refusal");
+    assert_eq!(
+        db.execute(
+            "UPDATE main.storage_source_journal SET revision=?1 WHERE namespace=?2",
+            rusqlite::params![source_revision, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_hint_unchanged();
+
+    let stage_runtime: String = db
+        .query_row(
+            "SELECT runtime FROM main.catalog_semantic_stage WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(stage_runtime, "stale-runtime-fence");
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_stage SET runtime='stale-runtime-fence' WHERE namespace=?1",
+            [namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_hint_unchanged();
+    assert_eq!(live_blocker(), None, "live stage runtime fences the refusal");
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_stage SET runtime=?1 WHERE namespace=?2",
+            rusqlite::params![stage_runtime, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_hint_unchanged();
+
     let selected_claim = refusal["selected_claims"][0].clone();
     let encoded_path = selected_claim["source_path_hex"].as_str().unwrap();
     let path = String::from_utf8(
