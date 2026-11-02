@@ -599,11 +599,9 @@ mod verified_history_tests {
     }
 
     fn runtime_capture(row: &CatalogRow) -> String {
-        let mut observations = PresentationObservations {
-            source_runtime: Some("source-runtime".into()),
-            runtime: Some("runtime".into()),
-            ..PresentationObservations::default()
-        };
+        let mut observations = PresentationObservations::default();
+        observations.source_runtime = Some("source-runtime".into());
+        observations.runtime = Some("runtime".into());
         let cwds = BTreeSet::from(["/cwd".to_owned()]);
         observations
             .capture_runtime(row, &cwds, "source-runtime-v1:test".into())
@@ -822,8 +820,14 @@ mod verified_history_tests {
             rusqlite::params![namespace, owner.key],
         )
         .unwrap();
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         super::super::proof_generations::retain_current_refs_for_unowned_history(
-            &db, namespace, &owner.key, admission, &stream,
+            &db,
+            namespace,
+            &owner.key,
+            admission,
+            &stream,
+            &mut budget,
         )
         .unwrap();
         let (history_ref, history_grant): (bool, bool) = db
@@ -841,7 +845,6 @@ mod verified_history_tests {
             !history_grant,
             "Current ref transfer must never mint History origin"
         );
-        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         let verified = super::super::proof_generations::verified_publication_receipts(
             &db,
             namespace,
@@ -856,5 +859,65 @@ mod verified_history_tests {
         .unwrap()
         .unwrap();
         assert!(verified.is_empty());
+    }
+
+    #[test]
+    fn retained_history_metadata_overflow_does_not_publish_partial_refs() {
+        let mut db = composition_db();
+        let namespace = "local";
+        let admission = 7;
+        let stream = "d".repeat(64);
+        let owner = row("original History");
+        let metadata = serde_json::to_string(&owner).unwrap();
+        let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
+        db.execute(
+            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            rusqlite::params![namespace, owner.key, metadata],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants VALUES(?1,?2,'catalog',?3,?4,?5,NULL)",
+            rusqlite::params![
+                namespace,
+                owner.key,
+                digest,
+                i64::try_from(admission).unwrap(),
+                stream
+            ],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current','old-current-receipt')",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+
+        crate::overview::cap_stage_summary_budget_for_test(metadata.len() + 4);
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        budget.charge(5).unwrap();
+        let tx = db.transaction().unwrap();
+        let error = super::super::proof_generations::retain_current_refs_for_unowned_history(
+            &tx,
+            namespace,
+            &owner.key,
+            admission,
+            &stream,
+            &mut budget,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            super::super::proof_generations::PublicationError::BudgetOverflow
+        ));
+        let (current_ref, history_ref): (bool, bool) = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' AND id='old-current-receipt'),EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history')",
+                rusqlite::params![namespace, owner.key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(current_ref);
+        assert!(!history_ref);
+        tx.rollback().unwrap();
     }
 }

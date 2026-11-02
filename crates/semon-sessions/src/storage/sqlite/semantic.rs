@@ -3485,9 +3485,17 @@ impl Stage {
                 super::proof_generations::PreparedPresentations {
                     prepared,
                     rows: &presentations,
+                    overview_budget,
                 },
             )
-            .map_err(StoreError::Configured)?;
+            .map_err(|error| match error {
+                super::proof_generations::PublicationError::Storage(error) => {
+                    StoreError::Configured(error)
+                }
+                super::proof_generations::PublicationError::BudgetOverflow => {
+                    refuse(PUBLICATION_GROUP_BUDGET)
+                }
+            })?;
             for metadata in &metadata {
                 super::proof_generations::native_observation_grant(
                     &tx,
