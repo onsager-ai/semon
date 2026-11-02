@@ -12973,13 +12973,16 @@ fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_at
     )
     .unwrap();
     let owned_delta = cache.source_revision_delta();
-    assert!(owned_delta > 0, "the full scan must commit a native source write");
+    assert!(
+        owned_delta > 0,
+        "the full scan must commit a native source write"
+    );
     let expected = baseline
         .revision
         .checked_add(i64::try_from(owned_delta).unwrap())
         .unwrap();
     assert_eq!(cache.full_catalog_start().unwrap().revision, expected);
-    assert!(cache.session_catalog_generation().unwrap().is_some());
+    assert!(cache.session_catalog_generation().is_some());
 
     let ledger = cache
         .stored_ledger_batch(std::slice::from_ref(&path_text))
@@ -12994,13 +12997,9 @@ fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_at
         json!({"type":"assistant","sessionId":"revision-fence","uuid":"revision-fence-a1","parentUuid":"revision-fence","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"id":"revision-fence-a1","role":"assistant","model":"claude-test","content":[{"type":"text","text":"sanitized append"}]}})
     );
     let generation = crate::source_change::stat_generation(&ledger.stat).unwrap();
-    let writer = crate::SessionSourceWrite::begin(
-        &fixture.options,
-        &input,
-        Some(&generation),
-        from,
-    )
-    .unwrap();
+    let writer =
+        crate::SessionSourceWrite::begin(&fixture.options, &input, Some(&generation), from)
+            .unwrap();
     let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
     raw.write_all(append.as_bytes()).unwrap();
     raw.sync_all().unwrap();
@@ -13020,14 +13019,18 @@ fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_at
             crate::invalidate_session_sources(&hook_options, std::slice::from_ref(&hook_input))
                 .unwrap();
             let snapshot = state(&hook_options);
-            assert!(snapshot
-                .continuations
-                .iter()
-                .any(|(source_path, _)| source_path == &path_text));
-            assert!(snapshot
-                .claims
-                .iter()
-                .any(|(source_path, _, _, _)| source_path == &path_text));
+            assert!(
+                snapshot
+                    .continuations
+                    .iter()
+                    .any(|(source_path, _)| source_path == &path_text)
+            );
+            assert!(
+                snapshot
+                    .claims
+                    .iter()
+                    .any(|(source_path, _, _, _)| source_path == &path_text)
+            );
             assert!(snapshot.head.is_some());
             *captured_state.borrow_mut() = Some(snapshot);
         }));
@@ -13045,7 +13048,10 @@ fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_at
     assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
     assert!(crate::model::AFTER_SCAN.with(|hook| hook.borrow().is_none()));
     let owned_delta = cache.source_revision_delta();
-    assert!(owned_delta > 0, "the second full scan must commit its append");
+    assert!(
+        owned_delta > 0,
+        "the second full scan must commit its append"
+    );
     let expected = baseline
         .revision
         .checked_add(i64::try_from(owned_delta).unwrap())

@@ -1409,8 +1409,10 @@ impl Writer {
             claims,
             closed,
             None,
-            super::CatalogWriter::Auto,
-            revision_fence,
+            super::CatalogWriterPolicy {
+                writer: super::CatalogWriter::Auto,
+                revision_fence,
+            },
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {

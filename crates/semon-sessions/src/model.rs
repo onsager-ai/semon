@@ -1405,9 +1405,10 @@ fn scan_selected(
     selection: ScanSelection<'_>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
     let (selected, retire_missing, committed_only, forced_paths) = match selection {
-        ScanSelection::Current { selected, forced_paths } => {
-            (selected, true, false, Some(forced_paths))
-        }
+        ScanSelection::Current {
+            selected,
+            forced_paths,
+        } => (selected, true, false, Some(forced_paths)),
         ScanSelection::Semantic(selected) => (Some(selected), false, false, None),
         ScanSelection::Committed(selected) => (Some(selected), false, true, None),
     };
