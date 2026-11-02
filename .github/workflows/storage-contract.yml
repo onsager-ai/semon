@@ -1,58 +1,17 @@
-# Diagnostic branch only: this focused workflow is not an integration gate.
+# Diagnostic branch only; never integrate this replacement workflow.
 name: Native storage contract
 on:
-  pull_request:
   workflow_dispatch:
-  push:
-    branches:
-      - task/479-pg-facts-20261026
-      - task/479-pg-catalog-20261026
-      - task/477-current-transfer-20261027
 permissions:
   contents: read
-concurrency:
-  group: storage-contract-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 jobs:
-  formatting:
+  focused:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - name: Check formatting independently of compilation
-        id: rustfmt
-        run: cargo fmt --all --check
-      - name: Prepare formatting patch for thermal-restricted review
-        if: failure() && steps.rustfmt.outcome == 'failure'
-        run: |
-          cargo fmt --all
-          git diff --binary -- '*.rs' > "$RUNNER_TEMP/storage-rustfmt.patch"
-      - name: Retain exact formatting patch
-        if: failure() && steps.rustfmt.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: storage-rustfmt
-          path: ${{ runner.temp }}/storage-rustfmt.patch
-  boundary:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Inventory native SQLite coupling
-        run: python3 scripts/check-native-storage-boundary.py
-  conformance:
-    runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       SEMON_PRICING_REFRESH: "off"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -61,109 +20,82 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
-      - name: Production host API callers compile
-        id: production
-        run: cargo check --locked --workspace --all-targets
-      - name: Producer completion and existing native search demand regressions
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+      - name: Resolve optional driver lock in CI
+        run: cargo metadata --format-version 1 > "$RUNNER_TEMP/477-history-metadata.json"
+      - name: Compile focused tests once
+        id: compile
         shell: bash
         run: |
-          completion_log="$RUNNER_TEMP/477-focused-completion.log"
-          search_log="$RUNNER_TEMP/477-focused-native-search.log"
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls --no-run 2>&1 | tee "$RUNNER_TEMP/477-history-compile.log"
+      - name: Shared planner and SQLite receipt tests
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
           result=0
-          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch -- --exact --nocapture > "$completion_log" 2>&1 || result=$?
-          if ! grep -Fq 'running 1 test' "$completion_log"; then result=1; fi
-          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$completion_log"; then result=1; fi
-          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::cold_catalog_search_ -- --nocapture > "$search_log" 2>&1 || result=$?
-          if ! grep -Fq 'running 24 tests' "$search_log"; then result=1; fi
-          if ! grep -Fq 'test result: ok. 24 passed; 0 failed;' "$search_log"; then result=1; fi
-          tail -n 40 "$completion_log"
-          tail -n 40 "$search_log"
+          group_number=0
+          for group in storage::catalog::history_composition_tests:: storage::sqlite::history::verified_history_tests::; do
+            group_number=$((group_number+1))
+            output="$RUNNER_TEMP/477-history-group-$group_number.log"
+            expected=3
+            if [ "$group_number" -eq 2 ]; then expected=5; fi
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$group" -- --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$output"; then result=1; fi
+            tail -n 50 "$output"
+          done
           exit "$result"
-      - name: Focused correctness diagnostics (not full qualification)
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+      - name: Real disappearance and deferred custody regressions
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           result=0
           case_number=0
-          for test in \
-            events::store::tests::direct_catalog_history_grants_preserve_only_existing_producer_metadata \
-            catalog::tests::codex_child_pages_use_complete_parent_calls_across_sibling_pages \
-            catalog::tests::codex_child_page_keeps_a_done_parent_context_only \
-            catalog::tests::codex_relation_closure_excludes_unrelated_pending_claude_source \
-            catalog::tests::codex_relation_corrupt_context_after_prefix_is_fatal \
-            catalog::tests::claude_owner_closure_accepts_64_and_refuses_65_during_identity \
-            model::tests::resumable_rich_codex_family_survives_owner_loss_and_late_native_append \
-            model::tests::catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages \
-            model::tests::catalog_runtime_staged_publication_replays_large_incident_relationships \
-            model::tests::staged_agent_messages_match_the_shared_builder_without_duplicate_relations \
-            model::tests::staged_claude_ambiguity_and_received_copy_policy_match_shared_builder \
-            model::tests::staged_identity_reprepares_copy_resume_split_across_source_pages \
-            model::tests::causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence \
-            model::tests::causal_peer_name_does_not_follow_a_reused_cross_harness_key \
-            model::tests::partial_lineage_source_disappearance_preserves_natural_history_context \
-            model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
-            model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
-            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
-            catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key \
-            catalog::tests::semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group \
-            catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
-            catalog::tests::semantic_stage_publishes_summary_and_trace_without_query_recipes \
-            catalog::tests::semantic_stage_summary_overflow_preflights_before_trace_publication \
-            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews \
-            events::store::configured::tests::domain52::presentation_capture_overflow::aggregate_overflow_rolls_back_then_halves_and_rebinds_admission \
-            events::store::configured::tests::domain52::presentation_capture_overflow::stale_wider_oversized_retry_preserves_narrower_hint_and_prior_receipt \
-            events::store::configured::tests::domain52::presentation_capture_overflow::later_oversized_record_keeps_prior_group_receipt_and_continues_same_epoch \
-            events::store::configured::tests::domain52::presentation_capture_overflow::recorded_same_selection_blocks_permuted_oversized_request \
-            events::store::configured::tests::domain52::presentation_capture_overflow::oversized_identity_or_claim_mismatch_does_not_write_a_hint \
-            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_record_refuses_without_a_receipt_or_hint \
-            events::store::configured::tests::domain52::presentation_capture_overflow::overflow_rejects_a_missing_exact_model_receipt \
-            events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_physical_group_keeps_its_receipt_and_stays_pending \
-            native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch \
-            storage::sqlite::source_journal::tests::configured_catalog_pending_selector_respects_large_exclusion_union; do
+          for test in model::tests::partial_lineage_source_disappearance_preserves_natural_history_context model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group catalog::tests::semantic_stage_retains_multisource_history_refs_across_recomposition storage::proof_codec::tests::presentation_manifest_requires_a_valid_catalog_generation catalog::tests::ordinary_empty_catalog_moves_current_receipt_to_history events::store::tests::ordinary_receipt_rejects_missing_or_duplicate_projections_without_mutation catalog::tests::semantic_stage_history_ref_budget_overflow_rolls_back_and_defers; do
             case_number=$((case_number+1))
-            case_log="$RUNNER_TEMP/477-focused-$case_number.log"
-            case_result=0
-            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$case_log" 2>&1 || case_result=$?
-            if ! grep -Fq 'running 1 test' "$case_log"; then case_result=1; fi
-            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log"; then case_result=1; fi
-            echo "CASE number=$case_number name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/477-focused-summary.txt"
-            if [ "$case_result" -ne 0 ]; then result=1; fi
+            output="$RUNNER_TEMP/477-history-case-$case_number.log"
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$output"; then result=1; fi
+            tail -n 55 "$output"
           done
-          python3 - <<'PYSAFE'
-          import os
-          from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP'])
-          with (root / '477-focused-summary.txt').open('a') as out:
-              for path in sorted(root.glob('477-focused-*.log')):
-                  for line in path.open():
-                      if line.startswith(('semantic_relation_merge_structure ', 'semantic_relation_merge_refusal ', 'semantic_relation_record_refusal ', 'staged_first_missing_turn ', 'test result:')):
-                          out.write(path.name + ': ' + line[:1000])
-          PYSAFE
-          cat "$RUNNER_TEMP/477-focused-summary.txt"
           exit "$result"
-      - name: Append continuation proof acceptance and refusal
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+      - name: Exact original History owner grants
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          case_number=0
+          for test in model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable; do
+            case_number=$((case_number+1))
+            output="$RUNNER_TEMP/477-history-auth-$case_number.log"
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$output"; then result=1; fi
+            tail -n 65 "$output"
+          done
+          exit "$result"
+      - name: Formatting
+        id: formatting
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
-          proof_log="$RUNNER_TEMP/477-focused-continuation-proof.log"
-          plan_log="$RUNNER_TEMP/477-focused-append-plan.log"
-          cargo test --locked -p semon-sessions --lib storage::catalog::source_continuation_tests:: -- --nocapture 2>&1 | tee "$proof_log"
-          grep -F 'test result: ok. 4 passed; 0 failed;' "$proof_log"
-          cargo test --locked -p semon-sessions --lib source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture 2>&1 | tee "$plan_log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$plan_log"
-      - name: Shared Claude selector metadata and event-read budgets
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+          cargo fmt --all --check 2>&1 | tee "$RUNNER_TEMP/477-history-format.log"
+      - name: Prepare formatting patch
+        if: ${{ !cancelled() && steps.formatting.outcome == 'failure' }}
+        run: |
+          cargo fmt --all
+          git diff --binary > "$RUNNER_TEMP/477-history-format.patch"
+      - name: Storage boundary
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-native-storage-boundary.py
+      - name: Strict focused Clippy
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
-          selector_log="$RUNNER_TEMP/477-focused-selector-budget.log"
-          cargo test --locked -p semon-sessions --lib model::relation_stage::selector_metadata_tests:: -- --nocapture 2>&1 | tee "$selector_log"
-          grep -F 'test result: ok. 2 passed; 0 failed;' "$selector_log"
-      - name: Retain focused correctness diagnostics
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+          cargo clippy --locked -p semon-sessions --all-targets --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/477-history-clippy.log"
+      - name: Retain exact diagnostic evidence
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: 477-focused-correctness
-          path: ${{ runner.temp }}/477-focused-*
+          name: 477-history-diagnostic
+          path: ${{ runner.temp }}/477-history-*
