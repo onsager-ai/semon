@@ -44,7 +44,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib events::store::configured::tests::domain52::presentation_capture_overflow:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-refusal-overflow.log"
-          grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed;' "$RUNNER_TEMP/477-refusal-overflow.log"
+          grep -F 'test result: ok. 8 passed; 0 failed;' "$RUNNER_TEMP/477-refusal-overflow.log"
       - name: Formatting
         id: formatting
         if: ${{ !cancelled() }}
