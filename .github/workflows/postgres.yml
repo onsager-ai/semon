@@ -54,6 +54,13 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls --no-run 2>&1 | tee "$RUNNER_TEMP/477-compile.log"
+      - name: PostgreSQL empty stage probe and fenced resume
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_semantic_stage_empty_probe_resumes_without_mutation -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-empty-probe.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-empty-probe.log"
       - name: Genuine oversized PostgreSQL owner phase and rollback diagnosis
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash

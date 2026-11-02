@@ -6541,19 +6541,19 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
         "an empty probe resumes the active stage"
     );
     assert_eq!(snapshot(), active, "empty resume retains the original seeds");
-    assert!(matches!(
-        resume.begin_semantic_stage(&[], "mismatched-runtime"),
-        Err(crate::events::StoreError::Configured(
-            crate::storage::StorageError::Conflict
-        ))
-    ));
+    let conflict = crate::events::StoreError::Configured(
+        crate::storage::StorageError::Conflict,
+    )
+    .to_string();
+    assert_eq!(
+        resume.begin_semantic_stage(&[], "mismatched-runtime").unwrap_err().to_string(),
+        conflict,
+    );
     assert_eq!(snapshot(), active, "runtime mismatch leaves the stage unchanged");
-    assert!(matches!(
-        resume.begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime),
-        Err(crate::events::StoreError::Configured(
-            crate::storage::StorageError::Conflict
-        ))
-    ));
+    assert_eq!(
+        resume.begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime).unwrap_err().to_string(),
+        conflict,
+    );
     assert_eq!(snapshot(), active, "seed mismatch leaves the stage unchanged");
 
     let mut successor = EventCache::open_scoped(&options.cache, &options.source).unwrap();
@@ -6577,12 +6577,10 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
     );
     let successor_stage = snapshot();
     assert_eq!(successor_stage.epoch, Some(epoch + 1));
-    assert!(matches!(
-        first.begin_semantic_stage(&[], &runtime),
-        Err(crate::events::StoreError::Configured(
-            crate::storage::StorageError::Conflict
-        ))
-    ));
+    assert_eq!(
+        first.begin_semantic_stage(&[], &runtime).unwrap_err().to_string(),
+        conflict,
+    );
     assert_eq!(
         snapshot(),
         successor_stage,
