@@ -3807,6 +3807,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     use std::io::Write;
     let path = inputs[0].full_path(&options);
+    let path_bytes = path.to_string_lossy().as_bytes().to_vec();
     let append = parent_source_append;
     let raw_store = || {
         crate::storage::postgres::index_store::open(
@@ -3974,6 +3975,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .offset,
         receipt.consumed_bytes
     );
+    let continuation_pending_before_publication = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let row = tx
+                .driver
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)",
+                    &[&namespace.as_str().as_bytes(), &path_bytes],
+                )
+                .map_err(sqlstate::error)?;
+            Ok(row.get::<_, bool>(0))
+        })
+        .unwrap();
+    assert!(
+        continuation_pending_before_publication,
+        "the append cell remains pending until its publication acknowledges it"
+    );
     let index_ahead_key = selected.key.clone();
     let original_hostname = fs::read(&hostname).unwrap();
     let global_before = crate::native_evidence::query_runtime_generation(&options).unwrap();
@@ -4030,6 +4047,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             break ack.1.unwrap();
         }
     };
+    let continuation_pending_after_publication = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let row = tx
+                .driver
+                .query_one(
+                    "SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)",
+                    &[&namespace.as_str().as_bytes(), &path_bytes],
+                )
+                .map_err(sqlstate::error)?;
+            Ok(row.get::<_, bool>(0))
+        })
+        .unwrap();
+    assert!(
+        !continuation_pending_after_publication,
+        "successful publication acknowledges the exact append cell"
+    );
     let next_store = super::super::snapshot::query::QueryCatalog {
         captured: false,
         pool: pool.clone(),

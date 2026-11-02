@@ -592,8 +592,7 @@ pub(in crate::storage::postgres) fn publish(
                     "WITH acknowledged(source_path,evidence) AS (VALUES {values}) \
                      DELETE FROM semon_pg_native_source_continuations c USING acknowledged a \
                      WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 \
-                       AND c.source_path_digest=sha256(a.source_path) \
-                       AND semon_pg_native_key_matches(c.source_path,c.source_path_digest,a.source_path) \
+                       AND c.source_path=a.source_path \
                        AND c.evidence=a.evidence"
                 ),
                 &params,
