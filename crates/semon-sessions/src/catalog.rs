@@ -907,8 +907,9 @@ pub(crate) fn read_page_snapshot_with_search(
         return Err(page_read_error("catalog_version_mismatch", "catalog version").into());
     }
     let publication_blocker = transaction.publication_blocker()?;
-    if request.require_complete && publication_blocker.is_some() {
-        let blocker = publication_blocker.expect("checked publication blocker");
+    if request.require_complete
+        && let Some(blocker) = publication_blocker
+    {
         return Ok(error(
             503,
             blocker.code(),
