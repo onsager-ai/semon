@@ -13948,9 +13948,8 @@ mod tests {
                     )
                     .unwrap();
                 let meta = state.get_mut("meta").unwrap();
-                let marker = rusqlite::types::Value::Text(
-                    "catalog_semantic_group_admission".to_owned(),
-                );
+                let marker =
+                    rusqlite::types::Value::Text("catalog_semantic_group_admission".to_owned());
                 let row = vec![
                     rusqlite::types::Value::Text(namespace.to_owned()),
                     marker.clone(),
@@ -14499,7 +14498,8 @@ mod tests {
             }
 
             #[test]
-            fn one_oversized_record_refuses_without_a_publication_receipt_but_keeps_typed_refusal() {
+            fn one_oversized_record_refuses_without_a_publication_receipt_but_keeps_typed_refusal()
+            {
                 let (f, _, options, _) = model_sources();
                 let options = &options[0];
                 let inputs = inputs(1);
