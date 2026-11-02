@@ -116,12 +116,9 @@ pub(crate) fn semantic_stage_test_publication_blocker(
     control: &PgCancellation,
     generation: &str,
 ) -> Result<Option<crate::storage::catalog::CatalogPublicationBlocker>, super::StorageError> {
-    pool.transaction(
-        namespace,
-        txn::TxnKind::ReadSnapshot,
-        control,
-        |tx| semantic_stage::publication_blocker(tx, generation),
-    )
+    pool.transaction(namespace, txn::TxnKind::ReadSnapshot, control, |tx| {
+        semantic_stage::publication_blocker(tx, generation)
+    })
 }
 
 #[cfg(test)]
