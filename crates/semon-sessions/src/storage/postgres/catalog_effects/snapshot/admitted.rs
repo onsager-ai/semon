@@ -310,6 +310,17 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let admitted: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
         if admitted { Ok(()) } else { unavailable() }
     }
+    fn publication_blocker(
+        &self,
+    ) -> io::Result<Option<crate::storage::catalog::CatalogPublicationBlocker>> {
+        self.require_current()?;
+        let mut tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        super::super::super::semantic_stage::publication_blocker(&mut tx, &self.generation)
+            .map_err(failed)
+    }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         self.require_current()?;
         let value = if key == "catalog_backfill_state" {
