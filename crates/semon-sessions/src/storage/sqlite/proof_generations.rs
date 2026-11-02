@@ -3412,16 +3412,22 @@ pub(crate) fn reconcile_native_observation_owners(
         )
         .map_err(failed)?;
     }
-    // A new Catalog proof does not replace the old exact grant's History
-    // custody. Each physical owner qualifies against its own row digest.
-    if !history_proof_owned && !history_owned && history_capture.is_some() {
+    // Preserve the old exact Catalog grant when its row becomes History,
+    // including when immutable receipts own the observation. Refs alone do
+    // not create a grant: the old producer digest, admission and stream match.
+    if !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
+        let capture = if history_proof_owned {
+            None
+        } else {
+            history_capture.flatten()
+        };
         db.execute(
             "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
-            params![namespace, session_key, digest, admission, stream, history_capture.flatten()],
+            params![namespace, session_key, digest, admission, stream, capture],
         )
         .map_err(failed)?;
-    } else if !history_owned && !history_proof_owned {
+    } else if !history_owned {
         db.execute(
             "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
             params![namespace, session_key],

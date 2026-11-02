@@ -13037,17 +13037,19 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     assert_eq!(paged[2]["text"], "new current answer");
     assert!(!removed.path.exists());
     let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
-    let body_leaks:i64=connection.query_row("SELECT count(*) FROM session_history_slots WHERE instr(metadata,'original cleared prompt')>0 OR instr(metadata,'new current answer')>0",[],|row|row.get(0)).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let namespace = config.namespace.as_str();
+    let body_leaks:i64=connection.query_row("SELECT count(*) FROM session_history_slots WHERE namespace=?1 AND (instr(metadata,'original cleared prompt')>0 OR instr(metadata,'new current answer')>0)",[namespace],|row|row.get(0)).unwrap();
     assert_eq!(body_leaks, 0);
-    let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT metadata FROM session_history_slots WHERE session_key='root' AND slot>=0 AND slot<2 ORDER BY slot",[],|row|row.get(3)).unwrap();
+    let plan:String=connection.query_row("EXPLAIN QUERY PLAN SELECT metadata FROM session_history_slots WHERE namespace=?1 AND session_key='root' AND slot>=0 AND slot<2 ORDER BY slot",[namespace],|row|row.get(3)).unwrap();
     assert!(
         plan.contains("SEARCH session_history_slots USING PRIMARY KEY"),
         "{plan}"
     );
     let ranged = || {
-        let mut query=connection.prepare("SELECT metadata FROM session_history_slots WHERE session_key='root' AND slot>=0 AND slot<2 ORDER BY slot").unwrap();
+        let mut query=connection.prepare("SELECT metadata FROM session_history_slots WHERE namespace=?1 AND session_key='root' AND slot>=0 AND slot<2 ORDER BY slot").unwrap();
         let rows: Vec<String> = query
-            .query_map([], |row| row.get(0))
+            .query_map([namespace], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
@@ -13056,7 +13058,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     let baseline = ranged();
     // Isolate ranged storage work: unrelated retained recipe rows, without
     // native-file discovery or a producer build, grow from zero to 20,000.
-    connection.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_history_slots(session_key,slot,metadata) SELECT 'unrelated-'||printf('%05d',x),0,metadata FROM n,session_history_slots WHERE session_key='root' AND slot=0").unwrap();
+    connection.execute("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20000) INSERT INTO session_history_slots(namespace,session_key,slot,metadata) SELECT namespace,'unrelated-'||printf('%05d',x),0,metadata FROM n,session_history_slots WHERE namespace=?1 AND session_key='root' AND slot=0",[namespace]).unwrap();
     assert_eq!(ranged(), baseline);
     let grown = read();
     assert_eq!(grown["entries"], advanced["entries"]);

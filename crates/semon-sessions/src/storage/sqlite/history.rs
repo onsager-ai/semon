@@ -873,6 +873,78 @@ mod verified_history_tests {
     }
 
     #[test]
+    fn exact_history_receipt_preserves_only_an_existing_local_producer_grant() {
+        let db = composition_db();
+        db.execute_batch(
+            "CREATE TABLE session_catalog(namespace TEXT,session_key TEXT,metadata TEXT,PRIMARY KEY(namespace,session_key));",
+        )
+        .unwrap();
+        let namespace = "local";
+        let admission = 7;
+        let stream = "e".repeat(64);
+        let owner = row("original History");
+        let metadata = serde_json::to_string(&owner).unwrap();
+        let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
+        db.execute(
+            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            rusqlite::params![namespace, owner.key, metadata],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_refs VALUES(?1,?2,'history','exact-receipt')",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_generations VALUES(?1,'exact-receipt',?2,?3,?4,?5)",
+            rusqlite::params![namespace, owner.key, admission, stream, metadata],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants VALUES(?1,?2,'catalog',?3,?4,?5,?6)",
+            rusqlite::params![
+                namespace,
+                owner.key,
+                digest,
+                admission,
+                stream,
+                runtime_capture(&owner)
+            ],
+        )
+        .unwrap();
+        super::super::proof_generations::reconcile_native_observation_owners(
+            &db, namespace, &owner.key, admission, &stream,
+        )
+        .unwrap();
+        let (grant_digest, capture): (String, Option<String>) = db
+            .query_row(
+                "SELECT metadata_digest,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND admission=?3 AND stream=?4",
+                rusqlite::params![namespace, owner.key, admission, stream],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(grant_digest, digest);
+        assert!(capture.is_none(), "the exact receipt owns the observation");
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+        super::super::proof_generations::reconcile_native_observation_owners(
+            &db, namespace, &owner.key, admission, &stream,
+        )
+        .unwrap();
+        let grants: i64 = db
+            .query_row(
+                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+                rusqlite::params![namespace, owner.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grants, 0, "receipt refs cannot recreate local origin");
+    }
+
+    #[test]
     fn retained_history_metadata_overflow_does_not_publish_partial_refs() {
         let mut db = composition_db();
         let namespace = "local";
