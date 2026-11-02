@@ -3166,6 +3166,113 @@ impl SqliteStore {
                 .base_generation()
                 .map_err(publication_storage_failure)?;
             if previous.as_deref() != expected_generation {
+                if semantic.is_none()
+                    && !rows.is_empty()
+                    && publication.observations.is_some()
+                    && !semantic_stage::active(&transaction).map_err(failure)?
+                    && (!preserve_complete
+                        || closed_catalog(&transaction, publication, claims.unwrap_or_default())
+                            .map_err(failure)?)
+                    && let Some(generation) = previous.as_deref()
+                {
+                    let namespace = owner.config().namespace.as_str();
+                    let stream = owner.config().expected_stream_epoch.as_deref().ok_or(
+                        StoreError::Configured(crate::storage::StorageError::ScopeChanged),
+                    )?;
+                    let marker: Option<String> = transaction
+                        .query_row(
+                            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_native_publication'",
+                            [namespace],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(failure)?;
+                    let completeness: Option<String> = transaction
+                        .query_row(
+                            "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_completeness') AND key='catalog_completeness'",
+                            [],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(failure)?;
+                    let expected_completeness = if claims.is_some() && !preserve_complete {
+                        "partial"
+                    } else {
+                        "complete"
+                    };
+                    if marker.as_deref()
+                        == Some(format!("{generation}:{}:{stream}", owner.admission()).as_str())
+                        && completeness.as_deref() == Some(expected_completeness)
+                    {
+                        let source_revision = transaction
+                            .query_row(
+                                "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                                [namespace],
+                                |row| row.get(0),
+                            )
+                            .map_err(failure)?;
+                        let observed_at: String = transaction
+                            .query_row(
+                                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_observed_at') AND key='catalog_observed_at'",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .map_err(failure)?;
+                        let claims_text = serde_json::to_string(&claims)
+                            .map_err(|error| StoreError::Data(error.to_string()))?;
+                        let metadata_text = serde_json::to_string(&metadata)
+                            .map_err(|error| StoreError::Data(error.to_string()))?;
+                        let replay = crate::storage::sqlite::proof_generations::replay_ordinary(
+                            &transaction,
+                            &crate::storage::sqlite::proof_generations::OrdinaryReceipt {
+                                namespace,
+                                admission: owner.admission(),
+                                stream,
+                                base_generation: expected_generation,
+                                source_revision,
+                                claims: &claims_text,
+                                metadata: &metadata_text,
+                            },
+                            crate::storage::sqlite::proof_generations::PresentationInputs {
+                                catalog_generation: generation,
+                                rows,
+                                projections: publication.transcripts,
+                                observations: publication.observations,
+                            },
+                            &metadata,
+                            observed_at
+                                .parse()
+                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?,
+                        )
+                        .map_err(StoreError::Configured)?;
+                        if replay {
+                            for source in rows.iter().flat_map(|row| &row.sources) {
+                                let path = source.path.to_string_lossy();
+                                let pending: bool = transaction
+                                    .query_row(
+                                        "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+                                        [path.as_ref()],
+                                        |row| row.get(0),
+                                    )
+                                    .map_err(failure)?;
+                                let ledger =
+                                    ledger_row(&transaction, path.as_ref()).map_err(failure)?;
+                                if pending
+                                    || !ledger.is_some_and(|(_, ledger)| {
+                                        crate::storage::catalog::source_matches_ledger(
+                                            source, &ledger,
+                                        )
+                                    })
+                                {
+                                    self.semantic_rejection = Some("publication_claim");
+                                    return Ok(Outcome::Conflict);
+                                }
+                            }
+                            published = Some(generation.to_owned());
+                            return Ok(Outcome::Written);
+                        }
+                    }
+                }
                 self.semantic_rejection = Some("publication_generation");
                 return Ok(Outcome::Conflict);
             }
@@ -3816,22 +3923,23 @@ impl SqliteStore {
                 let receipt_publication =
                     crate::storage::sqlite::proof_generations::publish_ordinary(
                         &transaction,
-                        owner.config().namespace.as_str(),
-                        owner.admission(),
-                        stream,
+                        &crate::storage::sqlite::proof_generations::OrdinaryReceipt {
+                            namespace: owner.config().namespace.as_str(),
+                            admission: owner.admission(),
+                            stream,
+                            base_generation: previous.as_deref(),
+                            source_revision,
+                            claims: &claims_text,
+                            metadata: &metadata_text,
+                        },
                         &base,
-                        previous.as_deref(),
-                        source_revision,
-                        &claims_text,
-                        &metadata_text,
                         crate::storage::sqlite::proof_generations::PreparedPresentations {
-                            inputs:
-                                crate::storage::sqlite::proof_generations::PresentationInputs {
-                                    catalog_generation: &generation,
-                                    rows,
-                                    projections: Some(projections),
-                                    observations: Some(observations),
-                                },
+                            inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
+                                catalog_generation: &generation,
+                                rows,
+                                projections: Some(projections),
+                                observations: Some(observations),
+                            },
                             presentations: &captured,
                             overview_budget: &mut history_budget,
                         },
@@ -10194,6 +10302,42 @@ mod tests {
             committed,
             "an exact prepared-source replay preserves the committed receipt state"
         );
+
+        let mut changed_observations = observations.clone();
+        changed_observations.machine_label = Some("different receipt".into());
+        let changed_publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: Some(&projections),
+            observations: Some(&changed_observations),
+        };
+        assert_eq!(
+            batch
+                .publish_catalog_with_generation(
+                    &changed_publication,
+                    Some(&generation),
+                    Some(&claims),
+                    true,
+                    None,
+                )
+                .unwrap(),
+            (Outcome::Conflict, None),
+            "changed observations must not reuse an immutable receipt"
+        );
+        assert_eq!(catalog_state(&batch.connection), committed);
+        assert_eq!(
+            batch
+                .publish_catalog_with_generation(
+                    &publication,
+                    Some(&generation),
+                    Some(&claims[1..]),
+                    true,
+                    None,
+                )
+                .unwrap(),
+            (Outcome::Conflict, None),
+            "changed claims must not reuse an immutable receipt"
+        );
+        assert_eq!(catalog_state(&batch.connection), committed);
 
         assert_eq!(publish(&mut row_wise).unwrap().0, Outcome::Written);
         let key = &rows[0].key;
