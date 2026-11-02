@@ -6333,10 +6333,12 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     ))
     .unwrap();
     let source = crate::storage::HostSource::new(namespace.clone(), "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
     let config = source
         .store_config(crate::storage::StoreBackend::Postgres {
-            pool: crate::storage::postgres::test_fixture_pool(),
-            control: crate::storage::postgres::PgCancellation::default(),
+            pool: pool.clone(),
+            control: control.clone(),
         })
         .unwrap();
     config.create_native_store().unwrap();
@@ -6470,24 +6472,29 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     drop(pg_cache);
 
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-    let mut failure = None;
+    let mut marker_observed = false;
     for _ in 0..1024 {
-        match evidence.refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW) {
-            Ok(true) => panic!("large PostgreSQL fixture unexpectedly claimed Catalog ready"),
-            Ok(false) => {}
-            Err(error) => {
-                failure = Some(error);
-                break;
-            }
+        assert!(!evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap(), "oversized PG stage must remain pending");
+        if crate::storage::postgres::semantic_stage_test_refusal_bytes(
+            &pool,
+            &namespace,
+            &control,
+        )
+        .unwrap()
+        .is_some()
+        {
+            marker_observed = true;
+            break;
         }
     }
     evidence.retire();
-    let error = failure.expect("large PostgreSQL fixture did not reach a refusal");
-    assert_eq!(error.to_string(), "Configured storage is busy.");
+    assert!(marker_observed, "large PostgreSQL fixture did not persist a refusal");
 
     let diagnostic =
         crate::storage::postgres::take_semantic_stage_save_diagnostic(namespace.as_str())
-            .expect("PostgreSQL semantic-stage save recorded the first bounded refusal");
+            .expect("PostgreSQL semantic-stage save recorded the bounded refusal");
     let before = diagnostic
         .before
         .as_ref()
@@ -6495,7 +6502,7 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     let after = diagnostic
         .after
         .as_ref()
-        .expect("diagnostic captured the rolled-back active stage");
+        .expect("diagnostic captured the active stage after marker commit");
     assert!(
         diagnostic.relations >= 720,
         "refusal covers the bidirectional component"
@@ -6509,6 +6516,10 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     assert_eq!(before.path_hash, after.path_hash);
     assert_eq!(before.claims_hash, after.claims_hash);
     assert!(!before.stage_hash.is_empty());
+    assert!(diagnostic.stage_bytes_exceeded);
+    assert!(!diagnostic.path_limit_exceeded);
+    assert!(!diagnostic.endpoint_limit_exceeded);
+    assert!(diagnostic.largest_owner_row_bytes > 1024 * 1024);
     assert!(
         diagnostic.stage_bytes_exceeded
             || diagnostic.path_limit_exceeded
@@ -6516,12 +6527,10 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
         "semantic-stage save reported no exceeded bound"
     );
     eprintln!(
-        "pg_post_ingest_oversized_native_diagnostic phase={} before_phase={} before_epoch={} error_kind={:?} error={} candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
+        "pg_post_ingest_oversized_native_diagnostic phase={} before_phase={} before_epoch={} outcome=Deferred candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
         diagnostic.phase,
         before.phase.as_deref().unwrap_or("absent"),
         before.epoch.unwrap_or_default(),
-        error.kind(),
-        error,
         diagnostic.candidate_stage_bytes,
         diagnostic.paths,
         diagnostic.endpoints,
@@ -6549,6 +6558,139 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
         component_paths.is_subset(&pending),
         "the refused bidirectional component claims remain pending"
     );
+    drop(pg_cache);
+
+    let generation = after.generation.as_deref().expect("prior Catalog head");
+    let marker = crate::storage::postgres::semantic_stage_test_refusal_bytes(
+        &pool,
+        &namespace,
+        &control,
+    )
+    .unwrap()
+    .expect("qualified oversized owner row persisted a refusal marker");
+    assert!(marker.len() <= 4096);
+    let marker_value: Value = serde_json::from_slice(&marker).unwrap();
+    assert_eq!(marker_value["version"], 1);
+    assert_eq!(marker_value["active_phase"], "identity");
+    assert_eq!(marker_value["attempted_phase"], "relations");
+    assert!(marker_value.get("source_path").is_none());
+    assert!(marker_value.get("native_id").is_none());
+    let marker_text = String::from_utf8(marker.clone()).unwrap();
+    assert!(selected_paths.iter().all(|path| !marker_text.contains(path)));
+    assert!(!marker_text.contains("Last admitted Catalog"));
+    assert!(!marker_text.contains(&crate::native_evidence::query_runtime_generation(&options).unwrap()));
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_publication_blocker(
+            &pool,
+            &namespace,
+            &control,
+            generation,
+        )
+        .unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+
+    for field in [
+        "stage_epoch",
+        "active_stage_sha256",
+        "active_claims_sha256",
+        "claims_sha256",
+        "runtime_sha256",
+        "head_sha256",
+        "source_revision",
+        "active_phase",
+    ] {
+        let mut changed = marker_value.clone();
+        match field {
+            "stage_epoch" | "source_revision" => {
+                changed[field] = json!(changed[field].as_i64().unwrap() + 1);
+            }
+            "active_phase" => {
+                changed["active_phase"] = json!("indexing");
+                changed["attempted_phase"] = json!("identity");
+            }
+            "head_sha256" => changed[field] = json!("0".repeat(64)),
+            _ => changed[field] = json!("0".repeat(64)),
+        }
+        let changed = serde_json::to_vec(&changed).unwrap();
+        crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+            &pool,
+            &namespace,
+            &control,
+            &changed,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::storage::postgres::semantic_stage_test_publication_blocker(
+                &pool,
+                &namespace,
+                &control,
+                generation,
+            )
+            .unwrap(),
+            None,
+            "changed {field} fence must expire the blocker"
+        );
+        crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+            &pool,
+            &namespace,
+            &control,
+            &marker,
+        )
+        .unwrap();
+    }
+    let mut corrupt = marker_value.clone();
+    corrupt["unknown"] = json!(true);
+    crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+        &pool,
+        &namespace,
+        &control,
+        &serde_json::to_vec(&corrupt).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::storage::postgres::semantic_stage_test_publication_blocker(
+            &pool,
+            &namespace,
+            &control,
+            generation,
+        ),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
+    crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+        &pool,
+        &namespace,
+        &control,
+        &marker,
+    )
+    .unwrap();
+
+    let page = crate::session_catalog_page(&options, "local", "limit=100");
+    assert_eq!(page.status, 200);
+    let page: Value = serde_json::from_slice(&page.body).unwrap();
+    assert_eq!(page["completeness"]["state"], "partial");
+    assert_eq!(page["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(page["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(page["freshness"], "updating");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["key"], "prior");
+
+    let search = crate::session_catalog_page(&options, "local", "q=prior&limit=100");
+    assert_eq!(search.status, 200);
+    let search: Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(search["completeness"]["state"], "partial");
+    assert_eq!(search["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(search["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(search["items"][0]["key"], "prior");
+
+    let mut complete_request = crate::catalog::Request::parse("limit=100").unwrap();
+    complete_request.require_complete = true;
+    let complete =
+        crate::storage::read_local_catalog_page(&options, "local", &complete_request).unwrap();
+    assert_eq!(complete.status, 503);
+    let complete: Value = serde_json::from_slice(&complete.body).unwrap();
+    assert_eq!(complete["error"]["code"], "publication_too_large");
+    assert_eq!(complete["error"]["retryable"], false);
     let after_page = crate::session_catalog_page(&options, "local", "sid=prior");
     assert_eq!(after_page.status, 200);
     let after_page: Value = serde_json::from_slice(&after_page.body).unwrap();
@@ -6557,6 +6699,26 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
         crate::session_catalog_page(&options, "local", "sid=alpha").status,
         200,
         "unpublished fixture owners remain unavailable"
+    );
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_finish(
+            &pool,
+            &namespace,
+            &control,
+            before.epoch.expect("active stage epoch"),
+        )
+        .unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_refusal_bytes(
+            &pool,
+            &namespace,
+            &control,
+        )
+        .unwrap(),
+        None,
+        "a successful stage mutation clears its stale refusal marker"
     );
 }
 

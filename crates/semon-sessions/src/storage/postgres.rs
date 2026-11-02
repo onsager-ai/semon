@@ -110,6 +110,59 @@ pub(crate) fn semantic_stage_test_snapshot(
 }
 
 #[cfg(test)]
+pub(crate) fn semantic_stage_test_publication_blocker(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+    generation: &str,
+) -> Result<Option<crate::storage::catalog::CatalogPublicationBlocker>, super::StorageError> {
+    pool.transaction(
+        namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| semantic_stage::publication_blocker(tx, generation),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_stage_test_refusal_bytes(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+) -> Result<Option<Vec<u8>>, super::StorageError> {
+    pool.transaction(
+        namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        semantic_stage::test_refusal_bytes,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_stage_test_write_refusal_bytes(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+    bytes: &[u8],
+) -> Result<(), super::StorageError> {
+    pool.transaction(namespace, txn::TxnKind::Write, control, |tx| {
+        semantic_stage::test_write_refusal_bytes(tx, bytes)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_stage_test_finish(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+    epoch: i64,
+) -> Result<crate::events::Outcome, super::StorageError> {
+    pool.transaction(namespace, txn::TxnKind::Write, control, |tx| {
+        semantic_stage::finish(tx, epoch)
+    })
+}
+
+#[cfg(test)]
 mod native_ingest_tests;
 
 #[cfg(test)]

@@ -168,7 +168,7 @@ impl IndexStore for NativeIndex {
                 super::semantic_stage::record(tx, batch, prepared)
             });
         #[cfg(test)]
-        if result.is_err() {
+        if result.is_err() || matches!(&result, Ok(Outcome::Deferred)) {
             super::semantic_stage::capture_after_refusal(
                 &self.pool,
                 &self.namespace,
