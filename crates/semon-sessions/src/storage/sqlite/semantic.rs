@@ -179,25 +179,25 @@ fn agent_tool_use_ids(
 /// Select the exact Claude Agent call for every loaded Agent source. Each
 /// call owner can itself be an Agent, so keep adding its own call source until
 /// the canonical call chain is closed.
-fn relation_spawn_call_context(
-    db: &Connection,
-    namespace: &str,
-    physical: &(
-         impl crate::events::store::semantic_stage::ContextPort
-         + crate::events::store::semantic_stage::OwnerClosurePort
-     ),
-    epoch: i64,
-    used: &mut usize,
-    budget: &mut RelationPageReadBudget,
-    mut loaded_paths: std::collections::BTreeSet<String>,
-    preloaded: &std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
-) -> rusqlite::Result<(
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
-    std::collections::BTreeMap<String, Option<crate::model::relation_stage::Location>>,
-)> {
+fn relation_spawn_call_context<Physical>(
+    request: RelationSpawnCallInput<'_, Physical>,
+) -> rusqlite::Result<RelationSpawnCallResult>
+where
+    Physical: crate::events::store::semantic_stage::ContextPort
+        + crate::events::store::semantic_stage::OwnerClosurePort,
+{
     use crate::model::relation_stage::{Selector, select_with};
 
+    let RelationSpawnCallInput {
+        db,
+        namespace,
+        physical,
+        epoch,
+        used,
+        budget,
+        mut loaded_paths,
+        preloaded,
+    } = request;
     if loaded_paths.len() > RELATION_OUTPUT_LIMIT {
         return Err(crate::events::store::semantic_stage::context_budget());
     }
@@ -257,7 +257,7 @@ fn relation_spawn_call_context(
 
             let mut frontier = closure;
             while !frontier.is_empty() {
-                let frontier_paths = frontier.iter().cloned().collect::<Vec<_>>();
+                let frontier_paths = frontier.to_vec();
                 let context = crate::events::store::semantic_stage::context_with_budget(
                     physical,
                     &frontier_paths,
@@ -318,7 +318,11 @@ fn relation_spawn_call_context(
     }
 
     endpoints.retain(|key, _| !preloaded.contains_key(key));
-    Ok((paths, endpoints, claude_call_locations))
+    Ok(RelationSpawnCallResult {
+        paths,
+        endpoints,
+        claude_call_locations,
+    })
 }
 
 struct RelationPage {
@@ -334,6 +338,24 @@ struct RelationPage {
 struct RelationPageReadBudget {
     metadata_reads: usize,
     metadata_bytes: usize,
+}
+
+struct RelationSpawnCallInput<'a, Physical> {
+    db: &'a Connection,
+    namespace: &'a str,
+    physical: &'a Physical,
+    epoch: i64,
+    used: &'a mut usize,
+    budget: &'a mut RelationPageReadBudget,
+    loaded_paths: std::collections::BTreeSet<String>,
+    preloaded: &'a std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+}
+
+struct RelationSpawnCallResult {
+    paths: std::collections::BTreeSet<String>,
+    endpoints: std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+    claude_call_locations:
+        std::collections::BTreeMap<String, Option<crate::model::relation_stage::Location>>,
 }
 
 struct RelationScope {
@@ -4555,26 +4577,27 @@ impl Stage {
                 companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
                 let mut loaded_paths = companions.clone();
                 loaded_paths.extend(paths.iter().cloned());
-                let (spawn_paths, spawn_endpoints, call_locations) =
-                    match relation_spawn_call_context(
-                        &tx,
-                        ns,
-                        &physical,
-                        epoch,
-                        &mut relation_context_bytes,
-                        &mut relation_read_budget,
-                        loaded_paths,
-                        &context.endpoints,
-                    ) {
-                        Ok(spawn_context) => spawn_context,
-                        Err(source_error) if relation_context_budget_error(&source_error) => {
-                            return Err(refuse("semantic_source_budget"));
-                        }
-                        Err(source_error) => return Err(error(source_error)),
-                    };
-                companions.extend(spawn_paths);
-                context.endpoints.extend(spawn_endpoints);
-                context.claude_call_locations.extend(call_locations);
+                let spawn_context = match relation_spawn_call_context(RelationSpawnCallInput {
+                    db: &tx,
+                    namespace: ns,
+                    physical: &physical,
+                    epoch,
+                    used: &mut relation_context_bytes,
+                    budget: &mut relation_read_budget,
+                    loaded_paths,
+                    preloaded: &context.endpoints,
+                }) {
+                    Ok(spawn_context) => spawn_context,
+                    Err(source_error) if relation_context_budget_error(&source_error) => {
+                        return Err(refuse("semantic_source_budget"));
+                    }
+                    Err(source_error) => return Err(error(source_error)),
+                };
+                companions.extend(spawn_context.paths);
+                context.endpoints.extend(spawn_context.endpoints);
+                context
+                    .claude_call_locations
+                    .extend(spawn_context.claude_call_locations);
                 // Sender sources carry their exact claims and context, while
                 // this receipt page remains the only relation cursor.
                 paths = vec![selected.clone()];
