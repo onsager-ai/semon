@@ -12015,8 +12015,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
                 |row| row.get(0),
             )
             .unwrap();
-        let current: crate::model::summary::CatalogRow =
-            serde_json::from_str(&metadata).unwrap();
+        let current: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
         assert_eq!(current.sources.len(), 2);
         let slots = db
             .prepare(
@@ -12034,11 +12033,8 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         let missing_source_slots = slots
             .iter()
             .filter(|text| {
-                let slot: crate::slot_projection::SavedSlot =
-                    serde_json::from_str(text).unwrap();
-                slot.source_paths()
-                    .iter()
-                    .any(|path| *path == &first_copy)
+                let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text).unwrap();
+                slot.source_paths().contains(&&first_copy)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -12055,7 +12051,30 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert!(!refs.is_empty(), "the real Current publication must own receipts");
+        assert!(
+            !refs.is_empty(),
+            "the real Current publication must own receipts"
+        );
+        let receipt: (String, Option<i64>, String, String) = db
+            .query_row(
+                "SELECT g.publication,p.epoch,g.proof,p.proof_digest FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='current' ORDER BY r.id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt.1, None, "ordinary receipts have no Stage epoch");
+        assert_eq!(receipt.2, receipt.3);
+        let catalog_generation: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            receipt.0, catalog_generation,
+            "the receipt identity also binds its projection and presentation"
+        );
         (slots, missing_source_slots, refs)
     };
 
@@ -12219,10 +12238,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         .unwrap();
     tx.commit().unwrap();
     assert_eq!(repeated_grant.0, repeated_digest);
-    assert_eq!(
-        repeated_grant.1,
-        i64::try_from(runtime.admission).unwrap()
-    );
+    assert_eq!(repeated_grant.1, i64::try_from(runtime.admission).unwrap());
     assert_eq!(repeated_grant.2, runtime.stream_epoch);
 }
 
