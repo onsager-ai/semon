@@ -1426,7 +1426,8 @@ impl ReductionStore for UnboundReduction<'_> {
         if ambiguous {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        c.execute("UPDATE catalog_semantic_endpoints SET parent_key=COALESCE((SELECT session_key FROM catalog_semantic_native n WHERE n.harness=COALESCE(catalog_semantic_endpoints.parent_native_harness,catalog_semantic_endpoints.harness) AND n.native_id=catalog_semantic_endpoints.parent_native),parent_key),parent_resolved=1,family_cost=cost WHERE session_key=?1",[key])?;
+        // Keep the producer-resolved parent; native identity fills gaps.
+        c.execute("UPDATE catalog_semantic_endpoints SET parent_key=COALESCE(parent_key,(SELECT session_key FROM catalog_semantic_native n WHERE n.harness=COALESCE(catalog_semantic_endpoints.parent_native_harness,catalog_semantic_endpoints.harness) AND n.native_id=catalog_semantic_endpoints.parent_native)),parent_resolved=1,family_cost=cost WHERE session_key=?1",[key])?;
         c.execute("UPDATE catalog_semantic_endpoints SET root_key=CASE WHEN parent_key IS NULL OR NOT EXISTS(SELECT 1 FROM catalog_semantic_endpoints p WHERE p.session_key=catalog_semantic_endpoints.parent_key) THEN session_key ELSE (SELECT root_key FROM catalog_semantic_endpoints p WHERE p.session_key=catalog_semantic_endpoints.parent_key) END WHERE session_key=?1",[key])?;
         c.execute("UPDATE catalog_semantic_paths SET root_key=(SELECT root_key FROM catalog_semantic_endpoints WHERE session_key=?1) WHERE session_key=?1",[key])?;
         c.execute("UPDATE catalog_semantic_endpoints SET children_pending=children_pending+1 WHERE session_key=(SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key=?1)",[key])?;
@@ -3149,6 +3150,38 @@ mod tests {
         )
         .unwrap();
         db
+    }
+
+    #[test]
+    fn unbound_parent_reduction_preserves_explicit_model_parent() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE catalog_semantic_endpoints(session_key TEXT PRIMARY KEY,harness TEXT,parent_native TEXT,parent_native_harness TEXT,parent_key TEXT,root_key TEXT,cost REAL,family_cost REAL,parent_resolved INTEGER DEFAULT 0,children_pending INTEGER DEFAULT 0);
+             CREATE TABLE catalog_semantic_native(harness TEXT,native_id TEXT,session_key TEXT);
+             CREATE TABLE catalog_semantic_paths(session_key TEXT,root_key TEXT,path TEXT);",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO catalog_semantic_endpoints VALUES('lead','claude',NULL,NULL,NULL,'lead',1,1,1,0),('mid','claude',NULL,NULL,NULL,'mid',1,1,1,0),('leaf','claude','lead','claude','mid',NULL,1,1,0,0)",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO catalog_semantic_native VALUES('claude','lead','lead')",
+            [],
+        )
+        .unwrap();
+
+        UnboundReduction(&db).parent("leaf").unwrap();
+
+        let parent: String = db
+            .query_row(
+                "SELECT parent_key FROM catalog_semantic_endpoints WHERE session_key='leaf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, "mid");
     }
 
     fn add_physical_owner_input(

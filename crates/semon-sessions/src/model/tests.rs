@@ -10573,7 +10573,11 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
         expected_page.contains(&nested_relay.id),
         "matching send and receipt select the leaf-to-mid relay"
     );
-    assert_eq!(expected_page.len(), 2, "the exact batch selects both relations");
+    assert_eq!(
+        expected_page.len(),
+        2,
+        "the exact batch selects both relations"
+    );
 
     let inputs_for = |paths: &[String]| {
         paths

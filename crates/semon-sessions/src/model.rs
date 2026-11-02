@@ -5484,74 +5484,70 @@ impl<'a> Builder<'a> {
         saved: Option<&crate::slot_projection::Projection>,
     ) -> Value {
         let prompt_fields = std::cell::RefCell::new(BTreeMap::new());
-        let decorate = |mut recipe: Value,
-                        source_file: Option<&SourceFile>,
-                        is_prompt_record: bool| {
-            let kind = recipe["kind"].as_str().unwrap_or("");
-            let field = saved
-                .into_iter()
-                .flat_map(|saved| &saved.slots)
-                .find_map(|slot| {
-                    let field = slot.field.as_ref()?;
-                    (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
-                        && Some(field.record_offset) == recipe["offset"].as_u64()
-                        && Some(u64::from(field.block)) == recipe["block"].as_u64()
-                        && matches!(
-                            (kind, field.kind),
-                            (
-                                "assistant" | "prompt" | "trace_prompt",
-                                crate::native_field::NativeFieldKind::Text
-                            ) | (
-                                "tool_result",
-                                crate::native_field::NativeFieldKind::ClaudeResult
-                                    | crate::native_field::NativeFieldKind::CodexResult
-                                    | crate::native_field::NativeFieldKind::CodexResultObject
-                            )
-                        ))
-                    .then_some(field)
-                })
-                .cloned()
-                .or_else(|| {
-                    if self.history_records.is_some()
-                        || kind != "prompt"
-                        || !is_prompt_record
-                    {
-                        return None;
-                    }
-                    let source_file = source_file?;
-                    let path = recipe["path"].as_str()?;
-                    let offset = recipe["offset"].as_u64()?;
-                    let block = u32::try_from(recipe["block"].as_u64()?).ok()?;
-                    if source_file.path.to_str()? != path {
-                        return None;
-                    }
-                    let source = summary::source(source_file);
-                    let key = (source.path.clone(), offset, block);
-                    let mut fields = prompt_fields.borrow_mut();
-                    fields
-                        .entry(key)
-                        .or_insert_with(|| {
-                            crate::native_field::capture_with_record(
-                                offset,
-                                block,
-                                &crate::slot_projection::Recipe::U,
-                                |at| {
-                                    crate::native_field::read_source_record(
-                                        &source,
-                                        at,
-                                        Some(self.records),
-                                    )
-                                },
-                            )
-                            .0
-                        })
-                        .clone()
-                });
-            if let Some(field) = field {
-                recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
-            }
-            recipe
-        };
+        let decorate =
+            |mut recipe: Value, source_file: Option<&SourceFile>, is_prompt_record: bool| {
+                let kind = recipe["kind"].as_str().unwrap_or("");
+                let field = saved
+                    .into_iter()
+                    .flat_map(|saved| &saved.slots)
+                    .find_map(|slot| {
+                        let field = slot.field.as_ref()?;
+                        (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
+                            && Some(field.record_offset) == recipe["offset"].as_u64()
+                            && Some(u64::from(field.block)) == recipe["block"].as_u64()
+                            && matches!(
+                                (kind, field.kind),
+                                (
+                                    "assistant" | "prompt" | "trace_prompt",
+                                    crate::native_field::NativeFieldKind::Text
+                                ) | (
+                                    "tool_result",
+                                    crate::native_field::NativeFieldKind::ClaudeResult
+                                        | crate::native_field::NativeFieldKind::CodexResult
+                                        | crate::native_field::NativeFieldKind::CodexResultObject
+                                )
+                            ))
+                        .then_some(field)
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        if self.history_records.is_some() || kind != "prompt" || !is_prompt_record {
+                            return None;
+                        }
+                        let source_file = source_file?;
+                        let path = recipe["path"].as_str()?;
+                        let offset = recipe["offset"].as_u64()?;
+                        let block = u32::try_from(recipe["block"].as_u64()?).ok()?;
+                        if source_file.path.to_str()? != path {
+                            return None;
+                        }
+                        let source = summary::source(source_file);
+                        let key = (source.path.clone(), offset, block);
+                        let mut fields = prompt_fields.borrow_mut();
+                        fields
+                            .entry(key)
+                            .or_insert_with(|| {
+                                crate::native_field::capture_with_record(
+                                    offset,
+                                    block,
+                                    &crate::slot_projection::Recipe::U,
+                                    |at| {
+                                        crate::native_field::read_source_record(
+                                            &source,
+                                            at,
+                                            Some(self.records),
+                                        )
+                                    },
+                                )
+                                .0
+                            })
+                            .clone()
+                    });
+                if let Some(field) = field {
+                    recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
+                }
+                recipe
+            };
         let recipe = |at: Ref, kind: &str| {
             let file = &self.files[at.0];
             let found = event(self.files, at);
