@@ -1475,6 +1475,11 @@ fn rebind_publication_group_hint(
         && !current.3
     {
         hint.epoch = new_epoch;
+        if let Some(refusal) = hint.refusal.as_mut()
+            && refusal.epoch == old_epoch
+        {
+            refusal.epoch = new_epoch;
+        }
         write_publication_group_hint(db, ns, &hint)?;
     } else {
         clear_publication_group_hint(db, ns).map_err(error)?;
