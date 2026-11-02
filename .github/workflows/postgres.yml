@@ -123,7 +123,7 @@ jobs:
             END LOOP;
             IF found_schema IS NULL THEN RAISE EXCEPTION '110-session pagination fixture not found'; END IF;
           END $$;
-          SELECT current_setting('semon.plan_schema') AS fixture_schema \\gset
+          SELECT current_setting('semon.plan_schema') AS fixture_schema \gset
           SELECT set_config('search_path',:'fixture_schema',false);
           """)
           print("SELECT encode(namespace,'hex') AS ns,encode(generation,'hex') AS generation FROM semon_pg_native_catalog_search_documents WHERE convert_from(namespace,'UTF8') LIKE 'pg-page-batches-%' GROUP BY namespace,generation HAVING count(*)=220 LIMIT 1 \\gset")
