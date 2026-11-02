@@ -1926,9 +1926,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         append_prefix_body, expected_bodies[&appended_key]["body"],
         "isolated SQLite prefix agrees with the full-source oracle"
     );
-    // Keep the full response for whole-JSON parity below. The retained-history
-    // check itself uses the explicitly scoped range API and a saved source prefix.
-    let append_history_body = append_prefix_body.clone();
+    // The retained-history check uses the explicitly scoped range API and a saved source prefix.
     struct SavedPrefix(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
     impl crate::SessionSourceReader for SavedPrefix {
         fn read_range(
@@ -2184,6 +2182,97 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     drop(append_successor_query);
     drop(append_oracle_query);
     drop(append_oracle_cache);
+
+    // Independently repeat the append with a durable continuation, matching PG's
+    // trust input while leaving the proof-absent custody assertions above intact.
+    let mut trusted_options = options.clone();
+    let trusted_root = oracle.root.join("oracle-trusted-append");
+    trusted_options.claude_home = trusted_root.join("claude");
+    trusted_options.codex_home = trusted_root.join("codex");
+    trusted_options.copilot_home = trusted_root.join("copilot");
+    trusted_options.cache = trusted_root.join("index.sqlite3");
+    for input in crate::inputs::inputs(&options).unwrap() {
+        let destination = input.full_path(&trusted_options);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(input.full_path(&options), destination).unwrap();
+    }
+    let mut trusted_cache =
+        EventCache::open_scoped(&trusted_options.cache, &trusted_options.source).unwrap();
+    let trusted_prefix = crate::model::prepare_sources(
+        &trusted_options,
+        &mut trusted_cache,
+        &inputs,
+        1790812802000,
+    )
+    .unwrap();
+    trusted_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &trusted_prefix.rows,
+                transcripts: Some(&trusted_prefix.transcripts),
+                observations: trusted_prefix.presentation_observations(),
+            },
+            trusted_prefix.base_generation.as_deref(),
+        )
+        .unwrap()
+        .expect("SQLite trusted prefix generation");
+    let trusted_path = inputs[0].full_path(&trusted_options);
+    let trusted_path_text = trusted_path.to_string_lossy().into_owned();
+    let ledger = trusted_cache
+        .stored_ledger_batch(std::slice::from_ref(&trusted_path_text))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect("SQLite trusted prefix ledger");
+    assert_eq!(ledger.stat.size, raw[0].len() as u64);
+    let trusted_generation = crate::source_change::stat_generation(&ledger.stat).unwrap();
+    let trusted_writer = crate::SessionSourceWrite::begin(
+        &trusted_options,
+        &inputs[0],
+        Some(&trusted_generation),
+        ledger.stat.size,
+    )
+    .unwrap();
+    assert!(trusted_writer.intent().continuation.is_some());
+    let mut trusted_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&trusted_path)
+        .unwrap();
+    trusted_file.write_all(source_append.as_bytes()).unwrap();
+    trusted_file.sync_all().unwrap();
+    drop(trusted_file);
+    trusted_writer
+        .complete(ledger.stat.size + source_append.len() as u64)
+        .unwrap();
+    let trusted_successor = crate::model::prepare_sources(
+        &trusted_options,
+        &mut trusted_cache,
+        &inputs,
+        1790812803000,
+    )
+    .unwrap();
+    trusted_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &trusted_successor.rows,
+                transcripts: Some(&trusted_successor.transcripts),
+                observations: trusted_successor.presentation_observations(),
+            },
+            trusted_successor.base_generation.as_deref(),
+        )
+        .unwrap()
+        .expect("SQLite trusted successor generation");
+    let mut trusted_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(recent_machine.into(), trusted_options.clone())]),
+    ));
+    let append_history_body = trusted_query
+        .call_at(
+            "read_transcript",
+            &serde_json::json!({"id":appended_key,"limit":100}),
+            1790812803000,
+        )
+        .expect("SQLite trusted successor History body");
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
@@ -4080,10 +4169,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert!(
         next_bodies[&appended_key]["body"] == append_history_body,
         "PG History-selected body must match SQLite after the same append"
-    );
-    assert_eq!(
-        next_bodies[&appended_key]["body"], expected_bodies[&appended_key]["body"],
-        "PG History-selected body must preserve the original exact prefix"
     );
     assert_eq!(
         next_bodies[&appended_key]["fields"], expected_bodies[&appended_key]["fields"],
