@@ -12,7 +12,218 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+use std::sync::{Mutex, OnceLock};
+
 const MAX: usize = 1024 * 1024;
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct StageSnapshot {
+    pub(crate) generation: Option<String>,
+    pub(crate) epoch: Option<i64>,
+    pub(crate) phase: Option<String>,
+    pub(crate) paths: usize,
+    pub(crate) claims: usize,
+    pub(crate) stage_hash: Vec<u8>,
+    pub(crate) path_hash: Vec<u8>,
+    pub(crate) claims_hash: Vec<u8>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub(crate) struct SaveDiagnostic {
+    pub(crate) phase: String,
+    pub(crate) candidate_stage_bytes: usize,
+    pub(crate) paths: usize,
+    pub(crate) endpoints: usize,
+    pub(crate) relations: usize,
+    pub(crate) largest_owner_row_bytes: usize,
+    pub(crate) largest_owner_witness_bytes: usize,
+    pub(crate) model_witness_bytes: usize,
+    pub(crate) stage_bytes_exceeded: bool,
+    pub(crate) path_limit_exceeded: bool,
+    pub(crate) endpoint_limit_exceeded: bool,
+    pub(crate) before: Option<StageSnapshot>,
+    pub(crate) after: Option<StageSnapshot>,
+}
+
+#[cfg(test)]
+static SAVE_DIAGNOSTICS: OnceLock<Mutex<std::collections::HashMap<String, SaveDiagnostic>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn take_save_diagnostic(namespace: &str) -> Option<SaveDiagnostic> {
+    SAVE_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(namespace)
+}
+
+#[cfg(test)]
+fn save_diagnostic(
+    namespace: &str,
+    stage: &Stage,
+    candidate_stage_bytes: usize,
+    stage_bytes_exceeded: bool,
+    path_limit_exceeded: bool,
+    endpoint_limit_exceeded: bool,
+) {
+    let largest_owner_row_bytes = stage
+        .context
+        .endpoints
+        .values()
+        .map(|endpoint| serde_json::to_vec(&endpoint.row).map_or(0, |bytes| bytes.len()))
+        .chain(
+            stage
+                .context
+                .prior_owners
+                .values()
+                .chain(stage.context.retired_owners.iter())
+                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
+        )
+        .max()
+        .unwrap_or_default();
+    let largest_owner_witness_bytes = stage
+        .context
+        .endpoints
+        .values()
+        .map(|endpoint| serde_json::to_vec(endpoint).map_or(0, |bytes| bytes.len()))
+        .chain(
+            stage
+                .context
+                .prior_owners
+                .values()
+                .chain(stage.context.retired_owners.iter())
+                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
+        )
+        .max()
+        .unwrap_or_default();
+    let diagnostic = SaveDiagnostic {
+        phase: format!("{:?}", stage.phase),
+        candidate_stage_bytes,
+        paths: stage.paths.len(),
+        endpoints: stage.context.endpoints.len(),
+        relations: stage.context.relations.len(),
+        largest_owner_row_bytes,
+        largest_owner_witness_bytes,
+        model_witness_bytes: stage.model.as_ref().map_or(0, String::len),
+        stage_bytes_exceeded,
+        path_limit_exceeded,
+        endpoint_limit_exceeded,
+        before: None,
+        after: None,
+    };
+    SAVE_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(namespace.to_owned(), diagnostic);
+}
+
+#[cfg(test)]
+fn stage_snapshot(generation: Option<String>, stage: Option<&Stage>) -> StageSnapshot {
+    let mut path_hash = Sha256::new();
+    let mut claims_hash = Sha256::new();
+    if let Some(stage) = stage {
+        let stage_hash = serde_json::to_vec(stage)
+            .map_or_else(|_| Vec::new(), |bytes| Sha256::digest(bytes).to_vec());
+        for path in &stage.paths {
+            path_hash.update((path.len() as u64).to_be_bytes());
+            path_hash.update(path.as_bytes());
+        }
+        for (path, claim) in &stage.claims {
+            claims_hash.update((path.len() as u64).to_be_bytes());
+            claims_hash.update(path.as_bytes());
+            match claim {
+                Some(claim) => {
+                    claims_hash.update([1]);
+                    claims_hash.update(claim.to_be_bytes());
+                }
+                None => claims_hash.update([0]),
+            }
+        }
+        StageSnapshot {
+            generation,
+            epoch: Some(stage.epoch),
+            phase: Some(format!("{:?}", stage.phase)),
+            paths: stage.paths.len(),
+            claims: stage.claims.len(),
+            stage_hash,
+            path_hash: path_hash.finalize().to_vec(),
+            claims_hash: claims_hash.finalize().to_vec(),
+        }
+    } else {
+        StageSnapshot {
+            generation,
+            epoch: None,
+            phase: None,
+            paths: 0,
+            claims: 0,
+            stage_hash: Vec::new(),
+            path_hash: path_hash.finalize().to_vec(),
+            claims_hash: claims_hash.finalize().to_vec(),
+        }
+    }
+}
+
+#[cfg(test)]
+fn record_owner_sizes(
+    namespace: &str,
+    prepared: &PreparedSources,
+    before: StageSnapshot,
+) {
+    let largest_owner_row_bytes = prepared
+        .rows
+        .iter()
+        .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len()))
+        .max()
+        .unwrap_or_default();
+    let model_witness_bytes = prepared
+        .staged_model_witness()
+        .map_or(0, |witness| witness.len());
+    let mut diagnostics = SAVE_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(diagnostic) = diagnostics.get_mut(namespace) {
+        diagnostic.largest_owner_row_bytes =
+            diagnostic.largest_owner_row_bytes.max(largest_owner_row_bytes);
+        diagnostic.model_witness_bytes = model_witness_bytes;
+        diagnostic.before = Some(before);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn capture_after_refusal(
+    pool: &super::PgPool,
+    namespace: &crate::storage::LogicalSourceNamespace,
+    control: &super::PgCancellation,
+) {
+    let has_diagnostic = SAVE_DIAGNOSTICS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains_key(namespace.as_str());
+    if !has_diagnostic {
+        return;
+    }
+    let after = pool.transaction(namespace, super::txn::TxnKind::ReadSnapshot, control, |tx| {
+        let generation = model_cache::generation(tx)?;
+        let stage = load(tx, true)?;
+        Ok(stage_snapshot(generation, stage.as_ref()))
+    });
+    if let Ok(after) = after {
+        let mut diagnostics = SAVE_DIAGNOSTICS
+            .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(diagnostic) = diagnostics.get_mut(namespace.as_str()) {
+            diagnostic.after = Some(after);
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,7 +291,19 @@ fn load_epoch(
 
 fn save(tx: &mut PgTxn<'_>, stage: &Stage, insert: bool) -> Result<(), StorageError> {
     let bytes = serde_json::to_vec(stage).map_err(|_| StorageError::Unavailable)?;
-    if bytes.len() > MAX || stage.paths.len() > 64 || stage.context.endpoints.len() > 64 {
+    let stage_bytes_exceeded = bytes.len() > MAX;
+    let path_limit_exceeded = stage.paths.len() > 64;
+    let endpoint_limit_exceeded = stage.context.endpoints.len() > 64;
+    if stage_bytes_exceeded || path_limit_exceeded || endpoint_limit_exceeded {
+        #[cfg(test)]
+        save_diagnostic(
+            tx.namespace.as_str(),
+            stage,
+            bytes.len(),
+            stage_bytes_exceeded,
+            path_limit_exceeded,
+            endpoint_limit_exceeded,
+        );
         return Err(StorageError::Busy);
     }
     let hash = Sha256::digest(&bytes).to_vec();
@@ -357,6 +580,8 @@ pub(super) fn record(
 ) -> Result<Outcome, StorageError> {
     let revision = lock(tx)?;
     let mut stage = checked(tx, batch)?;
+    #[cfg(test)]
+    let before_state = stage_snapshot(stage.generation.clone(), Some(&stage));
     claims(tx, batch, prepared)?;
     if batch.phase != Phase::Indexing && prepared.claims != stage.claims {
         return Err(StorageError::Conflict);
@@ -434,7 +659,12 @@ pub(super) fn record(
         Phase::Publication => unreachable!(),
     };
     stage.revision = revision;
-    save(tx, &stage, false)?;
+    let saved = save(tx, &stage, false);
+    #[cfg(test)]
+    if matches!(&saved, Err(StorageError::Busy)) {
+        record_owner_sizes(tx.namespace.as_str(), prepared, before_state);
+    }
+    saved?;
     Ok(Outcome::Written)
 }
 

@@ -6320,6 +6320,162 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     assert_eq!(complete["error"]["retryable"], false);
 }
 
+#[cfg(feature = "postgres")]
+#[test]
+fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-oversized-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "d".repeat(64)).unwrap();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: crate::storage::postgres::test_fixture_pool(),
+            control: crate::storage::postgres::PgCancellation::default(),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+
+    home.top(
+        "prior",
+        &[human("prior", ts(5, 0), "Last admitted Catalog")],
+    );
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    let mut prior_complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            prior_complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(prior_complete, "prior PostgreSQL Catalog did not complete");
+
+    let prior_page = crate::session_catalog_page(&options, "local", "sid=prior");
+    assert_eq!(prior_page.status, 200);
+    let prior_page: Value = serde_json::from_slice(&prior_page.body).unwrap();
+    let prior_item = prior_page["items"][0].clone();
+    assert_eq!(prior_item["key"], "prior");
+
+    write_bidirectional_message_page_fixture(&home, 360);
+    let inputs = crate::inputs(&options).unwrap();
+    let prior_path = options
+        .claude_home
+        .join("projects/-work-proj/prior.jsonl");
+    let selected_inputs = inputs
+        .iter()
+        .filter(|input| input.full_path(&options) != prior_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(selected_inputs.len(), 72);
+
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    let mut failure = None;
+    for _ in 0..1024 {
+        match evidence.refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW) {
+            Ok(true) => panic!("large PostgreSQL fixture unexpectedly claimed Catalog ready"),
+            Ok(false) => {}
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    evidence.retire();
+    let error = failure.expect("large PostgreSQL fixture did not reach a refusal");
+    assert_eq!(error.to_string(), "Configured storage is busy.");
+
+    let diagnostic = crate::storage::postgres::take_semantic_stage_save_diagnostic(
+        namespace.as_str(),
+    )
+    .expect("PostgreSQL semantic-stage save recorded the first bounded refusal");
+    let before = diagnostic
+        .before
+        .as_ref()
+        .expect("diagnostic captured the active stage before the failed record");
+    let after = diagnostic
+        .after
+        .as_ref()
+        .expect("diagnostic captured the rolled-back active stage");
+    assert!(diagnostic.relations >= 720, "refusal covers the bidirectional component");
+    assert_eq!(before.generation, after.generation);
+    assert_eq!(before.epoch, after.epoch);
+    assert_eq!(before.phase, after.phase);
+    assert_eq!(before.paths, after.paths);
+    assert_eq!(before.claims, after.claims);
+    assert_eq!(before.stage_hash, after.stage_hash);
+    assert_eq!(before.path_hash, after.path_hash);
+    assert_eq!(before.claims_hash, after.claims_hash);
+    assert!(!before.stage_hash.is_empty());
+    assert!(
+        diagnostic.stage_bytes_exceeded
+            || diagnostic.path_limit_exceeded
+            || diagnostic.endpoint_limit_exceeded,
+        "semantic-stage save reported no exceeded bound"
+    );
+    eprintln!(
+        "pg_oversized_native_diagnostic phase={} before_phase={} before_epoch={} error_kind={:?} error={} candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
+        diagnostic.phase,
+        before.phase.as_deref().unwrap_or("absent"),
+        before.epoch.unwrap_or_default(),
+        error.kind(),
+        error,
+        diagnostic.candidate_stage_bytes,
+        diagnostic.paths,
+        diagnostic.endpoints,
+        diagnostic.relations,
+        diagnostic.largest_owner_row_bytes,
+        diagnostic.largest_owner_witness_bytes,
+        diagnostic.model_witness_bytes,
+        diagnostic.stage_bytes_exceeded,
+        diagnostic.path_limit_exceeded,
+        diagnostic.endpoint_limit_exceeded,
+    );
+
+    let pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        pg_cache.session_catalog_generation(),
+        after.generation,
+        "the publication head matches the state immediately before the failed record"
+    );
+    let pending = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let component_paths = ["alpha", "beta"]
+        .map(|id| {
+            options
+                .claude_home
+                .join(format!("projects/-work-proj/{id}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending),
+        "the refused bidirectional component claims remain pending"
+    );
+    let after_page = crate::session_catalog_page(&options, "local", "sid=prior");
+    assert_eq!(after_page.status, 200);
+    let after_page: Value = serde_json::from_slice(&after_page.body).unwrap();
+    assert_eq!(after_page["items"][0], prior_item);
+    assert_ne!(
+        crate::session_catalog_page(&options, "local", "sid=alpha").status,
+        200,
+        "unpublished fixture owners remain unavailable"
+    );
+}
+
 fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
     write_bidirectional_message_page_fixture(&home, rounds);

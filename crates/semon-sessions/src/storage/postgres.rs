@@ -81,6 +81,18 @@ fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
 mod tests;
 
 #[cfg(test)]
+pub(crate) fn test_fixture_pool() -> PgPool {
+    tests::fixture(|_| {}).0
+}
+
+#[cfg(test)]
+pub(crate) fn take_semantic_stage_save_diagnostic(
+    namespace: &str,
+) -> Option<semantic_stage::SaveDiagnostic> {
+    semantic_stage::take_save_diagnostic(namespace)
+}
+
+#[cfg(test)]
 mod native_ingest_tests;
 
 #[cfg(test)]
