@@ -799,6 +799,12 @@ impl AdmittedSource {
     pub(super) fn namespace(&self) -> &str {
         self.config.namespace.as_str()
     }
+    pub(super) fn admission(&self) -> u64 {
+        self.admission
+    }
+    pub(super) fn stream_epoch(&self) -> Option<&str> {
+        self.config.expected_stream_epoch.as_deref()
+    }
     pub(super) fn validate_publication(&self, db: &Connection) -> Result<(), StorageError> {
         if self.owner.is_none() {
             return Err(StorageError::NamespaceUpgradePending);

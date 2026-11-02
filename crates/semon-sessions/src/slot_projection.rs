@@ -298,6 +298,29 @@ impl SavedSlot {
         }
         paths
     }
+    /// CWD values tied to every source edge carried by this slot. Callers may
+    /// use these only after authenticating the receipt that owns the slot.
+    pub(crate) fn source_cwds(&self) -> Vec<(&std::path::PathBuf, Option<&str>)> {
+        let mut sources = Vec::new();
+        if let Some(file) = &self.file {
+            sources.push((&file.path, file.cwd.as_deref()));
+        }
+        match &self.recipe {
+            Recipe::Tool {
+                background: Some(background),
+                ..
+            } => {
+                if let Some(end) = &background.end {
+                    sources.push((&end.file.path, end.file.cwd.as_deref()));
+                }
+            }
+            Recipe::BgEnd { source_file, .. } => {
+                sources.push((&source_file.path, source_file.cwd.as_deref()));
+            }
+            _ => {}
+        }
+        sources
+    }
     pub(crate) fn identity(&self) -> String {
         let event = self
             .native_event_id

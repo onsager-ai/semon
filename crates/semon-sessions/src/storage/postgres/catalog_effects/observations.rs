@@ -7,13 +7,27 @@ pub(super) type NativeReceipt = (u64, String, String);
 pub(super) enum Origin {
     Native(NativeReceipt),
     Imported(crate::storage::proof_lifetime::ProofGenerationId),
+    Composed(Vec<NativeReceipt>),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct HistoryReference {
     pub(super) version: u32,
     pub(super) lifecycle: crate::model::summary::CatalogLifecycle,
-    pub(super) receipt: NativeReceipt,
+    #[serde(default)]
+    pub(super) composed: bool,
+    #[serde(default)]
+    pub(super) receipt: Option<NativeReceipt>,
+    #[serde(default)]
+    pub(super) receipts: Vec<NativeReceipt>,
+    #[serde(default)]
+    pub(super) capture: Option<PresentationObservations>,
+}
+
+pub(super) struct AuthenticatedPublication {
+    pub(super) observations: Option<PresentationObservations>,
+    pub(super) slots: Vec<String>,
+    pub(super) row: crate::model::summary::CatalogRow,
 }
 
 pub(super) fn history_key(owner: &str, metadata: &[u8]) -> String {
@@ -29,6 +43,15 @@ pub(super) fn publication(
     original: &[u8],
     receipt: &NativeReceipt,
 ) -> Result<Option<PresentationObservations>, StorageError> {
+    Ok(publication_with_recipes(tx, current, original, receipt)?.observations)
+}
+
+pub(super) fn publication_with_recipes(
+    tx: &mut PgTxn<'_>,
+    current: &QueryRuntimeBinding,
+    original: &[u8],
+    receipt: &NativeReceipt,
+) -> Result<AuthenticatedPublication, StorageError> {
     let (admission, stream, generation) = receipt;
     if *admission != current.admission || stream != &current.stream_epoch {
         return Err(StorageError::ScopeChanged);
@@ -61,7 +84,31 @@ pub(super) fn publication(
     {
         return Err(StorageError::ScopeChanged);
     }
-    serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)
+    let row: crate::model::summary::CatalogRow =
+        serde_json::from_value(original.clone()).map_err(|_| StorageError::ScopeChanged)?;
+    let recipes: Option<Vec<(String, Vec<crate::slot_projection::SavedSlot>, bool)>> =
+        serde_json::from_value(values[3].clone()).map_err(|_| StorageError::ScopeChanged)?;
+    let slots = recipes
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(key, _, _)| key == &row.key)
+        .next()
+        .map(|(_, slots, _)| {
+            slots
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .map_err(|_| StorageError::ScopeChanged)?
+        .unwrap_or_default();
+    let observations = serde_json::from_value(values[4].clone())
+        .map_err(|_| StorageError::ScopeChanged)?;
+    Ok(AuthenticatedPublication {
+        observations,
+        slots,
+        row,
+    })
 }
 
 pub(super) fn issue_history(
@@ -71,11 +118,51 @@ pub(super) fn issue_history(
     lifecycle: crate::model::summary::CatalogLifecycle,
     receipt: NativeReceipt,
 ) -> Result<(), StorageError> {
+    issue_history_reference(
+        tx,
+        owner,
+        metadata,
+        lifecycle,
+        Some(receipt.clone()),
+        vec![receipt],
+        None,
+        false,
+    )
+}
+
+pub(super) fn issue_composed_history(
+    tx: &mut PgTxn<'_>,
+    owner: &str,
+    metadata: &[u8],
+    lifecycle: crate::model::summary::CatalogLifecycle,
+    receipts: Vec<NativeReceipt>,
+    capture: Option<PresentationObservations>,
+) -> Result<(), StorageError> {
+    if receipts.len() > 64 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    let receipt = receipts.first().cloned();
+    issue_history_reference(tx, owner, metadata, lifecycle, receipt, receipts, capture, true)
+}
+
+fn issue_history_reference(
+    tx: &mut PgTxn<'_>,
+    owner: &str,
+    metadata: &[u8],
+    lifecycle: crate::model::summary::CatalogLifecycle,
+    receipt: Option<NativeReceipt>,
+    receipts: Vec<NativeReceipt>,
+    capture: Option<PresentationObservations>,
+    composed: bool,
+) -> Result<(), StorageError> {
     let key = history_key(owner, metadata);
     let value = encoded(&HistoryReference {
-        version: 1,
+        version: 2,
         lifecycle,
+        composed,
         receipt,
+        receipts,
+        capture,
     })?;
     let changed = tx.driver.execute("INSERT INTO semon_pg_native_meta(namespace,key,value) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,key_digest) DO UPDATE SET value=excluded.value WHERE semon_pg_native_meta.namespace=excluded.namespace AND semon_pg_native_meta.key=excluded.key AND semon_pg_native_meta.value=excluded.value", &[&tx.namespace.as_str().as_bytes(),&key.as_bytes(),&value]).map_err(sqlstate::error)?;
     if changed != 1 {
