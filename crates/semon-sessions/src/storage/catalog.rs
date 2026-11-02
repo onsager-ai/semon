@@ -52,11 +52,12 @@ pub(crate) struct SourceContinuationCell {
 #[serde(deny_unknown_fields)]
 pub(crate) struct SourceContinuationCapture {
     pub(crate) path: String,
-    pub(crate) cell: Vec<u8>,
+    pub(crate) cell: Option<Vec<u8>>,
     pub(crate) claim: Option<i64>,
     pub(crate) ledger: Option<crate::events::Ledger>,
     pub(crate) pending_mutation: bool,
     pub(crate) raw_inflight: bool,
+    pub(crate) catalog_session_key: Option<String>,
     pub(crate) catalog_source: Option<CatalogSource>,
     pub(crate) physical: Option<crate::events::Stat>,
 }
@@ -65,6 +66,19 @@ pub(crate) enum SourceContinuationCellUpdate {
     Keep,
     Put(Vec<u8>),
     Clear,
+    Refuse,
+}
+
+pub(crate) fn valid_source_continuation_cell(cell: &SourceContinuationCell) -> bool {
+    cell.version == 1
+        && cell.prior.offset <= cell.prior.stat.size
+        && cell.current.offset >= cell.prior.offset
+        && cell.current.offset <= cell.current.stat.size
+        && cell.prior.stat == cell.accepted.before
+        && cell.current.stat == cell.accepted.after
+        && cell
+            .accepted
+            .qualifies(&cell.prior.stat, &cell.current.stat)
 }
 
 /// Promote one retired source mutation, preserving a chain only when custody
@@ -75,7 +89,26 @@ pub(crate) fn advance_source_continuation_cell(
     current: &crate::events::Ledger,
     mutation: Option<&[u8]>,
 ) -> SourceContinuationCellUpdate {
+    let previous = match existing {
+        Some(bytes) if bytes.len() <= 8192 => {
+            let Ok(previous) = serde_json::from_slice::<SourceContinuationCell>(bytes) else {
+                return SourceContinuationCellUpdate::Refuse;
+            };
+            if !valid_source_continuation_cell(&previous) {
+                return SourceContinuationCellUpdate::Refuse;
+            }
+            Some(previous)
+        }
+        Some(_) => return SourceContinuationCellUpdate::Refuse,
+        None => None,
+    };
     if expected == Some(current) {
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.current != *current)
+        {
+            return SourceContinuationCellUpdate::Clear;
+        }
         return SourceContinuationCellUpdate::Keep;
     }
     let (Some(expected), Some(mutation)) = (expected, mutation) else {
@@ -94,23 +127,12 @@ pub(crate) fn advance_source_continuation_cell(
         return SourceContinuationCellUpdate::Clear;
     }
 
-    let prior = match existing {
+    let prior = match previous {
         None => expected.clone(),
-        Some(bytes) => {
-            let Ok(previous) = serde_json::from_slice::<SourceContinuationCell>(bytes) else {
-                return SourceContinuationCellUpdate::Clear;
-            };
-            if previous.version != 1
-                || previous.current != *expected
+        Some(previous) => {
+            if previous.current != *expected
                 || previous.accepted.generation != accepted.generation
                 || previous.accepted.after != accepted.before
-                || previous.prior.stat != previous.accepted.before
-                || previous.current.stat != previous.accepted.after
-                || previous.current.offset < previous.prior.offset
-                || previous.current.offset > previous.current.stat.size
-                || !previous
-                    .accepted
-                    .qualifies(&previous.prior.stat, &previous.current.stat)
             {
                 return SourceContinuationCellUpdate::Clear;
             }
@@ -132,7 +154,7 @@ pub(crate) fn advance_source_continuation_cell(
         return SourceContinuationCellUpdate::Clear;
     };
     if encoded.len() > 8192 {
-        SourceContinuationCellUpdate::Clear
+        SourceContinuationCellUpdate::Refuse
     } else {
         SourceContinuationCellUpdate::Put(encoded)
     }
@@ -188,28 +210,17 @@ impl VerifiedSourceContinuation {
                 && source.prefix_sha256 == ledger.prefix
                 && source.tail_sha256 == ledger.tail
         };
-        if cell.version != 1
-            || old.path.as_path() != path
+        if old.path.as_path() != path
             || new.path.as_path() != path
             || cell.current != *current
             || !source_matches(old, &cell.prior)
             || !source_matches(new, current)
-            || cell.prior.stat != cell.accepted.before
-            || cell.current.stat != cell.accepted.after
-            || cell.current.offset <= cell.prior.offset
             || cell.current.stat != *physical
-            || !cell
-                .accepted
-                .qualifies(&cell.prior.stat, physical)
+            || !valid_source_continuation_cell(cell)
         {
             return None;
         }
-        Some(Self {
-            path: path.to_owned(),
-            prior: cell.prior.clone(),
-            current: cell.current.clone(),
-            accepted: cell.accepted.clone(),
-        })
+        Self::from_scan(path, &cell.prior, current, &cell.accepted, physical)
     }
 
     fn advances(&self, old: &CatalogSource, new: &CatalogSource) -> bool {

@@ -2129,6 +2129,23 @@ fn read_source_continuation_paths(
     Ok(paths)
 }
 
+fn source_path_values(count: usize) -> String {
+    (1..=count)
+        .map(|index| format!("(?{index})"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn source_continuation_ack_values(count: usize) -> String {
+    (0..count)
+        .map(|offset| {
+            let path = offset * 2 + 1;
+            format!("(?{path},?{})", path + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 pub(crate) fn source_continuation_snapshot(
     connection: &Connection,
     paths: &[String],
@@ -2148,98 +2165,295 @@ pub(crate) fn source_continuation_snapshot(
             crate::storage::StorageError::Conflict,
         ));
     }
-    let mut captures = Vec::with_capacity(paths.len());
-    for path in paths {
-        let size: Option<i64> = tx
-            .query_row(
-                "SELECT octet_length(evidence) FROM main.session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1",
-                [path],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        let Some(size) = size else {
-            if complete {
-                return Err(StoreError::Configured(
-                    crate::storage::StorageError::Conflict,
-                ));
-            }
-            continue;
-        };
-        if size > 8192 {
-            return Err(StoreError::Configured(
-                crate::storage::StorageError::ScopeChanged,
-            ));
-        }
-        let cell: Vec<u8> = tx
-            .query_row(
-                "SELECT evidence FROM main.session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1",
-                [path],
-                |row| row.get(0),
-            )
-            .map_err(failure)?;
-        let claim = tx
-            .query_row(
-                "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
-                [path],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(failure)?;
-        let ledger = ledger_row(&tx, path)
-            .map_err(failure)?
-            .map(|(_, ledger)| ledger);
-        let pending_mutation = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1)",
-                [path],
-                |row| row.get(0),
-            )
-            .map_err(failure)?;
-        let catalog_source = read_current_catalog_source(&tx, path).map_err(failure)?;
-        captures.push(crate::storage::catalog::SourceContinuationCapture {
-            path: path.clone(),
-            cell,
-            claim,
-            ledger,
-            pending_mutation,
-            raw_inflight: false,
-            catalog_source,
-            physical: None,
-        });
-    }
+    let mut captures = source_continuation_snapshot_tx(&tx, paths, complete)?;
     tx.commit().map_err(failure)?;
     Ok(captures)
 }
 
-fn read_current_catalog_source(
+fn source_continuation_snapshot_tx(
     tx: &Transaction<'_>,
-    path: &str,
-) -> rusqlite::Result<Option<crate::model::summary::CatalogSource>> {
-    let mut statement = tx.prepare(
-        "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata END FROM main.session_catalog_sources s JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 2",
-    )?;
+    paths: &[String],
+    require_cells: bool,
+) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let values = source_path_values(paths.len());
+    let params = rusqlite::params_from_iter(paths.iter().map(String::as_str));
+    let mut statement = tx
+        .prepare(&format!(
+            "WITH requested(source_path) AS (VALUES {values}) \
+             SELECT r.source_path,c.source_path IS NOT NULL,CASE WHEN octet_length(c.evidence)<=8192 THEN c.evidence END,i.revision,f.file_id, \
+                    EXISTS(SELECT 1 FROM main.session_source_mutations m WHERE m.namespace=semon_namespace() AND m.source_path=r.source_path) \
+             FROM requested r LEFT JOIN main.session_source_continuations c ON c.namespace=semon_namespace() AND c.source_path=r.source_path \
+             LEFT JOIN main.session_catalog_invalidations i ON i.namespace=semon_namespace() AND i.source_path=r.source_path \
+             LEFT JOIN main.files f ON f.namespace=semon_namespace() AND f.path=r.source_path \
+             ORDER BY r.source_path"
+        ))
+        .map_err(failure)?;
     let rows = statement
-        .query_map([path], |row| row.get::<_, Option<String>>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows.len() != 1 {
-        return Ok(None);
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, bool>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, bool>(5)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failure)?;
+    if rows.len() != paths.len() {
+        return Err(StoreError::Configured(
+            crate::storage::StorageError::ScopeChanged,
+        ));
     }
-    let Some(metadata) = rows.into_iter().next().flatten() else {
-        return Ok(None);
-    };
-    let Ok(row) = serde_json::from_str::<crate::model::summary::CatalogRow>(&metadata) else {
-        return Ok(None);
-    };
-    if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
-        return Ok(None);
+    let mut captures = Vec::with_capacity(rows.len());
+    let mut file_ids = Vec::with_capacity(rows.len());
+    for (path, has_cell, cell, claim, file_id, pending_mutation) in rows {
+        if has_cell != cell.is_some() || (require_cells && !has_cell) {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+        if let Some(cell) = &cell {
+            let decoded = serde_json::from_slice::<
+                crate::storage::catalog::SourceContinuationCell,
+            >(cell)
+            .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            if !crate::storage::catalog::valid_source_continuation_cell(&decoded) {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ));
+            }
+        }
+        if has_cell && file_id.is_none() {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+        if let Some(file_id) = file_id {
+            file_ids.push((path.clone(), file_id));
+        }
+        captures.push(crate::storage::catalog::SourceContinuationCapture {
+            path,
+            cell,
+            claim,
+            ledger: None,
+            pending_mutation,
+            raw_inflight: false,
+            catalog_session_key: None,
+            catalog_source: None,
+            physical: None,
+        });
     }
-    let mut sources = row
-        .sources
-        .into_iter()
-        .filter(|source| source.path == Path::new(path));
-    let source = sources.next();
-    Ok(source.filter(|_| sources.next().is_none()))
+
+    if !file_ids.is_empty() {
+        let ledger_values = source_path_values(file_ids.len());
+        let ids = file_ids.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+        let mut ledger_statement = tx
+            .prepare(&format!(
+                "SELECT file_id,dev,ino,size,mtime_ns,resume_at,head_sha256,tail_sha256,ctime_ns \
+                 FROM main.files WHERE namespace=semon_namespace() AND file_id IN ({ledger_values})"
+            ))
+            .map_err(failure)?;
+        let mut ledger_map = BTreeMap::new();
+        for item in ledger_statement
+            .query_map(rusqlite::params_from_iter(ids.iter()), |row| read_ledger(row))
+            .map_err(failure)?
+        {
+            let (file_id, ledger) = item.map_err(failure)?;
+            if ledger_map.insert(file_id, ledger).is_some() {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ));
+            }
+        }
+        for (path, file_id) in file_ids {
+            let ledger = ledger_map
+                .remove(&file_id)
+                .ok_or(StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            let index = captures
+                .binary_search_by(|capture| capture.path.cmp(&path))
+                .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            captures[index].ledger = Some(ledger);
+        }
+        if !ledger_map.is_empty() {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+    }
+
+    let cell_paths = captures
+        .iter()
+        .filter(|capture| capture.cell.is_some())
+        .map(|capture| capture.path.clone())
+        .collect::<Vec<_>>();
+    if cell_paths.is_empty() {
+        return Ok(captures);
+    }
+    let values = source_path_values(cell_paths.len());
+    let params = rusqlite::params_from_iter(cell_paths.iter().map(String::as_str));
+    let owner_sql = format!(
+        "WITH requested(source_path) AS (VALUES {values}), owners AS ( \
+         SELECT s.source_path,COUNT(*) AS owner_count,MIN(s.session_key) AS session_key \
+         FROM main.session_catalog_sources s WHERE s.namespace=semon_namespace() AND s.lifecycle='current' \
+           AND s.source_path IN (SELECT source_path FROM requested) GROUP BY s.source_path) \
+         SELECT o.source_path,o.owner_count,o.session_key,octet_length(c.metadata) \
+         FROM owners o LEFT JOIN main.session_catalog c ON c.namespace=semon_namespace() AND c.session_key=o.session_key \
+         ORDER BY o.source_path"
+    );
+    let mut owner_statement = tx.prepare(&owner_sql).map_err(failure)?;
+    let owner_rows = owner_statement
+        .query_map(params, |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+        .map_err(failure)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failure)?;
+    let mut catalog_bytes = 0usize;
+    let mut owners = BTreeMap::new();
+    for (path, count, session_key, size) in owner_rows {
+        if count != 1 {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+        let size = usize::try_from(size.ok_or(StoreError::Configured(
+            crate::storage::StorageError::ScopeChanged,
+        ))?)
+        .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+        catalog_bytes = catalog_bytes
+            .checked_add(size)
+            .ok_or(StoreError::Configured(crate::storage::StorageError::Busy))?;
+        if size > 1_048_576 || catalog_bytes > 1_048_576 {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::Busy,
+            ));
+        }
+        owners.insert(path, session_key);
+    }
+    if !owners.is_empty() {
+        let values = source_path_values(owners.len());
+        let owner_paths = owners.keys().cloned().collect::<Vec<_>>();
+        let params = rusqlite::params_from_iter(owner_paths.iter().map(String::as_str));
+        let metadata_sql = format!(
+            "WITH requested(source_path) AS (VALUES {values}) \
+             SELECT s.source_path,s.session_key,c.metadata FROM requested r \
+             JOIN main.session_catalog_sources s ON s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path=r.source_path \
+             JOIN main.session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key \
+             ORDER BY s.source_path"
+        );
+        let mut metadata_statement = tx.prepare(&metadata_sql).map_err(failure)?;
+        let metadata_rows = metadata_statement
+            .query_map(params, |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(failure)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failure)?;
+        if metadata_rows.len() != owners.len() {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+        let mut catalog_sources = BTreeMap::new();
+        for (path, session_key, metadata) in metadata_rows {
+            if owners.get(&path) != Some(&session_key) {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ));
+            }
+            let row = serde_json::from_str::<crate::model::summary::CatalogRow>(&metadata)
+                .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            if row.key != session_key
+                || row.lifecycle != crate::model::summary::CatalogLifecycle::Current
+            {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ));
+            }
+            let mut sources = row
+                .sources
+                .into_iter()
+                .filter(|source| source.path == Path::new(&path));
+            let source = sources.next().ok_or(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ))?;
+            if sources.next().is_some() {
+                return Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ));
+            }
+            catalog_sources.insert(path, (session_key, source));
+        }
+        for capture in &mut captures {
+            if let Some((session_key, source)) = catalog_sources.remove(&capture.path) {
+                capture.catalog_session_key = Some(session_key);
+                capture.catalog_source = Some(source);
+            }
+        }
+        if !catalog_sources.is_empty() {
+            return Err(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ));
+        }
+    }
+    Ok(captures)
+}
+
+fn continuation_ack_paths(
+    captures: &[crate::storage::catalog::SourceContinuationCapture],
+    rows: &[crate::model::summary::CatalogRow],
+    withdrawn: &[crate::model::summary::CatalogRow],
+) -> BTreeMap<String, Vec<u8>> {
+    let published = rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .map(|source| source.path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut acknowledged = BTreeMap::new();
+    for capture in captures {
+        let Some(cell) = capture.cell.as_ref() else {
+            continue;
+        };
+        if published.contains(&capture.path) {
+            acknowledged.insert(capture.path.clone(), cell.clone());
+            continue;
+        }
+        let (Some(owner_key), Some(old_source)) = (
+            capture.catalog_session_key.as_deref(),
+            capture.catalog_source.as_ref(),
+        ) else {
+            continue;
+        };
+        let updated_owner_removes_path = rows.iter().any(|row| {
+            row.key == owner_key
+                && !row
+                    .sources
+                    .iter()
+                    .any(|source| source.path == old_source.path)
+        });
+        let withdrawn_owner = withdrawn.iter().any(|row| {
+            row.key == owner_key && row.sources.iter().any(|source| source == old_source)
+        });
+        if updated_owner_removes_path || withdrawn_owner {
+            acknowledged.insert(capture.path.clone(), cell.clone());
+        }
+    }
+    acknowledged
 }
 
 impl IndexStore for SqliteStore {
@@ -3315,27 +3529,22 @@ impl SqliteStore {
                         return Ok(Outcome::Conflict);
                     }
                 }
-                for capture in captures {
-                    let claim: Option<i64> = transaction
-                        .query_row(
-                            "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
-                            [&capture.path],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(failure)?;
-                    let cell: Option<Vec<u8>> = transaction
-                        .query_row(
-                            "SELECT evidence FROM main.session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1",
-                            [&capture.path],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(failure)?;
-                    if claim != capture.claim || cell.as_deref() != Some(capture.cell.as_slice()) {
-                        self.semantic_rejection = Some("continuation_cell_claim");
-                        return Ok(Outcome::Conflict);
-                    }
+                let paths = captures
+                    .iter()
+                    .map(|capture| capture.path.clone())
+                    .collect::<Vec<_>>();
+                let current = source_continuation_snapshot_tx(&transaction, &paths, complete)?;
+                let mut expected = captures.to_vec();
+                for capture in &mut expected {
+                    capture.physical = None;
+                }
+                if current != expected
+                    || current
+                        .iter()
+                        .any(|capture| capture.pending_mutation || capture.raw_inflight)
+                {
+                    self.semantic_rejection = Some("continuation_source_state");
+                    return Ok(Outcome::Conflict);
                 }
             }
             let search_current = crate::storage::sqlite::search::current_for_generation(
@@ -3509,20 +3718,6 @@ impl SqliteStore {
                 transaction.commit().map_err(failure)?;
                 return Ok(Outcome::Deferred);
             }
-            if let Some((_, captures)) = continuation_observation {
-                for capture in captures {
-                    let deleted = transaction
-                        .execute(
-                            "DELETE FROM main.session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1 AND evidence=?2",
-                            params![capture.path, capture.cell],
-                        )
-                        .map_err(failure)?;
-                    if deleted != 1 {
-                        self.semantic_rejection = Some("continuation_cell_ack");
-                        return Ok(Outcome::Conflict);
-                    }
-                }
-            }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
             crate::storage::catalog::publish_history_rows(
@@ -3531,6 +3726,35 @@ impl SqliteStore {
                 publication.transcripts,
             )
             .map_err(failure)?;
+            if let Some((_, captures)) = continuation_observation {
+                let acknowledgements =
+                    continuation_ack_paths(captures, publication.rows, &withdrawn);
+                if !acknowledgements.is_empty() {
+                    let expected_acknowledgements = acknowledgements.len();
+                    let values = source_continuation_ack_values(acknowledgements.len());
+                    let mut bind = Vec::with_capacity(acknowledgements.len() * 2);
+                    for (path, cell) in acknowledgements {
+                        bind.push(rusqlite::types::Value::Text(path));
+                        bind.push(rusqlite::types::Value::Blob(cell));
+                    }
+                    let deleted = transaction
+                        .execute(
+                            &format!(
+                                "WITH acknowledged(source_path,evidence) AS (VALUES {values}) \
+                                 DELETE FROM main.session_source_continuations \
+                                 WHERE namespace=semon_namespace() AND EXISTS ( \
+                                   SELECT 1 FROM acknowledged a WHERE a.source_path=session_source_continuations.source_path \
+                                     AND a.evidence=session_source_continuations.evidence)"
+                            ),
+                            rusqlite::params_from_iter(bind.iter()),
+                        )
+                        .map_err(failure)?;
+                    if deleted != expected_acknowledgements {
+                        self.semantic_rejection = Some("continuation_cell_ack");
+                        return Ok(Outcome::Conflict);
+                    }
+                }
+            }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition_complete");
             stage("history", &transaction);

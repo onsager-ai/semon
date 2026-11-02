@@ -303,6 +303,7 @@ fn update_source_continuation_cell(
             ).map_err(sqlstate::error)?;
             Ok(())
         }
+        SourceContinuationCellUpdate::Refuse => Err(StorageError::ScopeChanged),
     }
 }
 

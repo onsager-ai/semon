@@ -8990,7 +8990,7 @@ fn combine_source_continuations(
     rows: &[summary::CatalogRow],
     captures: &[crate::storage::catalog::SourceContinuationCapture],
     continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
-) -> Vec<crate::storage::catalog::VerifiedSourceContinuation> {
+) -> io::Result<Vec<crate::storage::catalog::VerifiedSourceContinuation>> {
     let current_sources = rows
         .iter()
         .flat_map(|row| row.sources.iter())
@@ -9001,6 +9001,9 @@ fn combine_source_continuations(
         .map(|proof| (proof.path().to_string_lossy().into_owned(), proof))
         .collect::<BTreeMap<_, _>>();
     for capture in captures {
+        let Some(cell_bytes) = capture.cell.as_deref() else {
+            continue;
+        };
         let (Some(previous), Some(current), Some(ledger), Some(physical)) = (
             capture.catalog_source.as_ref(),
             current_sources.get(&capture.path).copied(),
@@ -9009,11 +9012,13 @@ fn combine_source_continuations(
         ) else {
             continue;
         };
-        let Ok(cell) = serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(
-            &capture.cell,
-        ) else {
-            continue;
-        };
+        let cell = serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(
+            cell_bytes,
+        )
+        .map_err(io::Error::other)?;
+        if !crate::storage::catalog::valid_source_continuation_cell(&cell) {
+            return Err(io::Error::other("Catalog continuation cell is unsupported"));
+        }
         if let Some(proof) = crate::storage::catalog::VerifiedSourceContinuation::from_cell(
             Path::new(&capture.path),
             previous,
@@ -9025,7 +9030,7 @@ fn combine_source_continuations(
             by_path.insert(capture.path.clone(), proof);
         }
     }
-    by_path.into_values().collect()
+    Ok(by_path.into_values().collect())
 }
 
 fn build_sources_inner(
@@ -9895,7 +9900,7 @@ fn build_sources_inner(
                     complete,
                 )?;
                 let continuations =
-                    combine_source_continuations(rows, &captures, continuations);
+                    combine_source_continuations(rows, &captures, continuations)?;
                 let mut observations = presentation.take().unwrap_or_default();
                 observations.set_source_continuation_observations(
                     captures,
@@ -10001,7 +10006,7 @@ fn build_sources_inner(
                         false,
                     )?
                 };
-                let continuations = combine_source_continuations(rows, &captures, continuations);
+                let continuations = combine_source_continuations(rows, &captures, continuations)?;
                 let mut observations = presentation.take().unwrap_or_default();
                 observations.set_source_continuation_observations(
                     captures,

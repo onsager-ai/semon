@@ -36,6 +36,56 @@ pub(in crate::storage::postgres) fn preflight(
         .transpose()
 }
 
+fn continuation_acknowledgements(
+    captures: &[crate::storage::catalog::SourceContinuationCapture],
+    rows: &[CatalogRow],
+    leaving: &[Vec<u8>],
+) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let published = rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .filter_map(|source| source.path.to_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut acknowledged = Vec::new();
+    for capture in captures {
+        let Some(cell) = capture.cell.as_ref() else {
+            continue;
+        };
+        if published.contains(capture.path.as_str()) {
+            acknowledged.push((capture.path.as_bytes().to_vec(), cell.clone()));
+            continue;
+        }
+        let (Some(owner), Some(old_source)) = (
+            capture.catalog_session_key.as_deref(),
+            capture.catalog_source.as_ref(),
+        ) else {
+            continue;
+        };
+        let updated_owner_removes_path = rows.iter().any(|row| {
+            row.key == owner
+                && !row
+                    .sources
+                    .iter()
+                    .any(|source| source.path == old_source.path)
+        });
+        let withdrawn_owner = leaving.iter().any(|key| key == &digest(owner.as_bytes()));
+        if updated_owner_removes_path || withdrawn_owner {
+            acknowledged.push((capture.path.as_bytes().to_vec(), cell.clone()));
+        }
+    }
+    acknowledged
+}
+
+fn continuation_ack_values(first: usize, count: usize) -> String {
+    (0..count)
+        .map(|offset| {
+            let path = first + offset * 2;
+            format!("(${path}::bytea,${}::bytea)", path + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn retirement_plan(
     tx: &mut PgTxn<'_>,
     expected: Option<&str>,
@@ -271,51 +321,21 @@ pub(in crate::storage::postgres) fn publish(
         return Ok((Outcome::Conflict, None));
     }
     if let Some((complete, captures)) = continuation_observation {
-        if complete {
-            let rows = tx
-                .driver
-                .query(
-                    "SELECT source_path FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY source_path LIMIT 65",
-                    &[&ns],
-                )
-                .map_err(sqlstate::error)?;
-            let paths = rows
-                .into_iter()
-                .map(|row| {
-                    String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let observed = captures
-                .iter()
-                .map(|capture| capture.path.clone())
-                .collect::<Vec<_>>();
-            if paths != observed {
-                return Ok((Outcome::Conflict, None));
-            }
+        let paths = captures
+            .iter()
+            .map(|capture| capture.path.clone())
+            .collect::<Vec<_>>();
+        let current = super::super::index_store::source_continuation_snapshot(tx, &paths, complete)?;
+        let mut observed = captures.to_vec();
+        for capture in &mut observed {
+            capture.physical = None;
         }
-        for capture in captures {
-            let path = capture.path.as_bytes();
-            let claim_rows = tx
-                .driver
-                .query(
-                    "SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
-                    &[&ns, &path],
-                )
-                .map_err(sqlstate::error)?;
-            let claim = claim_rows.first().map(|row| row.get::<_, i64>(0));
-            let cell_rows = tx
-                .driver
-                .query(
-                    "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
-                    &[&ns, &path],
-                )
-                .map_err(sqlstate::error)?;
-            let cell = cell_rows
-                .first()
-                .and_then(|row| row.get::<_, Option<Vec<u8>>>(0));
-            if claim != capture.claim || cell.as_deref() != Some(capture.cell.as_slice()) {
-                return Ok((Outcome::Conflict, None));
-            }
+        if current != observed
+            || current
+                .iter()
+                .any(|capture| capture.pending_mutation || capture.raw_inflight)
+        {
+            return Ok((Outcome::Conflict, None));
         }
     }
     let observation_runtime = if publication.rows.is_empty() {
@@ -535,12 +555,30 @@ pub(in crate::storage::postgres) fn publish(
         return Ok((Outcome::Deferred, None));
     }
     if let Some((_, captures)) = continuation_observation {
-        for capture in captures {
+        let acknowledgements = continuation_acknowledgements(captures, publication.rows, &leaving);
+        if !acknowledgements.is_empty() {
+            let values = continuation_ack_values(2, acknowledgements.len());
+            let mut owned_params: Vec<Box<dyn ToSql + Sync>> = vec![Box::new(ns.clone())];
+            for (path, cell) in &acknowledgements {
+                owned_params.push(Box::new(path.clone()));
+                owned_params.push(Box::new(cell.clone()));
+            }
+            let params = owned_params
+                .iter()
+                .map(|value| &**value as &(dyn ToSql + Sync))
+                .collect::<Vec<_>>();
             let deleted = tx.driver.execute(
-                "DELETE FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2) AND evidence=$3",
-                &[&ns, &capture.path.as_bytes(), &capture.cell],
+                &format!(
+                    "WITH acknowledged(source_path,evidence) AS (VALUES {values}) \
+                     DELETE FROM semon_pg_native_source_continuations c USING acknowledged a \
+                     WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 \
+                       AND c.source_path_digest=sha256(a.source_path) \
+                       AND semon_pg_native_key_matches(c.source_path,c.source_path_digest,a.source_path) \
+                       AND c.evidence=a.evidence"
+                ),
+                &params,
             ).map_err(sqlstate::error)?;
-            if deleted != 1 {
+            if deleted != acknowledgements.len() as u64 {
                 return Err(StorageError::Conflict);
             }
         }

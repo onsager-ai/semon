@@ -2582,6 +2582,10 @@ impl EventCache {
         }
 
         let lock_cache = self.lock_cache.as_deref().unwrap_or(&options.cache);
+        // This shared advisory lock is retained across the physical before,
+        // SQL snapshot, and physical after observations. It excludes
+        // cooperative exclusive Raw writes to these cell paths; ordinary
+        // shared Catalog scans may proceed together.
         let _locks = paths
             .iter()
             .map(|path| {
@@ -2605,19 +2609,11 @@ impl EventCache {
         let mut captures = store
             .source_continuation_snapshot(&paths, complete)
             .map_err(|error| io::Error::other(error.to_string()))?;
-        let capture_paths_match = if complete {
-            captures.len() == paths.len()
-                && captures
-                    .iter()
-                    .zip(&paths)
-                    .all(|(capture, path)| capture.path == *path)
-        } else {
-            captures.iter().all(|capture| {
-                paths.binary_search(&capture.path).is_ok()
-            }) && captures
-                .windows(2)
-                .all(|pair| pair[0].path < pair[1].path)
-        };
+        let capture_paths_match = captures.len() == paths.len()
+            && captures
+                .iter()
+                .zip(&paths)
+                .all(|(capture, path)| capture.path == *path);
         if !capture_paths_match {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -2644,6 +2640,29 @@ impl EventCache {
                     io::ErrorKind::WouldBlock,
                     "Catalog continuation source mutation is pending",
                 ));
+            }
+            if capture.cell.is_some() && capture.ledger.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Catalog continuation cell has no committed source ledger",
+                ));
+            }
+            if let Some(bytes) = &capture.cell {
+                let cell = serde_json::from_slice::<
+                    crate::storage::catalog::SourceContinuationCell,
+                >(bytes)
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Catalog continuation cell is malformed",
+                    )
+                })?;
+                if !crate::storage::catalog::valid_source_continuation_cell(&cell) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Catalog continuation cell is unsupported",
+                    ));
+                }
             }
             capture.physical = after_by_path.get(&capture.path).cloned().flatten();
         }

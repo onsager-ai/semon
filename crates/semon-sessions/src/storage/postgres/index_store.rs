@@ -95,7 +95,7 @@ fn source_continuation_paths(
         .collect()
 }
 
-fn source_continuation_snapshot(
+pub(super) fn source_continuation_snapshot(
     tx: &mut super::txn::PgTxn<'_>,
     paths: &[String],
     complete: bool,
@@ -111,58 +111,248 @@ fn source_continuation_snapshot(
     }
     let namespace = tx.namespace.as_str().as_bytes().to_vec();
     let generation = super::model_cache::generation(tx)?;
-    let mut captures = Vec::with_capacity(paths.len());
-    for path in paths {
-        let path_bytes = path.as_bytes();
-        let cell_rows = tx.driver.query(
-            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
-            &[&namespace, &path_bytes],
-        ).map_err(sqlstate::error)?;
-        if cell_rows.is_empty() && !complete {
-            continue;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let requested = pg_source_path_values(2, paths.len());
+    let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> =
+        vec![Box::new(namespace.clone())];
+    params.extend(
+        paths
+            .iter()
+            .map(|path| Box::new(path.as_bytes().to_vec()) as Box<dyn tokio_postgres::types::ToSql + Sync>),
+    );
+    let params = params
+        .iter()
+        .map(|value| &**value as &(dyn tokio_postgres::types::ToSql + Sync))
+        .collect::<Vec<_>>();
+    let rows = tx.driver.query(
+        &format!(
+            "WITH requested(source_path) AS (VALUES {requested}) \
+             SELECT r.source_path,c.source_path IS NOT NULL,CASE WHEN octet_length(c.evidence)<=8192 THEN c.evidence END, \
+                    i.revision,f.file_id,f.dev::text,f.ino::text,f.size::text,f.mtime_ns,f.resume_at::text, \
+                    f.head_sha256,f.tail_sha256,f.ctime_ns, \
+                    EXISTS(SELECT 1 FROM semon_pg_native_source_mutations m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(m.source_path,m.source_path_digest,r.source_path)), \
+                    EXISTS(SELECT 1 FROM semon_pg_native_meta m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.key_digest=sha256(convert_to('raw-write-inflight:','UTF8') || r.source_path) AND semon_pg_native_key_matches(m.key,m.key_digest,convert_to('raw-write-inflight:','UTF8') || r.source_path)) \
+             FROM requested r \
+             LEFT JOIN semon_pg_native_source_continuations c ON c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(c.source_path,c.source_path_digest,r.source_path) \
+             LEFT JOIN semon_pg_source_invalidations i ON i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(i.source_path,i.source_path_digest,r.source_path) \
+             LEFT JOIN semon_pg_native_files f ON f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(f.path,f.path_digest,r.source_path) \
+             ORDER BY r.source_path"
+        ),
+        &params,
+    )
+    .map_err(sqlstate::error)?;
+    if rows.len() != paths.len() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut captures = Vec::with_capacity(rows.len());
+    for (row, expected_path) in rows.into_iter().zip(paths) {
+        let path = String::from_utf8(row.get::<_, Vec<u8>>(0))
+            .map_err(|_| StorageError::ScopeChanged)?;
+        if path != *expected_path {
+            return Err(StorageError::ScopeChanged);
         }
-        let cell = cell_rows.first().and_then(|row| row.get::<_, Option<Vec<u8>>>(0)).ok_or(StorageError::ScopeChanged)?;
-        let claim_rows = tx.driver.query(
-            "SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
-            &[&namespace, &path_bytes],
-        ).map_err(sqlstate::error)?;
-        let claim = claim_rows.first().map(|row| row.get::<_, i64>(0));
-        let ledger = super::native_reader::ledger(tx, path)?.map(|(_, ledger)| ledger);
-        let pending_mutation: bool = tx.driver.query_one(
-            "SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2))",
-            &[&namespace, &path_bytes],
-        ).map_err(sqlstate::error)?.get(0);
-        let inflight_key = format!("raw-write-inflight:{path}");
-        let raw_inflight = super::native_keys::read_meta(tx, inflight_key.as_bytes(), 16384)?.is_some();
-        let catalog_source = if let Some(generation) = &generation {
-            let rows = tx.driver.query(
-                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND semon_pg_native_key_matches(source_path,path_digest,$3) ORDER BY session_key LIMIT 2",
-                &[&namespace, &generation.as_bytes(), &path_bytes],
-            ).map_err(sqlstate::error)?;
-            if rows.len() == 1 {
-                rows.first()
-                    .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
-                    .and_then(|bytes| serde_json::from_slice::<crate::model::summary::CatalogSource>(&bytes).ok())
-                    .filter(|source| source.path == std::path::Path::new(path))
-            } else {
-                None
+        let has_cell: bool = row.get(1);
+        let cell: Option<Vec<u8>> = row.get(2);
+        if has_cell != cell.is_some() || (complete && !has_cell) {
+            return Err(StorageError::ScopeChanged);
+        }
+        if let Some(bytes) = &cell {
+            let decoded = serde_json::from_slice::<
+                crate::storage::catalog::SourceContinuationCell,
+            >(bytes)
+            .map_err(|_| StorageError::ScopeChanged)?;
+            if !crate::storage::catalog::valid_source_continuation_cell(&decoded) {
+                return Err(StorageError::ScopeChanged);
             }
-        } else {
-            None
-        };
+        }
+        let ledger = pg_source_continuation_ledger(&row)?;
+        if has_cell && ledger.is_none() {
+            return Err(StorageError::ScopeChanged);
+        }
         captures.push(crate::storage::catalog::SourceContinuationCapture {
-            path: path.clone(),
+            path,
             cell,
-            claim,
+            claim: row.get(3),
             ledger,
-            pending_mutation,
-            raw_inflight,
-            catalog_source,
+            pending_mutation: row.get(13),
+            raw_inflight: row.get(14),
+            catalog_session_key: None,
+            catalog_source: None,
             physical: None,
         });
     }
+
+    let cell_paths = captures
+        .iter()
+        .filter(|capture| capture.cell.is_some())
+        .map(|capture| capture.path.clone())
+        .collect::<Vec<_>>();
+    if !cell_paths.is_empty()
+        && let Some(generation) = generation
+    {
+        let requested = pg_source_path_values(3, cell_paths.len());
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = vec![
+            Box::new(namespace.clone()),
+            Box::new(generation.as_bytes().to_vec()),
+        ];
+        params.extend(cell_paths.iter().map(|path| {
+            Box::new(path.as_bytes().to_vec()) as Box<dyn tokio_postgres::types::ToSql + Sync>
+        }));
+        let params = params
+            .iter()
+            .map(|value| &**value as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect::<Vec<_>>();
+        let owner_rows = tx.driver.query(
+            &format!(
+                "WITH requested(source_path) AS (VALUES {requested}), owners AS ( \
+                 SELECT c.source_path,c.session_key,c.metadata,COUNT(*) OVER(PARTITION BY c.source_path) AS owner_count, \
+                        ROW_NUMBER() OVER(PARTITION BY c.source_path ORDER BY c.session_key) AS owner_number \
+                 FROM semon_pg_native_catalog_sources c JOIN requested r ON r.source_path=c.source_path \
+                 WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND c.path_digest=sha256(r.source_path) \
+                   AND semon_pg_native_key_matches(c.source_path,c.path_digest,r.source_path)) \
+                 SELECT source_path,session_key,owner_count,octet_length(metadata)::bigint \
+                 FROM owners WHERE owner_number<=2 ORDER BY source_path,session_key"
+            ),
+            &params,
+        ).map_err(sqlstate::error)?;
+        let mut owners = BTreeMap::new();
+        let mut metadata_bytes = 0usize;
+        for row in owner_rows {
+            let path = String::from_utf8(row.get::<_, Vec<u8>>(0))
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let count: i64 = row.get(2);
+            if count != 1 || owners.contains_key(&path) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let size = usize::try_from(row.get::<_, i64>(3))
+                .map_err(|_| StorageError::ScopeChanged)?;
+            metadata_bytes = metadata_bytes
+                .checked_add(size)
+                .ok_or(StorageError::Busy)?;
+            if size > 1_048_576 || metadata_bytes > 1_048_576 {
+                return Err(StorageError::Busy);
+            }
+            let session_key = String::from_utf8(row.get::<_, Vec<u8>>(1))
+                .map_err(|_| StorageError::ScopeChanged)?;
+            owners.insert(path, session_key);
+        }
+        crate::selected_read::charge(owners.len() * 128, metadata_bytes)
+            .map_err(|_| StorageError::Busy)?;
+        if !owners.is_empty() {
+            let owner_paths = owners.keys().cloned().collect::<Vec<_>>();
+            let requested = pg_source_path_values(3, owner_paths.len());
+            let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = vec![
+                Box::new(namespace),
+                Box::new(generation.as_bytes().to_vec()),
+            ];
+            params.extend(owner_paths.iter().map(|path| {
+                Box::new(path.as_bytes().to_vec()) as Box<dyn tokio_postgres::types::ToSql + Sync>
+            }));
+            let params = params
+                .iter()
+                .map(|value| &**value as &(dyn tokio_postgres::types::ToSql + Sync))
+                .collect::<Vec<_>>();
+            let metadata_rows = tx.driver.query(
+                &format!(
+                    "WITH requested(source_path) AS (VALUES {requested}) \
+                     SELECT c.source_path,c.session_key,c.metadata FROM semon_pg_native_catalog_sources c \
+                     JOIN requested r ON r.source_path=c.source_path \
+                     WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 \
+                       AND c.path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(c.source_path,c.path_digest,r.source_path) \
+                     ORDER BY c.source_path"
+                ),
+                &params,
+            ).map_err(sqlstate::error)?;
+            if metadata_rows.len() != owners.len() {
+                return Err(StorageError::ScopeChanged);
+            }
+            for row in metadata_rows {
+                let path = String::from_utf8(row.get::<_, Vec<u8>>(0))
+                    .map_err(|_| StorageError::ScopeChanged)?;
+                let session_key = String::from_utf8(row.get::<_, Vec<u8>>(1))
+                    .map_err(|_| StorageError::ScopeChanged)?;
+                if owners.get(&path) != Some(&session_key) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                let bytes: Vec<u8> = row.get(2);
+                let source = serde_json::from_slice::<
+                    crate::model::summary::CatalogSource,
+                >(&bytes)
+                .map_err(|_| StorageError::ScopeChanged)?;
+                if source.path != std::path::Path::new(&path) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                let index = captures
+                    .binary_search_by(|capture| capture.path.cmp(&path))
+                    .map_err(|_| StorageError::ScopeChanged)?;
+                captures[index].catalog_session_key = Some(session_key);
+                captures[index].catalog_source = Some(source);
+            }
+        }
+    }
     tx.check()?;
     Ok(captures)
+}
+
+fn pg_source_path_values(first: usize, count: usize) -> String {
+    (0..count)
+        .map(|offset| format!("(${}::bytea)", first + offset))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn pg_source_continuation_ledger(
+    row: &tokio_postgres::Row,
+) -> Result<Option<Ledger>, StorageError> {
+    if row.get::<_, Option<i64>>(4).is_none() {
+        return Ok(None);
+    }
+    let numeric = |column| -> Result<u64, StorageError> {
+        row.get::<_, Option<String>>(column)
+            .ok_or(StorageError::ScopeChanged)?
+            .parse()
+            .map_err(|_| StorageError::ScopeChanged)
+    };
+    let stat_bytes = |column| -> Result<[u8; 16], StorageError> {
+        row.get::<_, Option<Vec<u8>>>(column)
+            .ok_or(StorageError::ScopeChanged)?
+            .try_into()
+            .map_err(|_| StorageError::ScopeChanged)
+    };
+    let digest = |column| -> Result<[u8; 32], StorageError> {
+        row.get::<_, Option<Vec<u8>>>(column)
+            .ok_or(StorageError::ScopeChanged)?
+            .try_into()
+            .map_err(|_| StorageError::ScopeChanged)
+    };
+    let changed = row
+        .try_get::<_, Option<Vec<u8>>>(12)
+        .map_err(|_| StorageError::ScopeChanged)?
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map(i128::from_be_bytes)
+                .map_err(|_| StorageError::ScopeChanged)
+        })
+        .transpose()?;
+    let ledger = Ledger {
+        stat: Stat {
+            dev: numeric(5)?,
+            ino: numeric(6)?,
+            size: numeric(7)?,
+            modified_ns: u128::from_be_bytes(stat_bytes(8)?),
+            changed_ns: changed,
+        },
+        offset: numeric(9)?,
+        prefix: digest(10)?,
+        tail: digest(11)?,
+    };
+    if ledger.offset > ledger.stat.size {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(Some(ledger))
 }
 
 impl NativeIndex {

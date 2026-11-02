@@ -288,6 +288,7 @@ fn update_source_continuation_cell(
             )?;
             Ok(())
         }
+        SourceContinuationCellUpdate::Refuse => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
