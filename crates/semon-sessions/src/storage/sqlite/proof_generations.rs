@@ -330,8 +330,7 @@ pub(crate) fn publish_ordinary(
         overview_budget,
     } = presentations;
     let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
-    let publication =
-        catalog_publication_id(namespace, inputs.catalog_generation, &root.digest)?;
+    let publication = catalog_publication_id(namespace, inputs.catalog_generation, base)?;
     let proof = root.digest.clone();
     let prepared = prepare_proof_publication(
         namespace,
