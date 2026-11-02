@@ -410,6 +410,10 @@ pub(crate) struct PresentationObservations {
     source_continuation_digest: Option<String>,
     #[serde(skip)]
     source_continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
+    #[serde(skip)]
+    source_continuation_captures: Vec<crate::storage::catalog::SourceContinuationCapture>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_continuation_complete: Option<bool>,
     /// Request-local capture authority. Neither physical roots nor an open
     /// Facts connection can enter the durable witness or a leased read.
     #[serde(skip)]
@@ -438,23 +442,52 @@ impl PresentationObservations {
         &mut self,
         continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
     ) -> io::Result<()> {
-        self.source_continuation_digest = None;
-        self.source_continuations.clear();
         if continuations.is_empty()
             || continuations.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
         {
+            self.source_continuation_digest = None;
+            self.source_continuations.clear();
+            self.source_continuation_captures.clear();
+            self.source_continuation_complete = None;
             return Ok(());
+        }
+        self.set_source_continuation_observations(Vec::new(), false, continuations)
+    }
+
+    pub(crate) fn set_source_continuation_observations(
+        &mut self,
+        captures: Vec<crate::storage::catalog::SourceContinuationCapture>,
+        complete: bool,
+        continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
+    ) -> io::Result<()> {
+        self.source_continuation_digest = None;
+        self.source_continuations.clear();
+        self.source_continuation_captures.clear();
+        self.source_continuation_complete = None;
+        if captures.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
+            || continuations.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation observation exceeds the bounded cohort",
+            ));
         }
         use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&continuations).map_err(io::Error::other)?;
+        let encoded = serde_json::to_vec(&(complete, &captures, &continuations))
+            .map_err(io::Error::other)?;
         if encoded.len() > 1_048_576 {
-            return Ok(());
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation observation exceeds the request digest bound",
+            ));
         }
         let mut digest = Sha256::new();
-        digest.update(b"semon-catalog-source-continuations-v1\0");
+        digest.update(b"semon-catalog-source-continuations-v2\0");
         digest.update(encoded);
         self.source_continuation_digest = Some(format!("{:x}", digest.finalize()));
         self.source_continuations = continuations;
+        self.source_continuation_captures = captures;
+        self.source_continuation_complete = Some(complete);
         Ok(())
     }
 
@@ -463,12 +496,35 @@ impl PresentationObservations {
     ) -> Option<&[crate::storage::catalog::VerifiedSourceContinuation]> {
         let expected = self.source_continuation_digest.as_deref()?;
         use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&self.source_continuations).ok()?;
+        let complete = self.source_continuation_complete?;
+        let encoded = serde_json::to_vec(&(
+            complete,
+            &self.source_continuation_captures,
+            &self.source_continuations,
+        ))
+        .ok()?;
         let mut digest = Sha256::new();
-        digest.update(b"semon-catalog-source-continuations-v1\0");
+        digest.update(b"semon-catalog-source-continuations-v2\0");
         digest.update(encoded);
         (format!("{:x}", digest.finalize()) == expected)
             .then_some(self.source_continuations.as_slice())
+    }
+
+    pub(crate) fn verified_source_continuation_captures(
+        &self,
+    ) -> Option<(
+        bool,
+        &[crate::storage::catalog::SourceContinuationCapture],
+    )> {
+        self.verified_continuations()?;
+        Some((
+            self.source_continuation_complete?,
+            self.source_continuation_captures.as_slice(),
+        ))
+    }
+
+    pub(crate) fn has_source_continuation_envelope(&self) -> bool {
+        self.source_continuation_digest.is_some()
     }
 
     /// A publication may contain a larger cohort than the row being reused.
@@ -639,6 +695,8 @@ impl PresentationObservations {
             relative_statuses: BTreeMap::new(),
             source_continuation_digest: None,
             source_continuations: Vec::new(),
+            source_continuation_captures: Vec::new(),
+            source_continuation_complete: None,
             authority: Some(std::sync::Arc::new(PresentationAuthority {
                 options: options.clone(),
                 runtime: scoped,
@@ -767,6 +825,8 @@ impl PresentationObservations {
             relative_statuses: BTreeMap::new(),
             source_continuation_digest: None,
             source_continuations: Vec::new(),
+            source_continuation_captures: Vec::new(),
+            source_continuation_complete: None,
             authority: None,
         })
     }

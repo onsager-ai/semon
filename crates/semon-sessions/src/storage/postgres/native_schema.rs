@@ -234,6 +234,11 @@ const TABLES: &[Table] = &[
         key: "source_path",
     },
     Table {
+        name: "source_continuations",
+        columns: "source_path bytea,evidence bytea",
+        key: "source_path",
+    },
+    Table {
         name: "relocation_candidates",
         columns: "old_path bytea,new_path bytea",
         key: "old_path",
@@ -598,7 +603,7 @@ const WORKSPACE_TABLES: &[&str] = &[
 
 fn contract_hash() -> Vec<u8> {
     let mut hash = Sha256::new();
-    hash.update(b"semon-private-native-v11");
+    hash.update(b"semon-private-native-v12");
     for table in TABLES.iter().chain(FOUNDATION) {
         for value in [table.name, table.columns, table.key] {
             hash.update((value.len() as u64).to_be_bytes());

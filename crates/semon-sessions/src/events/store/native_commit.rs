@@ -224,14 +224,15 @@ impl Effects for Writer<'_, '_, '_> {
         }
         Ok(())
     }
-    fn retire_mutation(&mut self, path: &str) -> rusqlite::Result<()> {
+    fn retire_mutation(&mut self, input: &Input<'_>) -> rusqlite::Result<()> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
+        update_source_continuation_cell(transaction, input)?;
         transaction.execute(
         "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
-        [path],
+        [input.path],
     )?;
         measurements.record("mutation_retirement", started, 1);
         record_writer_rows(
@@ -243,6 +244,50 @@ impl Effects for Writer<'_, '_, '_> {
         #[cfg(test)]
         configured::effect("mutation_retirement")?;
         Ok(())
+    }
+}
+
+fn update_source_continuation_cell(
+    transaction: &Transaction<'_>,
+    input: &Input<'_>,
+) -> rusqlite::Result<()> {
+    use crate::storage::catalog::SourceContinuationCellUpdate;
+    let existing: Option<Vec<u8>> = transaction
+        .query_row(
+            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence ELSE X'' END FROM session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1",
+            [input.path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mutation: Option<Option<String>> = transaction
+        .query_row(
+            "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence END FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
+            [input.path],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mutation = mutation.flatten().map(String::into_bytes);
+    match crate::storage::catalog::advance_source_continuation_cell(
+        existing.as_deref(),
+        input.expected,
+        input.ledger,
+        mutation.as_deref(),
+    ) {
+        SourceContinuationCellUpdate::Keep => Ok(()),
+        SourceContinuationCellUpdate::Put(evidence) => {
+            transaction.execute(
+                "INSERT INTO session_source_continuations(namespace,source_path,evidence) VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET evidence=excluded.evidence",
+                params![input.path, evidence],
+            )?;
+            Ok(())
+        }
+        SourceContinuationCellUpdate::Clear => {
+            transaction.execute(
+                "DELETE FROM session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1",
+                [input.path],
+            )?;
+            Ok(())
+        }
     }
 }
 

@@ -238,6 +238,14 @@ pub(in crate::storage::postgres) fn publish(
     semantic: Option<Semantic<'_>>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let (operation, payload) = request(publication, expected, claims, closed, semantic.as_ref())?;
+    let continuation_observation = match publication.observations {
+        Some(observations) if observations.has_source_continuation_envelope() => Some(
+            observations
+                .verified_source_continuation_captures()
+                .ok_or(StorageError::ScopeChanged)?,
+        ),
+        _ => None,
+    };
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     // Serialize against native advancement and other publishers, including
@@ -261,6 +269,54 @@ pub(in crate::storage::postgres) fn publish(
     }
     if super::super::model_cache::generation(tx)?.as_deref() != expected {
         return Ok((Outcome::Conflict, None));
+    }
+    if let Some((complete, captures)) = continuation_observation {
+        if complete {
+            let rows = tx
+                .driver
+                .query(
+                    "SELECT source_path FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY source_path LIMIT 65",
+                    &[&ns],
+                )
+                .map_err(sqlstate::error)?;
+            let paths = rows
+                .into_iter()
+                .map(|row| {
+                    String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let observed = captures
+                .iter()
+                .map(|capture| capture.path.clone())
+                .collect::<Vec<_>>();
+            if paths != observed {
+                return Ok((Outcome::Conflict, None));
+            }
+        }
+        for capture in captures {
+            let path = capture.path.as_bytes();
+            let claim_rows = tx
+                .driver
+                .query(
+                    "SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+                    &[&ns, &path],
+                )
+                .map_err(sqlstate::error)?;
+            let claim = claim_rows.first().map(|row| row.get::<_, i64>(0));
+            let cell_rows = tx
+                .driver
+                .query(
+                    "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+                    &[&ns, &path],
+                )
+                .map_err(sqlstate::error)?;
+            let cell = cell_rows
+                .first()
+                .and_then(|row| row.get::<_, Option<Vec<u8>>>(0));
+            if claim != capture.claim || cell.as_deref() != Some(capture.cell.as_slice()) {
+                return Ok((Outcome::Conflict, None));
+            }
+        }
     }
     let observation_runtime = if publication.rows.is_empty() {
         None
@@ -477,6 +533,17 @@ pub(in crate::storage::postgres) fn publish(
         // or owner is carried; the head, claims and stage stay with the old
         // generation until custody completes and the CAS below succeeds.
         return Ok((Outcome::Deferred, None));
+    }
+    if let Some((_, captures)) = continuation_observation {
+        for capture in captures {
+            let deleted = tx.driver.execute(
+                "DELETE FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2) AND evidence=$3",
+                &[&ns, &capture.path.as_bytes(), &capture.cell],
+            ).map_err(sqlstate::error)?;
+            if deleted != 1 {
+                return Err(StorageError::Conflict);
+            }
+        }
     }
     if let Some((previous, mentioned, claimed)) = carried {
         #[cfg(test)]

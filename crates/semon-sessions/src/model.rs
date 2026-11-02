@@ -8986,6 +8986,48 @@ fn prepare_history_inner(
     )
 }
 
+fn combine_source_continuations(
+    rows: &[summary::CatalogRow],
+    captures: &[crate::storage::catalog::SourceContinuationCapture],
+    continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
+) -> Vec<crate::storage::catalog::VerifiedSourceContinuation> {
+    let current_sources = rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .map(|source| (source.path.to_string_lossy().into_owned(), source))
+        .collect::<BTreeMap<_, _>>();
+    let mut by_path = continuations
+        .into_iter()
+        .map(|proof| (proof.path().to_string_lossy().into_owned(), proof))
+        .collect::<BTreeMap<_, _>>();
+    for capture in captures {
+        let (Some(previous), Some(current), Some(ledger), Some(physical)) = (
+            capture.catalog_source.as_ref(),
+            current_sources.get(&capture.path).copied(),
+            capture.ledger.as_ref(),
+            capture.physical.as_ref(),
+        ) else {
+            continue;
+        };
+        let Ok(cell) = serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(
+            &capture.cell,
+        ) else {
+            continue;
+        };
+        if let Some(proof) = crate::storage::catalog::VerifiedSourceContinuation::from_cell(
+            Path::new(&capture.path),
+            previous,
+            current,
+            &cell,
+            ledger,
+            physical,
+        ) {
+            by_path.insert(capture.path.clone(), proof);
+        }
+    }
+    by_path.into_values().collect()
+}
+
 fn build_sources_inner(
     options: &Options,
     cache: &mut EventCache,
@@ -9831,12 +9873,36 @@ fn build_sources_inner(
                     &relationships.relations,
                 )?;
             }
-            if ordinary_current_sources {
+            let staged_publication = staged_relationships.is_some()
+                && matching_relationships.is_none();
+            if ordinary_current_sources || staged_publication {
                 let rows = catalog.as_deref().unwrap_or_default();
-                let continuations = builder.cache.take_source_continuations(rows);
-                if let Some(observations) = presentation.as_mut() {
-                    observations.set_source_continuations(continuations)?;
-                }
+                let continuations = builder.cache.take_source_continuations(rows)?;
+                let complete = selected.is_none();
+                let seed_paths = selected.map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                });
+                let captures = builder.cache.capture_source_continuations(
+                    options,
+                    if complete {
+                        None
+                    } else {
+                        seed_paths.as_deref()
+                    },
+                    complete,
+                )?;
+                let continuations =
+                    combine_source_continuations(rows, &captures, continuations);
+                let mut observations = presentation.take().unwrap_or_default();
+                observations.set_source_continuation_observations(
+                    captures,
+                    complete,
+                    continuations,
+                )?;
+                presentation = Some(observations);
             } else {
                 builder.cache.discard_source_continuations();
             }
@@ -9918,20 +9984,31 @@ fn build_sources_inner(
         BuildTarget::Catalog => {
             let rows = catalog.as_deref().unwrap_or_default();
             if ordinary_current_sources {
-                let continuations = cache.take_source_continuations(rows);
-                if let Some(observations) = presentation.as_mut() {
-                    observations.set_source_continuations(continuations)?;
-                } else if !continuations.is_empty() {
-                    // Large Catalogs do not capture the bounded runtime cohort,
-                    // but still carry request-local continuation proofs through
-                    // the existing digest-bearing publication envelope.
-                    let mut proof_only =
-                        crate::storage::selected::PresentationObservations::default();
-                    proof_only.set_source_continuations(continuations)?;
-                    if proof_only.verified_continuations().is_some() {
-                        presentation = Some(proof_only);
-                    }
-                }
+                let mut continuations = cache.take_source_continuations(rows)?;
+                let complete = selected.is_none();
+                let seed_paths = selected.map(|inputs| {
+                    inputs
+                        .iter()
+                        .map(|input| input.full_path(options).to_string_lossy().into_owned())
+                        .collect::<Vec<_>>()
+                });
+                let captures = if complete {
+                    cache.capture_source_continuations(options, None, true)?
+                } else {
+                    cache.capture_source_continuations(
+                        options,
+                        seed_paths.as_deref(),
+                        false,
+                    )?
+                };
+                let continuations = combine_source_continuations(rows, &captures, continuations);
+                let mut observations = presentation.take().unwrap_or_default();
+                observations.set_source_continuation_observations(
+                    captures,
+                    complete,
+                    continuations,
+                )?;
+                presentation = Some(observations);
             } else {
                 cache.discard_source_continuations();
             }

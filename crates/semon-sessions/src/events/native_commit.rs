@@ -55,7 +55,7 @@ pub(crate) trait Effects {
     fn relationships(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
     fn archive(&mut self, path: &str) -> Result<(), Self::Error>;
     fn invalidate(&mut self, path: &str, changed: bool) -> Result<(), Self::Error>;
-    fn retire_mutation(&mut self, path: &str) -> Result<(), Self::Error>;
+    fn retire_mutation(&mut self, input: &Input<'_>) -> Result<(), Self::Error>;
 }
 
 pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(), E::Error> {
@@ -74,7 +74,7 @@ pub(crate) fn write<E: Effects>(effects: &mut E, input: Input<'_>) -> Result<(),
         effects.auxiliary(&input, stage)?;
     }
     effects.invalidate(input.path, input.semantic_change)?;
-    effects.retire_mutation(input.path)?;
+    effects.retire_mutation(&input)?;
     effects.relationships(&input)?;
     effects.archive(input.path)
 }

@@ -246,10 +246,63 @@ impl Effects for Writer<'_, '_> {
         }
         self.boundary()
     }
-    fn retire_mutation(&mut self, path: &str) -> Result<(), StorageError> {
+    fn retire_mutation(&mut self, input: &Input<'_>) -> Result<(), StorageError> {
+        let path = input.path;
         super::native_keys::delete_meta(self.tx, format!("source-retired:{path}").as_bytes())?;
+        update_source_continuation_cell(self.tx, input)?;
         self.tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace=$1 AND source_path=$2", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
         self.boundary()
+    }
+}
+
+fn update_source_continuation_cell(
+    tx: &mut PgTxn<'_>,
+    input: &Input<'_>,
+) -> Result<(), StorageError> {
+    use super::sqlstate;
+    use crate::storage::catalog::SourceContinuationCellUpdate;
+    let namespace = tx.namespace.as_str().as_bytes().to_vec();
+    let path = input.path.as_bytes();
+    let existing = tx
+        .driver
+        .query(
+            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            &[&namespace, &path],
+        )
+        .map_err(sqlstate::error)?
+        .first()
+        .map(|row| row.get::<_, Vec<u8>>(0));
+    let mutation = tx
+        .driver
+        .query(
+            "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            &[&namespace, &path],
+        )
+        .map_err(sqlstate::error)?
+        .first()
+        .map(|row| row.get::<_, Vec<u8>>(0));
+    let update = crate::storage::catalog::advance_source_continuation_cell(
+        existing.as_deref(),
+        input.expected,
+        input.ledger,
+        mutation.as_deref(),
+    );
+    match update {
+        SourceContinuationCellUpdate::Keep => Ok(()),
+        SourceContinuationCellUpdate::Put(evidence) => {
+            tx.driver.execute(
+                "INSERT INTO semon_pg_native_source_continuations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_continuations.namespace=excluded.namespace AND semon_pg_native_source_continuations.source_path=excluded.source_path",
+                &[&namespace, &path, &evidence],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        }
+        SourceContinuationCellUpdate::Clear => {
+            tx.driver.execute(
+                "DELETE FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+                &[&namespace, &path],
+            ).map_err(sqlstate::error)?;
+            Ok(())
+        }
     }
 }
 

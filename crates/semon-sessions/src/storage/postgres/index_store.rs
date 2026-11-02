@@ -77,6 +77,94 @@ fn read_error(error: std::io::Error) -> StoreError {
     err(storage)
 }
 
+fn source_continuation_paths(
+    tx: &mut super::txn::PgTxn<'_>,
+) -> Result<Vec<String>, StorageError> {
+    tx.check()?;
+    let rows = tx
+        .driver
+        .query(
+            "SELECT source_path FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY source_path LIMIT 65",
+            &[&tx.namespace.as_str().as_bytes()],
+        )
+        .map_err(sqlstate::error)?;
+    rows.into_iter()
+        .map(|row| {
+            String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+        })
+        .collect()
+}
+
+fn source_continuation_snapshot(
+    tx: &mut super::txn::PgTxn<'_>,
+    paths: &[String],
+    complete: bool,
+) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StorageError> {
+    if paths.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
+        || paths.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(StorageError::InvalidArguments);
+    }
+    tx.check()?;
+    if complete && source_continuation_paths(tx)? != paths {
+        return Err(StorageError::Conflict);
+    }
+    let namespace = tx.namespace.as_str().as_bytes().to_vec();
+    let generation = super::model_cache::generation(tx)?;
+    let mut captures = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path_bytes = path.as_bytes();
+        let cell_rows = tx.driver.query(
+            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            &[&namespace, &path_bytes],
+        ).map_err(sqlstate::error)?;
+        if cell_rows.is_empty() && !complete {
+            continue;
+        }
+        let cell = cell_rows.first().and_then(|row| row.get::<_, Option<Vec<u8>>>(0)).ok_or(StorageError::ScopeChanged)?;
+        let claim_rows = tx.driver.query(
+            "SELECT revision FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            &[&namespace, &path_bytes],
+        ).map_err(sqlstate::error)?;
+        let claim = claim_rows.first().map(|row| row.get::<_, i64>(0));
+        let ledger = super::native_reader::ledger(tx, path)?.map(|(_, ledger)| ledger);
+        let pending_mutation: bool = tx.driver.query_one(
+            "SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2))",
+            &[&namespace, &path_bytes],
+        ).map_err(sqlstate::error)?.get(0);
+        let inflight_key = format!("raw-write-inflight:{path}");
+        let raw_inflight = super::native_keys::read_meta(tx, inflight_key.as_bytes(), 16384)?.is_some();
+        let catalog_source = if let Some(generation) = &generation {
+            let rows = tx.driver.query(
+                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_sources WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND path_digest=sha256($3::bytea) AND semon_pg_native_key_matches(source_path,path_digest,$3) ORDER BY session_key LIMIT 2",
+                &[&namespace, &generation.as_bytes(), &path_bytes],
+            ).map_err(sqlstate::error)?;
+            if rows.len() == 1 {
+                rows.first()
+                    .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
+                    .and_then(|bytes| serde_json::from_slice::<crate::model::summary::CatalogSource>(&bytes).ok())
+                    .filter(|source| source.path == std::path::Path::new(path))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        captures.push(crate::storage::catalog::SourceContinuationCapture {
+            path: path.clone(),
+            cell,
+            claim,
+            ledger,
+            pending_mutation,
+            raw_inflight,
+            catalog_source,
+            physical: None,
+        });
+    }
+    tx.check()?;
+    Ok(captures)
+}
+
 impl NativeIndex {
     fn summary(
         &self,
@@ -985,6 +1073,30 @@ impl IndexStore for NativeIndex {
                 TxnKind::ReadSnapshot,
                 &self.control,
                 |tx| super::source_lifecycle::component_paths(tx, paths, keys, native_parents),
+            )
+            .map_err(err)
+    }
+    fn source_continuation_paths(&self) -> Result<Vec<String>, StoreError> {
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                source_continuation_paths,
+            )
+            .map_err(err)
+    }
+    fn source_continuation_snapshot(
+        &self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| source_continuation_snapshot(tx, paths, complete),
             )
             .map_err(err)
     }

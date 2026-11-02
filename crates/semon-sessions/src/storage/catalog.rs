@@ -33,6 +33,111 @@ pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 /// never stored as row metadata.
 pub(crate) const SOURCE_CONTINUATION_LIMIT: usize = 64;
 
+/// Durable accepted append evidence for one native source. This is promoted
+/// from `source_mutations` when native ingest retires that immediate intent;
+/// it remains separate so repeated Raw writes can be coalesced until Catalog
+/// publication acknowledges the captured value.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceContinuationCell {
+    pub(crate) version: u32,
+    pub(crate) prior: crate::events::Ledger,
+    pub(crate) current: crate::events::Ledger,
+    pub(crate) accepted: crate::source_change::AppendEvidence,
+}
+
+/// Raw bounded backend observation. `cell` remains byte exact for both the
+/// request digest and publication's value-qualified ACK.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SourceContinuationCapture {
+    pub(crate) path: String,
+    pub(crate) cell: Vec<u8>,
+    pub(crate) claim: Option<i64>,
+    pub(crate) ledger: Option<crate::events::Ledger>,
+    pub(crate) pending_mutation: bool,
+    pub(crate) raw_inflight: bool,
+    pub(crate) catalog_source: Option<CatalogSource>,
+    pub(crate) physical: Option<crate::events::Stat>,
+}
+
+pub(crate) enum SourceContinuationCellUpdate {
+    Keep,
+    Put(Vec<u8>),
+    Clear,
+}
+
+/// Promote one retired source mutation, preserving a chain only when custody
+/// and its exact stat boundary continue the previous cell.
+pub(crate) fn advance_source_continuation_cell(
+    existing: Option<&[u8]>,
+    expected: Option<&crate::events::Ledger>,
+    current: &crate::events::Ledger,
+    mutation: Option<&[u8]>,
+) -> SourceContinuationCellUpdate {
+    if expected == Some(current) {
+        return SourceContinuationCellUpdate::Keep;
+    }
+    let (Some(expected), Some(mutation)) = (expected, mutation) else {
+        return SourceContinuationCellUpdate::Clear;
+    };
+    let Ok(accepted) = serde_json::from_slice::<crate::source_change::AppendEvidence>(mutation)
+    else {
+        return SourceContinuationCellUpdate::Clear;
+    };
+    if expected.stat != accepted.before
+        || current.stat != accepted.after
+        || current.offset < expected.offset
+        || current.offset > current.stat.size
+        || !accepted.qualifies(&expected.stat, &current.stat)
+    {
+        return SourceContinuationCellUpdate::Clear;
+    }
+
+    let prior = match existing {
+        None => expected.clone(),
+        Some(bytes) => {
+            let Ok(previous) = serde_json::from_slice::<SourceContinuationCell>(bytes) else {
+                return SourceContinuationCellUpdate::Clear;
+            };
+            if previous.version != 1
+                || previous.current != *expected
+                || previous.accepted.generation != accepted.generation
+                || previous.accepted.after != accepted.before
+                || previous.prior.stat != previous.accepted.before
+                || previous.current.stat != previous.accepted.after
+                || previous.current.offset < previous.prior.offset
+                || previous.current.offset > previous.current.stat.size
+                || !previous
+                    .accepted
+                    .qualifies(&previous.prior.stat, &previous.current.stat)
+            {
+                return SourceContinuationCellUpdate::Clear;
+            }
+            previous.prior
+        }
+    };
+    let accepted = crate::source_change::AppendEvidence {
+        generation: accepted.generation,
+        before: prior.stat,
+        after: current.stat,
+    };
+    let cell = SourceContinuationCell {
+        version: 1,
+        prior,
+        current: current.clone(),
+        accepted,
+    };
+    let Ok(encoded) = serde_json::to_vec(&cell) else {
+        return SourceContinuationCellUpdate::Clear;
+    };
+    if encoded.len() > 8192 {
+        SourceContinuationCellUpdate::Clear
+    } else {
+        SourceContinuationCellUpdate::Put(encoded)
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub(crate) struct VerifiedSourceContinuation {
     path: std::path::PathBuf,
@@ -62,6 +167,48 @@ impl VerifiedSourceContinuation {
             prior: prior.clone(),
             current: current.clone(),
             accepted: accepted.clone(),
+        })
+    }
+
+    pub(crate) fn from_cell(
+        path: &std::path::Path,
+        old: &CatalogSource,
+        new: &CatalogSource,
+        cell: &SourceContinuationCell,
+        current: &crate::events::Ledger,
+        physical: &crate::events::Stat,
+    ) -> Option<Self> {
+        let source_matches = |source: &CatalogSource, ledger: &crate::events::Ledger| {
+            source.dev == ledger.stat.dev
+                && source.ino == ledger.stat.ino
+                && source.size == ledger.stat.size
+                && source.modified_ns == ledger.stat.modified_ns
+                && source.changed_ns == ledger.stat.changed_ns
+                && source.offset == ledger.offset
+                && source.prefix_sha256 == ledger.prefix
+                && source.tail_sha256 == ledger.tail
+        };
+        if cell.version != 1
+            || old.path.as_path() != path
+            || new.path.as_path() != path
+            || cell.current != *current
+            || !source_matches(old, &cell.prior)
+            || !source_matches(new, current)
+            || cell.prior.stat != cell.accepted.before
+            || cell.current.stat != cell.accepted.after
+            || cell.current.offset <= cell.prior.offset
+            || cell.current.stat != *physical
+            || !cell
+                .accepted
+                .qualifies(&cell.prior.stat, physical)
+        {
+            return None;
+        }
+        Some(Self {
+            path: path.to_owned(),
+            prior: cell.prior.clone(),
+            current: cell.current.clone(),
+            accepted: cell.accepted.clone(),
         })
     }
 
@@ -340,6 +487,88 @@ mod source_continuation_tests {
             VerifiedSourceContinuation::from_scan(&path, &prior, &current, &malformed, &physical,)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn durable_continuation_cell_coalesces_only_adjacent_matching_custody() {
+        let (_, prior, current, accepted, physical) = fixture();
+        let first = serde_json::to_vec(&accepted).unwrap();
+        let SourceContinuationCellUpdate::Put(cell) =
+            advance_source_continuation_cell(None, Some(&prior), &current, Some(&first))
+        else {
+            panic!("initial accepted append should create a cell");
+        };
+
+        let next_stat = crate::events::Stat {
+            size: 30,
+            modified_ns: 50,
+            changed_ns: Some(60),
+            ..physical
+        };
+        let next = crate::events::Ledger {
+            stat: next_stat,
+            offset: 28,
+            prefix: [5; 32],
+            tail: [6; 32],
+        };
+        let adjacent = crate::source_change::AppendEvidence {
+            generation: accepted.generation.clone(),
+            before: physical,
+            after: next_stat,
+        };
+        let adjacent_bytes = serde_json::to_vec(&adjacent).unwrap();
+        let SourceContinuationCellUpdate::Put(coalesced) =
+            advance_source_continuation_cell(Some(&cell), Some(&current), &next, Some(&adjacent_bytes))
+        else {
+            panic!("matching adjacent custody should extend the cell");
+        };
+        let coalesced: SourceContinuationCell = serde_json::from_slice(&coalesced).unwrap();
+        assert_eq!(coalesced.prior, prior);
+        assert_eq!(coalesced.current, next);
+        assert_eq!(coalesced.accepted.before, prior.stat);
+        assert_eq!(coalesced.accepted.after, next_stat);
+
+        let different_token = crate::source_change::AppendEvidence {
+            generation: "fedcba9876543210fedcba9876543210".into(),
+            ..adjacent
+        };
+        let different_token = serde_json::to_vec(&different_token).unwrap();
+        assert!(matches!(
+            advance_source_continuation_cell(
+                Some(&cell),
+                Some(&current),
+                &next,
+                Some(&different_token),
+            ),
+            SourceContinuationCellUpdate::Clear
+        ));
+    }
+
+    #[test]
+    fn durable_partial_line_cell_is_ackable_without_a_positive_advance_proof() {
+        let (path, prior, _, accepted, physical) = fixture();
+        let partial = crate::events::Ledger {
+            stat: physical,
+            offset: prior.offset,
+            prefix: prior.prefix,
+            tail: prior.tail,
+        };
+        let mutation = serde_json::to_vec(&accepted).unwrap();
+        let SourceContinuationCellUpdate::Put(bytes) = advance_source_continuation_cell(
+            None,
+            Some(&prior),
+            &partial,
+            Some(&mutation),
+        ) else {
+            panic!("accepted partial-line append should retain a cell");
+        };
+        let cell: SourceContinuationCell = serde_json::from_slice(&bytes).unwrap();
+        let old = source(&prior, &path, "native", None);
+        let new = source(&partial, &path, "native", None);
+        assert!(VerifiedSourceContinuation::from_cell(
+            &path, &old, &new, &cell, &partial, &physical,
+        )
+        .is_none());
     }
 }
 

@@ -1258,6 +1258,25 @@ pub(crate) trait IndexStore: Send {
         native_parents: &[(String, String)],
     ) -> Result<Option<Vec<String>>, StoreError>;
 
+    /// Candidate continuation cells are independent of ordinary file scans.
+    /// Backends cap discovery at one beyond the preparation bound so callers
+    /// can refuse honestly on overflow.
+    fn source_continuation_paths(&self) -> Result<Vec<String>, StoreError> {
+        Ok(Vec::new())
+    }
+
+    /// Capture cells, native ledgers, claims, pending mutations and the prior
+    /// Catalog source from one validated backend snapshot. `complete` means
+    /// these are all cells for the namespace, not a bounded selected cohort.
+    fn source_continuation_snapshot(
+        &self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
+        let _ = (paths, complete);
+        Ok(Vec::new())
+    }
+
     fn query_runtime_binding(
         &self,
     ) -> Result<Option<crate::storage::QueryRuntimeBinding>, StoreError> {
@@ -1487,6 +1506,14 @@ fn store_io_error(error: StoreError) -> io::Error {
     match error {
         StoreError::Configured(error) => io::Error::other(error),
         other => io::Error::other(other.to_string()),
+    }
+}
+
+fn stat_if_present(path: &Path) -> io::Result<Option<Stat>> {
+    match Stat::of(path) {
+        Ok(stat) => Ok(Some(stat)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -2503,6 +2530,126 @@ impl EventCache {
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
+    pub(crate) fn capture_source_continuations(
+        &self,
+        options: &crate::Options,
+        seeds: Option<&[String]>,
+        complete: bool,
+    ) -> io::Result<Vec<crate::storage::catalog::SourceContinuationCapture>> {
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?;
+        let paths = if complete {
+            if seeds.is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "complete Catalog continuation snapshot cannot use selected seeds",
+                ));
+            }
+            store
+                .source_continuation_paths()
+                .map_err(|error| io::Error::other(error.to_string()))?
+        } else {
+            let Some(seeds) = seeds else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "bounded Catalog continuation snapshot requires source seeds",
+                ));
+            };
+            let mut paths = seeds.to_vec();
+            paths.sort();
+            paths.dedup();
+            if paths.len() != seeds.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Catalog continuation source seeds must be distinct",
+                ));
+            }
+            paths
+        };
+        if paths.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
+            || paths.iter().collect::<BTreeSet<_>>().len() != paths.len()
+            || paths.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation cells exceed the bounded preparation cohort",
+            ));
+        }
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let lock_cache = self.lock_cache.as_deref().unwrap_or(&options.cache);
+        let _locks = paths
+            .iter()
+            .map(|path| {
+                crate::source_change::SourceLock::acquire_cache(lock_cache, path, false)
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let observe_physical = |path: &str| {
+            let input = crate::native_evidence::catalog_input(Path::new(path), options);
+            if input.as_ref().is_some_and(|input| {
+                input.full_path(options).to_string_lossy().as_ref() == path
+            }) {
+                stat_if_present(Path::new(path))
+            } else {
+                Ok(None)
+            }
+        };
+        let before = paths
+            .iter()
+            .map(|path| observe_physical(path))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mut captures = store
+            .source_continuation_snapshot(&paths, complete)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let capture_paths_match = if complete {
+            captures.len() == paths.len()
+                && captures
+                    .iter()
+                    .zip(&paths)
+                    .all(|(capture, path)| capture.path == *path)
+        } else {
+            captures.iter().all(|capture| {
+                paths.binary_search(&capture.path).is_ok()
+            }) && captures
+                .windows(2)
+                .all(|pair| pair[0].path < pair[1].path)
+        };
+        if !capture_paths_match {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation cell set changed during preparation",
+            ));
+        }
+        let after = paths
+            .iter()
+            .map(|path| observe_physical(path))
+            .collect::<io::Result<Vec<_>>>()?;
+        if before != after {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation source changed during preparation",
+            ));
+        }
+        let after_by_path = paths
+            .into_iter()
+            .zip(after)
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for capture in &mut captures {
+            if capture.pending_mutation || capture.raw_inflight {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Catalog continuation source mutation is pending",
+                ));
+            }
+            capture.physical = after_by_path.get(&capture.path).cloned().flatten();
+        }
+        Ok(captures)
+    }
+
     /// Mark one stale committed source for the ordinary local host scanner.
     /// Configured stores have no implicit Raw authority and leave recovery to
     /// their explicit NativeEventStore producer.
@@ -3079,17 +3226,23 @@ impl EventCache {
     pub(crate) fn take_source_continuations(
         &mut self,
         rows: &[crate::model::summary::CatalogRow],
-    ) -> Vec<crate::storage::catalog::VerifiedSourceContinuation> {
+    ) -> io::Result<Vec<crate::storage::catalog::VerifiedSourceContinuation>> {
         let published_paths = rows
             .iter()
             .flat_map(|row| row.sources.iter())
             .map(|source| source.path.clone())
             .collect::<BTreeSet<_>>();
-        std::mem::take(&mut self.source_continuations)
+        let continuations = std::mem::take(&mut self.source_continuations)
             .into_values()
             .filter(|proof| published_paths.contains(proof.path()))
-            .take(crate::storage::catalog::SOURCE_CONTINUATION_LIMIT)
-            .collect()
+            .collect::<Vec<_>>();
+        if continuations.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Catalog continuation proof cohort exceeds the bounded publication limit",
+            ));
+        }
+        Ok(continuations)
     }
 
     pub(crate) fn discard_source_continuations(&mut self) {

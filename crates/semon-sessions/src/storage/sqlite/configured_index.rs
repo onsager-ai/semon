@@ -320,6 +320,17 @@ impl IndexStore for ConfiguredIndex {
         self.native
             .catalog_component_paths(paths, keys, native_parents)
     }
+    fn source_continuation_paths(&self) -> Result<Vec<String>, StoreError> {
+        self.native.source_continuation_paths()
+    }
+    fn source_continuation_snapshot(
+        &self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
+        self.native
+            .source_continuation_snapshot(paths, complete)
+    }
     fn begin_semantic_stage(
         &mut self,
         paths: &[String],

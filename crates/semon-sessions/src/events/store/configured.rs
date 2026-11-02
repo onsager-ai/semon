@@ -380,6 +380,7 @@ const TABLES: &[&str] = &[
     "catalog_relocation_candidates",
     "catalog_native_dependencies",
     "session_source_mutations",
+    "session_source_continuations",
     "native_usage_sources",
     "native_usage_current",
     "native_usage_facts",
@@ -1314,6 +1315,18 @@ impl Writer {
         )
         .optional()
         .map_err(failure)
+    }
+
+    pub(crate) fn source_continuation_paths(&self) -> Result<Vec<String>, StoreError> {
+        super::source_continuation_paths(&self.connection)
+    }
+
+    pub(crate) fn source_continuation_snapshot(
+        &self,
+        paths: &[String],
+        complete: bool,
+    ) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
+        super::source_continuation_snapshot(&self.connection, paths, complete)
     }
 
     pub(crate) fn rebuild_catalog_search(
