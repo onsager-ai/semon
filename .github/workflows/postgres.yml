@@ -61,6 +61,13 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::relation_stage::selector_metadata_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-selector-budget.log"
           grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/477-selector-budget.log"
+      - name: Nested Claude source order and exact page relations
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::nested_claude_call_page_keeps_spawn_turn_anchor_when_source_order_changes -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-claude-source-order.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-claude-source-order.log"
       - name: Exact imported Current handoff with unchanged assertions
         if: ${{ !cancelled() }}
         shell: bash
@@ -68,9 +75,29 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::endpoint_owners::pg_imported_current_handoff_preserves_its_proof_and_old_current_reads -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-imported-handoff.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-imported-handoff.log"
+      - name: Formatting
+        id: formatting
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo fmt --all --check 2>&1 | tee "$RUNNER_TEMP/477-format.log"
+      - name: Prepare exact formatting patch
+        if: ${{ !cancelled() && steps.formatting.outcome == 'failure' }}
+        run: |
+          cargo fmt --all
+          git diff --binary > "$RUNNER_TEMP/477-format.patch"
+      - name: Strict PostgreSQL Clippy
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --locked -p semon-sessions --all-targets --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/477-clippy.log"
       - name: Retain diagnostic evidence
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: 477-three-case-diagnostic
-          path: ${{ runner.temp }}/477-*.log
+          path: |
+            ${{ runner.temp }}/477-*.log
+            ${{ runner.temp }}/477-format.patch
