@@ -10110,7 +10110,10 @@ mod tests {
             false,
             None,
         );
-        assert!(result.is_err(), "missing projection input must refuse issuance");
+        assert!(
+            result.is_err(),
+            "missing projection input must refuse issuance"
+        );
         assert_eq!(
             catalog_state(&batch.connection),
             before,
@@ -10152,7 +10155,10 @@ mod tests {
                 false,
                 None,
             );
-            assert!(result.is_err(), "{label} row projection must refuse issuance");
+            assert!(
+                result.is_err(),
+                "{label} row projection must refuse issuance"
+            );
             assert_eq!(
                 catalog_state(&batch.connection),
                 before,
