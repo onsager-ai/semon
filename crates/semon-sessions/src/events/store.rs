@@ -4077,7 +4077,8 @@ impl SqliteStore {
                             eprintln!("catalog_publication_probe stage=search_refresh");
                             #[cfg(test)]
                             {
-                                if let CatalogWriter::Traversal { owners, measured } = policy.writer {
+                                if let CatalogWriter::Traversal { owners, measured } = policy.writer
+                                {
                                     crate::catalog_search::publish_scoped_rows_effects(
                                         &transaction,
                                         &search,
