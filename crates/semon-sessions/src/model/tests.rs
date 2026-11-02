@@ -6474,23 +6474,25 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     let mut marker_observed = false;
     for _ in 0..1024 {
-        assert!(!evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
-            .unwrap(), "oversized PG stage must remain pending");
-        if crate::storage::postgres::semantic_stage_test_refusal_bytes(
-            &pool,
-            &namespace,
-            &control,
-        )
-        .unwrap()
-        .is_some()
+        assert!(
+            !evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap(),
+            "oversized PG stage must remain pending"
+        );
+        if crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control)
+            .unwrap()
+            .is_some()
         {
             marker_observed = true;
             break;
         }
     }
     evidence.retire();
-    assert!(marker_observed, "large PostgreSQL fixture did not persist a refusal");
+    assert!(
+        marker_observed,
+        "large PostgreSQL fixture did not persist a refusal"
+    );
 
     let diagnostic =
         crate::storage::postgres::take_semantic_stage_save_diagnostic(namespace.as_str())
@@ -6561,13 +6563,10 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     drop(pg_cache);
 
     let generation = after.generation.as_deref().expect("prior Catalog head");
-    let marker = crate::storage::postgres::semantic_stage_test_refusal_bytes(
-        &pool,
-        &namespace,
-        &control,
-    )
-    .unwrap()
-    .expect("qualified oversized owner row persisted a refusal marker");
+    let marker =
+        crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control)
+            .unwrap()
+            .expect("qualified oversized owner row persisted a refusal marker");
     assert!(marker.len() <= 4096);
     let marker_value: Value = serde_json::from_slice(&marker).unwrap();
     assert_eq!(marker_value["version"], 1);
@@ -6576,15 +6575,18 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     assert!(marker_value.get("source_path").is_none());
     assert!(marker_value.get("native_id").is_none());
     let marker_text = String::from_utf8(marker.clone()).unwrap();
-    assert!(selected_paths.iter().all(|path| !marker_text.contains(path)));
+    assert!(
+        selected_paths
+            .iter()
+            .all(|path| !marker_text.contains(path))
+    );
     assert!(!marker_text.contains("Last admitted Catalog"));
-    assert!(!marker_text.contains(&crate::native_evidence::query_runtime_generation(&options).unwrap()));
+    assert!(
+        !marker_text.contains(&crate::native_evidence::query_runtime_generation(&options).unwrap())
+    );
     assert_eq!(
         crate::storage::postgres::semantic_stage_test_publication_blocker(
-            &pool,
-            &namespace,
-            &control,
-            generation,
+            &pool, &namespace, &control, generation,
         )
         .unwrap(),
         Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
@@ -6614,28 +6616,19 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
         }
         let changed = serde_json::to_vec(&changed).unwrap();
         crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
-            &pool,
-            &namespace,
-            &control,
-            &changed,
+            &pool, &namespace, &control, &changed,
         )
         .unwrap();
         assert_eq!(
             crate::storage::postgres::semantic_stage_test_publication_blocker(
-                &pool,
-                &namespace,
-                &control,
-                generation,
+                &pool, &namespace, &control, generation,
             )
             .unwrap(),
             None,
             "changed {field} fence must expire the blocker"
         );
         crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
-            &pool,
-            &namespace,
-            &control,
-            &marker,
+            &pool, &namespace, &control, &marker,
         )
         .unwrap();
     }
@@ -6650,18 +6643,12 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     .unwrap();
     assert!(matches!(
         crate::storage::postgres::semantic_stage_test_publication_blocker(
-            &pool,
-            &namespace,
-            &control,
-            generation,
+            &pool, &namespace, &control, generation,
         ),
         Err(crate::storage::StorageError::ScopeChanged)
     ));
     crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
-        &pool,
-        &namespace,
-        &control,
-        &marker,
+        &pool, &namespace, &control, &marker,
     )
     .unwrap();
 
@@ -6669,7 +6656,10 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     assert_eq!(page.status, 200);
     let page: Value = serde_json::from_slice(&page.body).unwrap();
     assert_eq!(page["completeness"]["state"], "partial");
-    assert_eq!(page["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(
+        page["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
     assert_eq!(page["completeness"]["blocker"]["retryable"], false);
     assert_eq!(page["freshness"], "updating");
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
@@ -6679,7 +6669,10 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
     assert_eq!(search.status, 200);
     let search: Value = serde_json::from_slice(&search.body).unwrap();
     assert_eq!(search["completeness"]["state"], "partial");
-    assert_eq!(search["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(
+        search["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
     assert_eq!(search["completeness"]["blocker"]["retryable"], false);
     assert_eq!(search["items"][0]["key"], "prior");
 
@@ -6711,12 +6704,8 @@ fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages
         crate::events::Outcome::Written
     );
     assert_eq!(
-        crate::storage::postgres::semantic_stage_test_refusal_bytes(
-            &pool,
-            &namespace,
-            &control,
-        )
-        .unwrap(),
+        crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control,)
+            .unwrap(),
         None,
         "a successful stage mutation clears its stale refusal marker"
     );

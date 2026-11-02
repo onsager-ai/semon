@@ -360,7 +360,9 @@ fn write_publication_refusal(
         active_claims_sha256,
         claims_sha256: claims_sha256(claims)?,
         runtime_sha256: sha256_hex(candidate.runtime.as_bytes()),
-        head_sha256: head.as_deref().map(|generation| sha256_hex(generation.as_bytes())),
+        head_sha256: head
+            .as_deref()
+            .map(|generation| sha256_hex(generation.as_bytes())),
         source_revision: candidate.revision,
     };
     let bytes = serde_json::to_vec(&refusal).map_err(|_| StorageError::Unavailable)?;
@@ -374,7 +376,13 @@ fn current_claims(
     tx: &mut PgTxn<'_>,
     paths: &[String],
 ) -> Result<Vec<(String, Option<i64>)>, StorageError> {
-    if paths.len() > 64 || paths.iter().collect::<std::collections::BTreeSet<_>>().len() != paths.len() {
+    if paths.len() > 64
+        || paths
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != paths.len()
+    {
         return Err(StorageError::ScopeChanged);
     }
     let namespace = tx.namespace.as_str().as_bytes();
@@ -402,12 +410,7 @@ fn current_claims(
     }
     Ok(paths
         .iter()
-        .map(|path| {
-            (
-                path.clone(),
-                revisions.get(path.as_bytes()).copied(),
-            )
-        })
+        .map(|path| (path.clone(), revisions.get(path.as_bytes()).copied()))
         .collect())
 }
 
@@ -429,11 +432,9 @@ pub(super) fn publication_blocker(
     tx: &mut PgTxn<'_>,
     generation: &str,
 ) -> Result<Option<crate::storage::catalog::CatalogPublicationBlocker>, StorageError> {
-    let Some(bytes) = super::native_keys::read_meta(
-        tx,
-        PUBLICATION_REFUSAL_KEY,
-        PUBLICATION_REFUSAL_MAX_BYTES,
-    )? else {
+    let Some(bytes) =
+        super::native_keys::read_meta(tx, PUBLICATION_REFUSAL_KEY, PUBLICATION_REFUSAL_MAX_BYTES)?
+    else {
         return Ok(None);
     };
     let refusal: PublicationRefusal =
@@ -597,7 +598,9 @@ impl std::io::Write for BoundedJsonCounter {
         if buffer.len() > remaining {
             self.bytes = limit;
             self.exceeded = true;
-            return Err(std::io::Error::other("owner row serialization exceeded bound"));
+            return Err(std::io::Error::other(
+                "owner row serialization exceeded bound",
+            ));
         }
         self.bytes += buffer.len();
         Ok(buffer.len())
