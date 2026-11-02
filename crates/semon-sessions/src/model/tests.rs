@@ -13036,8 +13036,12 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     assert_eq!(paged.len(), 3);
     assert_eq!(paged[2]["text"], "new current answer");
     assert!(!removed.path.exists());
-    let connection = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let config = home.options.source.config(&home.options.cache).unwrap();
+    let connection = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
     let namespace = config.namespace.as_str();
     let body_leaks:i64=connection.query_row("SELECT count(*) FROM session_history_slots WHERE namespace=?1 AND (instr(metadata,'original cleared prompt')>0 OR instr(metadata,'new current answer')>0)",[namespace],|row|row.get(0)).unwrap();
     assert_eq!(body_leaks, 0);
@@ -13217,6 +13221,8 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
     publish();
     home.top("root", &[human("root", ts(1, 0), "replacement prompt")]);
     publish();
+    // Read the original from its archive after the local carrier disappears.
+    fs::remove_file(&source_path).unwrap();
 
     let config = home.options.source.config(&home.options.cache).unwrap();
     let connection = crate::storage::sqlite::semantic::Stage::open(
