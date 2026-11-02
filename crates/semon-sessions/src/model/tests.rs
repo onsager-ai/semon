@@ -6323,6 +6323,8 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 #[cfg(feature = "postgres")]
 #[test]
 fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
+    use crate::storage::native_events::NativeEventStore;
+
     let home = Home::new();
     let namespace = crate::storage::LogicalSourceNamespace::new(format!(
         "pg-page-batches-{}-{}",
@@ -6344,15 +6346,27 @@ fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
         .map(|index| format!("page-{index:03}"))
         .collect::<Vec<_>>();
     for (index, key) in expected.iter().enumerate() {
-        let minute = if index < 40 { 2 } else if index < 90 { 1 } else { 0 };
+        let minute = if index < 40 {
+            2
+        } else if index < 90 {
+            1
+        } else {
+            0
+        };
         home.top(key, &[human(key, ts(5, minute), "page fixture")]);
     }
     let inputs = crate::inputs(&options).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-    cache.discover_catalog_sources(&options, &inputs, true).unwrap();
+    cache
+        .discover_catalog_sources(&options, &inputs, true)
+        .unwrap();
     for (index, input) in inputs.iter().enumerate() {
         cache
-            .ingest(&format!("{:064x}", index + 1), &input.full_path(&options), "claude")
+            .ingest(
+                &format!("{:064x}", index + 1),
+                &input.full_path(&options),
+                "claude",
+            )
             .unwrap();
     }
     let prepared = crate::model::prepare_sources(&options, &mut cache, &inputs, NOW).unwrap();
@@ -6364,11 +6378,19 @@ fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
     let mut request = crate::catalog::Request::parse("limit=100").unwrap();
     let read = |request: &crate::catalog::Request| {
         let reply = crate::storage::read_local_catalog_page(&options, "local", request).unwrap();
-        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
         serde_json::from_slice::<Value>(&reply.body).unwrap()
     };
     let keys = |page: &Value| {
-        page["items"].as_array().unwrap().iter()
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
