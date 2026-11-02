@@ -587,16 +587,19 @@ pub(in crate::storage::postgres) fn publish(
                 .iter()
                 .map(|value| &**value as &(dyn ToSql + Sync))
                 .collect::<Vec<_>>();
-            let deleted = tx.driver.execute(
-                &format!(
-                    "WITH acknowledged(source_path,evidence) AS (VALUES {values}) \
+            let deleted = tx
+                .driver
+                .execute(
+                    &format!(
+                        "WITH acknowledged(source_path,evidence) AS (VALUES {values}) \
                      DELETE FROM semon_pg_native_source_continuations c USING acknowledged a \
                      WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 \
                        AND c.source_path=a.source_path \
                        AND c.evidence=a.evidence"
-                ),
-                &params,
-            ).map_err(sqlstate::error)?;
+                    ),
+                    &params,
+                )
+                .map_err(sqlstate::error)?;
             if deleted != acknowledgements.len() as u64 {
                 return Err(StorageError::Conflict);
             }
