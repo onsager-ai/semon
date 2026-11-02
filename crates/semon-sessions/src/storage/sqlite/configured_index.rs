@@ -250,7 +250,13 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let result = self
             .native
-            .publish_catalog(publication, expected_generation, None, false, revision_fence)
+            .publish_catalog(
+                publication,
+                expected_generation,
+                None,
+                false,
+                revision_fence,
+            )
             .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
         self.acknowledge_publication(expected_generation, Some(&result));
         Ok(result)
@@ -274,9 +280,13 @@ impl IndexStore for ConfiguredIndex {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
-        let result =
-            self.native
-                .publish_catalog(publication, expected_generation, Some(claims), true, None)?;
+        let result = self.native.publish_catalog(
+            publication,
+            expected_generation,
+            Some(claims),
+            true,
+            None,
+        )?;
         self.acknowledge_publication(expected_generation, result.as_ref());
         Ok(result)
     }
@@ -329,8 +339,7 @@ impl IndexStore for ConfiguredIndex {
         paths: &[String],
         complete: bool,
     ) -> Result<Vec<crate::storage::catalog::SourceContinuationCapture>, StoreError> {
-        self.native
-            .source_continuation_snapshot(paths, complete)
+        self.native.source_continuation_snapshot(paths, complete)
     }
     fn begin_semantic_stage(
         &mut self,

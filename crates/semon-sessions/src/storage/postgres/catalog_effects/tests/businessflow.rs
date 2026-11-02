@@ -211,6 +211,7 @@ fn generic_runtime_publication_preflight(
                     &prepared.claims,
                     false,
                     None,
+                    None,
                 )
             }),
             Err(StorageError::ScopeChanged),
@@ -233,6 +234,7 @@ fn generic_runtime_publication_preflight(
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
                 false,
+                None,
                 None,
             )
         }),
@@ -276,6 +278,7 @@ fn generic_runtime_publication_preflight(
             &prepared.claims,
             false,
             None,
+            None,
         )?;
         assert_eq!(result.0, Outcome::Written);
         let binding = super::super::super::model_cache::binding(tx)?;
@@ -303,6 +306,7 @@ fn generic_runtime_publication_preflight(
                 &[],
                 false,
                 None,
+                None,
             )
         }),
         Err(StorageError::ScopeChanged),
@@ -321,6 +325,7 @@ fn generic_runtime_publication_preflight(
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
                 closed,
+                None,
                 None,
             )?;
             assert_eq!(written.0, Outcome::Written);
@@ -351,6 +356,7 @@ fn generic_runtime_publication_preflight(
                 &[],
                 closed,
                 None,
+                None,
             )?;
             assert_eq!(empty.0, Outcome::Written);
             assert_eq!(
@@ -360,6 +366,7 @@ fn generic_runtime_publication_preflight(
                     prepared.base_generation.as_deref(),
                     &prepared.claims,
                     closed,
+                    None,
                     None,
                 )?,
                 written,
@@ -5035,7 +5042,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .unwrap();
     assert_eq!(replayed.old_path, codex.to_str().unwrap());
-    assert_eq!(replayed.source_revision_delta, 0, "exact relocation ACK replay");
+    assert_eq!(
+        replayed.source_revision_delta, 0,
+        "exact relocation ACK replay"
+    );
     assert_eq!(fs::read(&archived).unwrap(), codex_bytes);
     assert_eq!(
         captured_bodies(&pool),
@@ -5962,6 +5972,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                                     retired_owners: &model.prepared().relationships.retired_owners,
                                     lifecycle_authority: lifecycle,
                                 }),
+                                None,
                             )
                         }),
                         Err(StorageError::Conflict),

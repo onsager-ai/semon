@@ -537,6 +537,7 @@ pub(super) fn publish(
             retired_owners: &prepared.relationships.retired_owners,
             lifecycle_authority: lifecycle,
         }),
+        None,
     )?;
     if result.0 == Outcome::Written {
         stage.active = false;

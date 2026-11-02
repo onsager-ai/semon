@@ -2151,17 +2151,19 @@ impl Writer {
                         .map_err(failed)?;
                 }
             }
-            source_revision_delta += u64::from(write_index_changes_measured(
-                &tx,
-                path,
-                ledger,
-                index,
-                *changes,
-                *expected,
-                &mut row_measurements,
-                self.config.namespace.as_str(),
-            )
-            .map_err(|error| failed(error))?);
+            source_revision_delta += u64::from(
+                write_index_changes_measured(
+                    &tx,
+                    path,
+                    ledger,
+                    index,
+                    *changes,
+                    *expected,
+                    &mut row_measurements,
+                    self.config.namespace.as_str(),
+                )
+                .map_err(|error| failed(error))?,
+            );
             let intent = &self.intents[*path];
             tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }

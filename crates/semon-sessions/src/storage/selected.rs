@@ -473,8 +473,8 @@ impl PresentationObservations {
             ));
         }
         use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&(complete, &captures, &continuations))
-            .map_err(io::Error::other)?;
+        let encoded =
+            serde_json::to_vec(&(complete, &captures, &continuations)).map_err(io::Error::other)?;
         if encoded.len() > 1_048_576 {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -512,10 +512,7 @@ impl PresentationObservations {
 
     pub(crate) fn verified_source_continuation_captures(
         &self,
-    ) -> Option<(
-        bool,
-        &[crate::storage::catalog::SourceContinuationCapture],
-    )> {
+    ) -> Option<(bool, &[crate::storage::catalog::SourceContinuationCapture])> {
         self.verified_continuations()?;
         Some((
             self.source_continuation_complete?,
