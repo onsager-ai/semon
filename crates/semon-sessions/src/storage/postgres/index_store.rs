@@ -132,7 +132,9 @@ impl IndexStore for NativeIndex {
                 super::semantic_stage::begin(tx, paths, runtime, self.semantic_epoch)
             })
             .map_err(err)?;
-        self.semantic_epoch = Some(epoch);
+        if let Some(epoch) = epoch {
+            self.semantic_epoch = Some(epoch);
+        }
         Ok(outcome)
     }
     fn semantic_batch(

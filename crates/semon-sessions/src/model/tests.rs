@@ -6476,6 +6476,120 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
     );
 }
 
+#[cfg(feature = "postgres")]
+#[test]
+fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-semantic-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let snapshot = || {
+        crate::storage::postgres::semantic_stage_test_snapshot(&pool, &namespace, &control)
+            .unwrap()
+    };
+
+    let initial = snapshot();
+    assert_eq!(initial.epoch, None);
+    let mut probe = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        probe.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Conflict,
+        "an empty probe with no active stage reports no resumable work"
+    );
+    assert_eq!(snapshot(), initial, "an empty probe leaves storage unchanged");
+
+    let paths = vec!["source-a.jsonl".to_owned()];
+    let mut first = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        first.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let active = snapshot();
+    let epoch = active.epoch.expect("begin created an active stage");
+    assert_eq!(active.paths, 1);
+
+    let mut exact_resume = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        exact_resume
+            .begin_semantic_stage(&paths, &runtime)
+            .unwrap(),
+        crate::events::Outcome::Written,
+        "a supplied nonempty seed list must match the active stage"
+    );
+    assert_eq!(snapshot(), active, "exact resume retains the active stage");
+
+    let mut resume = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        resume.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written,
+        "an empty probe resumes the active stage"
+    );
+    assert_eq!(snapshot(), active, "empty resume retains the original seeds");
+    assert!(matches!(
+        resume.begin_semantic_stage(&[], "mismatched-runtime"),
+        Err(crate::events::StoreError::Configured(
+            crate::storage::StorageError::Conflict
+        ))
+    ));
+    assert_eq!(snapshot(), active, "runtime mismatch leaves the stage unchanged");
+    assert!(matches!(
+        resume.begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime),
+        Err(crate::events::StoreError::Configured(
+            crate::storage::StorageError::Conflict
+        ))
+    ));
+    assert_eq!(snapshot(), active, "seed mismatch leaves the stage unchanged");
+
+    let mut successor = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        successor.finish_semantic_stage(epoch).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let inactive = snapshot();
+    assert_eq!(inactive.epoch, None);
+    assert_eq!(
+        successor.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Conflict,
+        "an empty probe does not resume an inactive stage"
+    );
+    assert_eq!(snapshot(), inactive, "inactive probe leaves storage unchanged");
+    assert_eq!(
+        successor
+            .begin_semantic_stage(&["source-b.jsonl".to_owned()], &runtime)
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    let successor_stage = snapshot();
+    assert_eq!(successor_stage.epoch, Some(epoch + 1));
+    assert!(matches!(
+        first.begin_semantic_stage(&[], &runtime),
+        Err(crate::events::StoreError::Configured(
+            crate::storage::StorageError::Conflict
+        ))
+    ));
+    assert_eq!(
+        snapshot(),
+        successor_stage,
+        "a stale holder cannot mutate the successor stage"
+    );
+}
+
 fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
     write_bidirectional_message_page_fixture(&home, rounds);

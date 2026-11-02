@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 const MAX: usize = 1024 * 1024;
 
 #[cfg(test)]
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StageSnapshot {
     pub(crate) generation: Option<String>,
     pub(crate) epoch: Option<i64>,
@@ -166,6 +166,13 @@ fn stage_snapshot(generation: Option<String>, stage: Option<&Stage>) -> StageSna
             claims_hash: claims_hash.finalize().to_vec(),
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn test_snapshot(tx: &mut PgTxn<'_>) -> Result<StageSnapshot, StorageError> {
+    let generation = model_cache::generation(tx)?;
+    let stage = load(tx, true)?;
+    Ok(stage_snapshot(generation, stage.as_ref()))
 }
 
 #[cfg(test)]
@@ -326,9 +333,8 @@ pub(super) fn begin(
     paths: &[String],
     runtime: &str,
     held: Option<i64>,
-) -> Result<(Outcome, i64), StorageError> {
-    if paths.is_empty()
-        || paths.len() > 64
+) -> Result<(Outcome, Option<i64>), StorageError> {
+    if paths.len() > 64
         || runtime.len() > 65536
         || paths
             .iter()
@@ -346,12 +352,15 @@ pub(super) fn begin(
     if let Some(stage) = load(tx, true)? {
         if held.is_some_and(|epoch| epoch != stage.epoch)
             || stage.runtime != runtime
-            || stage.seeds != paths
+            || (!paths.is_empty() && stage.seeds != paths)
             || stage.generation != generation
         {
             return Err(StorageError::Conflict);
         }
-        return Ok((Outcome::Written, stage.epoch));
+        return Ok((Outcome::Written, Some(stage.epoch)));
+    }
+    if paths.is_empty() {
+        return Ok((Outcome::Conflict, None));
     }
     if held.is_some() {
         return Err(StorageError::Conflict);
@@ -382,7 +391,7 @@ pub(super) fn begin(
         },
         true,
     )?;
-    Ok((Outcome::Written, epoch))
+    Ok((Outcome::Written, Some(epoch)))
 }
 
 pub(super) fn next(tx: &mut PgTxn<'_>, limit: usize) -> Result<Option<Batch>, StorageError> {

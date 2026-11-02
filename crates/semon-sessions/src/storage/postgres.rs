@@ -93,6 +93,23 @@ pub(crate) fn take_semantic_stage_save_diagnostic(
 }
 
 #[cfg(test)]
+pub(crate) use semantic_stage::StageSnapshot as SemanticStageTestSnapshot;
+
+#[cfg(test)]
+pub(crate) fn semantic_stage_test_snapshot(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+) -> Result<SemanticStageTestSnapshot, super::StorageError> {
+    pool.transaction(
+        namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        semantic_stage::test_snapshot,
+    )
+}
+
+#[cfg(test)]
 mod native_ingest_tests;
 
 #[cfg(test)]
