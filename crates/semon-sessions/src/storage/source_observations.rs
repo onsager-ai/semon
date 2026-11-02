@@ -373,7 +373,9 @@ pub(crate) fn validate_paths(paths: &[String]) -> Result<(), StorageError> {
 /// mutation limit.
 pub(crate) fn validate_catalog_pending_exclusions(paths: &[String]) -> Result<(), StorageError> {
     if paths.len() > CATALOG_PENDING_EXCLUSION_LIMIT
-        || paths.iter().any(|path| path.is_empty() || path.len() > 4096)
+        || paths
+            .iter()
+            .any(|path| path.is_empty() || path.len() > 4096)
     {
         return Err(StorageError::InvalidArguments);
     }

@@ -502,13 +502,10 @@ fn pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes()
     let namespace = "selector-exclusion-bound";
     let mut store = journal(&pool, namespace);
     let hint = ["pending-hint".to_owned()];
-    discover(namespace, &hint, false)
-        .apply(&mut store)
-        .unwrap();
+    discover(namespace, &hint, false).apply(&mut store).unwrap();
     let before = store.claims(&hint).unwrap();
 
-    let exclusion_limit =
-        crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
+    let exclusion_limit = crate::storage::source_observations::CATALOG_PENDING_EXCLUSION_LIMIT;
     let excluded = (0..exclusion_limit)
         .map(|index| format!("excluded-{index:04}"))
         .collect::<Vec<_>>();
@@ -518,9 +515,7 @@ fn pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes()
         yield_to_fifo: false,
         excluded: &excluded,
     };
-    let batch = store
-        .pending_catalog_sources(1, Some(&accepted))
-        .unwrap();
+    let batch = store.pending_catalog_sources(1, Some(&accepted)).unwrap();
     assert_eq!(batch.tier, CatalogPendingTier::SearchHint);
     assert_eq!(batch.paths, vec!["pending-hint"]);
 
@@ -544,11 +539,13 @@ fn pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes()
         store.pending_catalog_sources(1, Some(&invalid)),
         Err(StorageError::InvalidArguments)
     ));
-    assert!(store
-        .claims(&too_many[..256])
-        .unwrap()
-        .iter()
-        .all(|(_, revision)| revision.is_none()));
+    assert!(
+        store
+            .claims(&too_many[..256])
+            .unwrap()
+            .iter()
+            .all(|(_, revision)| revision.is_none())
+    );
     let overlong_path = ["x".repeat(4097)];
     let invalid = CatalogPendingSearch {
         excluded: &overlong_path,
@@ -568,11 +565,13 @@ fn pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes()
         Err(StorageError::InvalidArguments)
     );
     assert_eq!(store.claims(&hint).unwrap(), before);
-    assert!(store
-        .claims(&too_many_mutations[..256])
-        .unwrap()
-        .iter()
-        .all(|(_, revision)| revision.is_none()));
+    assert!(
+        store
+            .claims(&too_many_mutations[..256])
+            .unwrap()
+            .iter()
+            .all(|(_, revision)| revision.is_none())
+    );
 }
 
 #[test]
