@@ -10398,7 +10398,10 @@ fn staged_claude_header_batch(
     );
     let header_path = header_path.to_string_lossy().into_owned();
     for _ in 0..128 {
-        let batch = cache.semantic_batch(64).unwrap().expect("active semantic stage");
+        let batch = cache
+            .semantic_batch(64)
+            .unwrap()
+            .expect("active semantic stage");
         if batch.phase == relation_stage::Phase::Relations
             && batch
                 .context
@@ -10477,7 +10480,10 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
         .get("origin")
         .cloned()
         .unwrap_or(Value::Null);
-    assert!(expected_origin.is_object(), "full spawn has a prompt origin");
+    assert!(
+        expected_origin.is_object(),
+        "full spawn has a prompt origin"
+    );
 
     let batch = staged_claude_header_batch(&home, &mut cache, &leaf_source.path);
     assert_eq!(batch.phase, relation_stage::Phase::Relations);
@@ -10495,10 +10501,12 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
         .expect("the semantic batch carries the exact cached parent call");
     assert_eq!(tm.source.path, lead_source.path);
     assert_eq!(tm.kind, Kind::Tool);
-    assert!(batch
-        .paths
-        .iter()
-        .any(|path| std::path::Path::new(path) == tm.source.path.as_path()));
+    assert!(
+        batch
+            .paths
+            .iter()
+            .any(|path| std::path::Path::new(path) == tm.source.path.as_path())
+    );
 
     let inputs_for = |paths: &[String]| {
         paths
@@ -10545,10 +10553,10 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
     };
     let before_cursors = cursor_state(&db);
     let persisted_before = relation_ids(&db);
-    let forward = prepare_semantic_batch(&home.options, &mut cache, &forward_inputs, &batch, NOW)
-        .unwrap();
-    let reverse = prepare_semantic_batch(&home.options, &mut cache, &reverse_inputs, &batch, NOW)
-        .unwrap();
+    let forward =
+        prepare_semantic_batch(&home.options, &mut cache, &forward_inputs, &batch, NOW).unwrap();
+    let reverse =
+        prepare_semantic_batch(&home.options, &mut cache, &reverse_inputs, &batch, NOW).unwrap();
     let selected_witnesses = |prepared: &PreparedSources| {
         prepared
             .relationships
@@ -10571,10 +10579,7 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
     };
     let expected_witnesses = BTreeMap::from([(
         selected_spawn.clone(),
-        (
-            full_spawn.source_turn.clone(),
-            expected_origin.clone(),
-        ),
+        (full_spawn.source_turn.clone(), expected_origin.clone()),
     )]);
     assert_eq!(
         selected_witnesses(forward.prepared()),
@@ -10586,10 +10591,16 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
         expected_witnesses,
         "reversed source order: selected page relation has full-build source turn and origin"
     );
-    assert_eq!(cursor_state(&db), before_cursors, "preparation leaves cursors unchanged");
+    assert_eq!(
+        cursor_state(&db),
+        before_cursors,
+        "preparation leaves cursors unchanged"
+    );
 
     assert_eq!(
-        cache.record_semantic_batch(&batch, forward.prepared()).unwrap(),
+        cache
+            .record_semantic_batch(&batch, forward.prepared())
+            .unwrap(),
         crate::events::Outcome::Written
     );
     cache.end_scan();
@@ -10616,18 +10627,27 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
     let primary_done: bool = db
         .query_row(
             "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",
-            rusqlite::params![namespace, batch.relation_cursors[0].path, batch.relation_cursors[0].end],
+            rusqlite::params![namespace.as_str(), batch.relation_cursors[0].path, batch.relation_cursors[0].end],
             |row| row.get(0),
         )
         .unwrap();
     assert_eq!(primary_after.1, primary_done);
     let persisted_after = relation_ids(&db);
-    let added: BTreeSet<_> = persisted_after.difference(&persisted_before).cloned().collect();
-    assert_eq!(added, expected_page.difference(&persisted_before).cloned().collect());
+    let added: BTreeSet<_> = persisted_after
+        .difference(&persisted_before)
+        .cloned()
+        .collect();
+    assert_eq!(
+        added,
+        expected_page
+            .difference(&persisted_before)
+            .cloned()
+            .collect()
+    );
     let persisted_relation: String = db
         .query_row(
             "SELECT metadata FROM catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",
-            rusqlite::params![namespace, selected_spawn],
+            rusqlite::params![namespace.as_str(), selected_spawn],
             |row| row.get(0),
         )
         .unwrap();
@@ -10638,7 +10658,10 @@ fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_chang
         .relations
         .get(&selected_spawn)
         .unwrap();
-    assert_eq!(persisted_relation, serde_json::to_value(prepared_relation).unwrap());
+    assert_eq!(
+        persisted_relation,
+        serde_json::to_value(prepared_relation).unwrap()
+    );
 }
 
 #[test]
