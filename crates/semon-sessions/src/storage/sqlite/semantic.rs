@@ -1191,9 +1191,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
     encoded
 }
 
-fn publication_claims_sha256(
-    claims: &[PublicationSourceClaim],
-) -> Result<String, StoreError> {
+fn publication_claims_sha256(claims: &[PublicationSourceClaim]) -> Result<String, StoreError> {
     let bytes = serde_json::to_vec(claims).map_err(|error| StoreError::Data(error.to_string()))?;
     Ok(sha256_hex(&bytes))
 }
@@ -1252,12 +1250,11 @@ pub(crate) fn catalog_publication_blocker(
     ns: &str,
 ) -> std::io::Result<Option<crate::storage::catalog::CatalogPublicationBlocker>> {
     let value = read_publication_group_hint_value(db, ns)
-        .map_err(std::io::Error::other)?;
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let Some(value) = value else {
         return Ok(None);
     };
-    let hint: PublicationGroupHint =
-        serde_json::from_str(&value).map_err(std::io::Error::other)?;
+    let hint: PublicationGroupHint = serde_json::from_str(&value).map_err(std::io::Error::other)?;
     if !(1..=64).contains(&hint.max_groups) {
         return Err(std::io::Error::other(StorageError::ScopeChanged));
     }
@@ -1272,7 +1269,7 @@ pub(crate) fn catalog_publication_blocker(
         || refusal.selected_claims.len() > 64
         || refusal.selected_claims_sha256
             != publication_claims_sha256(&refusal.selected_claims)
-                .map_err(std::io::Error::other)?
+                .map_err(|error| std::io::Error::other(error.to_string()))?
     {
         return Ok(None);
     }
@@ -1331,7 +1328,7 @@ pub(crate) fn catalog_publication_blocker(
         || refusal.base_generation != head
         || refusal.runtime_sha256 != sha256_hex(runtime.as_bytes())
         || !publication_claims_current(db, ns, &refusal.selected_claims)
-            .map_err(std::io::Error::other)?
+            .map_err(|error| std::io::Error::other(error.to_string()))?
     {
         return Ok(None);
     }
@@ -1404,14 +1401,13 @@ fn publication_group_refusal(batch: &Batch) -> Result<PublicationGroupRefusal, S
             claim: *claim,
         })
         .collect::<Vec<_>>();
-    selected_claims.sort_by(|left, right| {
-        left.source_path_hex.cmp(&right.source_path_hex)
-    });
-    if selected_claims.iter().any(|claim| {
-        claim.source_path_hex.is_empty() || claim.source_path_hex.len() > 8192
-    }) || selected_claims
-        .windows(2)
-        .any(|pair| pair[0].source_path_hex >= pair[1].source_path_hex)
+    selected_claims.sort_by(|left, right| left.source_path_hex.cmp(&right.source_path_hex));
+    if selected_claims
+        .iter()
+        .any(|claim| claim.source_path_hex.is_empty() || claim.source_path_hex.len() > 8192)
+        || selected_claims
+            .windows(2)
+            .any(|pair| pair[0].source_path_hex >= pair[1].source_path_hex)
     {
         return Err(StoreError::Configured(StorageError::Conflict));
     }

@@ -520,10 +520,7 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     fn publication_blocker(
         &self,
     ) -> io::Result<Option<crate::storage::catalog::CatalogPublicationBlocker>> {
-        super::semantic::catalog_publication_blocker(
-            self.0,
-            self.2.namespace.as_str(),
-        )
+        super::semantic::catalog_publication_blocker(self.0, self.2.namespace.as_str())
     }
     fn catalog_search_paths(
         &self,
