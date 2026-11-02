@@ -111,9 +111,24 @@ jobs:
           source = Path('crates/semon-sessions/src/storage/postgres/catalog_effects/search.rs').read_text()
           queries = re.findall(r'query_one\("(WITH memberships AS MATERIALIZED [^"\n]+)"', source)
           assert len(queries) == 2
+          print(r"""DO $$
+          DECLARE fixture record; found_schema text;
+          BEGIN
+            FOR fixture IN SELECT n.nspname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relname='semon_pg_native_catalog_search_documents' AND c.relkind='r' LOOP
+              EXECUTE format('SELECT %L FROM %I.semon_pg_native_catalog_search_documents WHERE convert_from(namespace,''UTF8'') LIKE ''pg-page-batches-%%'' GROUP BY namespace,generation HAVING count(*)=220 LIMIT 1',fixture.nspname,fixture.nspname) INTO found_schema;
+              IF found_schema IS NOT NULL THEN
+                PERFORM set_config('semon.plan_schema',found_schema,false);
+                EXIT;
+              END IF;
+            END LOOP;
+            IF found_schema IS NULL THEN RAISE EXCEPTION '110-session pagination fixture not found'; END IF;
+          END $$;
+          SELECT current_setting('semon.plan_schema') AS fixture_schema \\gset
+          SELECT set_config('search_path',:'fixture_schema',false);
+          """)
           print("SELECT encode(namespace,'hex') AS ns,encode(generation,'hex') AS generation FROM semon_pg_native_catalog_search_documents WHERE convert_from(namespace,'UTF8') LIKE 'pg-page-batches-%' GROUP BY namespace,generation HAVING count(*)=220 LIMIT 1 \\gset")
           print("\\connect 'host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres'")
-          print("BEGIN; SET LOCAL semon.namespace = :'ns';")
+          print("BEGIN; SELECT set_config('search_path',:'fixture_schema',true); SET LOCAL semon.namespace = :'ns';")
           print("SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user;")
           for query in queries:
               query = query.replace('$1::bytea', "decode(:'ns','hex')").replace('$1', "decode(:'ns','hex')").replace('$2', "decode(:'generation','hex')").replace('$3', "convert_to('current','UTF8')")
