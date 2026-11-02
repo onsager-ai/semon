@@ -3240,7 +3240,9 @@ impl SqliteStore {
                                 observations: publication.observations,
                             },
                             &metadata,
-                            observed_at.parse().map_err(|_| failure(rusqlite::Error::InvalidQuery))?,
+                            observed_at
+                                .parse()
+                                .map_err(|_| failure(rusqlite::Error::InvalidQuery))?,
                         )
                         .map_err(StoreError::Configured)?;
                         if replay {
@@ -3253,11 +3255,13 @@ impl SqliteStore {
                                         |row| row.get(0),
                                     )
                                     .map_err(failure)?;
-                                let ledger = ledger_row(&transaction, path.as_ref())
-                                    .map_err(failure)?;
+                                let ledger =
+                                    ledger_row(&transaction, path.as_ref()).map_err(failure)?;
                                 if pending
                                     || !ledger.is_some_and(|(_, ledger)| {
-                                        crate::storage::catalog::source_matches_ledger(source, &ledger)
+                                        crate::storage::catalog::source_matches_ledger(
+                                            source, &ledger,
+                                        )
                                     })
                                 {
                                     self.semantic_rejection = Some("publication_claim");
@@ -10180,7 +10184,10 @@ mod tests {
             false,
             None,
         );
-        assert!(result.is_err(), "missing projection input must refuse issuance");
+        assert!(
+            result.is_err(),
+            "missing projection input must refuse issuance"
+        );
         assert_eq!(
             catalog_state(&batch.connection),
             before,
@@ -10222,7 +10229,10 @@ mod tests {
                 false,
                 None,
             );
-            assert!(result.is_err(), "{label} row projection must refuse issuance");
+            assert!(
+                result.is_err(),
+                "{label} row projection must refuse issuance"
+            );
             assert_eq!(
                 catalog_state(&batch.connection),
                 before,

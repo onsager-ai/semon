@@ -189,10 +189,7 @@ fn validate_receipt_inputs(inputs: &PresentationInputs<'_>) -> Result<(), Storag
     {
         return Err(StorageError::ScopeChanged);
     }
-    if row_keys
-        .iter()
-        .any(|key| !projection_keys.contains(key))
-    {
+    if row_keys.iter().any(|key| !projection_keys.contains(key)) {
         return Err(StorageError::ScopeChanged);
     }
     Ok(())
@@ -282,10 +279,7 @@ pub(crate) fn publish(
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
     validate_receipt_inputs(&presentations.inputs)?;
-    validate_receipt_presentations(
-        presentations.inputs.rows,
-        presentations.presentations,
-    )?;
+    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -401,13 +395,14 @@ pub(crate) fn replay_ordinary(
     let Some(first) = inputs.rows.first() else {
         return Ok(false);
     };
+    let admission = i64::try_from(receipt.admission).map_err(|_| StorageError::ScopeChanged)?;
     let saved: Option<(String, String, String, String)> = tx
         .query_row(
             "SELECT g.id,g.publication,r.base,r.manifest FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND p.epoch IS NULL AND p.base_generation IS ?5 AND p.source_revision=?6 AND p.claims=?7 AND p.metadata=?8 AND octet_length(r.manifest)<=1048576 ORDER BY g.id LIMIT 1",
             params![
                 receipt.namespace,
                 first.key,
-                receipt.admission,
+                admission,
                 receipt.stream,
                 receipt.base_generation,
                 receipt.source_revision,
@@ -455,7 +450,8 @@ pub(crate) fn replay_ordinary(
     ))
     .map_err(|_| StorageError::Unavailable)?;
     if proof_codec::digest(&base_bytes) != base
-        || catalog_publication_id(receipt.namespace, inputs.catalog_generation, &base)? != publication
+        || catalog_publication_id(receipt.namespace, inputs.catalog_generation, &base)?
+            != publication
     {
         return Ok(false);
     }
@@ -515,8 +511,8 @@ fn prepare_proof_publication(
             .iter()
             .find(|projection| projection.key == row.key)
             .ok_or(StorageError::Unavailable)?;
-        let slots = serde_json::to_string(&projection.slots)
-            .map_err(|_| StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         // These values came directly from the model inputs in this owner
@@ -3806,17 +3802,13 @@ pub(crate) fn capture_presentations(
         .into_iter()
         .collect();
         let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
-        let context = CapturedContext::capture(
-            &lookup,
-            row,
-            &projection.slots,
-            &mut |relative, _owner| {
+        let context =
+            CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative, _owner| {
                 observations.capture_relative_status(relative, || {
                     super::catalog::runtime_source_cwds(tx, &relative.sources)
                 })
-            },
-        )
-        .map_err(|_| StorageError::Unavailable)?;
+            })
+            .map_err(|_| StorageError::Unavailable)?;
         let witness = Some(PresentationWitness {
             header_generation,
             version: header.1,
@@ -3874,8 +3866,8 @@ fn prepare_presentation_root(
             .iter()
             .find(|projection| &projection.key == key)
             .ok_or(StorageError::Unavailable)?;
-        let slots = serde_json::to_string(&projection.slots)
-            .map_err(|_| StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
         entries.push((
             key.clone(),
             proof_codec::presentation_entry(&metadata, &slots, text)?,
