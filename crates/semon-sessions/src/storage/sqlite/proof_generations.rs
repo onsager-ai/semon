@@ -101,21 +101,21 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) struct PresentationInputs<'a> {
-    pub(super) rows: &'a [CatalogRow],
-    pub(super) projections: Option<&'a [crate::slot_projection::Projection]>,
-    pub(super) observations: Option<&'a crate::storage::selected::PresentationObservations>,
+pub(crate) struct PresentationInputs<'a> {
+    pub(crate) rows: &'a [CatalogRow],
+    pub(crate) projections: Option<&'a [crate::slot_projection::Projection]>,
+    pub(crate) observations: Option<&'a crate::storage::selected::PresentationObservations>,
 }
 
-pub(super) struct PreparedPresentations<'a> {
-    pub(super) inputs: PresentationInputs<'a>,
-    pub(super) presentations: &'a [(String, String)],
-    pub(super) outgoing_owners: &'a [CatalogRow],
-    pub(super) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
+pub(crate) struct PreparedPresentations<'a> {
+    pub(crate) inputs: PresentationInputs<'a>,
+    pub(crate) presentations: &'a [(String, String)],
+    pub(crate) outgoing_owners: &'a [CatalogRow],
+    pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
 #[derive(Debug)]
-pub(super) enum PublicationError {
+pub(crate) enum PublicationError {
     Storage(StorageError),
     BudgetOverflow,
 }
@@ -164,7 +164,7 @@ fn prepared_query_recipe_for_test(
     Ok(Some(payload))
 }
 
-pub(super) fn publish(
+pub(crate) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
     admission: u64,
@@ -180,9 +180,7 @@ pub(super) fn publish(
         overview_budget,
     } = presentations;
     let PresentationInputs {
-        rows,
-        projections,
-        ..
+        rows, projections, ..
     } = inputs;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
@@ -1496,7 +1494,17 @@ pub(super) fn reusable_presentations(
     let ns = current.namespace.as_str();
     // Capture after publication effects, in the same transaction, so changed
     // History, relative context and source observations cannot masquerade as reuse.
-    let requested = capture_presentations(tx, ns, "", prepared, 0)?;
+    let requested = capture_presentations(
+        tx,
+        ns,
+        "",
+        PresentationInputs {
+            rows: &prepared.rows,
+            projections: Some(&prepared.transcripts),
+            observations: prepared.presentation_observations(),
+        },
+        0,
+    )?;
     let mut reusable = !prepared.rows.is_empty();
     if prepared
         .rows
@@ -3174,7 +3182,7 @@ fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
 
 /// The caller has completed every producer write in the same publication TX.
 /// Capture typed metadata, never Raw bodies, before committing the proof root.
-pub(super) fn capture_presentations(
+pub(crate) fn capture_presentations(
     tx: &Transaction<'_>,
     ns: &str,
     generation: &str,
@@ -3266,7 +3274,7 @@ pub(super) fn capture_presentations(
     Ok(result)
 }
 
-pub(super) fn bind_presentations(
+pub(crate) fn bind_presentations(
     tx: &Transaction<'_>,
     ns: &str,
     publication: &str,
@@ -3316,7 +3324,7 @@ pub(super) fn bind_presentations(
 
 /// Give an ordinary Catalog receipt an identity bound to its exact metadata
 /// generation and finalized projection/presentation root.
-pub(super) fn catalog_publication_id(
+pub(crate) fn catalog_publication_id(
     namespace: &str,
     catalog_generation: &str,
     proof_digest: &str,
