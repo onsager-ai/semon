@@ -4486,6 +4486,17 @@ impl Stage {
                 context.endpoints.extend(sender_endpoints);
                 context.matching_locations = Some(page.locations);
                 context.matching_header_paths = Some(vec![selected.clone()]);
+                #[cfg(test)]
+                eprintln!(
+                    "semantic_relation_page_header_selection selected_path_sha256={} sender_path_sha256s={} matching_header_path_sha256s={}",
+                    crate::model::diagnostic_sha256(&selected),
+                    sender_paths
+                        .iter()
+                        .map(|path| crate::model::diagnostic_sha256(path))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    crate::model::diagnostic_sha256(&selected),
+                );
                 let mut actors = context
                     .matching_locations
                     .iter()

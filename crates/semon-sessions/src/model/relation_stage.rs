@@ -634,6 +634,17 @@ impl OriginTurn {
     }
 }
 
+#[cfg(test)]
+fn diagnostic_origin_turn(turn: &OriginTurn) -> String {
+    match turn {
+        OriginTurn::Unknown => "unknown".to_owned(),
+        OriginTurn::Unavailable => "unavailable".to_owned(),
+        OriginTurn::Known(id) => {
+            format!("known:id_sha256={}", super::diagnostic_sha256(id))
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Relation {
@@ -691,7 +702,12 @@ impl Relation {
     pub(crate) fn merge_prior(&self, prior: &Self) -> io::Result<Self> {
         let witness = prior.source_turn.merge(&self.source_turn).ok_or_else(|| {
             #[cfg(test)]
-            eprintln!("semantic_relation_merge_refusal stage=source_turn");
+            eprintln!(
+                "semantic_relation_merge_refusal stage=source_turn relation_id_sha256={} prior={} current={}",
+                super::diagnostic_sha256(&self.id),
+                diagnostic_origin_turn(&prior.source_turn),
+                diagnostic_origin_turn(&self.source_turn),
+            );
             io::Error::other("conflicting staged parent turn")
         })?;
         let mut before = prior.clone();

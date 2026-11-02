@@ -546,6 +546,13 @@ pub(crate) fn fnv(value: &str) -> u64 {
     hash
 }
 
+#[cfg(test)]
+pub(crate) fn diagnostic_sha256(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
 fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
@@ -2452,6 +2459,33 @@ impl<'a> Builder<'a> {
         let Some(paths) = &self.matching_header_paths else {
             return true;
         };
+        #[cfg(test)]
+        {
+            let selected = self.sessions[session].files.iter().any(|position| {
+                let path = self.files[*position].path.to_string_lossy();
+                paths.contains(path.as_ref())
+            });
+            let session_paths = self.sessions[session]
+                .files
+                .iter()
+                .map(|position| self.files[*position].path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            eprintln!(
+                "semantic_session_header_selection selected={selected} page_header_path_sha256s={} session_header_path_sha256s={}",
+                paths
+                    .iter()
+                    .map(|path| diagnostic_sha256(path))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                session_paths
+                    .iter()
+                    .map(|path| diagnostic_sha256(path))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            selected
+        }
+        #[cfg(not(test))]
         self.sessions[session].files.iter().any(|position| {
             let path = self.files[*position].path.to_string_lossy();
             paths.contains(path.as_ref())
@@ -3515,6 +3549,15 @@ impl<'a> Builder<'a> {
             self.sessions[child].out.state = state;
             self.sessions[child].busy = state == "work";
             self.sessions[child].alive = state == "work";
+            #[cfg(test)]
+            {
+                let preimage = format!("spawn:claude:{key}");
+                eprintln!(
+                    "semantic_turn_identity scheme=claude_spawn id_sha256={} preimage_sha256={}",
+                    diagnostic_sha256(&stable_id("s", &preimage)),
+                    diagnostic_sha256(&preimage),
+                );
+            }
             let handoff = Handoff {
                 done: result.as_ref().and_then(|result| result.1),
                 result: result.map(|(text, _, _)| cap(text.as_deref().unwrap_or(""), MSG_MAX)),
@@ -6674,6 +6717,16 @@ impl<'a> Builder<'a> {
                             native_start_turn_id(sid, &self.files[turn.file].id, turn.offset, uuid)
                         })
                         .unwrap_or_else(|| {
+                            #[cfg(test)]
+                            {
+                                let preimage =
+                                    format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset);
+                                eprintln!(
+                                    "semantic_turn_identity scheme=offset_fallback id_sha256={} preimage_sha256={}",
+                                    diagnostic_sha256(&preimage),
+                                    diagnostic_sha256(&preimage),
+                                );
+                            }
                             format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset)
                         }),
                 },
