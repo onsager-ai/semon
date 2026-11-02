@@ -4375,21 +4375,38 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         &control,
         &continued_generation,
         |snapshot| {
-            let history = snapshot
-                .catalog(&appended_key, true)?
-                .ok_or(StorageError::ScopeChanged)?;
-            let current = snapshot
-                .catalog(&appended_key, false)?
-                .ok_or(StorageError::ScopeChanged)?;
-            let owner_generation = snapshot
-                .owner(&appended_key)?
-                .ok_or(StorageError::ScopeChanged)?
-                .generation;
-            let qualified = snapshot
-                .history_qualified(&history)
-                .map_err(|_| StorageError::ScopeChanged)?;
-            let source_generation = crate::retention::source_generation(&history.sources)
-                .map_err(|_| StorageError::ScopeChanged)?;
+            eprintln!(
+                "pg_successor_snapshot entered generation={continued_generation} key={appended_key}"
+            );
+            let owner_probe = snapshot.owner(&appended_key).map(|owner| {
+                owner.map(|owner| (owner.generation, owner.original, owner.has_current))
+            });
+            eprintln!("pg_successor_snapshot owner_probe={owner_probe:?}");
+            let history = snapshot.catalog(&appended_key, true);
+            eprintln!(
+                "pg_successor_snapshot history_catalog={:?}",
+                history.as_ref().map(|row| row.is_some())
+            );
+            let history = history?.ok_or(StorageError::ScopeChanged)?;
+            let current = snapshot.catalog(&appended_key, false);
+            eprintln!(
+                "pg_successor_snapshot current_catalog={:?}",
+                current.as_ref().map(|row| row.is_some())
+            );
+            let current = current?.ok_or(StorageError::ScopeChanged)?;
+            let owner = snapshot.owner(&appended_key).map(|owner| {
+                owner.map(|owner| (owner.generation, owner.original, owner.has_current))
+            });
+            eprintln!("pg_successor_snapshot owner={owner:?}");
+            let owner_generation = owner?.ok_or(StorageError::ScopeChanged)?.0;
+            let qualified = snapshot.history_qualified(&history);
+            eprintln!(
+                "pg_successor_snapshot history_qualified={qualified:?} owner_generation={owner_generation}"
+            );
+            let qualified = qualified.map_err(|_| StorageError::ScopeChanged)?;
+            let source_generation = crate::retention::source_generation(&history.sources);
+            eprintln!("pg_successor_snapshot source_generation={source_generation:?}");
+            let source_generation = source_generation.map_err(|_| StorageError::ScopeChanged)?;
             Ok((
                 history.harness,
                 current.harness,
@@ -4399,6 +4416,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             ))
         },
     )
+    .inspect_err(|error| {
+        eprintln!("pg_successor_snapshot failed generation={continued_generation} error={error:?}");
+    })
     .expect("successor publication keeps History beside the Current owner");
     assert_eq!(
         history_harness, current_harness,
