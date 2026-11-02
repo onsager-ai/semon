@@ -114,6 +114,67 @@ pub(crate) struct PreparedPresentations<'a> {
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
+/// Validate the selected-receipt input shape shared by ordinary and Stage
+/// issuers. Unknown observation fields remain valid; the typed object itself
+/// and one projection per Catalog row are required for a nonempty receipt.
+fn validate_receipt_inputs(inputs: &PresentationInputs<'_>) -> Result<(), StorageError> {
+    let PresentationInputs {
+        rows,
+        projections,
+        observations,
+        ..
+    } = inputs;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if observations.is_none() {
+        return Err(StorageError::Unavailable);
+    }
+    let projections = projections.ok_or(StorageError::Unavailable)?;
+    let mut row_keys = std::collections::BTreeSet::new();
+    if rows.iter().any(|row| !row_keys.insert(row.key.as_str())) {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut projection_keys = std::collections::BTreeSet::new();
+    if projections
+        .iter()
+        .any(|projection| !projection_keys.insert(projection.key.as_str()))
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    if row_keys
+        .iter()
+        .any(|key| !projection_keys.contains(key))
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
+fn validate_receipt_presentations(
+    rows: &[CatalogRow],
+    presentations: &[(String, String)],
+) -> Result<(), StorageError> {
+    if rows.len() != presentations.len() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let row_keys = rows
+        .iter()
+        .map(|row| row.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let presentation_keys = presentations
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if row_keys.len() != rows.len()
+        || presentation_keys.len() != presentations.len()
+        || row_keys != presentation_keys
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub(crate) enum PublicationError {
     Storage(StorageError),
@@ -173,6 +234,11 @@ pub(crate) fn publish(
     proof: &str,
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
+    validate_receipt_inputs(&presentations.inputs)?;
+    validate_receipt_presentations(
+        presentations.inputs.rows,
+        presentations.presentations,
+    )?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -192,8 +258,9 @@ pub(crate) fn publish(
         let projection = projections
             .unwrap_or_default()
             .iter()
-            .find(|projection| projection.key == row.key);
-        let slots = serde_json::to_string(&projection.map(|p| &p.slots))
+            .find(|projection| projection.key == row.key)
+            .ok_or(StorageError::Unavailable)?;
+        let slots = serde_json::to_string(&projection.slots)
             .map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
@@ -3225,6 +3292,7 @@ pub(crate) fn capture_presentations(
     inputs: PresentationInputs<'_>,
     observed_at: i64,
 ) -> Result<Vec<(String, String)>, StorageError> {
+    validate_receipt_inputs(&inputs)?;
     #[cfg(test)]
     if FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.replace(false)) {
         return Err(StorageError::HistoryRetentionBounds);
@@ -3241,67 +3309,76 @@ pub(crate) fn capture_presentations(
     let mut result = Vec::new();
     let mut bytes = 0usize;
     for row in rows {
-        let witness = if let Some(projection) = projections
+        let projection = projections
             .unwrap_or_default()
             .iter()
             .find(|projection| projection.key == row.key)
-        {
-            let texts = projection
-                .slots
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| StorageError::Unavailable)?;
-            let header_generation = crate::slot_projection::generation(&texts, &row.sources)
-                .map_err(|_| StorageError::Unavailable)?;
-            let header: (String,u32,i64) = tx.query_row("SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",params![ns,row.key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-            if header.0 != header_generation
-                || header.1 != crate::slot_projection::VERSION
-                || usize::try_from(header.2).ok() != Some(texts.len())
-            {
-                return Err(StorageError::ScopeChanged);
-            }
-            let has_history = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",params![ns,row.key],|r|r.get(0)).map_err(failed)?;
-            let catalog = [
-                (
-                    "catalog_version".into(),
-                    crate::model::summary::CATALOG_VERSION.to_string(),
-                ),
-                ("catalog_generation".into(), catalog_generation.to_owned()),
-                (
-                    "slot_projection_catalog_generation".into(),
-                    catalog_generation.to_owned(),
-                ),
-                ("catalog_completeness".into(), "partial".into()),
-                ("catalog_observed_at".into(), observed_at.to_string()),
-            ]
-            .into_iter()
-            .collect();
-            let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
-            let context = CapturedContext::capture(
-                &lookup,
-                row,
-                &projection.slots,
-                &mut |relative, _owner| {
-                    observations.capture_relative_status(relative, || {
-                        super::catalog::runtime_source_cwds(tx, &relative.sources)
-                    })
-                },
-            )
+            .ok_or(StorageError::Unavailable)?;
+        let texts = projection
+            .slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|_| StorageError::Unavailable)?;
-            Some(PresentationWitness {
-                header_generation,
-                version: header.1,
-                total: texts.len(),
-                has_history,
-                catalog,
-                context,
-                relative_statuses: std::mem::take(&mut observations.relative_statuses),
-                observations,
-            })
-        } else {
-            None
-        };
+        let header_generation = crate::slot_projection::generation(&texts, &row.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let header: (String, u32, i64) = tx
+            .query_row(
+                "SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                params![ns, row.key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(failed)?;
+        if header.0 != header_generation
+            || header.1 != crate::slot_projection::VERSION
+            || usize::try_from(header.2).ok() != Some(texts.len())
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let has_history = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",
+                params![ns, row.key],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        let catalog = [
+            (
+                "catalog_version".into(),
+                crate::model::summary::CATALOG_VERSION.to_string(),
+            ),
+            ("catalog_generation".into(), catalog_generation.to_owned()),
+            (
+                "slot_projection_catalog_generation".into(),
+                catalog_generation.to_owned(),
+            ),
+            ("catalog_completeness".into(), "partial".into()),
+            ("catalog_observed_at".into(), observed_at.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
+        let context = CapturedContext::capture(
+            &lookup,
+            row,
+            &projection.slots,
+            &mut |relative, _owner| {
+                observations.capture_relative_status(relative, || {
+                    super::catalog::runtime_source_cwds(tx, &relative.sources)
+                })
+            },
+        )
+        .map_err(|_| StorageError::Unavailable)?;
+        let witness = Some(PresentationWitness {
+            header_generation,
+            version: header.1,
+            total: texts.len(),
+            has_history,
+            catalog,
+            context,
+            relative_statuses: std::mem::take(&mut observations.relative_statuses),
+            observations,
+        });
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         bytes = bytes.saturating_add(text.len());
         if bytes > 8 * 1048576 {
@@ -3320,6 +3397,8 @@ pub(crate) fn bind_presentations(
     rows: &[(String, String)],
     inputs: PresentationInputs<'_>,
 ) -> Result<String, StorageError> {
+    validate_receipt_inputs(&inputs)?;
+    validate_receipt_presentations(inputs.rows, rows)?;
     let PresentationInputs {
         catalog_generation,
         rows: catalog_rows,
@@ -3337,8 +3416,9 @@ pub(crate) fn bind_presentations(
         let projection = projections
             .unwrap_or_default()
             .iter()
-            .find(|projection| &projection.key == key);
-        let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
+            .find(|projection| &projection.key == key)
+            .ok_or(StorageError::Unavailable)?;
+        let slots = serde_json::to_string(&projection.slots)
             .map_err(|_| StorageError::Unavailable)?;
         entries.push((
             key.clone(),

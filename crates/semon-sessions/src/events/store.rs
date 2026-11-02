@@ -3758,10 +3758,12 @@ impl SqliteStore {
                         crate::storage::StorageError::ScopeChanged,
                     ))?;
             if semantic.is_none()
-                && let (Some(projections), Some(observations)) =
-                    (publication.transcripts, publication.observations)
                 && !rows.is_empty()
+                && let Some(observations) = publication.observations
             {
+                let projections = publication.transcripts.ok_or(StoreError::Configured(
+                    crate::storage::StorageError::Unavailable,
+                ))?;
                 crate::storage::sqlite::semantic::validate_publication_support(&transaction)
                     .map_err(StoreError::Configured)?;
                 let observed_at: i64 = transaction
@@ -10064,6 +10066,100 @@ mod tests {
         assert!(catalog_batch_bytes(&rows[10..12], &metadata, CatalogWriter::Auto).is_some());
         eprintln!("catalog_publication_probe round=scoped");
         catalog_write_pair(&mut batch, &mut row_wise, &rows[10..12], &projections, true);
+        drop(batch);
+        drop(row_wise);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_receipt_rejects_missing_or_duplicate_projections_without_mutation() {
+        let root = scratch("catalog-receipt-projection-shape");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut batch, row_wise) = catalog_pair(&options);
+        let generation: String = batch
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt_count: i64 = batch
+            .connection
+            .query_row(
+                "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND kind='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            receipt_count > 0,
+            "the baseline must come from a real ordinary receipt publication"
+        );
+        let before = catalog_state(&batch.connection);
+        let observations = crate::storage::selected::PresentationObservations::default();
+        let missing_all = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: None,
+            observations: Some(&observations),
+        };
+        let result = batch.publish_catalog_with_generation(
+            &missing_all,
+            Some(&generation),
+            None,
+            false,
+            None,
+        );
+        assert!(result.is_err(), "missing projection input must refuse issuance");
+        assert_eq!(
+            catalog_state(&batch.connection),
+            before,
+            "missing projection input refusal must preserve the existing receipt"
+        );
+
+        let copy_projections = || {
+            projections
+                .iter()
+                .map(|projection| crate::slot_projection::Projection {
+                    key: projection.key.clone(),
+                    slots: projection.slots.clone(),
+                    repair: projection.repair,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut missing = copy_projections();
+        let missing_key = &rows[0].key;
+        let original_len = missing.len();
+        missing.retain(|projection| &projection.key != missing_key);
+        assert!(missing.len() < original_len);
+
+        let mut duplicate = copy_projections();
+        duplicate.push(crate::slot_projection::Projection {
+            key: projections[0].key.clone(),
+            slots: projections[0].slots.clone(),
+            repair: projections[0].repair,
+        });
+        for (label, malformed) in [("missing", missing), ("duplicate", duplicate)] {
+            let publication = crate::slot_projection::Publication {
+                rows: &rows,
+                transcripts: Some(&malformed),
+                observations: Some(&observations),
+            };
+            let result = batch.publish_catalog_with_generation(
+                &publication,
+                Some(&generation),
+                None,
+                false,
+                None,
+            );
+            assert!(result.is_err(), "{label} row projection must refuse issuance");
+            assert_eq!(
+                catalog_state(&batch.connection),
+                before,
+                "{label} projection refusal must roll back head, rows, claims, grants and proofs"
+            );
+        }
+
         drop(batch);
         drop(row_wise);
         fs::remove_dir_all(root).unwrap();
