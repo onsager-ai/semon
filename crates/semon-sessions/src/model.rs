@@ -5528,26 +5528,24 @@ impl<'a> Builder<'a> {
                     let source = summary::source(source_file);
                     let key = (source.path.clone(), offset, block);
                     let mut fields = prompt_fields.borrow_mut();
-                    Some(
-                        fields
-                            .entry(key)
-                            .or_insert_with(|| {
-                                crate::native_field::capture_with_record(
-                                    offset,
-                                    block,
-                                    &crate::slot_projection::Recipe::U,
-                                    |at| {
-                                        crate::native_field::read_source_record(
-                                            &source,
-                                            at,
-                                            Some(self.records),
-                                        )
-                                    },
-                                )
-                                .0
-                            })
-                            .clone(),
-                    )
+                    fields
+                        .entry(key)
+                        .or_insert_with(|| {
+                            crate::native_field::capture_with_record(
+                                offset,
+                                block,
+                                &crate::slot_projection::Recipe::U,
+                                |at| {
+                                    crate::native_field::read_source_record(
+                                        &source,
+                                        at,
+                                        Some(self.records),
+                                    )
+                                },
+                            )
+                            .0
+                        })
+                        .clone()
                 });
             if let Some(field) = field {
                 recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
