@@ -87,8 +87,8 @@ fn state(
     })
 }
 
-fn capture_next_full_catalog_start(
-) -> Rc<RefCell<Option<crate::storage::source_observations::FullCatalogStart>>> {
+fn capture_next_full_catalog_start()
+-> Rc<RefCell<Option<crate::storage::source_observations::FullCatalogStart>>> {
     let captured = Rc::new(RefCell::new(None));
     let destination = Rc::clone(&captured);
     crate::model::AFTER_FULL_CATALOG_CAPTURE.with(|hook| {
@@ -224,7 +224,10 @@ fn pg_full_catalog_revision_fence_uses_prior_ingest_and_refuses_external_advance
         .unwrap();
     assert_eq!(cache.full_catalog_start().unwrap().revision, expected);
     assert!(cache.session_catalog_generation().is_some());
-    assert_eq!(state(&pool, &namespace, &control).unwrap().revision, expected);
+    assert_eq!(
+        state(&pool, &namespace, &control).unwrap().revision,
+        expected
+    );
 
     let ledger = cache
         .stored_ledger_batch(std::slice::from_ref(&path_text))
@@ -296,7 +299,10 @@ fn pg_full_catalog_revision_fence_uses_prior_ingest_and_refuses_external_advance
                 hook_from,
             )
             .unwrap();
-            let mut raw = fs::OpenOptions::new().append(true).open(&hook_path).unwrap();
+            let mut raw = fs::OpenOptions::new()
+                .append(true)
+                .open(&hook_path)
+                .unwrap();
             raw.write_all(hook_append.as_bytes()).unwrap();
             raw.sync_all().unwrap();
             drop(raw);
@@ -312,14 +318,9 @@ fn pg_full_catalog_revision_fence_uses_prior_ingest_and_refuses_external_advance
                     .iter()
                     .any(|(source_path, _)| source_path.as_slice() == path_text.as_bytes())
             );
-            assert!(
-                snapshot
-                    .claims
-                    .iter()
-                    .any(|(source_path, _, _, _)| {
-                        source_path.as_slice() == hook_path_text.as_bytes()
-                    })
-            );
+            assert!(snapshot.claims.iter().any(|(source_path, _, _, _)| {
+                source_path.as_slice() == hook_path_text.as_bytes()
+            }));
             assert!(
                 snapshot
                     .mutations
