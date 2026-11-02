@@ -6367,9 +6367,7 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
 
     write_bidirectional_message_page_fixture(&home, 360);
     let inputs = crate::inputs(&options).unwrap();
-    let prior_path = options
-        .claude_home
-        .join("projects/-work-proj/prior.jsonl");
+    let prior_path = options.claude_home.join("projects/-work-proj/prior.jsonl");
     let selected_inputs = inputs
         .iter()
         .filter(|input| input.full_path(&options) != prior_path)
@@ -6393,10 +6391,9 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
     let error = failure.expect("large PostgreSQL fixture did not reach a refusal");
     assert_eq!(error.to_string(), "Configured storage is busy.");
 
-    let diagnostic = crate::storage::postgres::take_semantic_stage_save_diagnostic(
-        namespace.as_str(),
-    )
-    .expect("PostgreSQL semantic-stage save recorded the first bounded refusal");
+    let diagnostic =
+        crate::storage::postgres::take_semantic_stage_save_diagnostic(namespace.as_str())
+            .expect("PostgreSQL semantic-stage save recorded the first bounded refusal");
     let before = diagnostic
         .before
         .as_ref()
@@ -6405,7 +6402,10 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
         .after
         .as_ref()
         .expect("diagnostic captured the rolled-back active stage");
-    assert!(diagnostic.relations >= 720, "refusal covers the bidirectional component");
+    assert!(
+        diagnostic.relations >= 720,
+        "refusal covers the bidirectional component"
+    );
     assert_eq!(before.generation, after.generation);
     assert_eq!(before.epoch, after.epoch);
     assert_eq!(before.phase, after.phase);

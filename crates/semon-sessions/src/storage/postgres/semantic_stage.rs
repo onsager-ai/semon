@@ -169,11 +169,7 @@ fn stage_snapshot(generation: Option<String>, stage: Option<&Stage>) -> StageSna
 }
 
 #[cfg(test)]
-fn record_owner_sizes(
-    namespace: &str,
-    prepared: &PreparedSources,
-    before: StageSnapshot,
-) {
+fn record_owner_sizes(namespace: &str, prepared: &PreparedSources, before: StageSnapshot) {
     let largest_owner_row_bytes = prepared
         .rows
         .iter()
@@ -188,8 +184,9 @@ fn record_owner_sizes(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(diagnostic) = diagnostics.get_mut(namespace) {
-        diagnostic.largest_owner_row_bytes =
-            diagnostic.largest_owner_row_bytes.max(largest_owner_row_bytes);
+        diagnostic.largest_owner_row_bytes = diagnostic
+            .largest_owner_row_bytes
+            .max(largest_owner_row_bytes);
         diagnostic.model_witness_bytes = model_witness_bytes;
         diagnostic.before = Some(before);
     }
@@ -209,11 +206,16 @@ pub(super) fn capture_after_refusal(
     if !has_diagnostic {
         return;
     }
-    let after = pool.transaction(namespace, super::txn::TxnKind::ReadSnapshot, control, |tx| {
-        let generation = model_cache::generation(tx)?;
-        let stage = load(tx, true)?;
-        Ok(stage_snapshot(generation, stage.as_ref()))
-    });
+    let after = pool.transaction(
+        namespace,
+        super::txn::TxnKind::ReadSnapshot,
+        control,
+        |tx| {
+            let generation = model_cache::generation(tx)?;
+            let stage = load(tx, true)?;
+            Ok(stage_snapshot(generation, stage.as_ref()))
+        },
+    );
     if let Ok(after) = after {
         let mut diagnostics = SAVE_DIAGNOSTICS
             .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
