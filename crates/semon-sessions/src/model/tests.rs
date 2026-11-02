@@ -6322,6 +6322,77 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 
 #[cfg(feature = "postgres")]
 #[test]
+fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-page-batches-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace, "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres { pool, control })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+
+    let expected = (0..110)
+        .map(|index| format!("page-{index:03}"))
+        .collect::<Vec<_>>();
+    for (index, key) in expected.iter().enumerate() {
+        let minute = if index < 40 { 2 } else if index < 90 { 1 } else { 0 };
+        home.top(key, &[human(key, ts(5, minute), "page fixture")]);
+    }
+    let inputs = crate::inputs(&options).unwrap();
+    let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    cache.discover_catalog_sources(&options, &inputs, true).unwrap();
+    for (index, input) in inputs.iter().enumerate() {
+        cache
+            .ingest(&format!("{:064x}", index + 1), &input.full_path(&options), "claude")
+            .unwrap();
+    }
+    let prepared = crate::model::prepare_sources(&options, &mut cache, &inputs, NOW).unwrap();
+    assert_eq!(prepared.rows.len(), expected.len());
+    let (_, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+    assert!(generation.is_some());
+    drop(cache);
+
+    let mut request = crate::catalog::Request::parse("limit=100").unwrap();
+    let read = |request: &crate::catalog::Request| {
+        let reply = crate::storage::read_local_catalog_page(&options, "local", request).unwrap();
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        serde_json::from_slice::<Value>(&reply.body).unwrap()
+    };
+    let keys = |page: &Value| {
+        page["items"].as_array().unwrap().iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let first = read(&request);
+    assert_eq!(keys(&first), expected[..100]);
+    let cursor: crate::catalog::Cursor =
+        serde_json::from_str(first["next_cursor"].as_str().unwrap()).unwrap();
+    request.cursor = Some(cursor.clone());
+    let second = read(&request);
+    assert_eq!(keys(&second), expected[100..]);
+    assert!(second["next_cursor"].is_null());
+
+    let mut inclusive = cursor;
+    inclusive.last = at(5, 1);
+    inclusive.key = expected[64].clone();
+    inclusive.inclusive = true;
+    request.cursor = Some(inclusive);
+    let tied = read(&request);
+    assert_eq!(keys(&tied), expected[64..]);
+    assert!(tied["next_cursor"].is_null());
+}
+
+#[cfg(feature = "postgres")]
+#[test]
 fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages() {
     use crate::storage::native_events::NativeEventStore;
 
