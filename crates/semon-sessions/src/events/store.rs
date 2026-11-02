@@ -2551,8 +2551,10 @@ impl IndexStore for SqliteStore {
             None,
             false,
             None,
-            CatalogWriter::Auto,
-            revision_fence,
+            CatalogWriterPolicy {
+                writer: CatalogWriter::Auto,
+                revision_fence,
+            },
         )
     }
 
@@ -3280,6 +3282,12 @@ enum CatalogWriter {
     },
 }
 
+#[derive(Clone, Copy)]
+struct CatalogWriterPolicy<'a> {
+    writer: CatalogWriter,
+    revision_fence: Option<&'a crate::storage::source_observations::FullCatalogRevisionFence>,
+}
+
 /// This is optimization eligibility, not a new publication acceptance limit.
 /// Payloads are already serialized by the original publisher and stay borrowed.
 fn catalog_batch_bytes(
@@ -3442,8 +3450,10 @@ impl SqliteStore {
             claims,
             preserve_complete,
             semantic,
-            writer,
-            None,
+            CatalogWriterPolicy {
+                writer,
+                revision_fence: None,
+            },
         )
     }
 
@@ -3454,8 +3464,7 @@ impl SqliteStore {
         claims: Option<&[(String, Option<i64>)]>,
         preserve_complete: bool,
         semantic: Option<&crate::model::relation_stage::Batch>,
-        writer: CatalogWriter,
-        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
+        policy: CatalogWriterPolicy<'_>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let ownership = self.owner.clone();
         let owner = &ownership;
@@ -3515,7 +3524,7 @@ impl SqliteStore {
             .map(json)
             .collect::<Result<_, _>>()
             .map_err(failure)?;
-        let batch_bytes = catalog_batch_bytes(rows, &metadata, writer);
+        let batch_bytes = catalog_batch_bytes(rows, &metadata, policy.writer);
         self.connection
             .busy_timeout(Duration::ZERO)
             .map_err(failure)?;
@@ -3543,7 +3552,7 @@ impl SqliteStore {
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
-            if let Some(fence) = revision_fence {
+            if let Some(fence) = policy.revision_fence {
                 let expected_revision = fence.expected_revision();
                 let current_revision: Option<i64> = transaction
                     .query_row(
