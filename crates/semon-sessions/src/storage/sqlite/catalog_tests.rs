@@ -11984,9 +11984,7 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 
 #[test]
 fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
-    use crate::storage::{
-        proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore,
-    };
+    use crate::storage::{proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore};
 
     let fixture = Fixture::new();
     let first = fixture.source("first");
@@ -12016,11 +12014,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         .config(&fixture.options.cache)
         .unwrap();
     let semantic = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
-    let runtime = semantic
-        .reader_binding()
-        .unwrap()
-        .reader_runtime()
-        .unwrap();
+    let runtime = semantic.reader_binding().unwrap().reader_runtime().unwrap();
 
     let (
         original_slots,
@@ -12115,8 +12109,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             )
             .unwrap();
         assert_eq!(
-            selected.snapshot.publication_generation,
-            receipt.0,
+            selected.snapshot.publication_generation, receipt.0,
             "the selected lease keeps its receipt identity"
         );
         assert_eq!(
@@ -12282,9 +12275,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             == Some("repeated-history")
     }));
     assert_eq!(repeated_refs, history_refs);
-    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(
-        original_refs[0].0.clone(),
-    );
+    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(original_refs[0].0.clone());
     assert!(repeated_refs.iter().any(|(id, _)| id == &retained_id.0));
     let retained_lease = runtime
         .selected_generation("first", &retained_id, &"5".repeat(64), 60_000)
@@ -12314,10 +12305,12 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         serde_json::to_string(&original_selected_slots).unwrap(),
         "History opens the exact retained receipt's original slots"
     );
-    assert!(retained
-        .slots
-        .iter()
-        .any(|slot| slot.source_paths().contains(&&first_copy)));
+    assert!(
+        retained
+            .slots
+            .iter()
+            .any(|slot| slot.source_paths().contains(&&first_copy))
+    );
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
     let runtime = binding.runtime_binding_at(&tx).unwrap();
