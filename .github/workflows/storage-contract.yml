@@ -50,7 +50,7 @@ jobs:
         run: |
           result=0
           case_number=0
-          for test in model::tests::partial_lineage_source_disappearance_preserves_natural_history_context model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group catalog::tests::semantic_stage_retains_multisource_history_refs_across_recomposition; do
+          for test in model::tests::partial_lineage_source_disappearance_preserves_natural_history_context model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group catalog::tests::semantic_stage_retains_multisource_history_refs_across_recomposition storage::proof_codec::tests::presentation_manifest_requires_a_valid_catalog_generation; do
             case_number=$((case_number+1))
             output="$RUNNER_TEMP/477-history-case-$case_number.log"
             cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
