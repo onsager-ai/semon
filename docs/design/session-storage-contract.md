@@ -195,6 +195,12 @@ publication references; crashed readers have no surviving connection lease.
 Path-keyed live proofs alone are not sufficient. Current and retained references remain required for both adapters; private PG
 qualification must prove the same lifecycle before backend acceptance.
 
+Each selected-presentation manifest binds the actual Catalog generation together
+with its presentation entries and shared observations under the existing joined
+digest. Ordinary publication receipt IDs may differ from that Catalog generation:
+leases and proof roots retain the receipt ID, while selected opening matches the
+captured witness generation to the authenticated manifest field.
+
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,
 and recover incomplete steps after restart. Existing proof GC is reference-bound

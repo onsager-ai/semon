@@ -12,8 +12,25 @@ pub(crate) const METADATA_MAX: usize = 1_048_576;
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationManifest {
+    pub(crate) catalog_generation: String,
     pub(crate) entries: Vec<(String, String)>,
     pub(crate) observations: Option<crate::storage::selected::PresentationObservations>,
+}
+
+pub(crate) fn decode_presentation_manifest(
+    manifest: &str,
+) -> Result<PresentationManifest, StorageError> {
+    let manifest: PresentationManifest =
+        serde_json::from_str(manifest).map_err(|_| StorageError::Unavailable)?;
+    validate_catalog_generation(&manifest.catalog_generation)?;
+    Ok(manifest)
+}
+
+pub(crate) fn validate_catalog_generation(generation: &str) -> Result<(), StorageError> {
+    if generation.len() != 64 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
 }
 
 pub(crate) fn verify_presentation_entry(
@@ -46,8 +63,7 @@ fn verify_presentation_manifest_entry(
     text: &str,
     manifest: &str,
 ) -> Result<PresentationManifest, StorageError> {
-    let manifest: PresentationManifest =
-        serde_json::from_str(manifest).map_err(|_| StorageError::Unavailable)?;
+    let manifest = decode_presentation_manifest(manifest)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
         || !manifest
@@ -91,7 +107,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 
 pub(crate) fn presentation_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
     Ok(digest(
-        &serde_json::to_vec(&("selected-presentation-v2", base, manifest))
+        &serde_json::to_vec(&("selected-presentation-v3", base, manifest))
             .map_err(|_| StorageError::Unavailable)?,
     ))
 }
@@ -101,6 +117,7 @@ pub(crate) fn verify_presentation_digest(
     manifest: &str,
     expected: &str,
 ) -> Result<(), StorageError> {
+    decode_presentation_manifest(manifest)?;
     if presentation_digest(base, manifest)? != expected {
         return Err(StorageError::ScopeChanged);
     }
@@ -405,10 +422,32 @@ mod tests {
 
     #[test]
     fn codec89_digest_mismatch() {
-        let proof = presentation_digest("base", "manifest").unwrap();
-        assert!(verify_presentation_digest("base", "manifest", &proof).is_ok());
-        assert!(verify_presentation_digest("Base", "manifest", &proof).is_err());
+        let manifest = serde_json::json!({
+            "catalog_generation": "a".repeat(64),
+            "entries": [],
+            "observations": null,
+        })
+        .to_string();
+        let proof = presentation_digest("base", &manifest).unwrap();
+        assert!(verify_presentation_digest("base", &manifest, &proof).is_ok());
+        assert!(verify_presentation_digest("Base", &manifest, &proof).is_err());
         assert!(verify_presentation_digest("base", "Manifest", &proof).is_err());
+    }
+
+    #[test]
+    fn presentation_manifest_requires_a_valid_catalog_generation() {
+        for manifest in [
+            serde_json::json!({"entries": [], "observations": null}).to_string(),
+            serde_json::json!({
+                "catalog_generation": "not-a-generation",
+                "entries": [],
+                "observations": null,
+            })
+            .to_string(),
+        ] {
+            let proof = presentation_digest("base", &manifest).unwrap();
+            assert!(verify_presentation_digest("base", &manifest, &proof).is_err());
+        }
     }
 
     #[test]

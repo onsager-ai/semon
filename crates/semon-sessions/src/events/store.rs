@@ -3749,13 +3749,14 @@ impl SqliteStore {
                     .map_err(failure)?;
             }
             stage("slots", &transaction);
-            let stream = owner
-                .config()
-                .expected_stream_epoch
-                .as_deref()
-                .ok_or(StoreError::Configured(
-                    crate::storage::StorageError::ScopeChanged,
-                ))?;
+            let stream =
+                owner
+                    .config()
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or(StoreError::Configured(
+                        crate::storage::StorageError::ScopeChanged,
+                    ))?;
             if semantic.is_none()
                 && let (Some(projections), Some(observations)) =
                     (publication.transcripts, publication.observations)
@@ -3775,8 +3776,8 @@ impl SqliteStore {
                 let captured = crate::storage::sqlite::proof_generations::capture_presentations(
                     &transaction,
                     owner.config().namespace.as_str(),
-                    &generation,
                     crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
                         rows,
                         projections: Some(projections),
                         observations: Some(observations),
@@ -3797,14 +3798,15 @@ impl SqliteStore {
                     &captured,
                     observed_at,
                 ))
-                .map_err(failure)?;
+                .map_err(|error| StoreError::Data(error.to_string()))?;
                 let base = crate::storage::proof_codec::digest(&base_bytes);
-                let publication = crate::storage::sqlite::proof_generations::catalog_publication_id(
-                    owner.config().namespace.as_str(),
-                    &generation,
-                    &base,
-                )
-                .map_err(StoreError::Configured)?;
+                let publication =
+                    crate::storage::sqlite::proof_generations::catalog_publication_id(
+                        owner.config().namespace.as_str(),
+                        &generation,
+                        &base,
+                    )
+                    .map_err(StoreError::Configured)?;
                 let proof_digest = crate::storage::sqlite::proof_generations::bind_presentations(
                     &transaction,
                     owner.config().namespace.as_str(),
@@ -3812,14 +3814,16 @@ impl SqliteStore {
                     &base,
                     &captured,
                     crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
                         rows,
                         projections: Some(projections),
                         observations: Some(observations),
                     },
                 )
                 .map_err(StoreError::Configured)?;
-                let admission = i64::try_from(owner.admission())
-                    .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+                let admission = i64::try_from(owner.admission()).map_err(|_| {
+                    StoreError::Configured(crate::storage::StorageError::ScopeChanged)
+                })?;
                 let source_revision: i64 = transaction
                     .query_row(
                         "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
@@ -3827,8 +3831,10 @@ impl SqliteStore {
                         |row| row.get(0),
                     )
                     .map_err(failure)?;
-                let claims_text = serde_json::to_string(&claims).map_err(failure)?;
-                let metadata_text = serde_json::to_string(&metadata).map_err(failure)?;
+                let claims_text = serde_json::to_string(&claims)
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
+                let metadata_text = serde_json::to_string(&metadata)
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
                 transaction
                     .execute(
                         "INSERT INTO main.storage_semantic_publications(namespace,generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
@@ -3853,6 +3859,7 @@ impl SqliteStore {
                     &proof_digest,
                     crate::storage::sqlite::proof_generations::PreparedPresentations {
                         inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
+                            catalog_generation: &generation,
                             rows,
                             projections: Some(projections),
                             observations: Some(observations),

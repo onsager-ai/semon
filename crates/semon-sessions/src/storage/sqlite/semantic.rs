@@ -3776,8 +3776,8 @@ impl Stage {
             let presentations = match super::proof_generations::capture_presentations(
                 &tx,
                 ns,
-                &generation,
                 super::proof_generations::PresentationInputs {
+                    catalog_generation: &generation,
                     rows: &prepared.rows,
                     projections: Some(&prepared.transcripts),
                     observations: prepared.presentation_observations(),
@@ -3797,6 +3797,7 @@ impl Stage {
                 &proof_digest,
                 &presentations,
                 super::proof_generations::PresentationInputs {
+                    catalog_generation: &generation,
                     rows: &prepared.rows,
                     projections: Some(&prepared.transcripts),
                     observations: prepared.presentation_observations(),
@@ -3843,6 +3844,7 @@ impl Stage {
                 &proof_digest,
                 super::proof_generations::PreparedPresentations {
                     inputs: super::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
                         rows: &prepared.rows,
                         projections: Some(&prepared.transcripts),
                         observations: prepared.presentation_observations(),

@@ -101,21 +101,22 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) struct PresentationInputs<'a> {
-    pub(super) rows: &'a [CatalogRow],
-    pub(super) projections: Option<&'a [crate::slot_projection::Projection]>,
-    pub(super) observations: Option<&'a crate::storage::selected::PresentationObservations>,
+pub(crate) struct PresentationInputs<'a> {
+    pub(crate) catalog_generation: &'a str,
+    pub(crate) rows: &'a [CatalogRow],
+    pub(crate) projections: Option<&'a [crate::slot_projection::Projection]>,
+    pub(crate) observations: Option<&'a crate::storage::selected::PresentationObservations>,
 }
 
-pub(super) struct PreparedPresentations<'a> {
-    pub(super) inputs: PresentationInputs<'a>,
-    pub(super) presentations: &'a [(String, String)],
-    pub(super) outgoing_owners: &'a [CatalogRow],
-    pub(super) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
+pub(crate) struct PreparedPresentations<'a> {
+    pub(crate) inputs: PresentationInputs<'a>,
+    pub(crate) presentations: &'a [(String, String)],
+    pub(crate) outgoing_owners: &'a [CatalogRow],
+    pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
 #[derive(Debug)]
-pub(super) enum PublicationError {
+pub(crate) enum PublicationError {
     Storage(StorageError),
     BudgetOverflow,
 }
@@ -164,7 +165,7 @@ fn prepared_query_recipe_for_test(
     Ok(Some(payload))
 }
 
-pub(super) fn publish(
+pub(crate) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
     admission: u64,
@@ -180,9 +181,7 @@ pub(super) fn publish(
         overview_budget,
     } = presentations;
     let PresentationInputs {
-        rows,
-        projections,
-        ..
+        rows, projections, ..
     } = inputs;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
@@ -1494,9 +1493,26 @@ pub(super) fn reusable_presentations(
     prepared: &crate::model::PreparedSources,
 ) -> Result<bool, StorageError> {
     let ns = current.namespace.as_str();
+    let catalog_generation: String = tx
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+            [ns],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
     // Capture after publication effects, in the same transaction, so changed
     // History, relative context and source observations cannot masquerade as reuse.
-    let requested = capture_presentations(tx, ns, "", prepared, 0)?;
+    let requested = capture_presentations(
+        tx,
+        ns,
+        PresentationInputs {
+            catalog_generation: &catalog_generation,
+            rows: &prepared.rows,
+            projections: Some(&prepared.transcripts),
+            observations: prepared.presentation_observations(),
+        },
+        0,
+    )?;
     let mut reusable = !prepared.rows.is_empty();
     if prepared
         .rows
@@ -3174,10 +3190,9 @@ fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
 
 /// The caller has completed every producer write in the same publication TX.
 /// Capture typed metadata, never Raw bodies, before committing the proof root.
-pub(super) fn capture_presentations(
+pub(crate) fn capture_presentations(
     tx: &Transaction<'_>,
     ns: &str,
-    generation: &str,
     inputs: PresentationInputs<'_>,
     observed_at: i64,
 ) -> Result<Vec<(String, String)>, StorageError> {
@@ -3187,10 +3202,12 @@ pub(super) fn capture_presentations(
     }
     use crate::storage::selected::{CapturedContext, PresentationWitness};
     let PresentationInputs {
+        catalog_generation,
         rows,
         projections,
         observations,
     } = inputs;
+    proof_codec::validate_catalog_generation(catalog_generation)?;
     let lookup = super::selected::Context::owned(tx);
     let mut result = Vec::new();
     let mut bytes = 0usize;
@@ -3221,10 +3238,10 @@ pub(super) fn capture_presentations(
                     "catalog_version".into(),
                     crate::model::summary::CATALOG_VERSION.to_string(),
                 ),
-                ("catalog_generation".into(), generation.to_owned()),
+                ("catalog_generation".into(), catalog_generation.to_owned()),
                 (
                     "slot_projection_catalog_generation".into(),
-                    generation.to_owned(),
+                    catalog_generation.to_owned(),
                 ),
                 ("catalog_completeness".into(), "partial".into()),
                 ("catalog_observed_at".into(), observed_at.to_string()),
@@ -3266,7 +3283,7 @@ pub(super) fn capture_presentations(
     Ok(result)
 }
 
-pub(super) fn bind_presentations(
+pub(crate) fn bind_presentations(
     tx: &Transaction<'_>,
     ns: &str,
     publication: &str,
@@ -3275,10 +3292,12 @@ pub(super) fn bind_presentations(
     inputs: PresentationInputs<'_>,
 ) -> Result<String, StorageError> {
     let PresentationInputs {
+        catalog_generation,
         rows: catalog_rows,
         projections,
         observations,
     } = inputs;
+    proof_codec::validate_catalog_generation(catalog_generation)?;
     let mut entries = Vec::new();
     for (key, text) in rows {
         let row = catalog_rows
@@ -3298,6 +3317,7 @@ pub(super) fn bind_presentations(
         ));
     }
     let manifest = serde_json::to_string(&PresentationManifest {
+        catalog_generation: catalog_generation.to_owned(),
         entries,
         observations: observations.cloned(),
     })
@@ -3316,7 +3336,7 @@ pub(super) fn bind_presentations(
 
 /// Give an ordinary Catalog receipt an identity bound to its exact metadata
 /// generation and finalized projection/presentation root.
-pub(super) fn catalog_publication_id(
+pub(crate) fn catalog_publication_id(
     namespace: &str,
     catalog_generation: &str,
     proof_digest: &str,
@@ -3342,10 +3362,11 @@ pub(super) fn replayed_presentation(
     let Some((saved, manifest, joined)) = row else {
         return Ok(false);
     };
-    Ok(saved == base
-        && manifest.len() <= 1048576
-        && joined == expected
-        && joined_digest(&saved, &manifest)? == joined)
+    if saved != base || manifest.len() > 1048576 || joined != expected {
+        return Ok(false);
+    }
+    proof_codec::decode_presentation_manifest(&manifest)?;
+    Ok(joined_digest(&saved, &manifest)? == joined)
 }
 fn validate_presentation(
     db: &Connection,
@@ -3385,8 +3406,13 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
             serde_json::from_str(&text).map_err(io::Error::other)?;
         let mut witness =
             witness.ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
-        let manifest: PresentationManifest =
-            serde_json::from_str(&manifest).map_err(io::Error::other)?;
+        let manifest =
+            proof_codec::decode_presentation_manifest(&manifest).map_err(io::Error::other)?;
+        let witness_catalog_generation = witness
+            .catalog
+            .get("catalog_generation")
+            .cloned()
+            .ok_or_else(|| io::Error::other("selected catalog generation unavailable"))?;
         witness.observations = manifest
             .observations
             .ok_or_else(|| io::Error::other("selected observation witness unavailable"))?;
@@ -3406,8 +3432,7 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
             || crate::slot_projection::generation(&texts, &self.row.sources)
                 .map_err(io::Error::other)?
                 != witness.header_generation
-            || witness.catalog.get("catalog_generation")
-                != Some(&self.snapshot.publication_generation)
+            || manifest.catalog_generation != witness_catalog_generation
         {
             return Err(io::Error::other("selected witness changed"));
         }
