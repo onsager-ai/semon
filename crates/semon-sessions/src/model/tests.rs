@@ -6323,6 +6323,8 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 #[cfg(feature = "postgres")]
 #[test]
 fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
+    use crate::storage::native_events::NativeEventStore;
+
     let home = Home::new();
     let namespace = crate::storage::LogicalSourceNamespace::new(format!(
         "pg-oversized-{}-{}",
@@ -6345,19 +6347,28 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
         "prior",
         &[human("prior", ts(5, 0), "Last admitted Catalog")],
     );
-    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-    let mut prior_complete = false;
-    for _ in 0..128 {
-        if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
-            .unwrap()
-        {
-            prior_complete = true;
-            break;
-        }
+    let prior_inputs = crate::inputs(&options).unwrap();
+    assert_eq!(prior_inputs.len(), 1);
+    let mut pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    for (at, input) in prior_inputs.iter().enumerate() {
+        let path = input.full_path(&options);
+        let receipt = pg_cache
+            .ingest(&format!("{:064x}", at + 1), &path, "claude")
+            .unwrap();
+        assert_eq!(receipt.consumed_bytes, fs::metadata(&path).unwrap().len());
     }
-    evidence.retire();
-    assert!(prior_complete, "prior PostgreSQL Catalog did not complete");
+    let prior_prepared =
+        crate::model::prepare_sources(&options, &mut pg_cache, &prior_inputs, NOW).unwrap();
+    assert_eq!(prior_prepared.rows.len(), 1);
+    assert_eq!(prior_prepared.rows[0].key, "prior");
+    assert!(!prior_prepared.transcripts.is_empty());
+    let (prior_outcome, prior_generation) = pg_cache
+        .publish_partial_catalog_fenced(&prior_prepared)
+        .unwrap();
+    assert_eq!(prior_outcome, crate::events::Outcome::Written);
+    assert!(prior_generation.is_some(), "PG publication returned no head");
+    assert_eq!(pg_cache.session_catalog_generation(), prior_generation);
+    drop(pg_cache);
 
     let prior_page = crate::session_catalog_page(&options, "local", "sid=prior");
     assert_eq!(prior_page.status, 200);
