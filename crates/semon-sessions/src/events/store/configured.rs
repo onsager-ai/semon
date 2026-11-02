@@ -782,7 +782,7 @@ impl NativeOwnership {
         }
         let (count_matches, all_owned): (bool, bool) = db
             .query_row(
-                "WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))",
+                "WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29),(?30)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))",
                 rusqlite::params_from_iter(
                     std::iter::once(self.config.namespace.as_str())
                         .chain(TABLES.iter().copied())

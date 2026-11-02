@@ -1364,7 +1364,10 @@ fn modified_ms(path: &Path) -> Option<i64> {
 /// for builds that read every file. Also returns the ids of the top-level
 /// Claude files so skipped.
 enum ScanSelection<'a> {
-    Current(Option<&'a [crate::inputs::Input]>),
+    Current {
+        selected: Option<&'a [crate::inputs::Input]>,
+        forced_paths: &'a BTreeSet<String>,
+    },
     Semantic(&'a [crate::inputs::Input]),
     Committed(&'a [crate::inputs::Input]),
 }
@@ -1385,8 +1388,10 @@ fn scan(
         texts,
         cutoff,
         machine,
-        &BTreeSet::new(),
-        ScanSelection::Current(selected),
+        ScanSelection::Current {
+            selected,
+            forced_paths: &BTreeSet::new(),
+        },
     )
 }
 
@@ -1397,13 +1402,14 @@ fn scan_selected(
     texts: &mut Texts,
     cutoff: Option<i64>,
     machine: &MachineFacts,
-    forced_paths: &BTreeSet<String>,
     selection: ScanSelection<'_>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
-    let (selected, retire_missing, committed_only) = match selection {
-        ScanSelection::Current(selected) => (selected, true, false),
-        ScanSelection::Semantic(selected) => (Some(selected), false, false),
-        ScanSelection::Committed(selected) => (Some(selected), false, true),
+    let (selected, retire_missing, committed_only, forced_paths) = match selection {
+        ScanSelection::Current { selected, forced_paths } => {
+            (selected, true, false, Some(forced_paths))
+        }
+        ScanSelection::Semantic(selected) => (Some(selected), false, false, None),
+        ScanSelection::Committed(selected) => (Some(selected), false, true, None),
     };
     if selected.is_some_and(|inputs| {
         inputs.iter().any(|input| {
@@ -1461,7 +1467,7 @@ fn scan_selected(
     let mut seen = BTreeSet::new();
     let mut skipped = BTreeSet::new();
     let outside = |path: &Path| {
-        !forced_paths.contains(path.to_string_lossy().as_ref())
+        !forced_paths.is_some_and(|paths| paths.contains(path.to_string_lossy().as_ref()))
             && cutoff
                 .is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
     };
@@ -8276,7 +8282,6 @@ pub(crate) fn prepare_semantic_index_sources(
         &mut Texts::default(),
         scan_cutoff(options, now),
         &facts,
-        &BTreeSet::new(),
         ScanSelection::Semantic(inputs),
     )?;
     verify_sidecars(&files)?;
@@ -9189,8 +9194,10 @@ fn build_sources_inner(
                             texts,
                             window_start,
                             &facts,
-                            &forced_catalog_paths,
-                            ScanSelection::Current(selected),
+                            ScanSelection::Current {
+                                selected,
+                                forced_paths: &forced_catalog_paths,
+                            },
                         )
                     )?
                 )
@@ -9217,7 +9224,6 @@ fn build_sources_inner(
                     texts,
                     window_start,
                     &facts,
-                    &BTreeSet::new(),
                     ScanSelection::Committed(inputs)
                 )?
             );
