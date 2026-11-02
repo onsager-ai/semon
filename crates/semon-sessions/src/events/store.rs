@@ -2123,7 +2123,7 @@ fn read_source_continuation_paths(tx: &Transaction<'_>) -> rusqlite::Result<Vec<
     )?;
     let paths = statement
         .query_map([], |row| row.get::<_, String>(0))?
-        .collect()?;
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(paths)
 }
 

@@ -3871,15 +3871,11 @@ impl EventCache {
             Some(Ok(IndexWriteResult {
                 outcome: Outcome::Deferred,
                 ..
-            })) => {
-                Err(io::Error::other(crate::storage::StorageError::Conflict))
-            }
+            })) => Err(io::Error::other(crate::storage::StorageError::Conflict)),
             Some(Ok(IndexWriteResult {
                 outcome: Outcome::Stale,
                 ..
-            })) => {
-                Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
-            }
+            })) => Err(io::Error::other(crate::storage::StorageError::ScopeChanged)),
             Some(Err(StoreError::Configured(crate::storage::StorageError::Conflict))) => Ok(true),
             Some(Err(error)) => Err(io::Error::other(configured_error(error))),
             None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
