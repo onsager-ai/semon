@@ -2183,8 +2183,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     drop(append_oracle_query);
     drop(append_oracle_cache);
 
-    // Independently repeat the append with a durable continuation, matching PG's
-    // trust input while leaving the proof-absent custody assertions above intact.
+    // Independently repeat PG's append bytes and observation clock with a durable
+    // continuation, leaving the proof-absent custody assertions above intact.
     let mut trusted_options = options.clone();
     let trusted_root = oracle.root.join("oracle-trusted-append");
     trusted_options.claude_home = trusted_root.join("claude");
@@ -2234,14 +2234,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .append(true)
         .open(&trusted_path)
         .unwrap();
-    trusted_file.write_all(source_append.as_bytes()).unwrap();
+    trusted_file
+        .write_all(parent_source_append.as_bytes())
+        .unwrap();
     trusted_file.sync_all().unwrap();
     drop(trusted_file);
     trusted_writer
-        .complete(ledger.stat.size + source_append.len() as u64)
+        .complete(ledger.stat.size + parent_source_append.len() as u64)
         .unwrap();
     let trusted_successor =
-        crate::model::prepare_sources(&trusted_options, &mut trusted_cache, &inputs, 1790812803000)
+        crate::model::prepare_sources(&trusted_options, &mut trusted_cache, &inputs, 1790812807000)
             .unwrap();
     assert!(
         !trusted_successor
@@ -2270,7 +2272,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .call_at(
             "read_transcript",
             &serde_json::json!({"id":appended_key,"limit":100}),
-            1790812803000,
+            1790812802000,
         )
         .expect("SQLite trusted successor History body");
     let append_history_fields = trusted_query
