@@ -33,7 +33,9 @@ impl PgTxn<'_> {
                 "PG_READ_DIAG tx_check_busy caller={} cancelled={} overdue_ms={}",
                 std::panic::Location::caller(),
                 self.control.is_cancelled(),
-                Instant::now().saturating_duration_since(self.deadline).as_millis(),
+                Instant::now()
+                    .saturating_duration_since(self.deadline)
+                    .as_millis(),
             );
             Err(StorageError::Busy)
         } else {

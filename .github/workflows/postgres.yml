@@ -90,6 +90,20 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_catalog_page_crosses_batch_boundary_with_tied_timestamps -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-batch-pagination.log"
+      - name: Repeat pagination with and without auto_explain
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          result=0
+          for attempt in 1 2 3; do
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_catalog_page_crosses_batch_boundary_with_tied_timestamps -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-pagination-explain-$attempt.log" || result=1
+          done
+          PGPASSWORD=ephemeral-ci-admin psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE semon_f1 RESET session_preload_libraries; ALTER ROLE semon_f1 RESET log_min_duration_statement;"
+          for attempt in 1 2 3; do
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_catalog_page_crosses_batch_boundary_with_tied_timestamps -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-pagination-plain-$attempt.log" || result=1
+          done
+          exit "$result"
       - name: PostgreSQL Catalog search parity and refusal tests
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
@@ -134,6 +148,13 @@ jobs:
           for query in queries:
               query = query.replace('$1::bytea', "decode(:'ns','hex')").replace('$1', "decode(:'ns','hex')").replace('$2', "decode(:'generation','hex')").replace('$3', "convert_to('current','UTF8')")
               print('EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) ' + query + ';')
+          admitted = Path('crates/semon-sessions/src/storage/postgres/catalog_effects/snapshot/admitted.rs').read_text()
+          read_query = re.search(r'"(WITH visible AS \(.*?)",\s*&\[', admitted, re.S).group(1)
+          print("SELECT count(*) AS rows,sum(octet_length(metadata)) AS metadata_bytes FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256(decode(:'ns','hex')) AND namespace=decode(:'ns','hex') AND generation=decode(:'generation','hex');")
+          print("SELECT last_ms AS cursor_last,encode(session_key,'hex') AS cursor_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256(decode(:'ns','hex')) AND namespace=decode(:'ns','hex') AND generation=decode(:'generation','hex') ORDER BY last_ms DESC,session_key OFFSET 64 LIMIT 1 \\gset")
+          for cursor in (False, True):
+              params = {1: "decode(:'ns','hex')", 2: "decode(:'generation','hex')", 3: 'NULL', 4: 'NULL', 5: 'NULL', 6: 'NULL', 7: ":'cursor_last'::bigint" if cursor else 'NULL', 8: "decode(:'cursor_key','hex')" if cursor else 'NULL', 9: 'false', 10: '36' if cursor else '65', 11: 'false'}
+              print('EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) ' + re.sub(r'\$(\d+)', lambda match: params[int(match.group(1))], read_query) + ';')
           print('ROLLBACK;')
           PY
           PGPASSWORD=ephemeral-ci-admin psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/477-explain.sql" 2>&1 | tee "$RUNNER_TEMP/477-repaired-plans.log"

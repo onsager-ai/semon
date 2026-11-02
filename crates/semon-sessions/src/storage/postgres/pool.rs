@@ -132,7 +132,9 @@ impl Driver {
             eprintln!(
                 "PG_READ_DIAG sql_ms={} remaining_ms={} cancelled={} error={:?} sql={sql}",
                 started.elapsed().as_millis(),
-                self.deadline.saturating_duration_since(Instant::now()).as_millis(),
+                self.deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis(),
                 self.control.is_cancelled(),
                 result.as_ref().err(),
             );
@@ -347,7 +349,10 @@ impl PgPool {
         loop {
             if cancel.is_cancelled() || Instant::now() >= deadline {
                 #[cfg(test)]
-                eprintln!("PG_READ_DIAG acquire_busy cancelled={}", cancel.is_cancelled());
+                eprintln!(
+                    "PG_READ_DIAG acquire_busy cancelled={}",
+                    cancel.is_cancelled()
+                );
                 return Err(StorageError::Busy);
             }
             let mut state = self
@@ -403,7 +408,10 @@ impl PgPool {
                 }
                 if cancel.is_cancelled() || Instant::now() >= deadline {
                     #[cfg(test)]
-                    eprintln!("PG_READ_DIAG acquire_busy cancelled={}", cancel.is_cancelled());
+                    eprintln!(
+                        "PG_READ_DIAG acquire_busy cancelled={}",
+                        cancel.is_cancelled()
+                    );
                     return Err(StorageError::Busy);
                 }
                 return Ok(lease);
