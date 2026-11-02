@@ -253,7 +253,7 @@ impl Effects for Writer<'_, '_> {
         let path = input.path;
         super::native_keys::delete_meta(self.tx, format!("source-retired:{path}").as_bytes())?;
         update_source_continuation_cell(self.tx, input)?;
-        self.tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace=$1 AND source_path=$2", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
+        self.tx.driver.execute("DELETE FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&self.tx.namespace.as_str().as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
         self.boundary()
     }
 }
@@ -269,7 +269,7 @@ fn update_source_continuation_cell(
     let existing = tx
         .driver
         .query(
-            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            "SELECT CASE WHEN octet_length(evidence)<=8192 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
             &[&namespace, &path],
         )
         .map_err(sqlstate::error)?
@@ -278,7 +278,7 @@ fn update_source_continuation_cell(
     let mutation = tx
         .driver
         .query(
-            "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+            "SELECT CASE WHEN octet_length(evidence)<=2048 THEN evidence ELSE ''::bytea END FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
             &[&namespace, &path],
         )
         .map_err(sqlstate::error)?
@@ -301,7 +301,7 @@ fn update_source_continuation_cell(
         }
         SourceContinuationCellUpdate::Clear => {
             tx.driver.execute(
-                "DELETE FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path_digest=sha256($2::bytea) AND semon_pg_native_key_matches(source_path,source_path_digest,$2)",
+                "DELETE FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
                 &[&namespace, &path],
             ).map_err(sqlstate::error)?;
             Ok(())

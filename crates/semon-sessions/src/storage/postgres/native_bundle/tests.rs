@@ -257,6 +257,34 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
                 .find(|(path, _, _)| path == &data.path)
                 .unwrap();
             let changes = DirtyRows::between(old, index);
+            let mutation = crate::source_change::AppendEvidence {
+                generation: crate::source_change::stat_generation(&data.ledger.stat).unwrap(),
+                before: data.ledger.stat.clone(),
+                after: next.ledger.stat.clone(),
+            };
+            let mutation_evidence = serde_json::to_vec(&mutation).unwrap();
+            let foreign = ns("bundle-foreign\0🦀");
+            let foreign_continuation = b"foreign continuation".to_vec();
+            let foreign_mutation = b"foreign mutation".to_vec();
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver.execute(
+                    "INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3)",
+                    &[&tx.namespace.as_str().as_bytes(), &next.path.as_bytes(), &mutation_evidence],
+                ).map_err(sqlstate::error)?;
+                Ok(())
+            }).unwrap();
+            pool.transaction(&foreign, TxnKind::Write, &control, |tx| {
+                let ns = tx.namespace.as_str().as_bytes();
+                tx.driver.execute(
+                    "INSERT INTO semon_pg_native_source_continuations(namespace,source_path,evidence) VALUES($1,$2,$3)",
+                    &[&ns, &next.path.as_bytes(), &foreign_continuation],
+                ).map_err(sqlstate::error)?;
+                tx.driver.execute(
+                    "INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3)",
+                    &[&ns, &next.path.as_bytes(), &foreign_mutation],
+                ).map_err(sqlstate::error)?;
+                Ok(())
+            }).unwrap();
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                 apply(
                     tx,
@@ -266,8 +294,41 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
                     Some(&data.ledger),
                     Some(&changes),
                 )
+                ?;
+                let rows = tx.driver.query(
+                    "SELECT evidence FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
+                    &[&tx.namespace.as_str().as_bytes(), &next.path.as_bytes()],
+                ).map_err(sqlstate::error)?;
+                assert_eq!(rows.len(), 1, "append evidence is promoted to a continuation cell");
+                let evidence: Vec<u8> = rows[0].get(0);
+                let cell: crate::storage::catalog::SourceContinuationCell =
+                    serde_json::from_slice(&evidence).unwrap();
+                assert_eq!(cell.version, 1);
+                assert_eq!(cell.prior, data.ledger);
+                assert_eq!(cell.current, next.ledger);
+                assert_eq!(cell.accepted, mutation);
+                let mutation_count: i64 = tx.driver.query_one(
+                    "SELECT count(*) FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
+                    &[&tx.namespace.as_str().as_bytes(), &next.path.as_bytes()],
+                ).map_err(sqlstate::error)?.get(0);
+                assert_eq!(mutation_count, 0, "retired owner mutation is removed");
+                Ok(())
             })
             .unwrap();
+            pool.transaction(&foreign, TxnKind::ReadSnapshot, &control, |tx| {
+                let ns = tx.namespace.as_str().as_bytes();
+                let continuation: Vec<u8> = tx.driver.query_one(
+                    "SELECT evidence FROM semon_pg_native_source_continuations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
+                    &[&ns, &next.path.as_bytes()],
+                ).map_err(sqlstate::error)?.get(0);
+                let mutation: Vec<u8> = tx.driver.query_one(
+                    "SELECT evidence FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2",
+                    &[&ns, &next.path.as_bytes()],
+                ).map_err(sqlstate::error)?.get(0);
+                assert_eq!(continuation, foreign_continuation);
+                assert_eq!(mutation, foreign_mutation);
+                Ok(())
+            }).unwrap();
             let restored = Snapshot::restore(
                 pool.clone(),
                 namespace.clone(),
