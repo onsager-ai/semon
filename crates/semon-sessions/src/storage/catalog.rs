@@ -102,6 +102,26 @@ pub(crate) fn advance_source_continuation_cell(
         Some(_) => return SourceContinuationCellUpdate::Refuse,
         None => None,
     };
+    let accepted = match (expected, mutation) {
+        (Some(expected), Some(mutation)) => {
+            let Ok(accepted) =
+                serde_json::from_slice::<crate::source_change::AppendEvidence>(mutation)
+            else {
+                return SourceContinuationCellUpdate::Clear;
+            };
+            if expected.stat != accepted.before
+                || current.stat != accepted.after
+                || current.offset < expected.offset
+                || current.offset > current.stat.size
+                || !accepted.qualifies(&expected.stat, &current.stat)
+            {
+                return SourceContinuationCellUpdate::Clear;
+            }
+            Some(accepted)
+        }
+        (_, Some(_)) => return SourceContinuationCellUpdate::Clear,
+        (_, None) => None,
+    };
     if expected == Some(current) {
         if previous
             .as_ref()
@@ -111,21 +131,9 @@ pub(crate) fn advance_source_continuation_cell(
         }
         return SourceContinuationCellUpdate::Keep;
     }
-    let (Some(expected), Some(mutation)) = (expected, mutation) else {
+    let (Some(expected), Some(accepted)) = (expected, accepted) else {
         return SourceContinuationCellUpdate::Clear;
     };
-    let Ok(accepted) = serde_json::from_slice::<crate::source_change::AppendEvidence>(mutation)
-    else {
-        return SourceContinuationCellUpdate::Clear;
-    };
-    if expected.stat != accepted.before
-        || current.stat != accepted.after
-        || current.offset < expected.offset
-        || current.offset > current.stat.size
-        || !accepted.qualifies(&expected.stat, &current.stat)
-    {
-        return SourceContinuationCellUpdate::Clear;
-    }
 
     let prior = match previous {
         None => expected.clone(),
@@ -580,6 +588,50 @@ mod source_continuation_tests {
             &path, &old, &new, &cell, &partial, &physical,
         )
         .is_none());
+    }
+
+    #[test]
+    fn same_ledger_bad_pending_mutation_clears_existing_cell() {
+        let (_, prior, current, accepted, _) = fixture();
+        let mutation = serde_json::to_vec(&accepted).unwrap();
+        let SourceContinuationCellUpdate::Put(cell) =
+            advance_source_continuation_cell(None, Some(&prior), &current, Some(&mutation))
+        else {
+            panic!("accepted append should create a cell");
+        };
+
+        assert!(matches!(
+            advance_source_continuation_cell(
+                Some(&cell),
+                Some(&current),
+                &current,
+                Some(b"{malformed"),
+            ),
+            SourceContinuationCellUpdate::Clear
+        ));
+
+        let nonappend = crate::source_change::AppendEvidence {
+            after: crate::events::Stat {
+                size: current.stat.size - 1,
+                ..current.stat
+            },
+            ..accepted
+        };
+        let nonappend = serde_json::to_vec(&nonappend).unwrap();
+        assert!(matches!(
+            advance_source_continuation_cell(
+                Some(&cell),
+                Some(&current),
+                &current,
+                Some(&nonappend),
+            ),
+            SourceContinuationCellUpdate::Clear
+        ));
+
+        assert!(matches!(
+            advance_source_continuation_cell(Some(&cell), Some(&current), &current, None),
+            SourceContinuationCellUpdate::Keep
+        ));
     }
 }
 
