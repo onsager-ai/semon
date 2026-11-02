@@ -2634,15 +2634,14 @@ impl EventCache {
         // shared Catalog scans may proceed together.
         let _locks = paths
             .iter()
-            .map(|path| {
-                crate::source_change::SourceLock::acquire_cache(lock_cache, path, false)
-            })
+            .map(|path| crate::source_change::SourceLock::acquire_cache(lock_cache, path, false))
             .collect::<io::Result<Vec<_>>>()?;
         let observe_physical = |path: &str| {
             let input = crate::native_evidence::catalog_input(Path::new(path), options);
-            if input.as_ref().is_some_and(|input| {
-                input.full_path(options).to_string_lossy().as_ref() == path
-            }) {
+            if input
+                .as_ref()
+                .is_some_and(|input| input.full_path(options).to_string_lossy().as_ref() == path)
+            {
                 stat_if_present(Path::new(path))
             } else {
                 Ok(None)
@@ -2694,15 +2693,16 @@ impl EventCache {
                 ));
             }
             if let Some(bytes) = &capture.cell {
-                let cell = serde_json::from_slice::<
-                    crate::storage::catalog::SourceContinuationCell,
-                >(bytes)
-                .map_err(|_| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Catalog continuation cell is malformed",
+                let cell =
+                    serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(
+                        bytes,
                     )
-                })?;
+                    .map_err(|_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Catalog continuation cell is malformed",
+                        )
+                    })?;
                 if !crate::storage::catalog::valid_source_continuation_cell(&cell) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -3233,11 +3233,7 @@ impl EventCache {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> io::Result<Option<String>> {
-        self.publish_catalog_projection_fenced_with_revision(
-            publication,
-            expected_generation,
-            None,
-        )
+        self.publish_catalog_projection_fenced_with_revision(publication, expected_generation, None)
     }
 
     pub(crate) fn publish_catalog_projection_fenced_with_revision(
@@ -3587,20 +3583,23 @@ impl EventCache {
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
-            Some(Ok(result)) if result.outcome == Outcome::Stale => {
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Stale,
+                ..
+            })) => {
                 return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
             }
-            Some(Ok(result))
-                if matches!(
-                    result.outcome,
-                    Outcome::Written | Outcome::Conflict | Outcome::Deferred
-                ) =>
-            {
-                if matches!(result.outcome, Outcome::Written | Outcome::Deferred) {
-                    self.record_source_revision_delta(result.source_revision_delta)?;
-                }
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Written | Outcome::Deferred,
+                source_revision_delta,
+            })) => {
+                self.record_source_revision_delta(source_revision_delta)?;
                 self.gone.clear();
             }
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Conflict,
+                ..
+            })) => self.gone.clear(),
             Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
@@ -3857,16 +3856,28 @@ impl EventCache {
             self.index_write_duration += started.elapsed();
         }
         match committed {
-            Some(Ok(result)) if result.outcome == Outcome::Written => {
-                self.record_source_revision_delta(result.source_revision_delta)?;
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Written,
+                source_revision_delta,
+            })) => {
+                self.record_source_revision_delta(source_revision_delta)?;
                 self.unpersisted.remove(path);
                 Ok(false)
             }
-            Some(Ok(result)) if result.outcome == Outcome::Conflict => Ok(true),
-            Some(Ok(result)) if result.outcome == Outcome::Deferred => {
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Conflict,
+                ..
+            })) => Ok(true),
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Deferred,
+                ..
+            })) => {
                 Err(io::Error::other(crate::storage::StorageError::Conflict))
             }
-            Some(Ok(result)) if result.outcome == Outcome::Stale => {
+            Some(Ok(IndexWriteResult {
+                outcome: Outcome::Stale,
+                ..
+            })) => {
                 Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
             }
             Some(Err(StoreError::Configured(crate::storage::StorageError::Conflict))) => Ok(true),

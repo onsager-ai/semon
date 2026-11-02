@@ -1462,9 +1462,8 @@ fn scan_selected(
     let mut skipped = BTreeSet::new();
     let outside = |path: &Path| {
         !forced_paths.contains(path.to_string_lossy().as_ref())
-            && cutoff.is_some_and(|cutoff| {
-                modified_ms(path).is_some_and(|modified| modified < cutoff)
-            })
+            && cutoff
+                .is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
     };
     let mut paths = Vec::new();
     if let Some(selected) = selected {
@@ -9018,10 +9017,9 @@ fn combine_source_continuations(
         ) else {
             continue;
         };
-        let cell = serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(
-            cell_bytes,
-        )
-        .map_err(io::Error::other)?;
+        let cell =
+            serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(cell_bytes)
+                .map_err(io::Error::other)?;
         if !crate::storage::catalog::valid_source_continuation_cell(&cell) {
             return Err(io::Error::other("Catalog continuation cell is unsupported"));
         }
@@ -9086,38 +9084,37 @@ fn build_sources_inner(
     };
     measurements.record("source_locks", started, _source_locks.len());
     let mut forced_catalog_paths = BTreeSet::new();
-    let full_catalog_start = if target == BuildTarget::Catalog
-        && matches!(&selection, BuildSelection::Current(None))
-    {
-        let snapshot = cache.full_catalog_start()?;
-        if snapshot.overflow {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "complete Catalog has more than 256 pending source invalidations",
-            ));
-        }
-        let mut lock_keys = BTreeSet::new();
-        for path in &snapshot.pending_paths {
-            let input = crate::native_evidence::source_input(Path::new(path), options)
-                .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
-            let lock_key = crate::source_change::lock_key(options, &input);
-            lock_keys.insert(lock_key.clone());
-            if input.path.ends_with(".jsonl") {
-                forced_catalog_paths
-                    .insert(input.full_path(options).to_string_lossy().into_owned());
-            } else if input.path.ends_with(".meta.json") {
-                forced_catalog_paths.insert(lock_key);
+    let full_catalog_start =
+        if target == BuildTarget::Catalog && matches!(&selection, BuildSelection::Current(None)) {
+            let snapshot = cache.full_catalog_start()?;
+            if snapshot.overflow {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "complete Catalog has more than 256 pending source invalidations",
+                ));
             }
-        }
-        let pending_locks = lock_keys
-            .iter()
-            .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
-            .collect::<io::Result<Vec<_>>>()?;
-        drop(pending_locks);
-        Some(snapshot)
-    } else {
-        None
-    };
+            let mut lock_keys = BTreeSet::new();
+            for path in &snapshot.pending_paths {
+                let input = crate::native_evidence::source_input(Path::new(path), options)
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+                let lock_key = crate::source_change::lock_key(options, &input);
+                lock_keys.insert(lock_key.clone());
+                if input.path.ends_with(".jsonl") {
+                    forced_catalog_paths
+                        .insert(input.full_path(options).to_string_lossy().into_owned());
+                } else if input.path.ends_with(".meta.json") {
+                    forced_catalog_paths.insert(lock_key);
+                }
+            }
+            let pending_locks = lock_keys
+                .iter()
+                .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
+                .collect::<io::Result<Vec<_>>>()?;
+            drop(pending_locks);
+            Some(snapshot)
+        } else {
+            None
+        };
     let query_runtime = measured!(
         "runtime_fingerprint",
         1,
@@ -9937,8 +9934,8 @@ fn build_sources_inner(
                     &relationships.relations,
                 )?;
             }
-            let staged_publication = staged_relationships.is_some()
-                && matching_relationships.is_none();
+            let staged_publication =
+                staged_relationships.is_some() && matching_relationships.is_none();
             if ordinary_current_sources || staged_publication {
                 let rows = catalog.as_deref().unwrap_or_default();
                 let continuations = builder.cache.take_source_continuations(rows)?;
@@ -9958,8 +9955,7 @@ fn build_sources_inner(
                     },
                     complete,
                 )?;
-                let continuations =
-                    combine_source_continuations(rows, &captures, continuations)?;
+                let continuations = combine_source_continuations(rows, &captures, continuations)?;
                 let mut observations = presentation.take().unwrap_or_default();
                 observations.set_source_continuation_observations(
                     captures,
@@ -10048,7 +10044,7 @@ fn build_sources_inner(
         BuildTarget::Catalog => {
             let rows = catalog.as_deref().unwrap_or_default();
             if ordinary_current_sources {
-                let mut continuations = cache.take_source_continuations(rows)?;
+                let continuations = cache.take_source_continuations(rows)?;
                 let complete = selected.is_none();
                 let seed_paths = selected.map(|inputs| {
                     inputs
@@ -10059,11 +10055,7 @@ fn build_sources_inner(
                 let captures = if complete {
                     cache.capture_source_continuations(options, None, true)?
                 } else {
-                    cache.capture_source_continuations(
-                        options,
-                        seed_paths.as_deref(),
-                        false,
-                    )?
+                    cache.capture_source_continuations(options, seed_paths.as_deref(), false)?
                 };
                 let continuations = combine_source_continuations(rows, &captures, continuations)?;
                 let mut observations = presentation.take().unwrap_or_default();

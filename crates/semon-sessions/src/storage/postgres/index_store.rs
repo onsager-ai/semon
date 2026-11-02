@@ -77,9 +77,7 @@ fn read_error(error: std::io::Error) -> StoreError {
     err(storage)
 }
 
-fn source_continuation_paths(
-    tx: &mut super::txn::PgTxn<'_>,
-) -> Result<Vec<String>, StorageError> {
+fn source_continuation_paths(tx: &mut super::txn::PgTxn<'_>) -> Result<Vec<String>, StorageError> {
     tx.check()?;
     let rows = tx
         .driver
@@ -89,9 +87,7 @@ fn source_continuation_paths(
         )
         .map_err(sqlstate::error)?;
     rows.into_iter()
-        .map(|row| {
-            String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
-        })
+        .map(|row| String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged))
         .collect()
 }
 
@@ -117,11 +113,9 @@ pub(super) fn source_continuation_snapshot(
     let requested = pg_source_path_values(2, paths.len());
     let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> =
         vec![Box::new(namespace.clone())];
-    params.extend(
-        paths
-            .iter()
-            .map(|path| Box::new(path.as_bytes().to_vec()) as Box<dyn tokio_postgres::types::ToSql + Sync>),
-    );
+    params.extend(paths.iter().map(|path| {
+        Box::new(path.as_bytes().to_vec()) as Box<dyn tokio_postgres::types::ToSql + Sync>
+    }));
     let params = params
         .iter()
         .map(|value| &**value as &(dyn tokio_postgres::types::ToSql + Sync))
@@ -148,8 +142,8 @@ pub(super) fn source_continuation_snapshot(
     }
     let mut captures = Vec::with_capacity(rows.len());
     for (row, expected_path) in rows.into_iter().zip(paths) {
-        let path = String::from_utf8(row.get::<_, Vec<u8>>(0))
-            .map_err(|_| StorageError::ScopeChanged)?;
+        let path =
+            String::from_utf8(row.get::<_, Vec<u8>>(0)).map_err(|_| StorageError::ScopeChanged)?;
         if path != *expected_path {
             return Err(StorageError::ScopeChanged);
         }
@@ -159,10 +153,9 @@ pub(super) fn source_continuation_snapshot(
             return Err(StorageError::ScopeChanged);
         }
         if let Some(bytes) = &cell {
-            let decoded = serde_json::from_slice::<
-                crate::storage::catalog::SourceContinuationCell,
-            >(bytes)
-            .map_err(|_| StorageError::ScopeChanged)?;
+            let decoded =
+                serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(bytes)
+                    .map_err(|_| StorageError::ScopeChanged)?;
             if !crate::storage::catalog::valid_source_continuation_cell(&decoded) {
                 return Err(StorageError::ScopeChanged);
             }
@@ -226,11 +219,9 @@ pub(super) fn source_continuation_snapshot(
             if count != 1 || owners.contains_key(&path) {
                 return Err(StorageError::ScopeChanged);
             }
-            let size = usize::try_from(row.get::<_, i64>(3))
-                .map_err(|_| StorageError::ScopeChanged)?;
-            metadata_bytes = metadata_bytes
-                .checked_add(size)
-                .ok_or(StorageError::Busy)?;
+            let size =
+                usize::try_from(row.get::<_, i64>(3)).map_err(|_| StorageError::ScopeChanged)?;
+            metadata_bytes = metadata_bytes.checked_add(size).ok_or(StorageError::Busy)?;
             if size > 1_048_576 || metadata_bytes > 1_048_576 {
                 return Err(StorageError::Busy);
             }
@@ -277,10 +268,8 @@ pub(super) fn source_continuation_snapshot(
                     return Err(StorageError::ScopeChanged);
                 }
                 let bytes: Vec<u8> = row.get(2);
-                let source = serde_json::from_slice::<
-                    crate::model::summary::CatalogSource,
-                >(&bytes)
-                .map_err(|_| StorageError::ScopeChanged)?;
+                let source = serde_json::from_slice::<crate::model::summary::CatalogSource>(&bytes)
+                    .map_err(|_| StorageError::ScopeChanged)?;
                 if source.path != std::path::Path::new(&path) {
                     return Err(StorageError::ScopeChanged);
                 }

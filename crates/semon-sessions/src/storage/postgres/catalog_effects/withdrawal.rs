@@ -204,10 +204,7 @@ pub(in crate::storage::postgres) fn remove(
         tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
     tx.check()?;
-    Ok(IndexWriteResult::new(
-        Outcome::Written,
-        files.len() as u64,
-    ))
+    Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
 
 /// Mixed or connected owners are rebuilt by the ordinary semantic producer.
@@ -231,10 +228,7 @@ fn defer(
     }
     tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
     tx.check()?;
-    Ok(IndexWriteResult::new(
-        Outcome::Written,
-        files.len() as u64,
-    ))
+    Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
 
 type Page = Vec<(Vec<u8>, CatalogRow)>;

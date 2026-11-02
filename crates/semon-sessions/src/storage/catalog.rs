@@ -536,9 +536,12 @@ mod source_continuation_tests {
             after: next_stat,
         };
         let adjacent_bytes = serde_json::to_vec(&adjacent).unwrap();
-        let SourceContinuationCellUpdate::Put(coalesced) =
-            advance_source_continuation_cell(Some(&cell), Some(&current), &next, Some(&adjacent_bytes))
-        else {
+        let SourceContinuationCellUpdate::Put(coalesced) = advance_source_continuation_cell(
+            Some(&cell),
+            Some(&current),
+            &next,
+            Some(&adjacent_bytes),
+        ) else {
             panic!("matching adjacent custody should extend the cell");
         };
         let coalesced: SourceContinuationCell = serde_json::from_slice(&coalesced).unwrap();
@@ -573,21 +576,18 @@ mod source_continuation_tests {
             tail: prior.tail,
         };
         let mutation = serde_json::to_vec(&accepted).unwrap();
-        let SourceContinuationCellUpdate::Put(bytes) = advance_source_continuation_cell(
-            None,
-            Some(&prior),
-            &partial,
-            Some(&mutation),
-        ) else {
+        let SourceContinuationCellUpdate::Put(bytes) =
+            advance_source_continuation_cell(None, Some(&prior), &partial, Some(&mutation))
+        else {
             panic!("accepted partial-line append should retain a cell");
         };
         let cell: SourceContinuationCell = serde_json::from_slice(&bytes).unwrap();
         let old = source(&prior, &path, "native", None);
         let new = source(&partial, &path, "native", None);
-        assert!(VerifiedSourceContinuation::from_cell(
-            &path, &old, &new, &cell, &partial, &physical,
-        )
-        .is_none());
+        assert!(
+            VerifiedSourceContinuation::from_cell(&path, &old, &new, &cell, &partial, &physical,)
+                .is_none()
+        );
     }
 
     #[test]

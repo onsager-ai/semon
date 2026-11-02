@@ -1032,13 +1032,16 @@ impl SourceObservationStore for SourceJournal {
             .prepare("SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 ORDER BY revision,source_path LIMIT 257")
             .map_err(failed)?;
         let paths = statement
-            .query_map([self.config.namespace.as_str()], |row| row.get::<_, String>(0))
+            .query_map([self.config.namespace.as_str()], |row| {
+                row.get::<_, String>(0)
+            })
             .map_err(failed)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(failed)?;
         let overflow = paths.len() > 256;
         let pending_paths = paths.into_iter().take(256).collect::<Vec<_>>();
         crate::storage::source_observations::validate_paths(&pending_paths)?;
+        drop(statement);
         db.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(crate::storage::source_observations::FullCatalogStart {
             revision,

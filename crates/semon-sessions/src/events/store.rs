@@ -2117,14 +2117,12 @@ pub(crate) fn source_continuation_paths(
     read_source_continuation_paths(&tx).map_err(failure)
 }
 
-fn read_source_continuation_paths(
-    tx: &Transaction<'_>,
-) -> rusqlite::Result<Vec<String>> {
+fn read_source_continuation_paths(tx: &Transaction<'_>) -> rusqlite::Result<Vec<String>> {
     let mut statement = tx.prepare(
         "SELECT source_path FROM main.session_source_continuations WHERE namespace=semon_namespace() ORDER BY source_path LIMIT 65",
     )?;
     let paths = statement
-        .query_map([], |row| row.get(0))?
+        .query_map([], |row| row.get::<_, String>(0))?
         .collect()?;
     Ok(paths)
 }
@@ -2165,7 +2163,7 @@ pub(crate) fn source_continuation_snapshot(
             crate::storage::StorageError::Conflict,
         ));
     }
-    let mut captures = source_continuation_snapshot_tx(&tx, paths, complete)?;
+    let captures = source_continuation_snapshot_tx(&tx, paths, complete)?;
     tx.commit().map_err(failure)?;
     Ok(captures)
 }
@@ -2219,10 +2217,11 @@ fn source_continuation_snapshot_tx(
             ));
         }
         if let Some(cell) = &cell {
-            let decoded = serde_json::from_slice::<
-                crate::storage::catalog::SourceContinuationCell,
-            >(cell)
-            .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            let decoded =
+                serde_json::from_slice::<crate::storage::catalog::SourceContinuationCell>(cell)
+                    .map_err(|_| {
+                        StoreError::Configured(crate::storage::StorageError::ScopeChanged)
+                    })?;
             if !crate::storage::catalog::valid_source_continuation_cell(&decoded) {
                 return Err(StoreError::Configured(
                     crate::storage::StorageError::ScopeChanged,
@@ -2261,7 +2260,9 @@ fn source_continuation_snapshot_tx(
             .map_err(failure)?;
         let mut ledger_map = BTreeMap::new();
         for item in ledger_statement
-            .query_map(rusqlite::params_from_iter(ids.iter()), |row| read_ledger(row))
+            .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                read_ledger(row)
+            })
             .map_err(failure)?
         {
             let (file_id, ledger) = item.map_err(failure)?;
@@ -2272,9 +2273,9 @@ fn source_continuation_snapshot_tx(
             }
         }
         for (path, file_id) in file_ids {
-            let ledger = ledger_map
-                .remove(&file_id)
-                .ok_or(StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+            let ledger = ledger_map.remove(&file_id).ok_or(StoreError::Configured(
+                crate::storage::StorageError::ScopeChanged,
+            ))?;
             let index = captures
                 .binary_search_by(|capture| capture.path.cmp(&path))
                 .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
@@ -2335,9 +2336,7 @@ fn source_continuation_snapshot_tx(
             .checked_add(size)
             .ok_or(StoreError::Configured(crate::storage::StorageError::Busy))?;
         if size > 1_048_576 || catalog_bytes > 1_048_576 {
-            return Err(StoreError::Configured(
-                crate::storage::StorageError::Busy,
-            ));
+            return Err(StoreError::Configured(crate::storage::StorageError::Busy));
         }
         owners.insert(path, session_key);
     }
@@ -2882,19 +2881,21 @@ impl IndexStore for SqliteStore {
         let mut usage_deletes = UsageDeletes::default();
         let mut source_revision_delta = 0_u64;
         for (path, ledger, index) in files {
-            source_revision_delta += u64::from(write_index_changes_with_usage_deletes(
-                &transaction,
-                path,
-                ledger,
-                index,
-                None,
-                None,
-                &mut row_measurements,
-                self.owner.config().namespace.as_str(),
-                &layout,
-                &mut usage_deletes,
-            )
-            .map_err(failure)?);
+            source_revision_delta += u64::from(
+                write_index_changes_with_usage_deletes(
+                    &transaction,
+                    path,
+                    ledger,
+                    index,
+                    None,
+                    None,
+                    &mut row_measurements,
+                    self.owner.config().namespace.as_str(),
+                    &layout,
+                    &mut usage_deletes,
+                )
+                .map_err(failure)?,
+            );
         }
         drop(usage_deletes);
         measurements.record("write_index_changes", started, files.len());

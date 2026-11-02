@@ -178,9 +178,8 @@ pub(super) fn commit(
             source_revision_delta,
         )),
         Err(StorageError::CommitUncertain) => {
-            let receipt = reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
-                .ok_or(StorageError::CommitUncertain)
-                ?;
+            reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
+                .ok_or(StorageError::CommitUncertain)?;
             Ok(crate::events::IndexWriteResult::new(
                 crate::events::Outcome::Written,
                 source_revision_delta,
@@ -388,7 +387,8 @@ pub(super) fn commit_initial(
                 let intent = &intents[path];
                 let mut file_revision_delta = 0;
                 tx.apply_operation(&identity(intent), |tx| {
-                    let (completion, delta) = complete(tx, intent, path, None, None, ledger, index)?;
+                    let (completion, delta) =
+                        complete(tx, intent, path, None, None, ledger, index)?;
                     file_revision_delta = delta;
                     Ok(completion)
                 })?;

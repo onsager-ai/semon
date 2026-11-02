@@ -336,7 +336,8 @@ pub(in crate::storage::postgres) fn publish(
             .iter()
             .map(|capture| capture.path.clone())
             .collect::<Vec<_>>();
-        let current = super::super::index_store::source_continuation_snapshot(tx, &paths, complete)?;
+        let current =
+            super::super::index_store::source_continuation_snapshot(tx, &paths, complete)?;
         let mut observed = captures.to_vec();
         for capture in &mut observed {
             capture.physical = None;
