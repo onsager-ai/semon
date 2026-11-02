@@ -106,6 +106,18 @@ pub(super) struct PreparedPresentations<'a> {
     pub(super) rows: &'a [(String, String)],
 }
 
+#[derive(Debug)]
+pub(super) enum PublicationError {
+    Storage(StorageError),
+    BudgetOverflow,
+}
+
+impl From<StorageError> for PublicationError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
+}
+
 #[cfg(test)]
 std::thread_local! {
     static PREPARED_QUERY_RECIPE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -152,7 +164,8 @@ pub(super) fn publish(
     publication: &str,
     proof: &str,
     presentations: PreparedPresentations<'_>,
-) -> Result<(), StorageError> {
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
     let prepared = presentations.prepared;
     let presentations = presentations.rows;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
@@ -223,7 +236,14 @@ pub(super) fn publish(
             )
             .map_err(failed)?;
         }
-        retain_current_refs_for_unowned_history(tx, namespace, &row.key, admission, stream)?;
+        retain_current_refs_for_unowned_history(
+            tx,
+            namespace,
+            &row.key,
+            admission,
+            stream,
+            overview_budget,
+        )?;
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
         tx.execute(
             "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
@@ -238,7 +258,14 @@ pub(super) fn publish(
     // either the exact local composition set or retention references copied
     // from an exact local Current grant. They never grant History origin.
     for row in &prepared.relationships.retired_owners {
-        retain_current_refs_for_unowned_history(tx, namespace, &row.key, admission, stream)?;
+        retain_current_refs_for_unowned_history(
+            tx,
+            namespace,
+            &row.key,
+            admission,
+            stream,
+            overview_budget,
+        )?;
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
     }
     Ok(())
@@ -304,11 +331,11 @@ fn has_local_history_origin(
     namespace: &str,
     session_key: &str,
     metadata: &str,
+    normalized_metadata: &str,
     admission: u64,
     stream: &str,
 ) -> Result<bool, StorageError> {
-    let normalized = normalized_owner_metadata(metadata, session_key)?;
-    let digest = proof_codec::digest(normalized.as_bytes());
+    let digest = proof_codec::digest(normalized_metadata.as_bytes());
     let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.storage_catalog_native_observation_grants g ON g.namespace=h.namespace AND g.session_key=h.session_key WHERE h.namespace=?1 AND h.session_key=?2 AND h.metadata=?3 AND g.owner_kind='history' AND g.metadata_digest=?4 AND g.admission=?5 AND g.stream=?6)",
@@ -327,22 +354,43 @@ pub(super) fn retain_current_refs_for_unowned_history(
     session_key: &str,
     admission: u64,
     stream: &str,
-) -> Result<(), StorageError> {
-    let metadata: Option<String> = db
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    let metadata_bytes: Option<i64> = db
+        .query_row(
+            "SELECT octet_length(metadata) FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    let Some(metadata_bytes) = metadata_bytes else {
+        return Ok(());
+    };
+    let metadata_bytes =
+        usize::try_from(metadata_bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if budget.charge(metadata_bytes).is_err() {
+        return Err(PublicationError::BudgetOverflow);
+    }
+    let metadata: String = db
         .query_row(
             "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
             params![namespace, session_key],
             |row| row.get(0),
         )
-        .optional()
-        .map_err(failed)?;
-    let Some(metadata) = metadata else {
-        return Ok(());
-    };
-    if has_local_history_origin(db, namespace, session_key, &metadata, admission, stream)? {
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    let normalized = normalized_owner_metadata(&metadata, session_key)?;
+    if has_local_history_origin(
+        db,
+        namespace,
+        session_key,
+        &metadata,
+        &normalized,
+        admission,
+        stream,
+    )? {
         return Ok(());
     }
-    let normalized = normalized_owner_metadata(&metadata, session_key)?;
     let digest = proof_codec::digest(normalized.as_bytes());
     let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     let has_local_current: bool = db
@@ -351,7 +399,7 @@ pub(super) fn retain_current_refs_for_unowned_history(
             params![namespace, session_key, digest, admission, stream],
             |row| row.get(0),
         )
-        .map_err(failed)?;
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
     if !has_local_current {
         return Ok(());
     }
@@ -359,14 +407,14 @@ pub(super) fn retain_current_refs_for_unowned_history(
         .prepare(
             "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' ORDER BY id LIMIT 65",
         )
-        .map_err(failed)?;
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
     let ids = statement
         .query_map(params![namespace, session_key], |row| {
             row.get::<_, String>(0)
         })
-        .map_err(failed)?
+        .map_err(|error| PublicationError::Storage(failed(error)))?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(failed)?;
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
     if ids.len() > 64 {
         return Err(StorageError::HistoryRetentionBounds);
     }
@@ -375,7 +423,7 @@ pub(super) fn retain_current_refs_for_unowned_history(
             "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3) ON CONFLICT DO NOTHING",
             params![namespace, session_key, id],
         )
-        .map_err(failed)?;
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
     }
     Ok(())
 }
@@ -411,11 +459,13 @@ pub(crate) fn verified_publication_receipts(
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
     if kind == PublicationReceiptRef::History {
+        let normalized = normalized_owner_metadata(exact_owner_metadata, session_key)?;
         if !has_local_history_origin(
             db,
             namespace,
             session_key,
             exact_owner_metadata,
+            &normalized,
             publication_admission,
             stream,
         )? {
