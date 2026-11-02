@@ -2273,6 +2273,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             1790812803000,
         )
         .expect("SQLite trusted successor History body");
+    let append_history_fields = trusted_query
+        .call_at(
+            "get_session",
+            &serde_json::json!({"id":appended_key}),
+            1790812802000,
+        )
+        .expect("SQLite trusted successor History fields");
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
@@ -4171,8 +4178,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "PG History-selected body must match SQLite after the same append"
     );
     assert_eq!(
-        next_bodies[&appended_key]["fields"], expected_bodies[&appended_key]["fields"],
-        "PG History-selected fields must preserve the original exact oracle"
+        next_bodies[&appended_key]["fields"], append_history_fields,
+        "PG History-selected fields must match the SQLite trusted successor"
     );
     let successor_related_body = restarted_query
         .call_bound_selected_at(
