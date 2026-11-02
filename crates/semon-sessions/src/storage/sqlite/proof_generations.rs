@@ -223,13 +223,7 @@ pub(super) fn publish(
             )
             .map_err(failed)?;
         }
-        retain_current_refs_for_unowned_history(
-            tx,
-            namespace,
-            &row.key,
-            admission,
-            stream,
-        )?;
+        retain_current_refs_for_unowned_history(tx, namespace, &row.key, admission, stream)?;
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
         tx.execute(
             "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
@@ -244,13 +238,7 @@ pub(super) fn publish(
     // either the exact local composition set or retention references copied
     // from an exact local Current grant. They never grant History origin.
     for row in &prepared.relationships.retired_owners {
-        retain_current_refs_for_unowned_history(
-            tx,
-            namespace,
-            &row.key,
-            admission,
-            stream,
-        )?;
+        retain_current_refs_for_unowned_history(tx, namespace, &row.key, admission, stream)?;
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
     }
     Ok(())
@@ -266,7 +254,10 @@ pub(crate) fn replace_verified_history_refs(
 ) -> Result<(), StorageError> {
     if receipt_ids.len() > 64
         || receipt_ids.iter().any(String::is_empty)
-        || receipt_ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+        || receipt_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
             != receipt_ids.len()
     {
         return Err(StorageError::HistoryRetentionBounds);
@@ -370,7 +361,9 @@ pub(super) fn retain_current_refs_for_unowned_history(
         )
         .map_err(failed)?;
     let ids = statement
-        .query_map(params![namespace, session_key], |row| row.get::<_, String>(0))
+        .query_map(params![namespace, session_key], |row| {
+            row.get::<_, String>(0)
+        })
         .map_err(failed)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(failed)?;
@@ -509,7 +502,8 @@ pub(crate) fn verified_publication_receipts(
             continue;
         }
         if kind == PublicationReceiptRef::Current {
-            let admission = i64::try_from(record.admission).map_err(|_| StorageError::Unavailable)?;
+            let admission =
+                i64::try_from(record.admission).map_err(|_| StorageError::Unavailable)?;
             let digest = proof_codec::digest(record.metadata.as_bytes());
             let granted: bool = db
                 .query_row(
@@ -570,16 +564,13 @@ pub(crate) fn verified_publication_receipts(
         let Ok(source_generation) = crate::retention::source_generation(&original.sources) else {
             continue;
         };
-        let Some(saved_fingerprint) = serde_json::to_value(&observations)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("runtime_cwd_fingerprints")?
-                    .get(&source_generation)?
-                    .as_str()
-                    .map(str::to_owned)
-            })
-        else {
+        let Some(saved_fingerprint) = serde_json::to_value(&observations).ok().and_then(|value| {
+            value
+                .get("runtime_cwd_fingerprints")?
+                .get(&source_generation)?
+                .as_str()
+                .map(str::to_owned)
+        }) else {
             continue;
         };
         if observations.runtime_for(&original).is_none() {
@@ -648,11 +639,22 @@ pub(crate) fn verified_publication_receipts(
         };
         let cwd_by_path = match current_cwds {
             Some(current) => current,
-            None if slot_cwds.keys().cloned().collect::<std::collections::BTreeSet<_>>()
-                == source_paths => slot_cwds,
+            None if slot_cwds
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                == source_paths =>
+            {
+                slot_cwds
+            }
             None => continue,
         };
-        if cwd_by_path.keys().cloned().collect::<std::collections::BTreeSet<_>>() != source_paths {
+        if cwd_by_path
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != source_paths
+        {
             continue;
         }
         let cwds: std::collections::BTreeSet<_> =

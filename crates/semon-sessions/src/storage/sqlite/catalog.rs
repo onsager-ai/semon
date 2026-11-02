@@ -341,9 +341,8 @@ pub(crate) fn runtime_source_cwds_if_current(
     db: &Connection,
     sources: &[CatalogSource],
 ) -> io::Result<Option<std::collections::BTreeSet<String>>> {
-    Ok(runtime_source_cwds_by_path_if_current(db, sources)?.map(|by_path| {
-        by_path.into_values().flatten().collect()
-    }))
+    Ok(runtime_source_cwds_by_path_if_current(db, sources)?
+        .map(|by_path| by_path.into_values().flatten().collect()))
 }
 
 /// Preserve the exact source-to-CWD association after checking every source
@@ -352,9 +351,7 @@ pub(crate) fn runtime_source_cwds_if_current(
 pub(crate) fn runtime_source_cwds_by_path_if_current(
     db: &Connection,
     sources: &[CatalogSource],
-) -> io::Result<
-    Option<std::collections::BTreeMap<std::path::PathBuf, Option<String>>>,
-> {
+) -> io::Result<Option<std::collections::BTreeMap<std::path::PathBuf, Option<String>>>> {
     if sources.is_empty() || sources.len() > 64 {
         return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
     }

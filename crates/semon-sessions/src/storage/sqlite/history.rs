@@ -1,6 +1,6 @@
 //! Authored physical operations for the shared bounded original-custody recipe.
 use crate::model::summary::CatalogRow;
-use crate::storage::catalog::{OriginalHeader, OriginalHistoryStore};
+use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 use rusqlite::{Connection, OptionalExtension, params};
 
 /// Authored fresh private semantic profile; never converts singleton custody.
@@ -318,10 +318,11 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
     ) -> rusqlite::Result<crate::storage::catalog::HistoryCompositionSnapshot> {
         use crate::storage::catalog::HistoryCompositionSnapshot;
 
-        let history_exists = <Self as crate::storage::catalog::CompositeHistoryStore>::history_exists(
-            self,
-            &current.key,
-        )?;
+        let history_exists =
+            <Self as crate::storage::catalog::CompositeHistoryStore>::history_exists(
+                self,
+                &current.key,
+            )?;
         let (metadata_table, slots_table, projection_table) = if history_exists {
             (
                 "main.session_history_catalog",
@@ -398,9 +399,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             current_cwds: None,
             unavailable: false,
         };
-        if slot_count > 64
-            || total_bytes.is_none_or(|bytes| budget.charge(bytes).is_err())
-        {
+        if slot_count > 64 || total_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
             snapshot.unavailable = true;
             return Ok(snapshot);
         }
@@ -435,11 +434,12 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             snapshot.unavailable = true;
         }
         if snapshot.recipe_header.is_some() {
-            snapshot.recipe_slots = <Self as crate::storage::catalog::CompositeHistoryStore>::recipe_slots(
-                self,
-                &current.key,
-                history_exists,
-            )?;
+            snapshot.recipe_slots =
+                <Self as crate::storage::catalog::CompositeHistoryStore>::recipe_slots(
+                    self,
+                    &current.key,
+                    history_exists,
+                )?;
         }
         if let Some(previous_row) = previous_row.as_ref() {
             if previous_row.sources.len() > 64 {
@@ -478,21 +478,18 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                     },
                     budget,
                 )
-                .map_err(|error| {
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                })? {
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+                {
                     Some(receipts) => snapshot.receipts = receipts,
                     None => snapshot.unavailable = true,
                 }
             }
         }
-        snapshot.current_cwds = super::catalog::runtime_source_cwds_by_path_if_current(
-            self.db,
-            &current.sources,
-        )
-        .ok()
-        .flatten()
-        .map(|by_path| by_path.into_values().flatten().collect());
+        snapshot.current_cwds =
+            super::catalog::runtime_source_cwds_by_path_if_current(self.db, &current.sources)
+                .ok()
+                .flatten()
+                .map(|by_path| by_path.into_values().flatten().collect());
         Ok(snapshot)
     }
 
@@ -645,7 +642,7 @@ mod verified_history_tests {
         .unwrap();
         db.execute(
             "INSERT INTO storage_proof_generations VALUES(?1,'receipt-one',?2,?3,?4,'original receipt metadata')",
-            rusqlite::params![namespace, first.key, admission, stream],
+            rusqlite::params![namespace, first.key, i64::try_from(admission).unwrap(), stream],
         )
         .unwrap();
         let history = OriginalHistory {
@@ -811,7 +808,13 @@ mod verified_history_tests {
         .unwrap();
         db.execute(
             "INSERT INTO storage_catalog_native_observation_grants VALUES(?1,?2,'catalog',?3,?4,?5,NULL)",
-            rusqlite::params![namespace, owner.key, digest, admission, stream],
+            rusqlite::params![
+                namespace,
+                owner.key,
+                digest,
+                i64::try_from(admission).unwrap(),
+                stream
+            ],
         )
         .unwrap();
         db.execute(
@@ -820,11 +823,7 @@ mod verified_history_tests {
         )
         .unwrap();
         super::super::proof_generations::retain_current_refs_for_unowned_history(
-            &db,
-            namespace,
-            &owner.key,
-            admission,
-            &stream,
+            &db, namespace, &owner.key, admission, &stream,
         )
         .unwrap();
         let (history_ref, history_grant): (bool, bool) = db
@@ -834,8 +833,14 @@ mod verified_history_tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert!(history_ref, "the exact old ref remains available for custody transfer");
-        assert!(!history_grant, "Current ref transfer must never mint History origin");
+        assert!(
+            history_ref,
+            "the exact old ref remains available for custody transfer"
+        );
+        assert!(
+            !history_grant,
+            "Current ref transfer must never mint History origin"
+        );
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         let verified = super::super::proof_generations::verified_publication_receipts(
             &db,
