@@ -190,104 +190,6 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     fn data(error: serde_json::Error) -> Self::Error {
         rusqlite::Error::ToSqlConversionFailure(Box::new(error))
     }
-    fn composition_snapshot(
-        &self,
-        current: &CatalogRow,
-    ) -> rusqlite::Result<crate::storage::catalog::HistoryCompositionSnapshot> {
-        let previous: Option<Option<String>> = self
-            .db
-            .query_row(
-                "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
-                params![self.namespace, current.key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let mut unavailable = matches!(&previous, Some(None));
-        let previous = previous.flatten();
-        let old = previous
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
-        let history_exists = <Self as crate::storage::catalog::CompositeHistoryStore>::history_exists(
-            self,
-            &current.key,
-        )?;
-        let (recipe_history, recipe_header) =
-            <Self as crate::storage::catalog::CompositeHistoryStore>::previous_recipe(
-                self,
-                &current.key,
-            )?;
-        let mut recipe_slots = Vec::new();
-        if recipe_header.is_some() {
-            let table = if recipe_history {
-                "main.session_history_slots"
-            } else {
-                "main.session_slots"
-            };
-            let budget: (i64, i64) = self.db.query_row(
-                &format!("SELECT count(*),COALESCE(sum(octet_length(metadata)),0) FROM {table} WHERE namespace=?1 AND session_key=?2"),
-                params![self.namespace, current.key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if budget.0 > 64 || budget.1 > 1_048_576 {
-                unavailable = true;
-            } else {
-                recipe_slots = <Self as crate::storage::catalog::CompositeHistoryStore>::recipe_slots(
-                    self,
-                    &current.key,
-                    recipe_history,
-                )?;
-            }
-        }
-        let mut relocated = std::collections::BTreeSet::new();
-        if let Some(old) = old.as_ref() {
-            if old.sources.len() > 64 {
-                unavailable = true;
-            } else {
-                for source in &old.sources {
-                    if !current.sources.iter().any(|now| now.path == source.path)
-                        && self.relocated(source, &current.sources)?
-                    {
-                        relocated.insert(source.path.to_string_lossy().into_owned());
-                    }
-                }
-            }
-        } else if previous.is_some() {
-            unavailable = true;
-        }
-        let receipts = if !unavailable {
-            old.as_ref()
-                .zip(self.stream)
-                .map(|(old, stream)| {
-                    super::proof_generations::verified_history_receipts(
-                        self.db,
-                        self.namespace,
-                        &current.key,
-                        stream,
-                        old,
-                    )
-                })
-                .transpose()?
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let current_cwds = super::catalog::runtime_source_cwds_if_current(self.db, &current.sources)
-            .ok()
-            .flatten();
-        Ok(crate::storage::catalog::HistoryCompositionSnapshot {
-            key: current.key.clone(),
-            original: self.retained(&current.key)?,
-            previous,
-            history_exists,
-            recipe_history,
-            recipe_header,
-            recipe_slots,
-            relocated,
-            receipts,
-            current_cwds,
-            unavailable,
-        })
-    }
     fn original(&self, key: &str) -> rusqlite::Result<bool> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=composite_original");
@@ -389,6 +291,203 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     }
     fn composed(
         &self,
+        _key: &str,
+        _generation: &str,
+        _sources: &str,
+        _metadata: &str,
+        _texts: &[String],
+        _incomplete: bool,
+    ) -> rusqlite::Result<()> {
+        Err(rusqlite::Error::InvalidQuery)
+    }
+}
+
+impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistory<'_> {
+    fn composition_snapshot(
+        &self,
+        current: &CatalogRow,
+        budget: &mut crate::overview::SummaryPublicationBudget,
+    ) -> rusqlite::Result<crate::storage::catalog::HistoryCompositionSnapshot> {
+        use crate::storage::catalog::HistoryCompositionSnapshot;
+
+        let history_exists = <Self as crate::storage::catalog::CompositeHistoryStore>::history_exists(
+            self,
+            &current.key,
+        )?;
+        let (metadata_table, slots_table, projection_table) = if history_exists {
+            (
+                "main.session_history_catalog",
+                "main.session_history_slots",
+                "main.session_history_projections",
+            )
+        } else {
+            (
+                "main.session_catalog",
+                "main.session_slots",
+                "main.session_slot_projections",
+            )
+        };
+        let previous_bytes: Option<i64> = self.db.query_row(
+            &format!("SELECT octet_length(metadata) FROM {metadata_table} WHERE namespace=?1 AND session_key=?2"),
+            params![self.namespace, current.key],
+            |row| row.get(0),
+        ).optional()?;
+        let recipe_header_exists: bool = if history_exists {
+            self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2)",
+                params![self.namespace, current.key],
+                |row| row.get(0),
+            )?
+        } else {
+            self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2)",
+                params![self.namespace, current.key],
+                |row| row.get(0),
+            )?
+        };
+        let header_bytes: i64 = self.db.query_row(
+            &format!("SELECT COALESCE(sum(octet_length(generation)+COALESCE(octet_length(source_generation),0)),0) FROM {projection_table} WHERE namespace=?1 AND session_key=?2"),
+            params![self.namespace, current.key],
+            |row| row.get(0),
+        )?;
+        let (slot_count, slot_bytes): (i64, i64) = self.db.query_row(
+            &format!("SELECT count(*),COALESCE(sum(octet_length(metadata)),0) FROM {slots_table} WHERE namespace=?1 AND session_key=?2"),
+            params![self.namespace, current.key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let cwd_bytes = super::catalog::runtime_source_cwd_bytes(self.db, &current.sources)
+            .ok()
+            .and_then(|bytes| i64::try_from(bytes).ok())
+            .unwrap_or(i64::MAX);
+        let ledger_bytes = current
+            .sources
+            .len()
+            .checked_mul(std::mem::size_of::<crate::events::Ledger>())
+            .and_then(|bytes| i64::try_from(bytes).ok())
+            .unwrap_or(i64::MAX);
+        let sizes = [
+            previous_bytes.unwrap_or(0),
+            header_bytes,
+            if recipe_header_exists { slot_bytes } else { 0 },
+            cwd_bytes,
+            ledger_bytes,
+        ];
+        let total_bytes = sizes.into_iter().try_fold(0usize, |total, bytes| {
+            usize::try_from(bytes)
+                .ok()
+                .and_then(|bytes| total.checked_add(bytes))
+        });
+        let mut snapshot = HistoryCompositionSnapshot {
+            key: current.key.clone(),
+            original: false,
+            previous: None,
+            history_exists,
+            recipe_history: history_exists,
+            recipe_header: None,
+            recipe_slots: Vec::new(),
+            relocated: std::collections::BTreeSet::new(),
+            receipts: Vec::new(),
+            current_cwds: None,
+            unavailable: false,
+        };
+        if slot_count > 64
+            || total_bytes.is_none_or(|bytes| budget.charge(bytes).is_err())
+        {
+            snapshot.unavailable = true;
+            return Ok(snapshot);
+        }
+        snapshot.recipe_header = if recipe_header_exists && history_exists {
+            self.db.query_row(
+                "SELECT version,source_generation,incomplete FROM main.session_history_projections WHERE namespace=?1 AND session_key=?2",
+                params![self.namespace, current.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?
+        } else if recipe_header_exists {
+            self.db.query_row(
+                "SELECT version,source_generation,0 FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                params![self.namespace, current.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            ).optional()?
+        } else {
+            None
+        };
+
+        if previous_bytes.is_some() {
+            snapshot.previous = self.db.query_row(
+                &format!("SELECT metadata FROM {metadata_table} WHERE namespace=?1 AND session_key=?2"),
+                params![self.namespace, current.key],
+                |row| row.get(0),
+            ).optional()?;
+        }
+        let previous_row = snapshot
+            .previous
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        if snapshot.previous.is_some() && previous_row.is_none() {
+            snapshot.unavailable = true;
+        }
+        if snapshot.recipe_header.is_some() {
+            snapshot.recipe_slots = <Self as crate::storage::catalog::CompositeHistoryStore>::recipe_slots(
+                self,
+                &current.key,
+                history_exists,
+            )?;
+        }
+        if let Some(previous_row) = previous_row.as_ref() {
+            if previous_row.sources.len() > 64 {
+                snapshot.unavailable = true;
+            } else {
+                for source in &previous_row.sources {
+                    if !current.sources.iter().any(|now| now.path == source.path)
+                        && self.relocated(source, &current.sources)?
+                    {
+                        snapshot
+                            .relocated
+                            .insert(source.path.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            if !snapshot.unavailable
+                && snapshot.recipe_header.is_some()
+                && let Some(stream) = self.stream
+            {
+                let exact_current_metadata = (!history_exists)
+                    .then_some(snapshot.previous.as_deref())
+                    .flatten();
+                match super::proof_generations::verified_publication_receipts(
+                    self.db,
+                    self.namespace,
+                    &current.key,
+                    stream,
+                    previous_row,
+                    exact_current_metadata,
+                    if history_exists {
+                        super::proof_generations::PublicationReceiptRef::History
+                    } else {
+                        super::proof_generations::PublicationReceiptRef::Current
+                    },
+                    budget,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                })? {
+                    Some(receipts) => snapshot.receipts = receipts,
+                    None => snapshot.unavailable = true,
+                }
+            }
+        }
+        snapshot.current_cwds = super::catalog::runtime_source_cwds_by_path_if_current(
+            self.db,
+            &current.sources,
+        )
+        .ok()
+        .flatten()
+        .map(|by_path| by_path.into_values().flatten().collect());
+        Ok(snapshot)
+    }
+
+    fn composed_verified(
+        &self,
         key: &str,
         generation: &str,
         sources: &str,
@@ -396,18 +495,17 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         texts: &[String],
         incomplete: bool,
         _receipt_ids: &[String],
-        capture: Option<&str>,
+        capture: &str,
     ) -> rusqlite::Result<()> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=composite_composed");
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let changed=self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
+        let projection_changed = self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
         let row: CatalogRow = serde_json::from_str(metadata)
             .map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
-        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
-        if changed > 0 {
-            self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
+        let metadata_changed = self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
+        if projection_changed > 0 {
             self.db.execute(
                 "DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2",
                 params![self.namespace, key],
@@ -421,19 +519,20 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
                     text
                 ])?;
             }
-            if let Some(capture) = capture {
-                super::proof_generations::native_history_observation_grant(
-                    self.db,
-                    self.namespace,
-                    key,
-                    self.admission,
-                    self.stream.ok_or(rusqlite::Error::InvalidQuery)?,
-                    metadata,
-                    capture,
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            }
         }
+        if projection_changed > 0 || metadata_changed > 0 {
+            self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
+        }
+        super::proof_generations::native_history_observation_grant(
+            self.db,
+            self.namespace,
+            key,
+            self.admission,
+            self.stream.ok_or(rusqlite::Error::InvalidQuery)?,
+            metadata,
+            capture,
+        )
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }

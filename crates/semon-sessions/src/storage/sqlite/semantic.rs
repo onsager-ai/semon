@@ -2702,7 +2702,35 @@ impl Stage {
         batch: &Batch,
         prepared: &PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        match self.publish_transaction(batch, prepared) {
+        let metadata_bytes = prepared.rows.iter().try_fold(0usize, |total, row| {
+            let bytes = serde_json::to_vec(row)
+                .map_err(|error| StoreError::Data(error.to_string()))?
+                .len();
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| refuse(PUBLICATION_GROUP_BUDGET))
+        })?;
+        let mut overview_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
+        let (history_plan, history_captures) = {
+            let history = super::history::OriginalHistory::admitted(&self.db, &self.source)
+                .map_err(StoreError::Configured)?;
+            crate::storage::catalog::prepare_history_composition(
+                &history,
+                &prepared.rows,
+                Some(&prepared.transcripts),
+                prepared.presentation_observations(),
+                &mut overview_budget,
+            )
+            .map_err(error)?
+        };
+        match self.publish_transaction(
+            batch,
+            prepared,
+            &history_plan,
+            &history_captures,
+            &mut overview_budget,
+        ) {
             Err(StoreError::Data(reason)) if reason == PUBLICATION_GROUP_BUDGET => {
                 #[cfg(test)]
                 if DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.replace(false)) {
@@ -2876,6 +2904,9 @@ impl Stage {
         &mut self,
         batch: &Batch,
         prepared: &PreparedSources,
+        history_plan: &crate::storage::catalog::HistoryCompositionPlan,
+        history_captures: &crate::storage::catalog::HistoryCompositionCaptures,
+        overview_budget: &mut crate::overview::SummaryPublicationBudget,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         use crate::storage::catalog::CatalogPublicationHead;
         use sha2::{Digest, Sha256};
@@ -2926,8 +2957,6 @@ impl Stage {
         if metadata_bytes > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET {
             return Err(refuse(PUBLICATION_GROUP_BUDGET));
         }
-        let mut overview_budget =
-            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
         let claims_text =
             serde_json::to_string(&prepared.claims).map_err(|e| StoreError::Data(e.to_string()))?;
         let metadata_text =
@@ -3176,9 +3205,21 @@ impl Stage {
             let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
-        publication_phase("original_history");
+        publication_phase("composite_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
+        crate::storage::catalog::publish_history_composition(
+            &history,
+            &prepared.rows,
+            Some(&prepared.transcripts),
+            history_plan,
+            history_captures,
+            overview_budget,
+        )
+        .map_err(error)?;
+        #[cfg(test)]
+        crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
+        publication_phase("original_history");
         if !crate::storage::catalog::preserve_rows(
             &history,
             &prepared.rows,
@@ -3192,15 +3233,6 @@ impl Stage {
             tx.commit().map_err(error)?;
             return Ok((Outcome::Deferred, None));
         }
-        publication_phase("composite_history");
-        crate::storage::catalog::publish_history_rows(
-            &history,
-            &prepared.rows,
-            Some(&prepared.transcripts),
-        )
-        .map_err(error)?;
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
         publication_phase("slot_effects");
         if !prepared.transcripts.is_empty() {
             crate::storage::catalog::publish_slot_rows(
@@ -3272,7 +3304,7 @@ impl Stage {
                 row,
                 &mut overview_measurements,
                 &trace,
-                &mut overview_budget,
+                overview_budget,
             )
             .map_err(error)?;
         }

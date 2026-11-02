@@ -67,7 +67,7 @@ impl SummaryPublicationBudget {
     }
 
     /// Share one byte allowance across retained inputs and emitted summaries.
-    fn charge(&mut self, bytes: usize) -> rusqlite::Result<()> {
+    pub(crate) fn charge(&mut self, bytes: usize) -> rusqlite::Result<()> {
         if bytes > self.available() {
             return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                 SummaryPublicationBudgetOverflow,

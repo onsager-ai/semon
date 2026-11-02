@@ -421,7 +421,8 @@ pub(crate) struct VerifiedHistoryReceipt {
     pub(crate) source_generation: String,
     pub(crate) sources: Vec<CatalogSource>,
     pub(crate) slots: Vec<String>,
-    pub(crate) cwds: std::collections::BTreeSet<String>,
+    pub(crate) cwd_fingerprint: String,
+    pub(crate) cwds: std::collections::BTreeMap<std::path::PathBuf, Option<String>>,
 }
 
 impl VerifiedHistoryReceipt {
@@ -430,13 +431,15 @@ impl VerifiedHistoryReceipt {
         source_generation: String,
         sources: Vec<CatalogSource>,
         slots: Vec<String>,
-        cwds: std::collections::BTreeSet<String>,
+        cwd_fingerprint: String,
+        cwds: std::collections::BTreeMap<std::path::PathBuf, Option<String>>,
     ) -> Self {
         Self {
             id,
             source_generation,
             sources,
             slots,
+            cwd_fingerprint,
             cwds,
         }
     }
@@ -475,6 +478,8 @@ enum HistoryCompositionStep {
     },
     Clear {
         key: String,
+        metadata: String,
+        capture_cwds: Option<std::collections::BTreeSet<String>>,
     },
     Retain {
         key: String,
@@ -503,10 +508,6 @@ pub(crate) struct HistoryCompositionCaptures {
 pub(crate) trait CompositeHistoryStore {
     type Error;
     fn data(error: serde_json::Error) -> Self::Error;
-    fn composition_snapshot(
-        &self,
-        current: &CatalogRow,
-    ) -> Result<HistoryCompositionSnapshot, Self::Error>;
     fn original(&self, key: &str) -> Result<bool, Self::Error>;
     fn previous(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn history_exists(&self, key: &str) -> Result<bool, Self::Error>;
@@ -530,8 +531,29 @@ pub(crate) trait CompositeHistoryStore {
         metadata: &str,
         texts: &[String],
         incomplete: bool,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Verified composition is limited to adapters that can authenticate local
+/// publication receipts and charge their snapshot reads against the caller's
+/// dynamic request budget. Other adapters keep their established publisher
+/// until their receipt contract is reviewed.
+pub(crate) trait VerifiedHistoryCompositionStore: CompositeHistoryStore {
+    fn composition_snapshot(
+        &self,
+        current: &CatalogRow,
+        budget: &mut crate::overview::SummaryPublicationBudget,
+    ) -> Result<HistoryCompositionSnapshot, Self::Error>;
+    fn composed_verified(
+        &self,
+        key: &str,
+        generation: &str,
+        sources: &str,
+        metadata: &str,
+        texts: &[String],
+        incomplete: bool,
         receipt_ids: &[String],
-        capture: Option<&str>,
+        capture: &str,
     ) -> Result<(), Self::Error>;
 }
 
@@ -1102,24 +1124,11 @@ pub(crate) trait CatalogSnapshot {
     ) -> io::Result<Option<Value>>;
 }
 
-const HISTORY_COMPOSITION_STEP_BYTES: usize = 1_048_576;
-const HISTORY_COMPOSITION_TOTAL_BYTES: usize = 8 * 1_048_576;
-
-fn unavailable_history_snapshot(key: &str, mut snapshot: HistoryCompositionSnapshot) -> HistoryCompositionSnapshot {
-    snapshot.key = key.to_owned();
-    snapshot.previous = None;
-    snapshot.recipe_slots.clear();
-    snapshot.relocated.clear();
-    snapshot.receipts.clear();
-    snapshot.current_cwds = None;
-    snapshot.unavailable = true;
-    snapshot
-}
-
-fn history_snapshots<P: CompositeHistoryStore>(
+fn history_snapshots<P: VerifiedHistoryCompositionStore>(
     store: &P,
     rows: &[CatalogRow],
     projections: Option<&[crate::slot_projection::Projection]>,
+    budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<Vec<HistoryCompositionSnapshot>, P::Error> {
     let Some(projections) = projections else {
         return Ok(Vec::new());
@@ -1127,22 +1136,27 @@ fn history_snapshots<P: CompositeHistoryStore>(
     let rows: std::collections::BTreeMap<_, _> =
         rows.iter().map(|row| (row.key.as_str(), row)).collect();
     let mut snapshots = Vec::new();
-    let mut total = 0usize;
-    let mut exhausted = false;
     for projection in projections {
         let Some(current) = rows.get(projection.key.as_str()).copied() else {
             continue;
         };
-        let mut snapshot = store.composition_snapshot(current)?;
-        let encoded = serde_json::to_vec(&snapshot).map_err(P::data)?;
-        let over_step = encoded.len() > HISTORY_COMPOSITION_STEP_BYTES;
-        let over_total = total.saturating_add(encoded.len()) > HISTORY_COMPOSITION_TOTAL_BYTES;
-        if exhausted || over_step || over_total {
-            snapshot = unavailable_history_snapshot(&current.key, snapshot);
-            exhausted = true;
+        let snapshot = if store.original(&current.key)? {
+            HistoryCompositionSnapshot {
+                key: current.key.clone(),
+                original: true,
+                previous: None,
+                history_exists: true,
+                recipe_history: false,
+                recipe_header: None,
+                recipe_slots: Vec::new(),
+                relocated: std::collections::BTreeSet::new(),
+                receipts: Vec::new(),
+                current_cwds: None,
+                unavailable: false,
+            }
         } else {
-            total += encoded.len();
-        }
+            store.composition_snapshot(current, budget)?
+        };
         snapshots.push(snapshot);
     }
     Ok(snapshots)
@@ -1220,9 +1234,17 @@ fn plan_history_rows(
             }
         }
         if missing.is_empty() {
-            steps.push(HistoryCompositionStep::Clear {
-                key: current.key.clone(),
-            });
+            if snapshot.history_exists {
+                steps.push(HistoryCompositionStep::Clear {
+                    key: current.key.clone(),
+                    metadata: serde_json::to_string(current)?,
+                    capture_cwds: snapshot.current_cwds.clone(),
+                });
+            } else {
+                steps.push(HistoryCompositionStep::Preserve {
+                    key: current.key.clone(),
+                });
+            }
             continue;
         }
 
@@ -1325,32 +1347,60 @@ fn plan_history_rows(
                     .unwrap_or(slots.len());
                 slots.insert(at, slot);
             }
-            if let Some(cwds) = capture_cwds.as_mut() {
-                for source in missing.values() {
-                    let receipt = snapshot.receipts.iter().find(|receipt| {
-                        receipt.sources.iter().any(|saved| saved == source)
-                            && crate::retention::source_generation(&receipt.sources)
-                                .ok()
-                                .as_deref()
-                                == Some(receipt.source_generation.as_str())
-                    });
-                    if let Some(receipt) = receipt {
-                        cwds.extend(receipt.cwds.iter().cloned());
-                    } else {
+        } else {
+            incomplete = true;
+            invalid_predecessor = true;
+        }
+        if let Some(cwds) = capture_cwds.as_mut() {
+            for source in missing.values() {
+                let mut retained_cwd = None;
+                let mut ambiguous = false;
+                for receipt in snapshot.receipts.iter().filter(|receipt| {
+                    receipt.sources.iter().any(|saved| saved == source)
+                        && crate::retention::source_generation(&receipt.sources)
+                            .ok()
+                            .as_deref()
+                            == Some(receipt.source_generation.as_str())
+                        && crate::native_evidence::runtime::cwd_fingerprint(
+                            &receipt.cwds.values().filter_map(Clone::clone).collect(),
+                        ) == receipt.cwd_fingerprint
+                }) {
+                    let Some(value) = receipt.cwds.get(&source.path) else {
+                        ambiguous = true;
+                        break;
+                    };
+                    if retained_cwd
+                        .as_ref()
+                        .is_some_and(|saved| saved != value)
+                    {
+                        ambiguous = true;
+                        break;
+                    }
+                    retained_cwd = Some(value.clone());
+                }
+                match (retained_cwd, ambiguous) {
+                    (Some(Some(cwd)), false) => {
+                        cwds.insert(cwd);
+                    }
+                    (Some(None), false) => {}
+                    _ => {
+                        invalid_predecessor = true;
                         capture_cwds = None;
                         break;
                     }
                 }
             }
-        } else {
-            incomplete = true;
-            invalid_predecessor = true;
         }
         if snapshot.history_exists && invalid_predecessor {
             steps.push(HistoryCompositionStep::Preserve {
                 key: current.key.clone(),
             });
             continue;
+        }
+        if invalid_predecessor {
+            slots = projection.slots.clone();
+            receipt_ids.clear();
+            incomplete = true;
         }
         let mut seen = BTreeSet::new();
         slots.retain(|slot| seen.insert(slot.identity()));
@@ -1405,36 +1455,44 @@ fn plan_history_rows(
     })
 }
 
-pub(crate) fn prepare_history_composition<P: CompositeHistoryStore>(
+pub(crate) fn prepare_history_composition<P: VerifiedHistoryCompositionStore>(
     store: &P,
     rows: &[CatalogRow],
     projections: Option<&[crate::slot_projection::Projection]>,
     observations: Option<&crate::storage::selected::PresentationObservations>,
+    budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<(HistoryCompositionPlan, HistoryCompositionCaptures), P::Error> {
-    let snapshots = history_snapshots(store, rows, projections)?;
+    let snapshots = history_snapshots(store, rows, projections, budget)?;
     let plan = plan_history_rows(rows, projections, &snapshots).map_err(P::data)?;
-    let captures = prepare_history_captures(&plan, observations).map_err(P::data)?;
+    let captures = prepare_history_captures(&plan, observations, budget).map_err(P::data)?;
     Ok((plan, captures))
 }
 
 fn prepare_history_captures(
     plan: &HistoryCompositionPlan,
     observations: Option<&crate::storage::selected::PresentationObservations>,
+    budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<HistoryCompositionCaptures, serde_json::Error> {
     let Some(observations) = observations else {
         return Ok(HistoryCompositionCaptures::default());
     };
     let mut captures = HistoryCompositionCaptures::default();
     for step in &plan.steps {
-        let HistoryCompositionStep::Compose {
-            key,
-            metadata,
-            capture_cwds: Some(cwds),
-            ..
-        } = step
-        else {
-            continue;
+        let (key, metadata, cwds) = match step {
+            HistoryCompositionStep::Compose {
+                key,
+                metadata,
+                capture_cwds,
+                ..
+            }
+            | HistoryCompositionStep::Clear {
+                key,
+                metadata,
+                capture_cwds,
+            } => (key, metadata, capture_cwds.as_ref()),
+            _ => continue,
         };
+        let Some(cwds) = cwds else { continue };
         let row: CatalogRow = serde_json::from_str(metadata)?;
         let mut observed = observations.clone();
         let runtime = match observed.runtime_observation(&row, cwds) {
@@ -1450,20 +1508,37 @@ fn prepare_history_captures(
         if !capture.is_runtime_capture_for(&row) {
             continue;
         }
-        captures.values.insert(key.clone(), serde_json::to_string(&capture)?);
+        let encoded = serde_json::to_string(&capture)?;
+        if budget.charge(encoded.len()).is_err() {
+            continue;
+        }
+        captures.values.insert(key.clone(), encoded);
     }
     Ok(captures)
 }
 
-fn apply_history_composition<P: CompositeHistoryStore>(
+fn apply_history_composition<P: VerifiedHistoryCompositionStore>(
     store: &P,
     plan: &HistoryCompositionPlan,
     captures: &HistoryCompositionCaptures,
 ) -> Result<(), P::Error> {
     for step in &plan.steps {
+        let key = match step {
+            HistoryCompositionStep::Preserve { .. } => continue,
+            HistoryCompositionStep::Clear { key, .. }
+            | HistoryCompositionStep::Retain { key, .. }
+            | HistoryCompositionStep::Compose { key, .. } => key,
+        };
+        if store.original(key)? {
+            continue;
+        }
         match step {
-            HistoryCompositionStep::Preserve { .. } => {}
-            HistoryCompositionStep::Clear { key } => store.clear(key)?,
+            HistoryCompositionStep::Preserve { .. } => unreachable!(),
+            HistoryCompositionStep::Clear { key, .. } => {
+                if captures.values.contains_key(key) {
+                    store.clear(key)?;
+                }
+            }
             HistoryCompositionStep::Retain {
                 key: _,
                 previous,
@@ -1486,13 +1561,16 @@ fn apply_history_composition<P: CompositeHistoryStore>(
                 receipt_ids,
                 ..
             } => {
+                let Some(capture) = captures.values.get(key) else {
+                    continue;
+                };
                 if let Some(previous) = previous {
                     let row: CatalogRow = serde_json::from_str(previous).map_err(P::data)?;
                     for source in retained {
                         store.retain_source(&row, source)?;
                     }
                 }
-                store.composed(
+                store.composed_verified(
                     key,
                     generation,
                     sources,
@@ -1500,7 +1578,7 @@ fn apply_history_composition<P: CompositeHistoryStore>(
                     slots,
                     *incomplete,
                     receipt_ids,
-                    captures.values.get(key).map(String::as_str),
+                    capture,
                 )?;
             }
         }
@@ -1514,24 +1592,182 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
     rows: &[CatalogRow],
     projections: Option<&[crate::slot_projection::Projection]>,
 ) -> Result<(), P::Error> {
-    let (plan, captures) = prepare_history_composition(store, rows, projections, None)?;
-    apply_history_composition(store, &plan, &captures)
+    use crate::slot_projection::{SavedSlot, VERSION};
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet};
+    let Some(projections) = projections else {
+        return Ok(());
+    };
+    let rows: BTreeMap<_, _> = rows.iter().map(|row| (row.key.as_str(), row)).collect();
+    for projection in projections {
+        let Some(current) = rows.get(projection.key.as_str()).copied() else {
+            continue;
+        };
+        if store.original(&current.key)? {
+            continue;
+        }
+        let old_text = store.previous(&current.key)?;
+        let old = old_text
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        if old.as_ref().is_some_and(|old| old.harness != current.harness) {
+            let old = old.as_ref().unwrap();
+            for source in &old.sources {
+                store.retain_source(old, source)?;
+            }
+            continue;
+        }
+        let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
+        let mut missing = BTreeMap::new();
+        for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
+            if !paths.contains(&source.path) && !store.relocated(source, &current.sources)? {
+                missing.insert(source.path.clone(), source.clone());
+            }
+        }
+        if missing.is_empty() {
+            store.clear(&current.key)?;
+            continue;
+        }
+        let Some(old) = old.as_ref() else {
+            continue;
+        };
+        let mut history = current.clone();
+        history.query = None;
+        history.sources.extend(missing.values().cloned());
+        history.native_ids = history
+            .sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        for source in missing.values() {
+            store.retain_source(old, source)?;
+        }
+        let mut slots = projection.slots.clone();
+        let (recipe_history, header) = store.previous_recipe(&current.key)?;
+        let qualified = header.as_ref().is_some_and(|(version, hash, _)| {
+            *version == VERSION
+                && hash.as_deref()
+                    == crate::retention::source_generation(&old.sources).ok().as_deref()
+        });
+        let mut incomplete = !qualified;
+        if qualified {
+            incomplete = header.is_some_and(|(_, _, incomplete)| incomplete);
+            let old_sources: BTreeMap<_, _> = old
+                .sources
+                .iter()
+                .map(|source| (&source.path, source))
+                .collect();
+            let current_sources: BTreeMap<_, _> = current
+                .sources
+                .iter()
+                .map(|source| (&source.path, source))
+                .collect();
+            for text in store.recipe_slots(&current.key, recipe_history)? {
+                let slot: SavedSlot = match serde_json::from_str(&text) {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        incomplete = true;
+                        continue;
+                    }
+                };
+                let Some(file) = &slot.file else {
+                    continue;
+                };
+                if !missing.contains_key(&file.path) {
+                    if slot
+                        .source_paths()
+                        .iter()
+                        .any(|path| missing.contains_key(*path))
+                    {
+                        incomplete = true;
+                    }
+                    continue;
+                }
+                if slot.source_paths().iter().all(|path| {
+                    missing.contains_key(*path)
+                        || old_sources.get(*path) == current_sources.get(*path)
+                }) {
+                    let at = slot
+                        .t
+                        .and_then(|time| {
+                            slots
+                                .iter()
+                                .position(|current| current.t.is_some_and(|t| t > time))
+                        })
+                        .unwrap_or(slots.len());
+                    slots.insert(at, slot);
+                } else {
+                    incomplete = true;
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        slots.retain(|slot| seen.insert(slot.identity()));
+        let texts: Vec<String> = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<_, _>>()
+            .map_err(P::data)?;
+        let sources = crate::retention::source_generation(&history.sources).map_err(P::data)?;
+        let metadata = serde_json::to_string(&history).map_err(P::data)?;
+        let generation = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_string(&(VERSION, &sources, &texts, incomplete))
+                    .map_err(P::data)?
+                    .as_bytes()
+            )
+        );
+        store.composed(
+            &current.key,
+            &generation,
+            &sources,
+            &metadata,
+            &texts,
+            incomplete,
+        )?;
+    }
+    Ok(())
+}
+
+/// Recompute the deterministic plan inside the writer fence without changing
+/// custody. Callers that have other custody work can compare first, complete
+/// that work, and apply the prepared plan only after it succeeds.
+pub(crate) fn history_composition_matches<P: VerifiedHistoryCompositionStore>(
+    store: &P,
+    rows: &[CatalogRow],
+    projections: Option<&[crate::slot_projection::Projection]>,
+    expected: &HistoryCompositionPlan,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<bool, P::Error> {
+    let snapshots = history_snapshots(store, rows, projections, budget)?;
+    let actual = plan_history_rows(rows, projections, &snapshots).map_err(P::data)?;
+    Ok(&actual == expected)
+}
+
+pub(crate) fn apply_prepared_history_composition<P: VerifiedHistoryCompositionStore>(
+    store: &P,
+    plan: &HistoryCompositionPlan,
+    captures: &HistoryCompositionCaptures,
+) -> Result<(), P::Error> {
+    apply_history_composition(store, plan, captures)
 }
 
 /// Recompute the deterministic plan inside the writer fence. A mismatch leaves
 /// every existing History owner and slot untouched; Current can still publish.
-pub(crate) fn publish_history_composition<P: CompositeHistoryStore>(
+pub(crate) fn publish_history_composition<P: VerifiedHistoryCompositionStore>(
     store: &P,
     rows: &[CatalogRow],
     projections: Option<&[crate::slot_projection::Projection]>,
     expected: &HistoryCompositionPlan,
     captures: &HistoryCompositionCaptures,
+    budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<bool, P::Error> {
-    let snapshots = history_snapshots(store, rows, projections)?;
-    let actual = plan_history_rows(rows, projections, &snapshots).map_err(P::data)?;
-    if &actual != expected {
+    if !history_composition_matches(store, rows, projections, expected, budget)? {
         return Ok(false);
     }
-    apply_history_composition(store, &actual, captures)?;
+    apply_history_composition(store, expected, captures)?;
     Ok(true)
 }

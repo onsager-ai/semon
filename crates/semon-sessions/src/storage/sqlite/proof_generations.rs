@@ -269,43 +269,65 @@ pub(super) fn publish(
     Ok(())
 }
 
-/// Authenticate the retained local receipts that may supply prior History
-/// slots. The receipt owns row metadata, recipe bytes, exact source ledgers,
-/// and the original CWD witness; a copied slot or row digest is insufficient.
-pub(crate) fn verified_history_receipts(
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationReceiptRef {
+    Current,
+    History,
+}
+
+impl PublicationReceiptRef {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::History => "history",
+        }
+    }
+}
+
+/// Authenticate local publication receipts that may supply predecessor
+/// slots. Current ownership also requires its exact native observation grant;
+/// retained History ownership requires the durable local History reference.
+/// The full CWD fingerprint is checked against an exact path-to-CWD map.
+pub(crate) fn verified_publication_receipts(
     db: &Connection,
     namespace: &str,
     session_key: &str,
     stream: &str,
-    _previous: &CatalogRow,
-) -> Result<Vec<crate::storage::catalog::VerifiedHistoryReceipt>, StorageError> {
+    previous: &CatalogRow,
+    exact_current_metadata: Option<&str>,
+    kind: PublicationReceiptRef,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
     let refs: i64 = db
         .query_row(
-            "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
-            params![namespace, session_key],
+            "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind=?3",
+            params![namespace, session_key, kind.kind()],
             |row| row.get(0),
         )
         .map_err(failed)?;
     if refs <= 0 || refs > 64 {
-        return Ok(Vec::new());
+        return Ok(Some(Vec::new()));
     }
     let bytes: i64 = db
         .query_row(
-            "SELECT COALESCE(sum(octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.manifest)+octet_length(v.metadata)),0) FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='history'",
-            params![namespace, session_key],
+            "SELECT COALESCE(sum(octet_length(f.id)+octet_length(g.publication)+octet_length(g.proof)+octet_length(g.prefix)+octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.base)+octet_length(r.manifest)+octet_length(v.metadata)),0) FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3",
+            params![namespace, session_key, kind.kind()],
             |row| row.get(0),
         )
         .map_err(failed)?;
-    if bytes < 0 || bytes as usize > 8 * 1_048_576 {
-        return Ok(Vec::new());
+    let Ok(bytes) = usize::try_from(bytes) else {
+        return Ok(Some(Vec::new()));
+    };
+    if budget.charge(bytes).is_err() {
+        return Ok(None);
     }
     let mut statement = db
         .prepare(
-            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='history' ORDER BY g.id LIMIT 65",
+            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,g.metadata,g.slots,g.prefix,r.base,r.manifest,v.metadata FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 ORDER BY g.id LIMIT 65",
         )
         .map_err(failed)?;
     let rows = statement
-        .query_map(params![namespace, session_key], |row| {
+        .query_map(params![namespace, session_key, kind.kind()], |row| {
             Ok((
                 proof_codec::GenerationRecord {
                     namespace: namespace.to_owned(),
@@ -336,17 +358,38 @@ pub(crate) fn verified_history_receipts(
     drop(statement);
     let mut verified = Vec::new();
     for (record, base, manifest, presentation) in rows {
-        if record.metadata.is_empty()
-            || record.slots.is_empty()
-            || manifest.is_none()
-            || presentation.is_none()
-        {
+        let (Some(manifest), Some(presentation)) = (manifest, presentation) else {
             continue;
+        };
+        let decoded_bytes = record
+            .metadata
+            .len()
+            .checked_add(record.slots.len().saturating_mul(2))
+            .and_then(|bytes| bytes.checked_add(base.len()))
+            .and_then(|bytes| bytes.checked_add(manifest.len()))
+            .and_then(|bytes| bytes.checked_add(presentation.len()));
+        if decoded_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
+            return Ok(None);
         }
-        let manifest = manifest.unwrap();
-        let presentation = presentation.unwrap();
         if record.stream != stream || record.session_key != session_key {
             continue;
+        }
+        if exact_current_metadata.is_some_and(|expected| record.metadata != expected) {
+            continue;
+        }
+        if kind == PublicationReceiptRef::Current {
+            let admission = i64::try_from(record.admission).map_err(|_| StorageError::Unavailable)?;
+            let digest = proof_codec::digest(record.metadata.as_bytes());
+            let granted: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
+                    params![namespace, session_key, digest, admission, stream],
+                    |row| row.get(0),
+                )
+                .map_err(failed)?;
+            if !granted {
+                continue;
+            }
         }
         let id = record.id.clone();
         let publication = record.publication.clone();
@@ -368,6 +411,18 @@ pub(crate) fn verified_history_receipts(
             continue;
         };
         if original.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+            continue;
+        }
+        if original.key != previous.key
+            || original.harness != previous.harness
+            || original
+                .sources
+                .iter()
+                .any(|source| !previous.sources.contains(source))
+        {
+            continue;
+        }
+        if exact_current_metadata.is_some() && original.sources != previous.sources {
             continue;
         }
         let Ok(Some(observations)) = proof_codec::verify_presentation_observations(
@@ -435,15 +490,42 @@ pub(crate) fn verified_history_receipts(
         if !slots_valid {
             continue;
         }
-        let mut cwds = super::catalog::runtime_source_cwds_if_current(db, &original.sources)
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                slot_cwds
-                    .values()
-                    .filter_map(Clone::clone)
-                    .collect::<std::collections::BTreeSet<_>>()
-            });
+        let source_paths: std::collections::BTreeSet<_> = original
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
+        if source_paths.len() != original.sources.len() {
+            continue;
+        }
+        let ledger_bytes = original
+            .sources
+            .len()
+            .checked_mul(std::mem::size_of::<crate::events::Ledger>());
+        if ledger_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
+            return Ok(None);
+        }
+        let cwd_bytes = super::catalog::runtime_source_cwd_bytes(db, &original.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let current_cwds_budgeted = budget.charge(cwd_bytes).is_ok();
+        let current_cwds = if current_cwds_budgeted {
+            super::catalog::runtime_source_cwds_by_path_if_current(db, &original.sources)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let cwd_by_path = match current_cwds {
+            Some(current) => current,
+            None if slot_cwds.keys().cloned().collect::<std::collections::BTreeSet<_>>()
+                == source_paths => slot_cwds,
+            None => continue,
+        };
+        if cwd_by_path.keys().cloned().collect::<std::collections::BTreeSet<_>>() != source_paths {
+            continue;
+        }
+        let cwds: std::collections::BTreeSet<_> =
+            cwd_by_path.values().filter_map(Clone::clone).collect();
         if crate::native_evidence::runtime::cwd_fingerprint(&cwds) != saved_fingerprint {
             continue;
         }
@@ -457,10 +539,11 @@ pub(crate) fn verified_history_receipts(
             source_generation,
             original.sources,
             slot_texts,
-            std::mem::take(&mut cwds),
+            saved_fingerprint,
+            cwd_by_path,
         ));
     }
-    Ok(verified)
+    Ok(Some(verified))
 }
 
 /// Add durable references before the existing proof-copy/collection algorithm.
