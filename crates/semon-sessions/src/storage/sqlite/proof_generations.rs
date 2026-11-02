@@ -142,10 +142,7 @@ fn validate_receipt_inputs(inputs: &PresentationInputs<'_>) -> Result<(), Storag
     {
         return Err(StorageError::ScopeChanged);
     }
-    if row_keys
-        .iter()
-        .any(|key| !projection_keys.contains(key))
-    {
+    if row_keys.iter().any(|key| !projection_keys.contains(key)) {
         return Err(StorageError::ScopeChanged);
     }
     Ok(())
@@ -235,10 +232,7 @@ pub(crate) fn publish(
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
     validate_receipt_inputs(&presentations.inputs)?;
-    validate_receipt_presentations(
-        presentations.inputs.rows,
-        presentations.presentations,
-    )?;
+    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -260,8 +254,8 @@ pub(crate) fn publish(
             .iter()
             .find(|projection| projection.key == row.key)
             .ok_or(StorageError::Unavailable)?;
-        let slots = serde_json::to_string(&projection.slots)
-            .map_err(|_| StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         let record = proof_codec::GenerationRecord {
@@ -1568,7 +1562,46 @@ fn verify_immutable_observation(
     } else {
         false
     };
-    if !stage_grant && !transfer_grant {
+    let mut physical_owner = selected.clone();
+    physical_owner.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let physical_owner_metadata =
+        serde_json::to_string(&physical_owner).map_err(|_| StorageError::Unavailable)?;
+    let physical_owner_digest = proof_codec::digest(physical_owner_metadata.as_bytes());
+    let receipt_metadata_digest = proof_codec::digest(record.metadata.as_bytes());
+    // A grant for newly composed owner metadata cannot authorize an older
+    // receipt whose authenticated row differs from that physical owner.
+    let physical_owner_grant = if record.admission == current.admission
+        && record.stream == current.stream_epoch
+        && physical_owner_digest == receipt_metadata_digest
+    {
+        let owner_kind = match reference_kind {
+            "current" => Some("catalog"),
+            "history" => Some("history"),
+            _ => None,
+        };
+        if let Some(owner_kind) = owner_kind {
+            let admission =
+                i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
+                params![
+                    current.namespace.as_str(),
+                    selected.key,
+                    owner_kind,
+                    physical_owner_digest,
+                    admission,
+                    current.stream_epoch,
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ObservationPreparationError::Sql)?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !stage_grant && !transfer_grant && !physical_owner_grant {
         diagnose_observation_refusal("immutable_destination_or_local_grant");
         return Err(StorageError::ScopeChanged.into());
     }
@@ -3358,17 +3391,13 @@ pub(crate) fn capture_presentations(
         .into_iter()
         .collect();
         let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
-        let context = CapturedContext::capture(
-            &lookup,
-            row,
-            &projection.slots,
-            &mut |relative, _owner| {
+        let context =
+            CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative, _owner| {
                 observations.capture_relative_status(relative, || {
                     super::catalog::runtime_source_cwds(tx, &relative.sources)
                 })
-            },
-        )
-        .map_err(|_| StorageError::Unavailable)?;
+            })
+            .map_err(|_| StorageError::Unavailable)?;
         let witness = Some(PresentationWitness {
             header_generation,
             version: header.1,
@@ -3418,8 +3447,8 @@ pub(crate) fn bind_presentations(
             .iter()
             .find(|projection| &projection.key == key)
             .ok_or(StorageError::Unavailable)?;
-        let slots = serde_json::to_string(&projection.slots)
-            .map_err(|_| StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
         entries.push((
             key.clone(),
             proof_codec::presentation_entry(&metadata, &slots, text)?,

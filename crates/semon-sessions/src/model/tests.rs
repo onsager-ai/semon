@@ -12743,6 +12743,134 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         serde_json::from_slice::<Value>(&reply.body).unwrap()
     };
     let retained = read();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let (namespace, history_metadata): (String, String) = db
+        .query_row(
+            "SELECT namespace,metadata FROM main.session_history_catalog WHERE session_key='root'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let (history_digest, history_admission, history_stream): (String, i64, String) = db
+        .query_row(
+            "SELECT metadata_digest,admission,stream FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='root' AND owner_kind='history'",
+            [&namespace],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let receipt_metadata: String = db
+        .query_row(
+            "SELECT g.metadata FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=?1 AND r.session_key='root' AND r.kind='history' ORDER BY r.id LIMIT 1",
+            [&namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        history_digest,
+        crate::storage::proof_codec::digest(receipt_metadata.as_bytes())
+    );
+    let mut normalized_history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    normalized_history.lifecycle = super::summary::CatalogLifecycle::Current;
+    let normalized_history_metadata = serde_json::to_string(&normalized_history).unwrap();
+    assert_eq!(
+        history_digest,
+        crate::storage::proof_codec::digest(normalized_history_metadata.as_bytes())
+    );
+
+    // A new composed owner grant must not authorize the old immutable receipt
+    // when the owner metadata no longer matches that receipt.
+    let mut recomposed: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    recomposed.name.push_str(" recomposed");
+    let recomposed_history = serde_json::to_string(&recomposed).unwrap();
+    recomposed.lifecycle = super::summary::CatalogLifecycle::Current;
+    let recomposed_owner_metadata = serde_json::to_string(&recomposed).unwrap();
+    let recomposed_digest =
+        crate::storage::proof_codec::digest(recomposed_owner_metadata.as_bytes());
+    assert_eq!(
+        db.execute(
+            "UPDATE main.session_history_catalog SET metadata=?1 WHERE namespace=?2 AND session_key='root'",
+            rusqlite::params![recomposed_history, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.storage_catalog_native_observation_grants SET metadata_digest=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'",
+            rusqlite::params![recomposed_digest, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    let calls_before_mismatch = archive.calls.load(Ordering::Relaxed);
+    let mismatched_owner = crate::session_transcript_range_with_mode(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&after=0&limit=100",
+        Some(&archive),
+        crate::SessionSourceReadMode::LocalThenProvider,
+    );
+    assert_eq!(mismatched_owner.status, 503);
+    assert_eq!(archive.calls.load(Ordering::Relaxed), calls_before_mismatch);
+
+    db.execute(
+        "UPDATE main.session_history_catalog SET metadata=?1 WHERE namespace=?2 AND session_key='root'",
+        rusqlite::params![history_metadata, namespace],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE main.storage_catalog_native_observation_grants SET metadata_digest=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'",
+        rusqlite::params![history_digest, namespace],
+    )
+    .unwrap();
+    let invalid_stream = if history_stream == "0".repeat(64) {
+        "1".repeat(64)
+    } else {
+        "0".repeat(64)
+    };
+    let mismatches = [
+        (
+            "admission",
+            rusqlite::types::Value::Integer(history_admission.checked_add(1).unwrap()),
+            rusqlite::types::Value::Integer(history_admission),
+        ),
+        (
+            "stream",
+            rusqlite::types::Value::Text(invalid_stream),
+            rusqlite::types::Value::Text(history_stream),
+        ),
+    ];
+    for (column, invalid, original) in mismatches {
+        let update = format!(
+            "UPDATE main.storage_catalog_native_observation_grants SET {column}=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'"
+        );
+        assert_eq!(
+            db.execute(&update, rusqlite::params![invalid, namespace])
+                .unwrap(),
+            1
+        );
+        let calls_before_mismatch = archive.calls.load(Ordering::Relaxed);
+        let mismatched_owner = crate::session_transcript_range_with_mode(
+            &home.options,
+            "fixture",
+            "sid=root&scope=retained_history&after=0&limit=100",
+            Some(&archive),
+            crate::SessionSourceReadMode::LocalThenProvider,
+        );
+        assert_eq!(mismatched_owner.status, 503, "mismatched {column} grant");
+        assert_eq!(archive.calls.load(Ordering::Relaxed), calls_before_mismatch);
+        db.execute(&update, rusqlite::params![original, namespace])
+            .unwrap();
+    }
+    drop(db);
+
     assert_eq!(
         retained["session"]["summary_context"],
         json!({"state":"incomplete","scope":"current_observation"})

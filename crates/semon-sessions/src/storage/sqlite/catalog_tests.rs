@@ -12207,7 +12207,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     writeln!(
         fs::OpenOptions::new().append(true).open(&first).unwrap(),
         "{}",
-        json!({"type":"assistant","sessionId":"first","uuid":"repeated-history","parentUuid":"first","timestamp":"2026-10-02T00:00:00Z","message":{"role":"assistant","content":"updated native answer"}})
+        json!({"type":"assistant","sessionId":"first","uuid":"repeated-history","parentUuid":"first","timestamp":"2026-10-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"updated native answer"}]}})
     )
     .unwrap();
     fixture.publish_existing();
@@ -12473,7 +12473,10 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert!(!refs.is_empty(), "ordinary Current publication has a receipt");
+        assert!(
+            !refs.is_empty(),
+            "ordinary Current publication has a receipt"
+        );
         assert!(refs.iter().all(|(kind, _)| kind == "current"));
         let epoch: Option<i64> = db
             .query_row(
@@ -12482,7 +12485,10 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(epoch, None, "the source receipt came from ordinary publication");
+        assert_eq!(
+            epoch, None,
+            "the source receipt came from ordinary publication"
+        );
         let (slot_count, slot_bytes): (i64, i64) = db
             .query_row(
                 "SELECT count(*),COALESCE(sum(octet_length(metadata)),0) FROM main.session_slots WHERE namespace=semon_namespace() AND session_key=?1",
@@ -12491,7 +12497,7 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
             )
             .unwrap();
         assert!(slot_count > 0 && slot_count <= 64);
-        assert!(slot_bytes >= 0 && slot_bytes < 1_048_576);
+        assert!((0..1_048_576).contains(&slot_bytes));
     }
     drop(db);
 
@@ -12503,7 +12509,10 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
     )
     .unwrap();
     let (mut cache, batch, prepared) = fixture.prepare_publication(&paths);
-    assert_eq!(batch.phase, crate::model::relation_stage::Phase::Publication);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
     let prepared = prepared.prepared();
     assert!(prepared.rows.is_empty());
     assert!(prepared.transcripts.is_empty());
@@ -12643,12 +12652,8 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        let claims = crate::storage::sqlite::source_journal::claims(
-            db,
-            &namespace,
-            &batch.paths,
-        )
-        .unwrap();
+        let claims =
+            crate::storage::sqlite::source_journal::claims(db, &namespace, &batch.paths).unwrap();
         let publication_progress = db
             .prepare(
                 "SELECT source_path,publication_done,ack_done FROM main.catalog_semantic_sources WHERE namespace=semon_namespace() ORDER BY source_path",
@@ -12680,10 +12685,23 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
 
     let db = fixture.db();
     let before = snapshot(&db);
-    assert_eq!(before.1.len(), 2, "Current rows remain under their old head");
-    assert_eq!(before.2.len(), 1, "one original owner is checkpointed per attempt");
+    assert_eq!(
+        before.1.len(),
+        2,
+        "Current rows remain under their old head"
+    );
+    assert_eq!(
+        before.2.len(),
+        1,
+        "one original owner is checkpointed per attempt"
+    );
     assert!(before.4.iter().all(|(_, kind, _)| kind == "current"));
-    assert!(before.3.iter().all(|(_, kind, _, _, _, _)| kind == "catalog"));
+    assert!(
+        before
+            .3
+            .iter()
+            .all(|(_, kind, _, _, _, _)| kind == "catalog")
+    );
     assert_eq!(before.5, prepared.claims);
     let checkpoint_key = &before.2[0].0;
     let checkpoint_owner = prepared
@@ -12727,8 +12745,15 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
     drop(db);
 
     let retry = cache.semantic_batch(64).unwrap().unwrap();
-    assert_eq!(retry.phase, crate::model::relation_stage::Phase::Publication);
-    assert_eq!(retry.paths.len(), 1, "two independent withdrawals split into groups");
+    assert_eq!(
+        retry.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
+    assert_eq!(
+        retry.paths.len(),
+        1,
+        "two independent withdrawals split into groups"
+    );
     assert!(batch.paths.contains(&retry.paths[0]));
 }
 
