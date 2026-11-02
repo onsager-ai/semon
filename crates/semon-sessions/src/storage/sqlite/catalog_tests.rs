@@ -12344,7 +12344,10 @@ fn ordinary_empty_catalog_moves_current_receipt_to_history() {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert!(!refs.is_empty(), "ordinary publication must issue a Current receipt");
+        assert!(
+            !refs.is_empty(),
+            "ordinary publication must issue a Current receipt"
+        );
         let history_count: i64 = db
             .query_row(
                 "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history'",
@@ -12367,7 +12370,10 @@ fn ordinary_empty_catalog_moves_current_receipt_to_history() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(current_count, 0, "withdrawn owner must release Current refs");
+    assert_eq!(
+        current_count, 0,
+        "withdrawn owner must release Current refs"
+    );
     let history_refs = db
         .prepare(
             "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history' ORDER BY id",

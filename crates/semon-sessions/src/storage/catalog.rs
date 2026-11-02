@@ -1956,10 +1956,7 @@ mod history_composition_tests {
         ) -> Result<HistoryCompositionSnapshot, Self::Error> {
             Ok(self.snapshot.borrow().clone())
         }
-        fn composed_verified(
-            &self,
-            _: VerifiedHistoryComposition<'_>,
-        ) -> Result<(), Self::Error> {
+        fn composed_verified(&self, _: VerifiedHistoryComposition<'_>) -> Result<(), Self::Error> {
             self.effects.set(self.effects.get() + 1);
             Ok(())
         }
