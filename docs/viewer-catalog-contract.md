@@ -61,6 +61,14 @@ available for explanation. Both the native observer and control presentation
 reject provisional and historical authority. Independent read-only runtime phase
 observation remains available.
 
+When an indivisible SQLite semantic publication owner exceeds the current storage
+bounds, Catalog reads keep serving the last admitted rows and generation. The
+read projection reports `completeness.state: 'partial'`, `freshness: 'updating'`
+and the optional `completeness.blocker: {code: 'publication_too_large',
+retryable: false}`. The blocker is stage-scoped; it does not publish a new
+generation or acknowledge the pending source claims. PostgreSQL keeps its
+separate large-family refusal and does not yet report this reader blocker.
+
 Metadata search requires explicit `metadata_search: true` and the advertised `q`
 filter. Literal user input is URL-encoded once and normalized by the server. The
 result documents Unicode lowercase substring matching over names, keys,

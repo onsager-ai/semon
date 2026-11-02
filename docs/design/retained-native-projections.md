@@ -486,6 +486,18 @@ same-runtime stage resume, and clears on reset or finish. A single oversized
 physical group remains unavailable; source claims and acknowledgements remain
 pending while the hint is applied.
 
+When halving reaches one group and that indivisible group still exceeds the
+publication bound, SQLite records a bounded typed refusal with the exact
+selected source claims. Catalog readers expose `partial` / `updating` with the
+`publication_too_large` blocker while serving the last admitted rows and head.
+The blocker is returned only while its epoch, source revision, runtime, moving
+head and selected pending claims still match; the reader checks those claims in
+one bounded query and does not rerun owner planning. A complete-required read
+returns the same typed blocker code. The refusal does not advance publication
+receipts or acknowledgement state. PostgreSQL retains its separate
+large-family stage refusal and currently has no equivalent Catalog reader
+blocker projection, so this reader status is SQLite-specific.
+
 Receipts use immutable publication generation as their physical and logical
 transfer key, allowing multiple committed groups in one epoch. SQLite schema 35
 and stage recipe v7 are one current contract, with no compatibility reader or
