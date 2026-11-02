@@ -5879,8 +5879,8 @@ impl<'a> Builder<'a> {
     /// Complete native receipts are needed even when their edges belong to a
     /// different message page. An exact cached Claude call also supplies the
     /// initial turn boundary when its Agent header is outside the selected
-    /// page. These temporary boundaries carry no sender claim and never enter
-    /// the staged relationships or published projection.
+    /// page. These temporary boundaries recover the canonical turn and prompt
+    /// origin, while their handoffs remain absent from staged relationships.
     fn complete_sender_turns(&mut self) -> io::Result<Option<CompleteSenderTurns>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
@@ -5971,10 +5971,7 @@ impl<'a> Builder<'a> {
             let call = location
                 .local(self)?
                 .ok_or_else(|| io::Error::other("staged Claude call source not selected"))?;
-            let id = stable_id(
-                "s",
-                &format!("spawn:claude:{}", self.sessions[*sender].key),
-            );
+            let id = stable_id("s", &format!("spawn:claude:{}", self.sessions[*sender].key));
             if self.ids.contains_key(&id) || self.head.contains_key(sender) {
                 continue;
             }
@@ -5997,7 +5994,9 @@ impl<'a> Builder<'a> {
             spawn_anchors.push(SpawnTurnAnchor {
                 session: *sender,
                 id,
-                at: event(self.files, call).t.unwrap_or(self.sessions[*sender].out.start),
+                at: event(self.files, call)
+                    .t
+                    .unwrap_or(self.sessions[*sender].out.start),
                 first_prompt,
             });
         }
@@ -6035,6 +6034,7 @@ impl<'a> Builder<'a> {
             synthetic_starts.insert(id, *at);
         }
         let mut temporary_spawn_ids = BTreeSet::new();
+        let mut temporary_spawn_origins = BTreeMap::new();
         let mut spawn_placement_restore = Vec::new();
         let mut spawn_head_restore = Vec::new();
         for anchor in &spawn_anchors {
@@ -6056,6 +6056,7 @@ impl<'a> Builder<'a> {
                 inline: false,
             });
             temporary_spawn_ids.insert(anchor.id.clone());
+            temporary_spawn_origins.insert(anchor.id.clone(), anchor.first_prompt);
             if let Some(at) = anchor.first_prompt {
                 let previous = self.placed.get(&at).cloned();
                 self.placed
@@ -6077,6 +6078,11 @@ impl<'a> Builder<'a> {
                     continue;
                 };
                 if temporary_spawn_ids.contains(start) {
+                    if let Some(Some(at)) = temporary_spawn_origins.get(start) {
+                        for edge in &turn.sent {
+                            origins.insert(edge.clone(), *at);
+                        }
+                    }
                     continue;
                 }
                 let at = synthetic_starts.get(start).copied().or_else(|| {

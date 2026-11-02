@@ -10375,11 +10375,78 @@ fn staged_agent_messages_match_the_shared_builder_without_duplicate_relations() 
     }
 }
 
+fn staged_claude_header_batch(
+    home: &Home,
+    cache: &mut EventCache,
+    header_path: &std::path::Path,
+) -> relation_stage::Batch {
+    let paths = crate::inputs(&home.options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| input.path.ends_with(".jsonl"))
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let header_path = header_path.to_string_lossy().into_owned();
+    for _ in 0..128 {
+        let batch = cache.semantic_batch(64).unwrap().expect("active semantic stage");
+        if batch.phase == relation_stage::Phase::Relations
+            && batch
+                .context
+                .matching_header_paths
+                .as_ref()
+                .is_some_and(|selected| selected.iter().any(|path| path == &header_path))
+        {
+            return batch;
+        }
+        if batch.paths.is_empty() {
+            assert!(matches!(
+                batch.phase,
+                relation_stage::Phase::Indexing | relation_stage::Phase::Identity
+            ));
+            continue;
+        }
+        assert_ne!(batch.phase, relation_stage::Phase::Publication);
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Claude,
+                path: std::path::Path::new(path)
+                    .strip_prefix(&home.options.claude_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            prepare_semantic_batch(&home.options, cache, &batch_inputs, &batch, NOW).unwrap();
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    panic!("semantic stage did not select the requested Claude header page");
+}
+
 #[test]
-fn nested_claude_call_page_keeps_spawn_turn_anchor_when_source_order_changes() {
+fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_changes() {
     let home = down_and_nested_home();
     home.build_query();
-    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let mut inputs = crate::inputs(&home.options).unwrap();
     inputs.retain(|input| input.path.ends_with(".jsonl"));
     assert_eq!(inputs.len(), 4);
@@ -10392,70 +10459,186 @@ fn nested_claude_call_page_keeps_spawn_turn_anchor_when_source_order_changes() {
             .unwrap()
             .clone()
     };
-    let mid_source = source_for("agent-mid.jsonl");
+    let lead_source = source_for("lead.jsonl");
     let leaf_source = source_for("agent-leaf.jsonl");
-    let index = cache.selected_index(&mid_source.path).unwrap();
-    let (at, found) = index
-        .events
-        .iter()
-        .enumerate()
-        .find(|(_, event)| event.id.as_deref() == Some("t-leaf"))
-        .unwrap();
-    let call = relation_stage::Location {
-        source: mid_source,
-        offset: found.o,
-        block: found.b,
-        kind: found.k,
-        occurrence: index.events[..at]
-            .iter()
-            .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
-            .count(),
-    };
-    let mut page = full.relationships.clone();
-    page.relations.clear();
-    page.matching_locations = Some(vec![call]);
-    page.matching_header_paths = Some(vec![leaf_source.path.to_string_lossy().into_owned()]);
-    let expected: BTreeSet<String> = full
+    let selected_spawn = stable_id("s", "spawn:claude:leaf");
+    let expected_page = BTreeSet::from([selected_spawn.clone()]);
+    let full_spawn = full
         .relationships
         .relations
-        .values()
-        .filter(|relation| relation.from == "leaf" || relation.to.as_deref() == Some("leaf"))
-        .map(|relation| relation.id.clone())
-        .collect();
-    assert!(expected.contains(&stable_id("s", "spawn:claude:leaf")));
+        .get(&selected_spawn)
+        .expect("full build contains the selected leaf spawn");
+    assert_eq!(
+        full_spawn.source_turn,
+        relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:mid"))
+    );
+    let expected_origin = full_spawn
+        .query_content
+        .get("origin")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert!(expected_origin.is_object(), "full spawn has a prompt origin");
 
-    let mut reversed_inputs = inputs.clone();
-    reversed_inputs.reverse();
-    for (label, ordered_inputs) in [
-        ("source order", inputs.as_slice()),
-        ("reversed source order", reversed_inputs.as_slice()),
-    ] {
-        let prepared =
-            prepare_staged_sources(&home.options, &mut cache, ordered_inputs, &page, true, NOW)
-                .unwrap();
-        let actual: BTreeSet<String> = prepared
-            .relationships
-            .relations
-            .keys()
-            .cloned()
-            .collect();
-        assert_eq!(actual, expected, "{label}: page relations");
-        let spawn = prepared
-            .relationships
-            .relations
-            .values()
-            .find(|relation| {
-                relation.kind == "spawn"
-                    && relation.from == "mid"
-                    && relation.to.as_deref() == Some("leaf")
+    let batch = staged_claude_header_batch(&home, &mut cache, &leaf_source.path);
+    assert_eq!(batch.phase, relation_stage::Phase::Relations);
+    assert_eq!(batch.context.epoch, Some(batch.epoch));
+    assert_eq!(batch.relation_cursors.len(), 1);
+    assert_eq!(
+        batch.relation_cursors[0].path,
+        leaf_source.path.to_string_lossy().into_owned()
+    );
+    let tm = batch
+        .context
+        .claude_call_locations
+        .get("tm")
+        .and_then(Option::as_ref)
+        .expect("the semantic batch carries the exact cached parent call");
+    assert_eq!(tm.source.path, lead_source.path);
+    assert_eq!(tm.kind, Kind::Tool);
+    assert!(batch
+        .paths
+        .iter()
+        .any(|path| std::path::Path::new(path) == tm.source.path.as_path()));
+
+    let inputs_for = |paths: &[String]| {
+        paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Claude,
+                path: std::path::Path::new(path)
+                    .strip_prefix(&home.options.claude_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
             })
+            .collect::<Vec<_>>()
+    };
+    let forward_inputs = inputs_for(&batch.paths);
+    let mut reverse_inputs = forward_inputs.clone();
+    reverse_inputs.reverse();
+    let namespace = home.options.source.namespace().unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let cursor_state = |db: &rusqlite::Connection| {
+        let mut statement = db
+            .prepare("SELECT source_path,relation_after,relation_done FROM catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path")
             .unwrap();
-        assert_eq!(
-            &spawn.source_turn,
-            &relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:mid")),
-            "{label}: canonical parent turn"
-        );
-    }
+        statement
+            .query_map([namespace.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, String>(1)?, row.get::<_, bool>(2)?),
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .unwrap()
+    };
+    let relation_ids = |db: &rusqlite::Connection| {
+        let mut statement = db
+            .prepare("SELECT relation_id FROM catalog_semantic_relations WHERE namespace=?1 ORDER BY relation_id")
+            .unwrap();
+        statement
+            .query_map([namespace.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<BTreeSet<String>>>()
+            .unwrap()
+    };
+    let before_cursors = cursor_state(&db);
+    let persisted_before = relation_ids(&db);
+    let forward = prepare_semantic_batch(&home.options, &mut cache, &forward_inputs, &batch, NOW)
+        .unwrap();
+    let reverse = prepare_semantic_batch(&home.options, &mut cache, &reverse_inputs, &batch, NOW)
+        .unwrap();
+    let selected_witnesses = |prepared: &PreparedSources| {
+        prepared
+            .relationships
+            .relations
+            .iter()
+            .map(|(id, relation)| {
+                (
+                    id.clone(),
+                    (
+                        relation.source_turn.clone(),
+                        relation
+                            .query_content
+                            .get("origin")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_witnesses = BTreeMap::from([(
+        selected_spawn.clone(),
+        (
+            full_spawn.source_turn.clone(),
+            expected_origin.clone(),
+        ),
+    )]);
+    assert_eq!(
+        selected_witnesses(forward.prepared()),
+        expected_witnesses,
+        "source order: selected page relation has full-build source turn and origin"
+    );
+    assert_eq!(
+        selected_witnesses(reverse.prepared()),
+        expected_witnesses,
+        "reversed source order: selected page relation has full-build source turn and origin"
+    );
+    assert_eq!(cursor_state(&db), before_cursors, "preparation leaves cursors unchanged");
+
+    assert_eq!(
+        cache.record_semantic_batch(&batch, forward.prepared()).unwrap(),
+        crate::events::Outcome::Written
+    );
+    cache.end_scan();
+    cache.release_published_indexes();
+    let after_cursors = cursor_state(&db);
+    let changed_cursors: BTreeSet<_> = before_cursors
+        .iter()
+        .filter_map(|(path, before)| {
+            after_cursors
+                .get(path)
+                .is_some_and(|after| after != before)
+                .then_some(path.clone())
+        })
+        .collect();
+    assert_eq!(
+        changed_cursors,
+        BTreeSet::from([batch.relation_cursors[0].path.clone()]),
+        "recording the selected page moves only its primary cursor"
+    );
+    let primary_after = after_cursors
+        .get(&batch.relation_cursors[0].path)
+        .expect("primary relation cursor remains staged");
+    assert_eq!(primary_after.0, batch.relation_cursors[0].end);
+    let primary_done: bool = db
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",
+            rusqlite::params![namespace, batch.relation_cursors[0].path, batch.relation_cursors[0].end],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(primary_after.1, primary_done);
+    let persisted_after = relation_ids(&db);
+    let added: BTreeSet<_> = persisted_after.difference(&persisted_before).cloned().collect();
+    assert_eq!(added, expected_page.difference(&persisted_before).cloned().collect());
+    let persisted_relation: String = db
+        .query_row(
+            "SELECT metadata FROM catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",
+            rusqlite::params![namespace, selected_spawn],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let persisted_relation: Value = serde_json::from_str(&persisted_relation).unwrap();
+    let prepared_relation = forward
+        .prepared()
+        .relationships
+        .relations
+        .get(&selected_spawn)
+        .unwrap();
+    assert_eq!(persisted_relation, serde_json::to_value(prepared_relation).unwrap());
 }
 
 #[test]
