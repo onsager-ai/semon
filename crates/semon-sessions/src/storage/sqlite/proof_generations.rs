@@ -370,8 +370,7 @@ pub(super) fn retain_current_refs_for_unowned_history(
     let Some(metadata_bytes) = metadata_bytes else {
         return Ok(());
     };
-    let metadata_bytes =
-        usize::try_from(metadata_bytes).map_err(|_| StorageError::ScopeChanged)?;
+    let metadata_bytes = usize::try_from(metadata_bytes).map_err(|_| StorageError::ScopeChanged)?;
     if budget.charge(metadata_bytes).is_err() {
         return Err(PublicationError::BudgetOverflow);
     }

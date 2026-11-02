@@ -12015,8 +12015,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
                 |row| row.get(0),
             )
             .unwrap();
-        let current: crate::model::summary::CatalogRow =
-            serde_json::from_str(&metadata).unwrap();
+        let current: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
         assert_eq!(current.sources.len(), 2);
         let slots = db
             .prepare(
@@ -12034,11 +12033,8 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         let missing_source_slots = slots
             .iter()
             .filter(|text| {
-                let slot: crate::slot_projection::SavedSlot =
-                    serde_json::from_str(text).unwrap();
-                slot.source_paths()
-                    .iter()
-                    .any(|path| *path == &first_copy)
+                let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text).unwrap();
+                slot.source_paths().contains(&&first_copy)
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -12055,7 +12051,10 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        assert!(!refs.is_empty(), "the real Current publication must own receipts");
+        assert!(
+            !refs.is_empty(),
+            "the real Current publication must own receipts"
+        );
         (slots, missing_source_slots, refs)
     };
 
@@ -12219,10 +12218,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         .unwrap();
     tx.commit().unwrap();
     assert_eq!(repeated_grant.0, repeated_digest);
-    assert_eq!(
-        repeated_grant.1,
-        i64::try_from(runtime.admission).unwrap()
-    );
+    assert_eq!(repeated_grant.1, i64::try_from(runtime.admission).unwrap());
     assert_eq!(repeated_grant.2, runtime.stream_epoch);
 }
 
