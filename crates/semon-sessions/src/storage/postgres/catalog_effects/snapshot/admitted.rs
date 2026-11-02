@@ -91,47 +91,25 @@ impl Snapshot<'_, '_> {
                 let reference: observations::HistoryReference =
                     serde_json::from_slice(&reference).map_err(io::Error::other)?;
                 let acknowledged: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(),&history_owner.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
-                if !(reference.version == 1 || reference.version == 2) || !acknowledged {
+                if reference.version != 1 || !acknowledged {
                     return Err(failed(StorageError::ScopeChanged));
                 }
-                if reference.composed {
-                    if let Some(capture) = reference.capture.as_ref()
-                        && !capture.is_runtime_capture_for(
-                            physical
-                                .as_ref()
-                                .ok_or_else(|| failed(StorageError::ScopeChanged))?,
-                        )
-                    {
-                        return Err(failed(StorageError::ScopeChanged));
-                    }
-                    return Ok(Some((
-                        current,
-                        reference.capture,
-                        Origin::Composed(reference.receipts),
-                    )));
-                }
-                if reference.capture.is_some() {
-                    return Err(failed(StorageError::ScopeChanged));
-                }
-                let receipt = reference
-                    .receipt
-                    .ok_or_else(|| failed(StorageError::ScopeChanged))?;
                 let mut original = physical
                     .as_ref()
                     .ok_or_else(|| failed(StorageError::ScopeChanged))?
                     .clone();
                 original.lifecycle = reference.lifecycle;
-                let publication = observations::publication_with_recipes(
+                let observations = observations::publication(
                     &mut tx,
                     &current,
                     &encoded(&original).map_err(failed)?,
-                    &receipt,
+                    &reference.receipt,
                 )
                 .map_err(failed)?;
                 return Ok(Some((
                     current,
-                    publication.observations,
-                    Origin::Native(receipt),
+                    observations,
+                    Origin::Native(reference.receipt),
                 )));
             }
         }
