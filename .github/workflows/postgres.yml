@@ -70,6 +70,20 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::businessflow::pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-continuation-businessflow.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-businessflow.log"
+      - name: Real SQLite and PostgreSQL owned versus external revision fences
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          case_number=0
+          for test in catalog::tests::full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically storage::postgres::catalog_effects::tests::revision_fence::pg_full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically; do
+            case_number=$((case_number+1))
+            output="$RUNNER_TEMP/477-revision-fence-$case_number.log"
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$output"; then result=1; fi
+            tail -n 70 "$output"
+          done
+          exit "$result"
       - name: Formatting
         id: formatting
         if: ${{ !cancelled() }}
