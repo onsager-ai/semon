@@ -3776,8 +3776,8 @@ impl SqliteStore {
                 let captured = crate::storage::sqlite::proof_generations::capture_presentations(
                     &transaction,
                     owner.config().namespace.as_str(),
-                    &generation,
                     crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
                         rows,
                         projections: Some(projections),
                         observations: Some(observations),
@@ -3814,6 +3814,7 @@ impl SqliteStore {
                     &base,
                     &captured,
                     crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
                         rows,
                         projections: Some(projections),
                         observations: Some(observations),
@@ -3858,6 +3859,7 @@ impl SqliteStore {
                     &proof_digest,
                     crate::storage::sqlite::proof_generations::PreparedPresentations {
                         inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
+                            catalog_generation: &generation,
                             rows,
                             projections: Some(projections),
                             observations: Some(observations),

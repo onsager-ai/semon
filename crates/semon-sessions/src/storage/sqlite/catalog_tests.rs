@@ -11984,6 +11984,10 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 
 #[test]
 fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
+    use crate::storage::{
+        proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore,
+    };
+
     let fixture = Fixture::new();
     let first = fixture.source("first");
     let first_copy = fixture
@@ -12006,7 +12010,26 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     .unwrap();
     fixture.publish_existing();
 
-    let (original_slots, missing_source_slots, original_refs) = {
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    let semantic = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+    let runtime = semantic
+        .reader_binding()
+        .unwrap()
+        .reader_runtime()
+        .unwrap();
+
+    let (
+        original_slots,
+        missing_source_slots,
+        original_refs,
+        original_publication,
+        original_catalog_generation,
+        original_selected_slots,
+    ) = {
         let db = fixture.db();
         let metadata: String = db
             .query_row(
@@ -12075,7 +12098,40 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             receipt.0, catalog_generation,
             "the receipt identity also binds its projection and presentation"
         );
-        (slots, missing_source_slots, refs)
+        let id = runtime.current_generation("first").unwrap();
+        assert_eq!(id.0, refs[0].0);
+        let lease = runtime
+            .selected_generation("first", &id, &"4".repeat(64), 60_000)
+            .unwrap();
+        let host = crate::storage::selected::HostSourceBinding {
+            source_key: "local".into(),
+            snapshot: lease.snapshot().clone(),
+        };
+        let selected = lease
+            .open_selected(
+                &fixture.options,
+                &host,
+                &crate::SelectedReadControl::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            selected.snapshot.publication_generation,
+            receipt.0,
+            "the selected lease keeps its receipt identity"
+        );
+        assert_eq!(
+            selected.witness.catalog.get("catalog_generation"),
+            Some(&catalog_generation),
+            "the selected witness keeps its actual Catalog generation"
+        );
+        (
+            slots,
+            missing_source_slots,
+            refs,
+            receipt.0,
+            catalog_generation,
+            selected.slots.clone(),
+        )
     };
 
     fs::remove_file(first_copy).unwrap();
@@ -12226,6 +12282,42 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             == Some("repeated-history")
     }));
     assert_eq!(repeated_refs, history_refs);
+    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(
+        original_refs[0].0.clone(),
+    );
+    assert!(repeated_refs.iter().any(|(id, _)| id == &retained_id.0));
+    let retained_lease = runtime
+        .selected_generation("first", &retained_id, &"5".repeat(64), 60_000)
+        .unwrap();
+    let retained_host = crate::storage::selected::HostSourceBinding {
+        source_key: "local".into(),
+        snapshot: retained_lease.snapshot().clone(),
+    };
+    let retained = retained_lease
+        .open_selected(
+            &fixture.options,
+            &retained_host,
+            &crate::SelectedReadControl::default(),
+        )
+        .unwrap();
+    assert_eq!(retained.snapshot.proof_generation, retained_id);
+    assert_eq!(
+        retained.snapshot.publication_generation,
+        original_publication
+    );
+    assert_eq!(
+        retained.witness.catalog.get("catalog_generation"),
+        Some(&original_catalog_generation)
+    );
+    assert_eq!(
+        serde_json::to_string(&retained.slots).unwrap(),
+        serde_json::to_string(&original_selected_slots).unwrap(),
+        "History opens the exact retained receipt's original slots"
+    );
+    assert!(retained
+        .slots
+        .iter()
+        .any(|slot| slot.source_paths().contains(&&first_copy)));
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
     let runtime = binding.runtime_binding_at(&tx).unwrap();
