@@ -9305,9 +9305,7 @@ fn build_sources_inner(
                 }
             }
             #[cfg(test)]
-            if let Some(hook) =
-                AFTER_FULL_CATALOG_CAPTURE.with(|hook| hook.borrow_mut().take())
-            {
+            if let Some(hook) = AFTER_FULL_CATALOG_CAPTURE.with(|hook| hook.borrow_mut().take()) {
                 hook(&snapshot);
             }
             let pending_locks = lock_keys

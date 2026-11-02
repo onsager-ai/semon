@@ -13144,8 +13144,8 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
     fs::create_dir_all(source_path.parent().unwrap()).unwrap();
     assert!(!source_path.exists());
 
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
-        .unwrap();
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
     cache.begin_scan().unwrap();
     let published = cache.full_catalog_start().unwrap();
     assert!(published.pending_paths.is_empty());
@@ -13164,13 +13164,11 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
     assert!(held_state.claimed);
     assert!(!held_state.has_continuation);
     assert_eq!(held_state.head, published_state.head);
-    assert!(crate::source_projection_ready(
-        &fixture.options,
-        input.root.as_str(),
-        &input.path,
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        crate::source_projection_ready(&fixture.options, input.root.as_str(), &input.path,)
+            .unwrap()
+            .is_none()
+    );
     assert_eq!(
         fs::metadata(&source_path).unwrap_err().kind(),
         std::io::ErrorKind::NotFound
@@ -13181,7 +13179,8 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
         json!({"type":"user","sessionId":"pending-create","uuid":"pending-create-u1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"pending raw create"}})
     )
     .into_bytes();
-    let (captured_tx, captured_rx) = mpsc::sync_channel(1);
+    let (captured_tx, captured_rx) =
+        mpsc::sync_channel::<crate::storage::source_observations::FullCatalogStart>(1);
     let (resume_tx, resume_rx) = mpsc::sync_channel(1);
     let (observed_tx, observed_rx) = mpsc::sync_channel(1);
     let controller_options = fixture.options.clone();
@@ -13209,13 +13208,15 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
             fs::metadata(&controller_path).unwrap_err().kind(),
             std::io::ErrorKind::NotFound
         );
-        assert!(crate::source_projection_ready(
-            &controller_options,
-            controller_input.root.as_str(),
-            &controller_input.path,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            crate::source_projection_ready(
+                &controller_options,
+                controller_input.root.as_str(),
+                &controller_input.path,
+            )
+            .unwrap()
+            .is_none()
+        );
 
         // The observer has captured the pending claim but still cannot finish
         // inventory while the Raw producer retains its exclusive SourceLock.
@@ -13231,9 +13232,9 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
             raw.write_all(&controller_bytes)?;
             // The full Catalog API has no scan cutoff. Keep this fixture old
             // mtime without treating it as evidence for a cutoff override.
-            raw.set_times(fs::FileTimes::new().set_modified(
-                std::time::UNIX_EPOCH + Duration::from_secs(1),
-            ))?;
+            raw.set_times(
+                fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1)),
+            )?;
             raw.sync_all()?;
             Ok(())
         })();
@@ -13244,11 +13245,14 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
             Err(mpsc::RecvTimeoutError::Timeout) => observed_rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("full Catalog should resume after Raw completion"),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(
-                "full Catalog observation channel disconnected".into(),
-            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err("full Catalog observation channel disconnected".into())
+            }
         };
-        assert!(write_result.is_ok(), "Raw producer failed: {write_result:?}");
+        assert!(
+            write_result.is_ok(),
+            "Raw producer failed: {write_result:?}"
+        );
         assert!(
             !completed_while_held,
             "full Catalog completed while the Raw producer held its SourceLock"
@@ -13273,9 +13277,14 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
         &mut texts,
         crate::model::now_ms(),
     );
-    let hook_consumed = crate::model::AFTER_FULL_CATALOG_CAPTURE
-        .with(|hook| hook.borrow_mut().take().is_none());
-    let _ = observed_tx.send(observation.as_ref().map(|_| ()).map_err(|error| error.to_string()));
+    let hook_consumed =
+        crate::model::AFTER_FULL_CATALOG_CAPTURE.with(|hook| hook.borrow_mut().take().is_none());
+    let _ = observed_tx.send(
+        observation
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    );
     let captured = controller.join().unwrap();
     assert_eq!(captured, baseline);
     assert!(hook_consumed, "full Catalog capture hook did not run");
@@ -13299,13 +13308,9 @@ fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_sourc
     assert_eq!(source.prefix_sha256, prefix);
     assert_eq!(fs::read(&source_path).unwrap(), bytes);
 
-    let ready = crate::source_projection_ready(
-        &fixture.options,
-        input.root.as_str(),
-        &input.path,
-    )
-    .unwrap()
-    .expect("published source projection must qualify after its claim is acknowledged");
+    let ready = crate::source_projection_ready(&fixture.options, input.root.as_str(), &input.path)
+        .unwrap()
+        .expect("published source projection must qualify after its claim is acknowledged");
     assert_eq!(ready.source.path, input.path);
     assert_eq!(ready.source.offset, source.offset);
     assert_eq!(ready.source.prefix_sha256, prefix);
