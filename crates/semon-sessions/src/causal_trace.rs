@@ -1315,7 +1315,7 @@ mod generation_tests {
         };
         let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
         let (outcome, generation) = writer
-            .publish_catalog(&publication, None, None, false)
+            .publish_catalog(&publication, None, None, false, None)
             .unwrap()
             .unwrap();
         assert_eq!(outcome, crate::events::Outcome::Written);
@@ -1343,7 +1343,7 @@ mod generation_tests {
             }
         }
         let (outcome, _) = writer
-            .publish_catalog(&publication, generation.as_deref(), None, false)
+            .publish_catalog(&publication, generation.as_deref(), None, false, None)
             .unwrap()
             .unwrap();
         assert_eq!(outcome, crate::events::Outcome::Written);

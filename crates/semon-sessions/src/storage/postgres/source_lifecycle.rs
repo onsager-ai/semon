@@ -395,7 +395,7 @@ pub(super) fn relocate(
     stat: &crate::events::Stat,
     prior: &crate::events::Ledger,
     summary: crate::native_tree::Summary,
-) -> Result<bool, StorageError> {
+) -> Result<u64, StorageError> {
     use sha2::{Digest, Sha256};
     let request = serde_json::to_vec(&("native-relocation-v1", old, path, id, stat, prior))
         .map_err(|_| StorageError::InvalidArguments)?;
@@ -404,7 +404,7 @@ pub(super) fn relocate(
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     if let Some(ack) = super::native_keys::read_meta(tx, key.as_bytes(), 1048576)? {
         return if ack == request {
-            Ok(true)
+            Ok(0)
         } else {
             Err(StorageError::Conflict)
         };
@@ -458,7 +458,7 @@ pub(super) fn relocate(
     tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&request]).map_err(sqlstate::error)?;
     // Reuse the ordinary native commit algorithm to make a complete new path
     // generation. The old native families and immutable proofs remain retained.
-    super::native_bundle::stage(
+    let staged = super::native_bundle::stage(
         tx,
         crate::events::native_commit::Input {
             path,
@@ -484,6 +484,7 @@ pub(super) fn relocate(
     )?;
     tx.driver.execute("INSERT INTO semon_pg_native_relocation_candidates(namespace,old_path,new_path) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&ns,&old.as_bytes(),&path.as_bytes()]).map_err(sqlstate::error)?;
     super::source_journal::invalidate(tx, old)?;
+    let source_revision_delta = staged.source_revision_delta + 1;
     tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&old.as_bytes()]).map_err(sqlstate::error)?;
     if after.stat != *stat {
         let evidence = crate::source_change::AppendEvidence {
@@ -520,7 +521,7 @@ pub(super) fn relocate(
     )?;
     super::native_keys::put_meta(tx, key.as_bytes(), &request)?;
     tx.check()?;
-    Ok(true)
+    Ok(source_revision_delta)
 }
 
 /// A completed relocation has already retained both native generations. Replay

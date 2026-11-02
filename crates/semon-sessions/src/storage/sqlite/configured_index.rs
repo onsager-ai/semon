@@ -297,7 +297,7 @@ impl IndexStore for ConfiguredIndex {
         id: &str,
         file: &mut LogFile,
         measurements: &mut crate::native_timing::Measurements,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<crate::events::RelocationResult>, StoreError> {
         self.native
             .relocate_codex(path, stat, id, file, measurements)
     }

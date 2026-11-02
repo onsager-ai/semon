@@ -1069,6 +1069,13 @@ impl PartialEq<Outcome> for IndexWriteResult {
     }
 }
 
+/// A committed native source relocation and the journal revisions it owns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RelocationResult {
+    pub(crate) old_path: String,
+    pub(crate) source_revision_delta: u64,
+}
+
 /// Everything a store holds, as read when it opens.
 #[derive(Default)]
 pub(crate) struct Loaded {
@@ -1270,7 +1277,7 @@ pub(crate) trait IndexStore: Send {
         id: &str,
         file: &mut LogFile,
         measurements: &mut crate::native_timing::Measurements,
-    ) -> Result<Option<String>, StoreError>;
+    ) -> Result<Option<RelocationResult>, StoreError>;
     fn append_evidence(
         &self,
         path: &str,
@@ -4168,14 +4175,15 @@ fn scan_file_with_mode(
             && let Some(id) = crate_id_for_relocation(path)
         {
             let started = cache.scan_measurements.start();
-            if let Some(old) = cache
+            if let Some(relocation) = cache
                 .store
                 .as_mut()
                 .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
                 .relocate_codex(&key, &stat, &id, &mut file, &mut cache.scan_measurements)
                 .map_err(store_io_error)?
             {
-                cache.files.remove(&old);
+                cache.record_source_revision_delta(relocation.source_revision_delta)?;
+                cache.files.remove(&relocation.old_path);
                 recorded = cache.recorded(&key)?;
             }
             cache

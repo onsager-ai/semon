@@ -187,7 +187,7 @@ pub(super) fn reuse(
     file: &mut crate::sealed::LogFile,
     measurements: &mut crate::native_timing::Measurements,
     writer: &configured::Writer,
-) -> Result<Option<String>, StoreError> {
+) -> Result<Option<crate::events::RelocationResult>, StoreError> {
     writer
         .validate(&store.connection)
         .map_err(StoreError::Configured)?;
@@ -393,7 +393,11 @@ pub(super) fn reuse(
     invalidate_bound_catalog_source(&tx, path, "changed").map_err(failure)?;
     tx.commit()
         .map_err(|_| StoreError::Configured(crate::storage::StorageError::CommitUncertain))?;
-    Ok(Some(old.clone()))
+    Ok(Some(crate::events::RelocationResult {
+        old_path: old.clone(),
+        // This transaction invalidates the outgoing and incoming source paths.
+        source_revision_delta: 2,
+    }))
 }
 
 #[cfg(test)]

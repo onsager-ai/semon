@@ -1189,7 +1189,7 @@ impl IndexStore for NativeIndex {
         id: &str,
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<crate::events::RelocationResult>, StoreError> {
         let started = measurements.start();
         let candidate = self
             .pool
@@ -1231,14 +1231,17 @@ impl IndexStore for NativeIndex {
             .load_shared_usage()
             .map_err(|e| StoreError::Data(e.to_string()))?;
         summary.stored = None;
-        let result = self
+        let source_revision_delta = self
             .pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::source_lifecycle::relocate(tx, &old, path, id, stat, &prior, summary)
             })
             .map_err(err)?;
         measurements.record("relocation_candidate", started, 1);
-        Ok(result.then_some(old))
+        Ok(Some(crate::events::RelocationResult {
+            old_path: old,
+            source_revision_delta,
+        }))
     }
     fn append_evidence(
         &self,

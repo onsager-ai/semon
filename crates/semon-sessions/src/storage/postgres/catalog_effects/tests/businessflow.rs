@@ -5012,33 +5012,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let moved_stat = crate::events::Stat::of(&archived).unwrap();
     let mut moved_file = crate::sealed::LogFile::open(&archived).unwrap();
     let mut timing = crate::native_timing::Measurements::new(false);
-    assert_eq!(
-        cache
-            .relocate_codex(
-                archived.to_str().unwrap(),
-                &moved_stat,
-                codex_id,
-                &mut moved_file,
-                &mut timing
-            )
-            .unwrap()
-            .as_deref(),
-        codex.to_str()
-    );
-    assert_eq!(
-        cache
-            .relocate_codex(
-                archived.to_str().unwrap(),
-                &moved_stat,
-                codex_id,
-                &mut moved_file,
-                &mut timing
-            )
-            .unwrap()
-            .as_deref(),
-        codex.to_str(),
-        "exact relocation ACK replay"
-    );
+    let relocated = cache
+        .relocate_codex(
+            archived.to_str().unwrap(),
+            &moved_stat,
+            codex_id,
+            &mut moved_file,
+            &mut timing,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(relocated.old_path, codex.to_str().unwrap());
+    assert_eq!(relocated.source_revision_delta, 2);
+    let replayed = cache
+        .relocate_codex(
+            archived.to_str().unwrap(),
+            &moved_stat,
+            codex_id,
+            &mut moved_file,
+            &mut timing,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(replayed.old_path, codex.to_str().unwrap());
+    assert_eq!(replayed.source_revision_delta, 0, "exact relocation ACK replay");
     assert_eq!(fs::read(&archived).unwrap(), codex_bytes);
     assert_eq!(
         captured_bodies(&pool),

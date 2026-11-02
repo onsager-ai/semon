@@ -1428,7 +1428,7 @@ impl Writer {
         id: &str,
         file: &mut crate::sealed::LogFile,
         measurements: &mut crate::native_timing::Measurements,
-    ) -> Result<Option<String>, StoreError> {
+    ) -> Result<Option<crate::events::RelocationResult>, StoreError> {
         if self.owner.is_none() {
             return Err(StoreError::Configured(
                 StorageError::NamespaceUpgradePending,
