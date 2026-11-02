@@ -12328,6 +12328,83 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
 }
 
 #[test]
+fn ordinary_empty_catalog_moves_current_receipt_to_history() {
+    let fixture = Fixture::new();
+    let source = fixture.source("receipt-owner");
+    fixture.publish_existing();
+
+    let current_refs = {
+        let db = fixture.db();
+        let refs = db
+            .prepare(
+                "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!refs.is_empty(), "ordinary publication must issue a Current receipt");
+        let history_count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 0);
+        refs
+    };
+
+    fs::remove_file(source).unwrap();
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_count, 0, "withdrawn owner must release Current refs");
+    let history_refs = db
+        .prepare(
+            "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        history_refs, current_refs,
+        "empty ordinary publication must retain the exact outgoing receipt"
+    );
+    let history_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_count, 0, "ordinary output should be empty");
+}
+
+#[test]
 fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() {
     let fixture = Fixture::new();
     let first = fixture.source("first");

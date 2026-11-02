@@ -111,7 +111,6 @@ pub(crate) struct PresentationInputs<'a> {
 pub(crate) struct PreparedPresentations<'a> {
     pub(crate) inputs: PresentationInputs<'a>,
     pub(crate) presentations: &'a [(String, String)],
-    pub(crate) outgoing_owners: &'a [CatalogRow],
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
@@ -177,7 +176,6 @@ pub(crate) fn publish(
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
-        outgoing_owners,
         overview_budget,
     } = presentations;
     let PresentationInputs {
@@ -272,9 +270,22 @@ pub(crate) fn publish(
         // Reconstructing them from path/ledger matches would retain unrelated
         // generations and let imported proof sources acquire local authority.
     }
-    // Outgoing owners lose Current references after custody. History refs are
-    // either the exact local composition set or retention references copied
-    // from an exact local Current grant. They never grant History origin.
+    Ok(())
+}
+
+/// Retain outgoing owners' exact Current receipts after History composition,
+/// then release their Current references before grant reconciliation.
+pub(crate) fn retain_outgoing_history_refs(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    outgoing_owners: &[CatalogRow],
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    // History refs are either the exact local composition set or retention
+    // references copied from an exact local Current grant. They never grant
+    // History origin.
     for row in outgoing_owners {
         retain_current_refs_for_unowned_history(
             tx,
@@ -284,7 +295,11 @@ pub(crate) fn publish(
             stream,
             overview_budget,
         )?;
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+        tx.execute(
+            "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+            params![namespace, row.key],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }

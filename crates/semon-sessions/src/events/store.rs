@@ -3865,7 +3865,6 @@ impl SqliteStore {
                             observations: Some(observations),
                         },
                         presentations: &captured,
-                        outgoing_owners: &withdrawn,
                         overview_budget: &mut history_budget,
                     },
                 );
@@ -3878,6 +3877,22 @@ impl SqliteStore {
                         crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
                     ) => return Ok(Outcome::Deferred),
                 }
+            }
+            match crate::storage::sqlite::proof_generations::retain_outgoing_history_refs(
+                &transaction,
+                owner.config().namespace.as_str(),
+                owner.admission(),
+                stream,
+                &withdrawn,
+                &mut history_budget,
+            ) {
+                Ok(()) => {}
+                Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
+                    error,
+                )) => return Err(StoreError::Configured(error)),
+                Err(
+                    crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
+                ) => return Ok(Outcome::Deferred),
             }
             commit_boundary.capture(&transaction);
             for scope in ["current", "retained_history"] {
