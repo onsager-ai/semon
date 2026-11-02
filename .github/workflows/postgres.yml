@@ -76,7 +76,7 @@ jobs:
         run: |
           result=0
           case_number=0
-          for test in catalog::tests::full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically storage::postgres::catalog_effects::tests::revision_fence::pg_full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically; do
+          for test in catalog::tests::full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically storage::postgres::catalog_effects::tests::revision_fence::pg_full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically catalog::tests::full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_source_lock; do
             case_number=$((case_number+1))
             output="$RUNNER_TEMP/477-revision-fence-$case_number.log"
             cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
