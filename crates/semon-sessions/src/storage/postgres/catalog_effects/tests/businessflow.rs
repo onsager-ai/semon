@@ -1220,9 +1220,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         listing
     };
 
-    // Give SQLite the same original `one` owner that PostgreSQL published
-    // before its continuation. The retained History recipe after the append
-    // must still name this exact source prefix.
+    // Match PostgreSQL's publication sequence: a verified continuation advances
+    // Current first; the later append without prior-generation authority then
+    // preserves that continued prefix as original History.
     let parent_relative = claude_parent
         .strip_prefix(&options.claude_home)
         .unwrap()
@@ -1288,13 +1288,85 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "SQLite original owner captures the complete precontinuation parent prefix"
     );
 
+    let mut withdrawal_cache =
+        EventCache::open_scoped(&withdraw_options.cache, &withdraw_options.source).unwrap();
+    let parent_path = claude_parent.to_string_lossy().into_owned();
+    let ledger = withdrawal_cache
+        .stored_ledger_batch(std::slice::from_ref(&parent_path))
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect("SQLite withdrawal prefix ledger");
+    let parent_generation = crate::source_change::stat_generation(&ledger.stat).unwrap();
+    let writer = crate::SessionSourceWrite::begin(
+        &withdraw_options,
+        &inputs[0],
+        Some(&parent_generation),
+        ledger.stat.size,
+    )
+    .unwrap();
     let mut parent = fs::OpenOptions::new()
         .append(true)
         .open(&claude_parent)
         .unwrap();
     parent.write_all(parent_source_append.as_bytes()).unwrap();
-    parent.write_all(parent_facts_append.as_bytes()).unwrap();
+    parent.sync_all().unwrap();
     drop(parent);
+    writer
+        .complete(ledger.stat.size + parent_source_append.len() as u64)
+        .unwrap();
+    let continued_prefix = crate::model::prepare_sources(
+        &withdraw_options,
+        &mut withdrawal_cache,
+        &inputs,
+        1790812807000,
+    )
+    .unwrap();
+    assert!(
+        !continued_prefix
+            .presentation_observations()
+            .and_then(|observations| observations.verified_continuations())
+            .expect("SQLite withdrawal continuation observations")
+            .is_empty(),
+        "the first withdrawal-oracle append has exact continuation authority"
+    );
+    withdrawal_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &continued_prefix.rows,
+                transcripts: Some(&continued_prefix.transcripts),
+                observations: continued_prefix.presentation_observations(),
+            },
+            continued_prefix.base_generation.as_deref(),
+        )
+        .unwrap()
+        .expect("SQLite withdrawal continued generation");
+    let retained_parent_source = parent_source(
+        &crate::session_catalog_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .expect("SQLite trusted continued parent"),
+    );
+    assert_eq!(
+        retained_parent_source.offset,
+        original_parent_source.offset + parent_source_append.len() as u64,
+        "the verified append advances the parent prefix before History capture"
+    );
+    let mut sqlite_host = body_host(&withdraw_options, &continued_prefix.rows);
+    drop(withdrawal_cache);
+    let from = retained_parent_source.offset;
+    let writer =
+        crate::SessionSourceWrite::begin(&withdraw_options, &inputs[0], None, from).unwrap();
+    let mut parent = fs::OpenOptions::new()
+        .append(true)
+        .open(&claude_parent)
+        .unwrap();
+    parent.write_all(parent_facts_append.as_bytes()).unwrap();
+    parent.sync_all().unwrap();
+    drop(parent);
+    writer
+        .complete(from + parent_facts_append.len() as u64)
+        .unwrap();
     let oracle_pid = options.claude_home.join("sessions/4242.json");
     fs::create_dir_all(oracle_pid.parent().unwrap()).unwrap();
     fs::write(&oracle_pid, &pid_bytes).unwrap();
@@ -1329,8 +1401,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .expect("SQLite continued parent retained identity");
     assert_eq!(
         parent_source(&continued_parent_history),
-        original_parent_source,
-        "SQLite History preserves the original parent source prefix"
+        retained_parent_source,
+        "SQLite History preserves the prefix captured before the unverified append"
     );
     let composite_before_withdrawal =
         crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
@@ -1365,7 +1437,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         1790812805000,
     )
     .unwrap();
-    let mut sqlite_host = body_host(&withdraw_options, &withdrawal_prepared.rows);
+    sqlite_host
+        .0
+        .extend(body_host(&withdraw_options, &withdrawal_prepared.rows).0);
     sqlite_host.0.extend(body_host(&options, &expected.rows).0);
     drop(withdrawal_cache);
     let parked = [
@@ -1442,8 +1516,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         parent_source(&parent_history_after_withdrawal),
-        original_parent_source,
-        "SQLite parent History still points to its original precontinuation source"
+        retained_parent_source,
+        "SQLite parent History retains the prefix captured before the unverified append"
     );
     let sqlite_scoped = |scope: &str, limit: usize| {
         let mut items = Vec::new();
@@ -4175,58 +4249,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // explicitly; a current-path entry alone cannot authorize an old prefix.
     next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
-    fn first_body_difference(
-        actual: &serde_json::Value,
-        expected: &serde_json::Value,
-        pointer: &str,
-    ) {
-        if let (Some(actual), Some(expected)) = (actual.as_object(), expected.as_object()) {
-            for key in actual.keys().chain(expected.keys()) {
-                if actual.get(key) != expected.get(key) {
-                    let pointer = format!("{pointer}/{key}");
-                    if let (Some(actual), Some(expected)) = (actual.get(key), expected.get(key)) {
-                        first_body_difference(actual, expected, &pointer);
-                    } else {
-                        eprintln!(
-                            "pg_history_body_difference pointer={pointer} missing_field=true"
-                        );
-                    }
-                    return;
-                }
-            }
-        } else if let (Some(actual), Some(expected)) = (actual.as_array(), expected.as_array()) {
-            eprintln!(
-                "pg_history_body_difference pointer={pointer} actual_count={} expected_count={}",
-                actual.len(),
-                expected.len()
-            );
-            if let Some((index, (actual, expected))) = actual
-                .iter()
-                .zip(expected)
-                .enumerate()
-                .find(|(_, (actual, expected))| actual != expected)
-            {
-                first_body_difference(actual, expected, &format!("{pointer}/{index}"));
-            }
-        } else {
-            let actual = actual.to_string();
-            let expected = expected.to_string();
-            eprintln!(
-                "pg_history_body_difference pointer={pointer} actual_bytes={} expected_bytes={} actual_sha256={:x} expected_sha256={:x}",
-                actual.len(),
-                expected.len(),
-                sha2::Sha256::digest(actual.as_bytes()),
-                sha2::Sha256::digest(expected.as_bytes())
-            );
-        }
-    }
-    if next_bodies[&appended_key]["body"] != append_history_body {
-        first_body_difference(
-            &next_bodies[&appended_key]["body"],
-            &append_history_body,
-            "",
-        );
-    }
     assert!(
         next_bodies[&appended_key]["body"] == append_history_body,
         "PG History-selected body must match SQLite after the same append"
@@ -4363,274 +4385,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "selected edge recipe must not use the parent's retained History ref"
         );
     }
-    let (
-        history_harness,
-        current_harness,
-        history_owner_generation,
-        history_qualified,
-        history_source_generation,
-    ) = super::super::snapshot::with_admitted_snapshot(
+    super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
         &control,
         &continued_generation,
         |snapshot| {
-            eprintln!(
-                "pg_successor_snapshot entered generation={continued_generation} key={appended_key}"
+            assert!(
+                snapshot.owner(&appended_key)?.is_none(),
+                "an exactly verified continuation advances Current without original History"
             );
-            let owner_probe = snapshot.owner(&appended_key).map(|owner| {
-                owner.map(|owner| (owner.generation, owner.original, owner.has_current))
-            });
-            eprintln!("pg_successor_snapshot owner_probe={owner_probe:?}");
-            let history = snapshot.catalog(&appended_key, true);
-            eprintln!(
-                "pg_successor_snapshot history_catalog={:?}",
-                history.as_ref().map(|row| row.is_some())
-            );
-            let history = history?.ok_or(StorageError::ScopeChanged)?;
-            let current = snapshot.catalog(&appended_key, false);
-            eprintln!(
-                "pg_successor_snapshot current_catalog={:?}",
-                current.as_ref().map(|row| row.is_some())
-            );
-            let current = current?.ok_or(StorageError::ScopeChanged)?;
-            let owner = snapshot.owner(&appended_key).map(|owner| {
-                owner.map(|owner| (owner.generation, owner.original, owner.has_current))
-            });
-            eprintln!("pg_successor_snapshot owner={owner:?}");
-            let owner_generation = owner?.ok_or(StorageError::ScopeChanged)?.0;
-            let qualified = snapshot.history_qualified(&history);
-            eprintln!(
-                "pg_successor_snapshot history_qualified={qualified:?} owner_generation={owner_generation}"
-            );
-            let qualified = qualified.map_err(|_| StorageError::ScopeChanged)?;
-            let source_generation = crate::retention::source_generation(&history.sources);
-            eprintln!("pg_successor_snapshot source_generation={source_generation:?}");
-            let source_generation = source_generation.map_err(|_| StorageError::ScopeChanged)?;
-            Ok((
-                history.harness,
-                current.harness,
-                owner_generation,
-                qualified,
-                source_generation,
-            ))
-        },
-    )
-    .inspect_err(|error| {
-        eprintln!("pg_successor_snapshot failed generation={continued_generation} error={error:?}");
-    })
-    .expect("successor publication keeps History beside the Current owner");
-    assert_eq!(
-        history_harness, current_harness,
-        "History runtime qualification requires its same-harness Current owner"
-    );
-    assert!(
-        history_qualified,
-        "the exact admitted History owner and complete header qualify"
-    );
-    assert_eq!(history_owner_generation.len(), 64);
-    assert!(
-        history_owner_generation
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    );
-    let history_version = crate::slot_projection::VERSION as i64;
-    let history_source_generation = history_source_generation.into_bytes();
-    assert_eq!(history_source_generation.len(), 64);
-    let history_incomplete = false;
-    let history_request = crate::catalog::Request::parse(&format!(
-        "sid={}&scope=retained_history",
-        crate::viewer::percent_encode(&appended_key)
-    ))
-    .expect("selected History request");
-
-    let update_history_header = |version: i64,
-                                 source_generation: Option<Vec<u8>>,
-                                 incomplete: bool| {
-        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            let changed = tx
-                .driver
-                .execute(
-                    "UPDATE semon_pg_native_catalog_history_headers SET version=$4,source_generation=$5,incomplete=$6 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
-                    &[
-                        &namespace.as_str().as_bytes(),
-                        &history_owner_generation.as_bytes(),
-                        &appended_key.as_bytes(),
-                        &version,
-                        &source_generation,
-                        &incomplete,
-                    ],
-                )
-                .map_err(sqlstate::error)?;
-            if changed != 1 {
-                return Err(StorageError::ScopeChanged);
-            }
+            assert!(snapshot.catalog(&appended_key, true)?.is_none());
+            assert!(snapshot.catalog(&appended_key, false)?.is_some());
             Ok(())
-        })
-    };
-    let assert_history_header_refused =
-        |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
-            let composite_expected = incomplete
-                && version == history_version
-                && source_generation.as_deref() == Some(history_source_generation.as_slice());
-            update_history_header(version, source_generation.clone(), incomplete)
-                .expect("install exact History header corruption");
-            let qualification = super::super::snapshot::with_admitted_snapshot(
-                &pool,
-                &namespace,
-                &control,
-                &continued_generation,
-                |snapshot| {
-                    let history = snapshot
-                        .catalog(&appended_key, true)?
-                        .ok_or(StorageError::ScopeChanged)?;
-                    let owner = snapshot
-                        .owner(&appended_key)?
-                        .ok_or(StorageError::ScopeChanged)?;
-                    assert!(!owner.original);
-                    assert!(owner.has_current);
-                    let current = snapshot
-                        .rows(&history_request)
-                        .map_err(|_| StorageError::ScopeChanged)?
-                        .into_iter()
-                        .next()
-                        .ok_or(StorageError::ScopeChanged)?;
-                    assert_eq!(
-                        current.owner,
-                        Some(crate::storage::catalog::CatalogObservationOwner::Catalog)
-                    );
-                    assert_eq!(
-                        current.lifecycle,
-                        crate::model::summary::CatalogLifecycle::Current
-                    );
-                    assert_eq!(current.harness, history.harness);
-                    Ok((
-                        snapshot
-                            .history_qualified(&history)
-                            .map_err(|_| StorageError::ScopeChanged)?,
-                        snapshot
-                            .composite_history_identity_qualified(&current, &history)
-                            .map_err(|_| StorageError::ScopeChanged)?,
-                    ))
-                },
-            );
-            update_history_header(
-                history_version,
-                Some(history_source_generation.clone()),
-                history_incomplete,
-            )
-            .expect("restore exact admitted History header");
-            let (qualified, composite_qualified) =
-                qualification.expect("History header uses the admitted snapshot");
-            assert!(!qualified, "{reason}");
-            assert_eq!(
-                composite_qualified, composite_expected,
-                "{reason}: incomplete composite identity qualification"
-            );
-        };
-    assert_history_header_refused(
-        history_version + 1,
-        Some(history_source_generation.clone()),
-        history_incomplete,
-        "a mismatched History version refuses qualification",
-    );
-    let mut mismatched_source_generation = history_source_generation.clone();
-    mismatched_source_generation[0] = if mismatched_source_generation[0] == b'0' {
-        b'1'
-    } else {
-        b'0'
-    };
-    assert_history_header_refused(
-        history_version,
-        Some(mismatched_source_generation),
-        history_incomplete,
-        "a same length mismatched History source generation refuses qualification",
-    );
-    assert_history_header_refused(
-        history_version,
-        Some(history_source_generation.clone()),
-        true,
-        "an incomplete History header refuses qualification",
-    );
-    let set_history_original = |original: bool| {
-        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            let changed = tx
-                .driver
-                .execute(
-                    "UPDATE semon_pg_native_catalog_history_owners SET original=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
-                    &[
-                        &namespace.as_str().as_bytes(),
-                        &history_owner_generation.as_bytes(),
-                        &appended_key.as_bytes(),
-                        &original,
-                    ],
-                )
-                .map_err(sqlstate::error)?;
-            if changed != 1 {
-                return Err(StorageError::ScopeChanged);
-            }
-            Ok(())
-        })
-    };
-    update_history_header(
-        history_version,
-        Some(history_source_generation.clone()),
-        true,
-    )
-    .expect("install otherwise qualifying incomplete composite header");
-    set_history_original(true).expect("install original History owner marker");
-    let original_owner_composite_qualified = super::super::snapshot::with_admitted_snapshot(
-        &pool,
-        &namespace,
-        &control,
-        &continued_generation,
-        |snapshot| {
-            let history = snapshot
-                .catalog(&appended_key, true)?
-                .ok_or(StorageError::ScopeChanged)?;
-            let current = snapshot
-                .rows(&history_request)
-                .map_err(|_| StorageError::ScopeChanged)?
-                .into_iter()
-                .next()
-                .ok_or(StorageError::ScopeChanged)?;
-            let owner = snapshot
-                .owner(&appended_key)?
-                .ok_or(StorageError::ScopeChanged)?;
-            assert!(owner.original);
-            snapshot
-                .composite_history_identity_qualified(&current, &history)
-                .map_err(|_| StorageError::ScopeChanged)
         },
     )
-    .expect("original History owner is read through admitted snapshot");
-    set_history_original(false).expect("restore composite History owner marker");
-    update_history_header(
-        history_version,
-        Some(history_source_generation.clone()),
-        history_incomplete,
-    )
-    .expect("restore exact admitted History header after original-owner check");
-    assert!(
-        !original_owner_composite_qualified,
-        "original History owners cannot use incomplete composite identity qualification"
-    );
-    let restored_history_qualified = super::super::snapshot::with_admitted_snapshot(
-        &pool,
-        &namespace,
-        &control,
-        &continued_generation,
-        |snapshot| {
-            let history = snapshot
-                .catalog(&appended_key, true)?
-                .ok_or(StorageError::ScopeChanged)?;
-            snapshot
-                .history_qualified(&history)
-                .map_err(|_| StorageError::ScopeChanged)
-        },
-    )
-    .expect("restored admitted History header");
-    assert!(restored_history_qualified);
+    .expect("trusted successor has Current custody");
     // This live PID file adds a native runtime dependency to this Claude owner.
     let pid = 314;
     let pid_stat = options.proc_root.join(pid.to_string()).join("stat");
@@ -4666,10 +4436,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     fs::remove_file(&pid_session).unwrap();
     fs::remove_file(&pid_stat).unwrap();
     let error = history_runtime_drift
-        .expect_err("History-selected read must refuse when its same-harness PID runtime drifts");
+        .expect_err("Current-selected read must refuse when its same-harness PID runtime drifts");
     assert!(
         error.code == "unavailable" && error.message == StorageError::ScopeChanged.to_string(),
-        "History runtime drift must refuse with ScopeChanged: {error:?}"
+        "Current runtime drift must refuse with ScopeChanged: {error:?}"
     );
     let recovered_history_body = restarted_query
         .call_bound_selected_at(
@@ -4682,8 +4452,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .expect("restoring same-harness runtime recovers the retained body");
     assert_eq!(
-        recovered_history_body, expected_bodies[&appended_key]["body"],
-        "restored runtime recovers the original retained source body"
+        recovered_history_body, next_bodies[&appended_key]["body"],
+        "restored runtime recovers the exact continued selected body"
     );
     let successor_current_body = super::super::snapshot::with_admitted_snapshot(
         &pool,
@@ -5606,6 +5376,34 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &pool,
             &namespace,
             &control,
+            &generation,
+            |snapshot| {
+                let original = snapshot
+                    .catalog(&pid_owner.key, false)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                let source = original
+                    .sources
+                    .iter()
+                    .find(|source| source.native_id == "one")
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(
+                    source, &pid_original_source,
+                    "the captured generation keeps its exact original source ledger"
+                );
+                let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+                assert_eq!(
+                    native_proof_tuple(&mut tx, &generation, source)?,
+                    pid_original_proof,
+                    "the captured generation keeps its complete original Native proof tuple"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+        super::super::snapshot::with_admitted_snapshot(
+            &pool,
+            &namespace,
+            &control,
             &moved_store.generation,
             |snapshot| {
                 let current = snapshot.catalog(&pid_owner.key, false)?.unwrap();
@@ -5613,37 +5411,37 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     current.lifecycle,
                     crate::model::summary::CatalogLifecycle::Current
                 );
-                let history = snapshot.owner(&pid_owner.key)?.is_some();
-                assert!(history, "the PID owner keeps its original History source");
-                let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
+                assert!(
+                    snapshot.owner(&pid_owner.key)?.is_none(),
+                    "the moved publication keeps the verified continuation in Current"
+                );
+                let (row, _, _) = snapshot.selected(&pid_owner.key, false, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
-                let history_source = row
+                let selected_source = row
                     .sources
                     .iter()
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
-                assert!(
-                    history_source == &pid_original_source,
-                    "History keeps the exact original source ledger"
-                );
                 let current_source = current
                     .sources
                     .iter()
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
-                let history_proof =
-                    native_proof_tuple(&mut tx, &moved_store.generation, history_source)?;
+                assert_eq!(
+                    selected_source, current_source,
+                    "the PID selection uses the exact continued Current source ledger"
+                );
+                assert_ne!(
+                    current_source, &pid_original_source,
+                    "the continued source differs from the captured original prefix"
+                );
                 let current_proof =
                     native_proof_tuple(&mut tx, &moved_store.generation, current_source)?;
-                assert!(
-                    history_proof == pid_original_proof,
-                    "History keeps the complete original Native proof tuple"
-                );
-                assert!(
-                    history_proof != current_proof,
-                    "a different Current proof cannot substitute for History"
+                assert_ne!(
+                    current_proof, pid_original_proof,
+                    "the continued Current proof cannot substitute for the original proof"
                 );
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(
@@ -6834,6 +6632,255 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         history_b_proof, current_a_proof,
         "Current Source A's proof cannot substitute for retained Source B"
     );
+    let (
+        history_harness,
+        current_harness,
+        history_owner_generation,
+        history_qualified,
+        history_source_generation,
+    ) = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            let history = snapshot
+                .catalog(composite_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let current = snapshot
+                .catalog(composite_key, false)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let owner = snapshot
+                .owner(composite_key)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(!owner.original);
+            assert!(owner.has_current);
+            let qualified = snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            let source_generation = crate::retention::source_generation(&history.sources)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            Ok((
+                history.harness,
+                current.harness,
+                owner.generation,
+                qualified,
+                source_generation,
+            ))
+        },
+    )
+    .expect("Source B withdrawal creates composite History beside Current");
+    assert_eq!(
+        history_harness, current_harness,
+        "History runtime qualification requires its same-harness Current owner"
+    );
+    assert!(
+        history_qualified,
+        "the exact admitted History owner and complete header qualify"
+    );
+    assert_eq!(history_owner_generation.len(), 64);
+    assert!(
+        history_owner_generation
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
+    let history_version = crate::slot_projection::VERSION as i64;
+    let history_source_generation = history_source_generation.into_bytes();
+    assert_eq!(history_source_generation.len(), 64);
+    let history_incomplete = false;
+    let history_request = crate::catalog::Request::parse(&format!(
+        "sid={}&scope=retained_history",
+        crate::viewer::percent_encode(composite_key)
+    ))
+    .expect("selected History request");
+
+    let update_history_header = |version: i64,
+                                 source_generation: Option<Vec<u8>>,
+                                 incomplete: bool| {
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let changed = tx
+                .driver
+                .execute(
+                    "UPDATE semon_pg_native_catalog_history_headers SET version=$4,source_generation=$5,incomplete=$6 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &history_owner_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                        &version,
+                        &source_generation,
+                        &incomplete,
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            if changed != 1 {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(())
+        })
+    };
+    let assert_history_header_refused =
+        |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
+            let composite_expected = incomplete
+                && version == history_version
+                && source_generation.as_deref() == Some(history_source_generation.as_slice());
+            update_history_header(version, source_generation.clone(), incomplete)
+                .expect("install exact History header corruption");
+            let qualification = super::super::snapshot::with_admitted_snapshot(
+                &pool,
+                &namespace,
+                &control,
+                &caught,
+                |snapshot| {
+                    let history = snapshot
+                        .catalog(composite_key, true)?
+                        .ok_or(StorageError::ScopeChanged)?;
+                    let owner = snapshot
+                        .owner(composite_key)?
+                        .ok_or(StorageError::ScopeChanged)?;
+                    assert!(!owner.original);
+                    assert!(owner.has_current);
+                    let current = snapshot
+                        .rows(&history_request)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                        .into_iter()
+                        .next()
+                        .ok_or(StorageError::ScopeChanged)?;
+                    assert_eq!(
+                        current.owner,
+                        Some(crate::storage::catalog::CatalogObservationOwner::Catalog)
+                    );
+                    assert_eq!(
+                        current.lifecycle,
+                        crate::model::summary::CatalogLifecycle::Current
+                    );
+                    assert_eq!(current.harness, history.harness);
+                    Ok((
+                        snapshot
+                            .history_qualified(&history)
+                            .map_err(|_| StorageError::ScopeChanged)?,
+                        snapshot
+                            .composite_history_identity_qualified(&current, &history)
+                            .map_err(|_| StorageError::ScopeChanged)?,
+                    ))
+                },
+            );
+            update_history_header(
+                history_version,
+                Some(history_source_generation.clone()),
+                history_incomplete,
+            )
+            .expect("restore exact admitted History header");
+            let (qualified, composite_qualified) =
+                qualification.expect("History header uses the admitted snapshot");
+            assert!(!qualified, "{reason}");
+            assert_eq!(
+                composite_qualified, composite_expected,
+                "{reason}: incomplete composite identity qualification"
+            );
+        };
+    assert_history_header_refused(
+        history_version + 1,
+        Some(history_source_generation.clone()),
+        history_incomplete,
+        "a mismatched History version refuses qualification",
+    );
+    let mut mismatched_source_generation = history_source_generation.clone();
+    mismatched_source_generation[0] = if mismatched_source_generation[0] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    assert_history_header_refused(
+        history_version,
+        Some(mismatched_source_generation),
+        history_incomplete,
+        "a same length mismatched History source generation refuses qualification",
+    );
+    assert_history_header_refused(
+        history_version,
+        Some(history_source_generation.clone()),
+        true,
+        "an incomplete History header refuses qualification",
+    );
+    let set_history_original = |original: bool| {
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            let changed = tx
+                .driver
+                .execute(
+                    "UPDATE semon_pg_native_catalog_history_owners SET original=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[
+                        &namespace.as_str().as_bytes(),
+                        &history_owner_generation.as_bytes(),
+                        &composite_key.as_bytes(),
+                        &original,
+                    ],
+                )
+                .map_err(sqlstate::error)?;
+            if changed != 1 {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(())
+        })
+    };
+    update_history_header(
+        history_version,
+        Some(history_source_generation.clone()),
+        true,
+    )
+    .expect("install otherwise qualifying incomplete composite header");
+    set_history_original(true).expect("install original History owner marker");
+    let original_owner_composite_qualified = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            let history = snapshot
+                .catalog(composite_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let current = snapshot
+                .rows(&history_request)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .into_iter()
+                .next()
+                .ok_or(StorageError::ScopeChanged)?;
+            let owner = snapshot
+                .owner(composite_key)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(owner.original);
+            snapshot
+                .composite_history_identity_qualified(&current, &history)
+                .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .expect("original History owner is read through admitted snapshot");
+    set_history_original(false).expect("restore composite History owner marker");
+    update_history_header(
+        history_version,
+        Some(history_source_generation.clone()),
+        history_incomplete,
+    )
+    .expect("restore exact admitted History header after original-owner check");
+    assert!(
+        !original_owner_composite_qualified,
+        "original History owners cannot use incomplete composite identity qualification"
+    );
+    let restored_history_qualified = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &caught,
+        |snapshot| {
+            let history = snapshot
+                .catalog(composite_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .expect("restored admitted History header");
+    assert!(restored_history_qualified);
     let parent = claude_parent.to_str().unwrap().to_owned();
     let counts: Vec<i64> = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
