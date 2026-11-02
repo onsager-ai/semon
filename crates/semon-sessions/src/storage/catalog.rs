@@ -1260,6 +1260,7 @@ fn plan_history_rows(
             .as_ref()
             .expect("missing sources require a previous row");
         let mut history = current.clone();
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         history.query = None;
         history.sources.extend(missing.values().cloned());
         history.native_ids = history
