@@ -12496,7 +12496,7 @@ fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert!(slot_count > 0 && slot_count <= 64);
+        assert!((1..=64).contains(&slot_count));
         assert!((0..1_048_576).contains(&slot_bytes));
     }
     drop(db);
