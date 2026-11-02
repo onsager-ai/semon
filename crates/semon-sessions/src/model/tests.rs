@@ -6500,8 +6500,7 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
     options.source = source.with_store(config).unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     let snapshot = || {
-        crate::storage::postgres::semantic_stage_test_snapshot(&pool, &namespace, &control)
-            .unwrap()
+        crate::storage::postgres::semantic_stage_test_snapshot(&pool, &namespace, &control).unwrap()
     };
 
     let initial = snapshot();
@@ -6512,7 +6511,11 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
         crate::events::Outcome::Conflict,
         "an empty probe with no active stage reports no resumable work"
     );
-    assert_eq!(snapshot(), initial, "an empty probe leaves storage unchanged");
+    assert_eq!(
+        snapshot(),
+        initial,
+        "an empty probe leaves storage unchanged"
+    );
 
     let paths = vec!["source-a.jsonl".to_owned()];
     let mut first = EventCache::open_scoped(&options.cache, &options.source).unwrap();
@@ -6526,9 +6529,7 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
 
     let mut exact_resume = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     assert_eq!(
-        exact_resume
-            .begin_semantic_stage(&paths, &runtime)
-            .unwrap(),
+        exact_resume.begin_semantic_stage(&paths, &runtime).unwrap(),
         crate::events::Outcome::Written,
         "a supplied nonempty seed list must match the active stage"
     );
@@ -6540,21 +6541,37 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
         crate::events::Outcome::Written,
         "an empty probe resumes the active stage"
     );
-    assert_eq!(snapshot(), active, "empty resume retains the original seeds");
-    let conflict = crate::events::StoreError::Configured(
-        crate::storage::StorageError::Conflict,
-    )
-    .to_string();
     assert_eq!(
-        resume.begin_semantic_stage(&[], "mismatched-runtime").unwrap_err().to_string(),
+        snapshot(),
+        active,
+        "empty resume retains the original seeds"
+    );
+    let conflict =
+        crate::events::StoreError::Configured(crate::storage::StorageError::Conflict).to_string();
+    assert_eq!(
+        resume
+            .begin_semantic_stage(&[], "mismatched-runtime")
+            .unwrap_err()
+            .to_string(),
         conflict,
     );
-    assert_eq!(snapshot(), active, "runtime mismatch leaves the stage unchanged");
     assert_eq!(
-        resume.begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime).unwrap_err().to_string(),
+        snapshot(),
+        active,
+        "runtime mismatch leaves the stage unchanged"
+    );
+    assert_eq!(
+        resume
+            .begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime)
+            .unwrap_err()
+            .to_string(),
         conflict,
     );
-    assert_eq!(snapshot(), active, "seed mismatch leaves the stage unchanged");
+    assert_eq!(
+        snapshot(),
+        active,
+        "seed mismatch leaves the stage unchanged"
+    );
 
     let mut successor = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     assert_eq!(
@@ -6568,7 +6585,11 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
         crate::events::Outcome::Conflict,
         "an empty probe does not resume an inactive stage"
     );
-    assert_eq!(snapshot(), inactive, "inactive probe leaves storage unchanged");
+    assert_eq!(
+        snapshot(),
+        inactive,
+        "inactive probe leaves storage unchanged"
+    );
     assert_eq!(
         successor
             .begin_semantic_stage(&["source-b.jsonl".to_owned()], &runtime)
@@ -6578,7 +6599,10 @@ fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
     let successor_stage = snapshot();
     assert_eq!(successor_stage.epoch, Some(epoch + 1));
     assert_eq!(
-        first.begin_semantic_stage(&[], &runtime).unwrap_err().to_string(),
+        first
+            .begin_semantic_stage(&[], &runtime)
+            .unwrap_err()
+            .to_string(),
         conflict,
     );
     assert_eq!(
