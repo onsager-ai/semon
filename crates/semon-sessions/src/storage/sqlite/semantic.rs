@@ -969,7 +969,7 @@ impl SemanticStaging {
 const SEMANTIC_SUPPORT_SCHEMA: &[(&str, &str)] = &[
     (
         "storage_semantic_publications",
-        "CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER NOT NULL,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,generation)) STRICT, WITHOUT ROWID;",
+        "CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,generation)) STRICT, WITHOUT ROWID;",
     ),
     (
         "storage_semantic_publication_generation",
@@ -992,6 +992,30 @@ const SEMANTIC_SUPPORT_SCHEMA: &[(&str, &str)] = &[
         "CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_delete BEFORE DELETE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END;",
     ),
 ];
+
+/// Validate the current authored receipt schema before an ordinary Catalog
+/// publisher inserts a receipt with no Stage epoch. This is validation only:
+/// an older NOT NULL shape is refused without DDL repair or migration.
+pub(crate) fn validate_publication_support(db: &Connection) -> Result<(), StorageError> {
+    for (name, sql) in SEMANTIC_SUPPORT_SCHEMA {
+        let expected = sql.replace(" IF NOT EXISTS", "");
+        let expected = expected.trim_end_matches(';');
+        let actual: Option<String> = db
+            .query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
+        if actual.as_deref() != Some(expected) {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+    }
+    super::proof_generations::validate(db)?;
+    super::catalog_namespace::validate_guard(db, "storage_semantic_publications")?;
+    Ok(())
+}
 
 /// Provision the current semantic profile only while enrolling a namespace.
 pub(crate) fn enroll(
@@ -3426,7 +3450,11 @@ impl Stage {
                 &tx,
                 ns,
                 &generation,
-                prepared,
+                super::proof_generations::PresentationInputs {
+                    rows: &prepared.rows,
+                    projections: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
+                },
                 selected_observed_at,
             ) {
                 Err(StorageError::HistoryRetentionBounds) => {
@@ -3441,7 +3469,11 @@ impl Stage {
                 &generation,
                 &proof_digest,
                 &presentations,
-                prepared,
+                super::proof_generations::PresentationInputs {
+                    rows: &prepared.rows,
+                    projections: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
+                },
             )
             .map_err(StoreError::Configured)?;
             tx.execute(
@@ -3483,8 +3515,13 @@ impl Stage {
                 &generation,
                 &proof_digest,
                 super::proof_generations::PreparedPresentations {
-                    prepared,
-                    rows: &presentations,
+                    inputs: super::proof_generations::PresentationInputs {
+                        rows: &prepared.rows,
+                        projections: Some(&prepared.transcripts),
+                        observations: prepared.presentation_observations(),
+                    },
+                    presentations: &presentations,
+                    outgoing_owners: &prepared.relationships.retired_owners,
                     overview_budget,
                 },
             )
@@ -3867,23 +3904,7 @@ impl Stage {
             )
             .map_err(failed)?;
         }
-        for (name, sql) in SEMANTIC_SUPPORT_SCHEMA {
-            let expected = sql.replace(" IF NOT EXISTS", "");
-            let expected = expected.trim_end_matches(';');
-            let actual: Option<String> = tx
-                .query_row(
-                    "SELECT sql FROM main.sqlite_schema WHERE name=?1",
-                    [name],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(failed)?;
-            if actual.as_deref() != Some(expected) {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-        }
-        super::proof_generations::validate(&tx)?;
-        super::catalog_namespace::validate_guard(&tx, "storage_semantic_publications")?;
+        validate_publication_support(&tx)?;
         for table in crate::events::store::configured::semantic_tables()
             .iter()
             .copied()

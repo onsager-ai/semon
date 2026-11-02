@@ -3749,6 +3749,129 @@ impl SqliteStore {
                     .map_err(failure)?;
             }
             stage("slots", &transaction);
+            let stream = owner
+                .config()
+                .expected_stream_epoch
+                .as_deref()
+                .ok_or(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged,
+                ))?;
+            if semantic.is_none()
+                && let (Some(projections), Some(observations)) =
+                    (publication.transcripts, publication.observations)
+                && !rows.is_empty()
+            {
+                crate::storage::sqlite::semantic::validate_publication_support(&transaction)
+                    .map_err(StoreError::Configured)?;
+                let observed_at: i64 = transaction
+                    .query_row(
+                        "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_observed_at') AND key='catalog_observed_at'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(failure)?
+                    .parse()
+                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                let captured = crate::storage::sqlite::proof_generations::capture_presentations(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    &generation,
+                    crate::storage::sqlite::proof_generations::PresentationInputs {
+                        rows,
+                        projections: Some(projections),
+                        observations: Some(observations),
+                    },
+                    observed_at,
+                )
+                .map_err(StoreError::Configured)?;
+                let projection_witness = projections
+                    .iter()
+                    .map(|projection| (&projection.key, &projection.slots, projection.repair))
+                    .collect::<Vec<_>>();
+                let base_bytes = serde_json::to_vec(&(
+                    "ordinary-catalog-presentation-v1",
+                    &generation,
+                    &metadata,
+                    &projection_witness,
+                    observations,
+                    &captured,
+                    observed_at,
+                ))
+                .map_err(failure)?;
+                let base = crate::storage::proof_codec::digest(&base_bytes);
+                let publication = crate::storage::sqlite::proof_generations::catalog_publication_id(
+                    owner.config().namespace.as_str(),
+                    &generation,
+                    &base,
+                )
+                .map_err(StoreError::Configured)?;
+                let proof_digest = crate::storage::sqlite::proof_generations::bind_presentations(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    &publication,
+                    &base,
+                    &captured,
+                    crate::storage::sqlite::proof_generations::PresentationInputs {
+                        rows,
+                        projections: Some(projections),
+                        observations: Some(observations),
+                    },
+                )
+                .map_err(StoreError::Configured)?;
+                let admission = i64::try_from(owner.admission())
+                    .map_err(|_| StoreError::Configured(crate::storage::StorageError::ScopeChanged))?;
+                let source_revision: i64 = transaction
+                    .query_row(
+                        "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                        [owner.config().namespace.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)?;
+                let claims_text = serde_json::to_string(&claims).map_err(failure)?;
+                let metadata_text = serde_json::to_string(&metadata).map_err(failure)?;
+                transaction
+                    .execute(
+                        "INSERT INTO main.storage_semantic_publications(namespace,generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
+                        params![
+                            owner.config().namespace.as_str(),
+                            publication,
+                            admission,
+                            previous,
+                            source_revision,
+                            proof_digest,
+                            claims_text,
+                            metadata_text
+                        ],
+                    )
+                    .map_err(failure)?;
+                let receipt_publication = crate::storage::sqlite::proof_generations::publish(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    owner.admission(),
+                    stream,
+                    &publication,
+                    &proof_digest,
+                    crate::storage::sqlite::proof_generations::PreparedPresentations {
+                        inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
+                            rows,
+                            projections: Some(projections),
+                            observations: Some(observations),
+                        },
+                        presentations: &captured,
+                        outgoing_owners: &withdrawn,
+                        overview_budget: &mut history_budget,
+                    },
+                );
+                match receipt_publication {
+                    Ok(()) => {}
+                    Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
+                        error,
+                    )) => return Err(StoreError::Configured(error)),
+                    Err(
+                        crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
+                    ) => return Ok(Outcome::Deferred),
+                }
+            }
             commit_boundary.capture(&transaction);
             for scope in ["current", "retained_history"] {
                 let incomplete: i64 = transaction
@@ -3812,14 +3935,6 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let stream =
-                owner
-                    .config()
-                    .expected_stream_epoch
-                    .as_deref()
-                    .ok_or(StoreError::Configured(
-                        crate::storage::StorageError::ScopeChanged,
-                    ))?;
             let mut grant_owners = std::collections::BTreeSet::new();
             grant_owners.extend(rows.iter().map(|row| row.key.clone()));
             grant_owners.extend(affected.iter().cloned());

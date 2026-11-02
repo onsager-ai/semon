@@ -101,9 +101,16 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
+pub(super) struct PresentationInputs<'a> {
+    pub(super) rows: &'a [CatalogRow],
+    pub(super) projections: Option<&'a [crate::slot_projection::Projection]>,
+    pub(super) observations: Option<&'a crate::storage::selected::PresentationObservations>,
+}
+
 pub(super) struct PreparedPresentations<'a> {
-    pub(super) prepared: &'a crate::model::PreparedSources,
-    pub(super) rows: &'a [(String, String)],
+    pub(super) inputs: PresentationInputs<'a>,
+    pub(super) presentations: &'a [(String, String)],
+    pub(super) outgoing_owners: &'a [CatalogRow],
     pub(super) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
@@ -167,15 +174,28 @@ pub(super) fn publish(
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
     let PreparedPresentations {
-        prepared,
-        rows: presentations,
+        inputs,
+        presentations: captured_presentations,
+        outgoing_owners,
         overview_budget,
     } = presentations;
+    let PresentationInputs {
+        rows,
+        projections,
+        ..
+    } = inputs;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-    for row in &prepared.rows {
+    for row in rows {
+        let presentation = captured_presentations
+            .iter()
+            .find(|(key, _)| key == &row.key)
+            .ok_or(StorageError::Unavailable)?;
         let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
-        let projection = prepared.transcripts.iter().find(|p| p.key == row.key);
+        let projection = projections
+            .unwrap_or_default()
+            .iter()
+            .find(|projection| projection.key == row.key);
         let slots = serde_json::to_string(&projection.map(|p| &p.slots))
             .map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
@@ -192,7 +212,7 @@ pub(super) fn publish(
             slots,
             prefix,
         };
-        // These values came directly from the prepared model in this owner
+        // These values came directly from the model inputs in this owner
         // transaction. Production does not decode this freshly encoded row.
         #[cfg(not(test))]
         let query_recipe: Option<String> = None;
@@ -215,10 +235,6 @@ pub(super) fn publish(
             ],
         )
         .map_err(failed)?;
-        let presentation = presentations
-            .iter()
-            .find(|(key, _)| key == &row.key)
-            .ok_or(StorageError::Unavailable)?;
         tx.execute(
             "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
             params![namespace, id.0, row.key, presentation.1],
@@ -260,7 +276,7 @@ pub(super) fn publish(
     // Outgoing owners lose Current references after custody. History refs are
     // either the exact local composition set or retention references copied
     // from an exact local Current grant. They never grant History origin.
-    for row in &prepared.relationships.retired_owners {
+    for row in outgoing_owners {
         retain_current_refs_for_unowned_history(
             tx,
             namespace,
@@ -3162,7 +3178,7 @@ pub(super) fn capture_presentations(
     tx: &Transaction<'_>,
     ns: &str,
     generation: &str,
-    prepared: &crate::model::PreparedSources,
+    inputs: PresentationInputs<'_>,
     observed_at: i64,
 ) -> Result<Vec<(String, String)>, StorageError> {
     #[cfg(test)]
@@ -3170,12 +3186,19 @@ pub(super) fn capture_presentations(
         return Err(StorageError::HistoryRetentionBounds);
     }
     use crate::storage::selected::{CapturedContext, PresentationWitness};
+    let PresentationInputs {
+        rows,
+        projections,
+        observations,
+    } = inputs;
     let lookup = super::selected::Context::owned(tx);
     let mut result = Vec::new();
     let mut bytes = 0usize;
-    for row in &prepared.rows {
-        let witness = if let Some(projection) =
-            prepared.transcripts.iter().find(|p| p.key == row.key)
+    for row in rows {
+        let witness = if let Some(projection) = projections
+            .unwrap_or_default()
+            .iter()
+            .find(|projection| projection.key == row.key)
         {
             let texts = projection
                 .slots
@@ -3208,10 +3231,7 @@ pub(super) fn capture_presentations(
             ]
             .into_iter()
             .collect();
-            let mut observations = prepared
-                .presentation_observations()
-                .cloned()
-                .ok_or(StorageError::Unavailable)?;
+            let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
             let context = CapturedContext::capture(
                 &lookup,
                 row,
@@ -3252,18 +3272,22 @@ pub(super) fn bind_presentations(
     publication: &str,
     base: &str,
     rows: &[(String, String)],
-    prepared: &crate::model::PreparedSources,
+    inputs: PresentationInputs<'_>,
 ) -> Result<String, StorageError> {
+    let PresentationInputs {
+        rows: catalog_rows,
+        projections,
+        observations,
+    } = inputs;
     let mut entries = Vec::new();
     for (key, text) in rows {
-        let row = prepared
-            .rows
+        let row = catalog_rows
             .iter()
             .find(|row| &row.key == key)
             .ok_or(StorageError::Unavailable)?;
         let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
-        let projection = prepared
-            .transcripts
+        let projection = projections
+            .unwrap_or_default()
             .iter()
             .find(|projection| &projection.key == key);
         let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
@@ -3275,7 +3299,7 @@ pub(super) fn bind_presentations(
     }
     let manifest = serde_json::to_string(&PresentationManifest {
         entries,
-        observations: prepared.presentation_observations().cloned(),
+        observations: observations.cloned(),
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
@@ -3289,6 +3313,24 @@ pub(super) fn bind_presentations(
     .map_err(failed)?;
     Ok(joined)
 }
+
+/// Give an ordinary Catalog receipt an identity bound to its exact metadata
+/// generation and finalized projection/presentation root.
+pub(super) fn catalog_publication_id(
+    namespace: &str,
+    catalog_generation: &str,
+    proof_digest: &str,
+) -> Result<String, StorageError> {
+    let identity = serde_json::to_vec(&(
+        "catalog-proof-publication-v1",
+        namespace,
+        catalog_generation,
+        proof_digest,
+    ))
+    .map_err(|_| StorageError::Unavailable)?;
+    Ok(proof_codec::digest(&identity))
+}
+
 pub(super) fn replayed_presentation(
     db: &Connection,
     ns: &str,
