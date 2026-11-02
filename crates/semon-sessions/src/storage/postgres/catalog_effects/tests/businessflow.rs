@@ -2198,13 +2198,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     let mut trusted_cache =
         EventCache::open_scoped(&trusted_options.cache, &trusted_options.source).unwrap();
-    let trusted_prefix = crate::model::prepare_sources(
-        &trusted_options,
-        &mut trusted_cache,
-        &inputs,
-        1790812802000,
-    )
-    .unwrap();
+    let trusted_prefix =
+        crate::model::prepare_sources(&trusted_options, &mut trusted_cache, &inputs, 1790812802000)
+            .unwrap();
     trusted_cache
         .publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
@@ -2234,7 +2230,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         ledger.stat.size,
     )
     .unwrap();
-    assert!(trusted_writer.intent().continuation.is_some());
     let mut trusted_file = fs::OpenOptions::new()
         .append(true)
         .open(&trusted_path)
@@ -2245,13 +2240,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     trusted_writer
         .complete(ledger.stat.size + source_append.len() as u64)
         .unwrap();
-    let trusted_successor = crate::model::prepare_sources(
-        &trusted_options,
-        &mut trusted_cache,
-        &inputs,
-        1790812803000,
-    )
-    .unwrap();
+    let trusted_successor =
+        crate::model::prepare_sources(&trusted_options, &mut trusted_cache, &inputs, 1790812803000)
+            .unwrap();
+    assert!(
+        !trusted_successor
+            .presentation_observations()
+            .and_then(|observations| observations.verified_continuations())
+            .expect("SQLite continuation observations")
+            .is_empty(),
+        "SQLite successor carries a verified continuation"
+    );
     trusted_cache
         .publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
@@ -2263,9 +2262,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .unwrap()
         .expect("SQLite trusted successor generation");
-    let mut trusted_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(recent_machine.into(), trusted_options.clone())]),
-    ));
+    let mut trusted_query =
+        crate::Query::from_sources(std::sync::Arc::new(crate::SessionSources::with_machines(
+            vec![(recent_machine.into(), trusted_options.clone())],
+        )));
     let append_history_body = trusted_query
         .call_at(
             "read_transcript",
