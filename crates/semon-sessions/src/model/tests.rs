@@ -5724,7 +5724,10 @@ fn write_bidirectional_message_page_fixture(home: &Home, rounds: i64) {
 
 fn staged_publication_refuses_large_bidirectional_message_pages() {
     let home = Home::new();
-    home.top("prior", &[human("prior", ts(5, 0), "Last admitted Catalog")]);
+    home.top(
+        "prior",
+        &[human("prior", ts(5, 0), "Last admitted Catalog")],
+    );
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
     let mut complete = false;
     for _ in 0..128 {
@@ -5755,7 +5758,10 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(serde_json::from_str::<Value>(&prior).unwrap()["name"], "prior");
+        assert_eq!(
+            serde_json::from_str::<Value>(&prior).unwrap()["name"],
+            "prior"
+        );
         db.query_row(
             "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
             [],
@@ -5868,7 +5874,12 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     enroll_stage_inventory(&home.options, &inputs);
     let mut paths = selected_inputs
         .iter()
-        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     paths.sort();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
@@ -5963,7 +5974,11 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
             .unwrap();
         let mut rows = statement
             .query_map([], |row| {
-                Ok(format!("{}\u{1f}{}", row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok(format!(
+                    "{}\u{1f}{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
             })
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
@@ -5984,13 +5999,18 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         let batch_inputs = selected_inputs
             .iter()
             .filter(|input| {
-                selected.contains(&input.full_path(&home.options).to_string_lossy().into_owned())
+                selected.contains(
+                    &input
+                        .full_path(&home.options)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
             })
             .cloned()
             .collect::<Vec<_>>();
         assert_eq!(batch_inputs.len(), batch.paths.len());
-        let prepared = prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW)
-            .unwrap();
+        let prepared =
+            prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
         if batch.phase == relation_stage::Phase::Publication {
             let before_record = snapshot();
             match stage.record(&batch, prepared.prepared()) {
@@ -6020,7 +6040,9 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
                         }
                         Err(error) => panic!("unexpected typed publication failure: {error:?}"),
                         Ok((crate::events::Outcome::Deferred, None)) => deferred = true,
-                        Ok(result) => panic!("oversized fixture unexpectedly published: {result:?}"),
+                        Ok(result) => {
+                            panic!("oversized fixture unexpectedly published: {result:?}")
+                        }
                     }
                 }
                 Ok(outcome) => panic!("unexpected publication record outcome: {outcome:?}"),
@@ -6034,8 +6056,14 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         cache.end_scan();
         cache.release_published_indexes();
     }
-    assert!(deferred, "oversized aggregate must first reduce its group bound");
-    assert!(refused, "one oversized bidirectional owner must refuse publication");
+    assert!(
+        deferred,
+        "oversized aggregate must first reduce its group bound"
+    );
+    assert!(
+        refused,
+        "one oversized bidirectional owner must refuse publication"
+    );
     assert_eq!(snapshot().0, prior_head, "refusal preserves Catalog head");
 
     drop(stage);
@@ -6078,8 +6106,7 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         )
         .unwrap();
         assert_eq!(
-            crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace)
-                .unwrap(),
+            crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
             None,
             "stale {label} fence must not report a publication blocker"
         );
@@ -6090,10 +6117,7 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         .unwrap();
     };
     for (field, stale) in [
-        (
-            "epoch",
-            json!(refusal["epoch"].as_i64().unwrap() + 1),
-        ),
+        ("epoch", json!(refusal["epoch"].as_i64().unwrap() + 1)),
         (
             "source_revision",
             json!(refusal["source_revision"].as_i64().unwrap() + 1),
@@ -6106,9 +6130,8 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         reject_marker(invalid, field);
     }
 
-    let live_blocker = || {
-        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap()
-    };
+    let live_blocker =
+        || crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap();
     let assert_hint_unchanged = || {
         let current: String = db
             .query_row(
@@ -6117,7 +6140,10 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current, hint_text, "live fence checks preserve refusal bytes");
+        assert_eq!(
+            current, hint_text,
+            "live fence checks preserve refusal bytes"
+        );
     };
 
     let source_revision: i64 = db
@@ -6180,7 +6206,11 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
         1
     );
     assert_hint_unchanged();
-    assert_eq!(live_blocker(), None, "live stage runtime fences the refusal");
+    assert_eq!(
+        live_blocker(),
+        None,
+        "live stage runtime fences the refusal"
+    );
     assert_eq!(
         db.execute(
             "UPDATE main.catalog_semantic_stage SET runtime=?1 WHERE namespace=?2",
@@ -6243,7 +6273,10 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     assert_eq!(page.status, 200);
     let body: Value = serde_json::from_slice(&page.body).unwrap();
     assert_eq!(body["completeness"]["state"], "partial");
-    assert_eq!(body["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(
+        body["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
     assert_eq!(body["completeness"]["blocker"]["retryable"], false);
     assert_eq!(body["freshness"], "updating");
     let items = body["items"].as_array().unwrap();
@@ -6265,7 +6298,10 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     assert_eq!(search.status, 200);
     let search: Value = serde_json::from_slice(&search.body).unwrap();
     assert_eq!(search["completeness"]["state"], "partial");
-    assert_eq!(search["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(
+        search["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
     assert_eq!(search["freshness"], "updating");
     assert_eq!(search["items"][0]["key"], "prior");
     assert_eq!(search["search"]["index_complete"], false);
@@ -6273,12 +6309,9 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 
     let mut complete_request = crate::catalog::Request::parse("limit=100").unwrap();
     complete_request.require_complete = true;
-    let complete = crate::storage::read_local_catalog_page(
-        &home.options,
-        "fixture",
-        &complete_request,
-    )
-    .unwrap();
+    let complete =
+        crate::storage::read_local_catalog_page(&home.options, "fixture", &complete_request)
+            .unwrap();
     assert_eq!(complete.status, 503);
     let complete: Value = serde_json::from_slice(&complete.body).unwrap();
     assert_eq!(complete["error"]["code"], "publication_too_large");
