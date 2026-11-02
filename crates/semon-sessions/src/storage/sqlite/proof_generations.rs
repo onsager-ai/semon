@@ -111,7 +111,6 @@ pub(crate) struct PresentationInputs<'a> {
 pub(crate) struct PreparedPresentations<'a> {
     pub(crate) inputs: PresentationInputs<'a>,
     pub(crate) presentations: &'a [(String, String)],
-    pub(crate) outgoing_owners: &'a [CatalogRow],
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
@@ -177,7 +176,6 @@ pub(crate) fn publish(
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
-        outgoing_owners,
         overview_budget,
     } = presentations;
     let PresentationInputs {
@@ -272,9 +270,22 @@ pub(crate) fn publish(
         // Reconstructing them from path/ledger matches would retain unrelated
         // generations and let imported proof sources acquire local authority.
     }
-    // Outgoing owners lose Current references after custody. History refs are
-    // either the exact local composition set or retention references copied
-    // from an exact local Current grant. They never grant History origin.
+    Ok(())
+}
+
+/// Retain outgoing owners' exact Current receipts after History composition,
+/// then release their Current references before grant reconciliation.
+pub(crate) fn retain_outgoing_history_refs(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    outgoing_owners: &[CatalogRow],
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    // History refs are either the exact local composition set or retention
+    // references copied from an exact local Current grant. They never grant
+    // History origin.
     for row in outgoing_owners {
         retain_current_refs_for_unowned_history(
             tx,
@@ -284,7 +295,11 @@ pub(crate) fn publish(
             stream,
             overview_budget,
         )?;
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+        tx.execute(
+            "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+            params![namespace, row.key],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
@@ -460,21 +475,35 @@ impl PublicationReceiptRef {
     }
 }
 
+/// Exact owner and publication context used to authenticate stored receipts.
+pub(crate) struct PublicationReceiptRequest<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) session_key: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) publication_admission: u64,
+    pub(crate) previous: &'a CatalogRow,
+    pub(crate) exact_owner_metadata: &'a str,
+    pub(crate) kind: PublicationReceiptRef,
+}
+
 /// Authenticate local publication receipts that may supply predecessor
 /// slots. Current ownership also requires its exact native observation grant;
 /// retained History ownership requires the durable local History reference.
 /// The full CWD fingerprint is checked against an exact path-to-CWD map.
 pub(crate) fn verified_publication_receipts(
     db: &Connection,
-    namespace: &str,
-    session_key: &str,
-    stream: &str,
-    publication_admission: u64,
-    previous: &CatalogRow,
-    exact_owner_metadata: &str,
-    kind: PublicationReceiptRef,
+    request: PublicationReceiptRequest<'_>,
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
+    let PublicationReceiptRequest {
+        namespace,
+        session_key,
+        stream,
+        publication_admission,
+        previous,
+        exact_owner_metadata,
+        kind,
+    } = request;
     if kind == PublicationReceiptRef::History {
         let normalized = normalized_owner_metadata(exact_owner_metadata, session_key)?;
         if !has_local_history_origin(

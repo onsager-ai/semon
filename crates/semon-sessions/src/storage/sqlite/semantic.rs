@@ -3850,9 +3850,28 @@ impl Stage {
                         observations: prepared.presentation_observations(),
                     },
                     presentations: &presentations,
-                    outgoing_owners: &prepared.relationships.retired_owners,
                     overview_budget,
                 },
+            )
+            .map_err(|error| match error {
+                super::proof_generations::PublicationError::Storage(error) => {
+                    StoreError::Configured(error)
+                }
+                super::proof_generations::PublicationError::BudgetOverflow => {
+                    refuse(PUBLICATION_GROUP_BUDGET)
+                }
+            })?;
+            super::proof_generations::retain_outgoing_history_refs(
+                &tx,
+                ns,
+                self.source.admission,
+                self.source
+                    .config
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+                &prepared.relationships.retired_owners,
+                overview_budget,
             )
             .map_err(|error| match error {
                 super::proof_generations::PublicationError::Storage(error) => {

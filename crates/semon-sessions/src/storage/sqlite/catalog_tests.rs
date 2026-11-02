@@ -11984,9 +11984,7 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 
 #[test]
 fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
-    use crate::storage::{
-        proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore,
-    };
+    use crate::storage::{proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore};
 
     let fixture = Fixture::new();
     let first = fixture.source("first");
@@ -12016,11 +12014,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         .config(&fixture.options.cache)
         .unwrap();
     let semantic = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
-    let runtime = semantic
-        .reader_binding()
-        .unwrap()
-        .reader_runtime()
-        .unwrap();
+    let runtime = semantic.reader_binding().unwrap().reader_runtime().unwrap();
 
     let (
         original_slots,
@@ -12115,8 +12109,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             )
             .unwrap();
         assert_eq!(
-            selected.snapshot.publication_generation,
-            receipt.0,
+            selected.snapshot.publication_generation, receipt.0,
             "the selected lease keeps its receipt identity"
         );
         assert_eq!(
@@ -12282,9 +12275,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             == Some("repeated-history")
     }));
     assert_eq!(repeated_refs, history_refs);
-    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(
-        original_refs[0].0.clone(),
-    );
+    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(original_refs[0].0.clone());
     assert!(repeated_refs.iter().any(|(id, _)| id == &retained_id.0));
     let retained_lease = runtime
         .selected_generation("first", &retained_id, &"5".repeat(64), 60_000)
@@ -12314,10 +12305,12 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         serde_json::to_string(&original_selected_slots).unwrap(),
         "History opens the exact retained receipt's original slots"
     );
-    assert!(retained
-        .slots
-        .iter()
-        .any(|slot| slot.source_paths().contains(&&first_copy)));
+    assert!(
+        retained
+            .slots
+            .iter()
+            .any(|slot| slot.source_paths().contains(&&first_copy))
+    );
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
     let runtime = binding.runtime_binding_at(&tx).unwrap();
@@ -12332,6 +12325,83 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     assert_eq!(repeated_grant.0, repeated_digest);
     assert_eq!(repeated_grant.1, i64::try_from(runtime.admission).unwrap());
     assert_eq!(repeated_grant.2, runtime.stream_epoch);
+}
+
+#[test]
+fn ordinary_empty_catalog_moves_current_receipt_to_history() {
+    let fixture = Fixture::new();
+    let source = fixture.source("receipt-owner");
+    fixture.publish_existing();
+
+    let current_refs = {
+        let db = fixture.db();
+        let refs = db
+            .prepare(
+                "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(!refs.is_empty(), "ordinary publication must issue a Current receipt");
+        let history_count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 0);
+        refs
+    };
+
+    fs::remove_file(source).unwrap();
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_count, 0, "withdrawn owner must release Current refs");
+    let history_refs = db
+        .prepare(
+            "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        history_refs, current_refs,
+        "empty ordinary publication must retain the exact outgoing receipt"
+    );
+    let history_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_count, 0, "ordinary output should be empty");
 }
 
 #[test]
