@@ -84,10 +84,43 @@ jobs:
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::semantic_stage::publication_refusal_tests::aggregate_and_count_only_refusals_remain_busy -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-oversized-bounds.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-oversized-bounds.log"
       - name: PostgreSQL Catalog batch pagination
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_catalog_page_crosses_batch_boundary_with_tied_timestamps -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-batch-pagination.log"
+      - name: PostgreSQL Catalog search parity and refusal tests
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::pg_catalog124_ -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-search-counts.log"
+          grep -F 'test result: ok. 5 passed; 0 failed;' "$RUNNER_TEMP/477-pg-search-counts.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::source_journal::tests::pg_catalog_search_ -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-catalog-search.log"
+          grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/477-pg-catalog-search.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::source_journal::tests::pg_codex_header_search_projection_tracks_metadata_commit_and_delete -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-header-search.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-header-search.log"
+      - name: Explain repaired count queries under the restricted role
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/477-explain.sql"
+          from pathlib import Path
+          import re
+          source = Path('crates/semon-sessions/src/storage/postgres/catalog_effects/search.rs').read_text()
+          queries = re.findall(r'query_one\("(WITH memberships AS MATERIALIZED [^"\n]+)"', source)
+          assert len(queries) == 2
+          print("SELECT encode(namespace,'hex') AS ns,encode(generation,'hex') AS generation FROM semon_pg_native_catalog_search_documents WHERE convert_from(namespace,'UTF8') LIKE 'pg-page-batches-%' GROUP BY namespace,generation HAVING count(*)=220 LIMIT 1 \\gset")
+          print("\\connect 'host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres'")
+          print("BEGIN; SET LOCAL semon.namespace = :'ns';")
+          print("SELECT current_user,rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user;")
+          for query in queries:
+              query = query.replace('$1::bytea', "decode(:'ns','hex')").replace('$1', "decode(:'ns','hex')").replace('$2', "decode(:'generation','hex')").replace('$3', "convert_to('current','UTF8')")
+              print('EXPLAIN (ANALYZE, BUFFERS, TIMING OFF) ' + query + ';')
+          print('ROLLBACK;')
+          PY
+          PGPASSWORD=ephemeral-ci-admin psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -f "$RUNNER_TEMP/477-explain.sql" 2>&1 | tee "$RUNNER_TEMP/477-repaired-plans.log"
       - name: Formatting
         id: formatting
         if: ${{ !cancelled() }}
