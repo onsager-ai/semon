@@ -1228,7 +1228,9 @@ fn plan_history_rows(
         let mut missing = BTreeMap::new();
         for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
             if !paths.contains(&source.path)
-                && !snapshot.relocated.contains(&source.path.to_string_lossy().into_owned())
+                && !snapshot
+                    .relocated
+                    .contains(&source.path.to_string_lossy().into_owned())
             {
                 missing.insert(source.path.clone(), source.clone());
             }
@@ -1248,7 +1250,9 @@ fn plan_history_rows(
             continue;
         }
 
-        let old = old.as_ref().expect("missing sources require a previous row");
+        let old = old
+            .as_ref()
+            .expect("missing sources require a previous row");
         let mut history = current.clone();
         history.query = None;
         history.sources.extend(missing.values().cloned());
@@ -1261,7 +1265,7 @@ fn plan_history_rows(
             .collect();
 
         let mut slots = projection.slots.clone();
-        let mut incomplete = false;
+        let mut incomplete;
         let mut invalid_predecessor = false;
         let mut receipt_ids = BTreeSet::new();
         let mut capture_cwds = snapshot.current_cwds.clone();
@@ -1271,7 +1275,9 @@ fn plan_history_rows(
             .is_some_and(|(version, generation, _)| {
                 *version == VERSION
                     && generation.as_deref()
-                        == crate::retention::source_generation(&old.sources).ok().as_deref()
+                        == crate::retention::source_generation(&old.sources)
+                            .ok()
+                            .as_deref()
             });
         if qualified {
             incomplete = snapshot
@@ -1370,10 +1376,7 @@ fn plan_history_rows(
                         ambiguous = true;
                         break;
                     };
-                    if retained_cwd
-                        .as_ref()
-                        .is_some_and(|saved| saved != value)
-                    {
+                    if retained_cwd.as_ref().is_some_and(|saved| saved != value) {
                         ambiguous = true;
                         break;
                     }
@@ -1613,7 +1616,10 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         let old = old_text
             .as_deref()
             .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
-        if old.as_ref().is_some_and(|old| old.harness != current.harness) {
+        if old
+            .as_ref()
+            .is_some_and(|old| old.harness != current.harness)
+        {
             let old = old.as_ref().unwrap();
             for source in &old.sources {
                 store.retain_source(old, source)?;
@@ -1652,7 +1658,9 @@ pub(crate) fn publish_history_rows<P: CompositeHistoryStore>(
         let qualified = header.as_ref().is_some_and(|(version, hash, _)| {
             *version == VERSION
                 && hash.as_deref()
-                    == crate::retention::source_generation(&old.sources).ok().as_deref()
+                    == crate::retention::source_generation(&old.sources)
+                        .ok()
+                        .as_deref()
         });
         let mut incomplete = !qualified;
         if qualified {
@@ -1779,8 +1787,8 @@ pub(crate) fn publish_history_composition<P: VerifiedHistoryCompositionStore>(
 mod history_composition_tests {
     use super::*;
     use crate::slot_projection::{File, Projection, Recipe, SavedSlot, VERSION};
-    use std::collections::{BTreeMap, BTreeSet};
     use std::cell::{Cell, RefCell};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     fn source(path: &str, native_id: &str) -> CatalogSource {
@@ -1902,11 +1910,7 @@ mod history_composition_tests {
             self.effects.set(self.effects.get() + 1);
             Ok(())
         }
-        fn relocated(
-            &self,
-            _: &CatalogSource,
-            _: &[CatalogSource],
-        ) -> Result<bool, Self::Error> {
+        fn relocated(&self, _: &CatalogSource, _: &[CatalogSource]) -> Result<bool, Self::Error> {
             Ok(false)
         }
         fn clear(&self, _: &str) -> Result<(), Self::Error> {
@@ -2003,7 +2007,11 @@ mod history_composition_tests {
             previous: Some(serde_json::to_string(&original).unwrap()),
             history_exists: false,
             recipe_history: false,
-            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_header: Some((
+                VERSION,
+                Some(crate::retention::source_generation(&original.sources).unwrap()),
+                false,
+            )),
             recipe_slots: vec![slot_a_text.clone(), slot_b_text.clone()],
             relocated: BTreeSet::new(),
             receipts: receipt_ids.clone(),
@@ -2023,11 +2031,24 @@ mod history_composition_tests {
         );
         assert_eq!(
             first_slots,
-            &[slot_a_text.clone(), slot_b_text.clone(), slot_c_text.clone()]
+            &[
+                slot_a_text.clone(),
+                slot_b_text.clone(),
+                slot_c_text.clone()
+            ]
         );
-        assert_eq!(first_cwds, &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()]));
-        let HistoryCompositionStep::Compose { metadata, generation, .. } = &first_plan.steps[0]
-        else { unreachable!() };
+        assert_eq!(
+            first_cwds,
+            &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()])
+        );
+        let HistoryCompositionStep::Compose {
+            metadata,
+            generation,
+            ..
+        } = &first_plan.steps[0]
+        else {
+            unreachable!()
+        };
         let first_history: CatalogRow = serde_json::from_str(metadata).unwrap();
         let first_generation = generation.clone();
 
@@ -2043,7 +2064,9 @@ mod history_composition_tests {
             generation: metadata_only_generation,
             ..
         } = &metadata_only_plan.steps[0]
-        else { unreachable!() };
+        else {
+            unreachable!()
+        };
         assert_eq!(metadata_only_generation, &first_generation);
         assert_ne!(metadata_only_metadata, metadata);
 
@@ -2059,7 +2082,11 @@ mod history_composition_tests {
             previous: Some(serde_json::to_string(&first_history).unwrap()),
             history_exists: true,
             recipe_history: true,
-            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&first_history.sources).unwrap()), false)),
+            recipe_header: Some((
+                VERSION,
+                Some(crate::retention::source_generation(&first_history.sources).unwrap()),
+                false,
+            )),
             recipe_slots: first_slots.to_vec(),
             relocated: BTreeSet::new(),
             receipts: receipt_ids,
@@ -2078,9 +2105,13 @@ mod history_composition_tests {
             &["cwd-only-receipt".to_owned(), "slot-receipt".to_owned()]
         );
         assert_eq!(second_slots, &[slot_a_text, slot_b_text, slot_c_text]);
-        assert_eq!(second_cwds, &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()]));
-        let HistoryCompositionStep::Compose { generation, .. } = &second_plan.steps[0]
-        else { unreachable!() };
+        assert_eq!(
+            second_cwds,
+            &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()])
+        );
+        let HistoryCompositionStep::Compose { generation, .. } = &second_plan.steps[0] else {
+            unreachable!()
+        };
         assert_ne!(generation, &first_generation);
     }
 
@@ -2104,7 +2135,11 @@ mod history_composition_tests {
             previous: Some(previous),
             history_exists: true,
             recipe_history: true,
-            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_header: Some((
+                VERSION,
+                Some(crate::retention::source_generation(&original.sources).unwrap()),
+                false,
+            )),
             recipe_slots: vec![slot_text.clone()],
             relocated: BTreeSet::new(),
             receipts: Vec::new(),
@@ -2160,7 +2195,11 @@ mod history_composition_tests {
             previous: Some(serde_json::to_string(&original).unwrap()),
             history_exists: false,
             recipe_history: false,
-            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_header: Some((
+                VERSION,
+                Some(crate::retention::source_generation(&original.sources).unwrap()),
+                false,
+            )),
             recipe_slots: vec![serde_json::to_string(&slot_a).unwrap()],
             relocated: BTreeSet::new(),
             receipts: vec![receipt],
@@ -2186,11 +2225,17 @@ mod history_composition_tests {
             &mut budget,
         )
         .unwrap();
-        captures.values.insert(current.key.clone(), "capture".into());
-        assert!(matches!(plan.steps.as_slice(), [HistoryCompositionStep::Compose { .. }]));
+        captures
+            .values
+            .insert(current.key.clone(), "capture".into());
+        assert!(matches!(
+            plan.steps.as_slice(),
+            [HistoryCompositionStep::Compose { .. }]
+        ));
 
         store.snapshot.borrow_mut().receipts.clear();
-        let mut writer_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let mut writer_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         assert!(
             !publish_history_composition(
                 &store,
