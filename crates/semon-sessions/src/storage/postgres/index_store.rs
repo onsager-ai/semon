@@ -132,7 +132,9 @@ impl IndexStore for NativeIndex {
                 super::semantic_stage::begin(tx, paths, runtime, self.semantic_epoch)
             })
             .map_err(err)?;
-        self.semantic_epoch = Some(epoch);
+        if let Some(epoch) = epoch {
+            self.semantic_epoch = Some(epoch);
+        }
         Ok(outcome)
     }
     fn semantic_batch(
@@ -160,11 +162,20 @@ impl IndexStore for NativeIndex {
         let _withdrawal_guard = prepared
             .withdrawal_guard()
             .map_err(|_| err(StorageError::Conflict))?;
-        self.pool
+        let result = self
+            .pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::semantic_stage::record(tx, batch, prepared)
-            })
-            .map_err(err)
+            });
+        #[cfg(test)]
+        if result.is_err() {
+            super::semantic_stage::capture_after_refusal(
+                &self.pool,
+                &self.namespace,
+                &self.control,
+            );
+        }
+        result.map_err(err)
     }
     fn publish_semantic_catalog(
         &mut self,

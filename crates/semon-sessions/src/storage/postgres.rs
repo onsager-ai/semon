@@ -81,6 +81,35 @@ fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
 mod tests;
 
 #[cfg(test)]
+pub(crate) fn test_fixture_pool() -> PgPool {
+    tests::fixture(|_| {}).0
+}
+
+#[cfg(test)]
+pub(crate) fn take_semantic_stage_save_diagnostic(
+    namespace: &str,
+) -> Option<semantic_stage::SaveDiagnostic> {
+    semantic_stage::take_save_diagnostic(namespace)
+}
+
+#[cfg(test)]
+pub(crate) use semantic_stage::StageSnapshot as SemanticStageTestSnapshot;
+
+#[cfg(test)]
+pub(crate) fn semantic_stage_test_snapshot(
+    pool: &PgPool,
+    namespace: &super::LogicalSourceNamespace,
+    control: &PgCancellation,
+) -> Result<SemanticStageTestSnapshot, super::StorageError> {
+    pool.transaction(
+        namespace,
+        txn::TxnKind::ReadSnapshot,
+        control,
+        semantic_stage::test_snapshot,
+    )
+}
+
+#[cfg(test)]
 mod native_ingest_tests;
 
 #[cfg(test)]
