@@ -462,6 +462,19 @@ pub(crate) struct HistoryCompositionSnapshot {
     pub(crate) unavailable: bool,
 }
 
+/// Inputs for the verified History projection and ownership write.
+#[derive(Clone, Copy)]
+pub(crate) struct VerifiedHistoryComposition<'a> {
+    pub(crate) key: &'a str,
+    pub(crate) generation: &'a str,
+    pub(crate) sources: &'a str,
+    pub(crate) metadata: &'a str,
+    pub(crate) texts: &'a [String],
+    pub(crate) incomplete: bool,
+    pub(crate) receipt_ids: &'a [String],
+    pub(crate) capture: &'a str,
+}
+
 /// The prewriter and writer derive this same deterministic plan. Slot texts
 /// enter it only from `VerifiedHistoryReceipt`; a changed preimage therefore
 /// prevents composition before any History owner or slot is replaced.
@@ -546,14 +559,7 @@ pub(crate) trait VerifiedHistoryCompositionStore: CompositeHistoryStore {
     ) -> Result<HistoryCompositionSnapshot, Self::Error>;
     fn composed_verified(
         &self,
-        key: &str,
-        generation: &str,
-        sources: &str,
-        metadata: &str,
-        texts: &[String],
-        incomplete: bool,
-        receipt_ids: &[String],
-        capture: &str,
+        composition: VerifiedHistoryComposition<'_>,
     ) -> Result<(), Self::Error>;
 }
 
@@ -1438,7 +1444,7 @@ fn plan_history_rows(
     }
     let preimage = serde_json::to_vec(&(
         rows.values()
-            .map(|row| serde_json::to_string(row))
+            .map(serde_json::to_string)
             .collect::<Result<Vec<_>, _>>()?,
         projections
             .iter()
@@ -1576,16 +1582,16 @@ fn apply_history_composition<P: VerifiedHistoryCompositionStore>(
                         store.retain_source(&row, source)?;
                     }
                 }
-                store.composed_verified(
+                store.composed_verified(VerifiedHistoryComposition {
                     key,
                     generation,
                     sources,
                     metadata,
-                    slots,
-                    *incomplete,
+                    texts: slots,
+                    incomplete: *incomplete,
                     receipt_ids,
                     capture,
-                )?;
+                })?;
             }
         }
     }
@@ -1768,6 +1774,7 @@ pub(crate) fn apply_prepared_history_composition<P: VerifiedHistoryCompositionSt
 
 /// Recompute the deterministic plan inside the writer fence. A mismatch leaves
 /// every existing History owner and slot untouched; Current can still publish.
+#[cfg(test)]
 pub(crate) fn publish_history_composition<P: VerifiedHistoryCompositionStore>(
     store: &P,
     rows: &[CatalogRow],
@@ -1950,14 +1957,7 @@ mod history_composition_tests {
         }
         fn composed_verified(
             &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &[String],
-            _: bool,
-            _: &[String],
-            _: &str,
+            _: VerifiedHistoryComposition<'_>,
         ) -> Result<(), Self::Error> {
             self.effects.set(self.effects.get() + 1);
             Ok(())

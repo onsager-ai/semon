@@ -465,16 +465,18 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                 };
                 match super::proof_generations::verified_publication_receipts(
                     self.db,
-                    self.namespace,
-                    &current.key,
-                    stream,
-                    self.admission,
-                    previous_row,
-                    exact_owner_metadata,
-                    if history_exists {
-                        super::proof_generations::PublicationReceiptRef::History
-                    } else {
-                        super::proof_generations::PublicationReceiptRef::Current
+                    super::proof_generations::PublicationReceiptRequest {
+                        namespace: self.namespace,
+                        session_key: &current.key,
+                        stream,
+                        publication_admission: self.admission,
+                        previous: previous_row,
+                        exact_owner_metadata,
+                        kind: if history_exists {
+                            super::proof_generations::PublicationReceiptRef::History
+                        } else {
+                            super::proof_generations::PublicationReceiptRef::Current
+                        },
                     },
                     budget,
                 )
@@ -495,15 +497,18 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
 
     fn composed_verified(
         &self,
-        key: &str,
-        generation: &str,
-        sources: &str,
-        metadata: &str,
-        texts: &[String],
-        incomplete: bool,
-        receipt_ids: &[String],
-        capture: &str,
+        composition: crate::storage::catalog::VerifiedHistoryComposition<'_>,
     ) -> rusqlite::Result<()> {
+        let crate::storage::catalog::VerifiedHistoryComposition {
+            key,
+            generation,
+            sources,
+            metadata,
+            texts,
+            incomplete,
+            receipt_ids,
+            capture,
+        } = composition;
         #[cfg(test)]
         eprintln!("catalog_history_probe method=composite_composed");
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -555,7 +560,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
 #[cfg(test)]
 mod verified_history_tests {
     use super::*;
-    use crate::storage::catalog::VerifiedHistoryCompositionStore;
+    use crate::storage::catalog::{VerifiedHistoryComposition, VerifiedHistoryCompositionStore};
     use crate::storage::selected::PresentationObservations;
     use std::collections::BTreeSet;
 
@@ -653,16 +658,16 @@ mod verified_history_tests {
         let texts = vec!["saved-slot".to_owned()];
         let capture = runtime_capture(&first);
         history
-            .composed_verified(
-                &first.key,
-                "same-generation",
-                &source_generation,
-                &first_metadata,
-                &texts,
-                false,
-                &receipt_ids,
-                &capture,
-            )
+            .composed_verified(VerifiedHistoryComposition {
+                key: &first.key,
+                generation: "same-generation",
+                sources: &source_generation,
+                metadata: &first_metadata,
+                texts: &texts,
+                incomplete: false,
+                receipt_ids: &receipt_ids,
+                capture: &capture,
+            })
             .unwrap();
         let first_digest = crate::storage::proof_codec::digest(first_metadata.as_bytes());
         let first_projection_generation: String = db
@@ -686,16 +691,16 @@ mod verified_history_tests {
         let updated_metadata = serde_json::to_string(&updated).unwrap();
         let updated_capture = runtime_capture(&updated);
         history
-            .composed_verified(
-                &updated.key,
-                "same-generation",
-                &source_generation,
-                &updated_metadata,
-                &texts,
-                false,
-                &receipt_ids,
-                &updated_capture,
-            )
+            .composed_verified(VerifiedHistoryComposition {
+                key: &updated.key,
+                generation: "same-generation",
+                sources: &source_generation,
+                metadata: &updated_metadata,
+                texts: &texts,
+                incomplete: false,
+                receipt_ids: &receipt_ids,
+                capture: &updated_capture,
+            })
             .unwrap();
         let updated_digest = crate::storage::proof_codec::digest(updated_metadata.as_bytes());
         let (stored_metadata, projection_generation, grant_digest, grant_capture): (
@@ -756,13 +761,15 @@ mod verified_history_tests {
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         let verified = super::super::proof_generations::verified_publication_receipts(
             &db,
-            namespace,
-            &owner.key,
-            &stream,
-            7,
-            &owner,
-            &metadata,
-            super::super::proof_generations::PublicationReceiptRef::History,
+            super::super::proof_generations::PublicationReceiptRequest {
+                namespace,
+                session_key: &owner.key,
+                stream: &stream,
+                publication_admission: 7,
+                previous: &owner,
+                exact_owner_metadata: &metadata,
+                kind: super::super::proof_generations::PublicationReceiptRef::History,
+            },
             &mut budget,
         )
         .unwrap()
@@ -776,13 +783,15 @@ mod verified_history_tests {
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         let imported = super::super::proof_generations::verified_publication_receipts(
             &db,
-            namespace,
-            &owner.key,
-            &stream,
-            7,
-            &owner,
-            &metadata,
-            super::super::proof_generations::PublicationReceiptRef::History,
+            super::super::proof_generations::PublicationReceiptRequest {
+                namespace,
+                session_key: &owner.key,
+                stream: &stream,
+                publication_admission: 7,
+                previous: &owner,
+                exact_owner_metadata: &metadata,
+                kind: super::super::proof_generations::PublicationReceiptRef::History,
+            },
             &mut budget,
         )
         .unwrap()
@@ -847,13 +856,15 @@ mod verified_history_tests {
         );
         let verified = super::super::proof_generations::verified_publication_receipts(
             &db,
-            namespace,
-            &owner.key,
-            &stream,
-            admission,
-            &owner,
-            &metadata,
-            super::super::proof_generations::PublicationReceiptRef::History,
+            super::super::proof_generations::PublicationReceiptRequest {
+                namespace,
+                session_key: &owner.key,
+                stream: &stream,
+                publication_admission: admission,
+                previous: &owner,
+                exact_owner_metadata: &metadata,
+                kind: super::super::proof_generations::PublicationReceiptRef::History,
+            },
             &mut budget,
         )
         .unwrap()
