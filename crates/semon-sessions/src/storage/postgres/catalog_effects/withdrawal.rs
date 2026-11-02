@@ -20,6 +20,7 @@ pub(in crate::storage::postgres) fn remove(
     }
     let request = encoded(&("source-withdrawal-v1", files))?;
     let operation = digest(&request);
+    eprintln!("477-withdrawal begin operation={operation:x?} files={}", files.len());
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     // Reconcile the exact full-value ACK before inspecting a successor head.
@@ -50,7 +51,8 @@ pub(in crate::storage::postgres) fn remove(
             tx,
             path,
             ledger.as_ref().ok_or(StorageError::InvalidArguments)?,
-        )? {
+        )
+        .inspect_err(|e| eprintln!("477-withdrawal relocation_removed error={e:?}"))? {
             relocated += 1;
         }
     }
@@ -66,7 +68,8 @@ pub(in crate::storage::postgres) fn remove(
         if pending {
             return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
         }
-        if super::super::native_reader::ledger(tx, path)?
+        if super::super::native_reader::ledger(tx, path)
+            .inspect_err(|e| eprintln!("477-withdrawal ledger error={e:?}"))?
             .map(|(_, l)| l)
             .as_ref()
             != expected.as_ref()
@@ -74,7 +77,13 @@ pub(in crate::storage::postgres) fn remove(
             return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
         }
     }
-    let previous = super::super::model_cache::generation(tx)?.ok_or(StorageError::ScopeChanged)?;
+    let previous = super::super::model_cache::generation(tx)
+        .inspect_err(|e| eprintln!("477-withdrawal generation read error={e:?}"))?
+        .ok_or_else(|| {
+            eprintln!("477-withdrawal generation expected=Some actual=None");
+            StorageError::ScopeChanged
+        })?;
+    eprintln!("477-withdrawal previous={previous}");
     let paths = files
         .iter()
         .map(|(p, _)| p.as_str())
@@ -87,7 +96,8 @@ pub(in crate::storage::postgres) fn remove(
     let mut removed = Vec::new();
     let mut connected = false;
     let mut after = None;
-    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))? {
+    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))
+        .inspect_err(|e| eprintln!("477-withdrawal affected owners generation={previous} error={e:?}"))? {
         for (_, value) in &page {
             let hits = value
                 .sources
@@ -102,7 +112,14 @@ pub(in crate::storage::postgres) fn remove(
                     .iter()
                     .find(|(p, _)| Some(p.as_str()) == source.path.to_str())
                     .and_then(|(_, l)| l.as_ref())
-                    .ok_or(StorageError::ScopeChanged)?;
+                    .ok_or_else(|| {
+                        eprintln!(
+                            "477-withdrawal ledger missing owner={:x?} source={:x?}",
+                            digest(value.key.as_bytes()),
+                            digest(source.path.to_string_lossy().as_bytes())
+                        );
+                        StorageError::ScopeChanged
+                    })?;
                 if !catalog::source_matches_ledger(source, ledger) {
                     return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
                 }
@@ -116,7 +133,8 @@ pub(in crate::storage::postgres) fn remove(
     let mut after = None;
     while !connected
         && !removed.is_empty()
-        && let Some(page) = owners(tx, &previous, &after, None)?
+        && let Some(page) = owners(tx, &previous, &after, None)
+            .inspect_err(|e| eprintln!("477-withdrawal related owners generation={previous} error={e:?}"))?
     {
         for (_, row) in &page {
             if removed.contains(&row.key) {
@@ -144,7 +162,8 @@ pub(in crate::storage::postgres) fn remove(
         after = page.last().map(|(digest, _)| digest.clone());
     }
     if connected {
-        return defer(tx, files, &deferred);
+        return defer(tx, files, &deferred)
+            .inspect_err(|e| eprintln!("477-withdrawal defer error={e:?}"));
     }
     let generation = format!("{:x}", Sha256::digest(&operation));
     let stages=tx.driver.query("SELECT stage_epoch,runtime FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
@@ -152,17 +171,22 @@ pub(in crate::storage::postgres) fn remove(
         // An imported Catalog can be admitted before this destination has a
         // producer runtime. Preserve its Current head and let the ordinary
         // semantic producer create the successor with a fresh runtime.
-        return defer(tx, files, &deferred);
+        return defer(tx, files, &deferred)
+            .inspect_err(|e| eprintln!("477-withdrawal defer error={e:?}"));
     };
     let prior_epoch: i64 = stage.get(0);
     let epoch = prior_epoch
         .checked_add(1)
-        .ok_or(StorageError::ScopeChanged)?;
+        .ok_or_else(|| {
+            eprintln!("477-withdrawal epoch overflow actual={prior_epoch}");
+            StorageError::ScopeChanged
+        })?;
     let runtime: Vec<u8> = stage.get(1);
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;
         tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&evidence]).map_err(sqlstate::error)?;
-        super::super::source_journal::invalidate(tx, path)?;
+        super::super::source_journal::invalidate(tx, path)
+            .inspect_err(|e| eprintln!("477-withdrawal invalidate error={e:?}"))?;
         tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
     // Surviving owners keep their exact immutable effects and proofs; no old
@@ -171,10 +195,12 @@ pub(in crate::storage::postgres) fn remove(
         .iter()
         .map(|k| digest(k.as_bytes()))
         .collect::<Vec<_>>();
-    super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
+    super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)
+        .inspect_err(|e| eprintln!("477-withdrawal carry previous={previous} generation={generation} removed={removed_digests:x?} error={e:?}"))?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
-    super::carry::retained_search(tx, &generation, &previous, &removed_digests)?;
+    super::carry::retained_search(tx, &generation, &previous, &removed_digests)
+        .inspect_err(|e| eprintln!("477-withdrawal retained_search previous={previous} generation={generation} error={e:?}"))?;
     let effects = Effects {
         tx: RefCell::new(tx),
         generation: &generation,
@@ -185,25 +211,32 @@ pub(in crate::storage::postgres) fn remove(
             crate::CatalogReadScope::Current,
             crate::CatalogReadScope::RetainedHistory,
         ] {
-            effects.counts(scope)?;
+            effects.counts(scope).inspect_err(|e| {
+                eprintln!("477-withdrawal counts scope={scope:?} generation={generation} error={e:?}");
+            })?;
         }
     }
     let tx = effects.tx.into_inner();
-    super::search::publish_state(tx, &generation)?;
+    super::search::publish_state(tx, &generation)
+        .inspect_err(|e| eprintln!("477-withdrawal publish_state generation={generation} error={e:?}"))?;
     if tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation=$3", &[&ns,&generation,&previous]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     if tx.driver.execute("UPDATE semon_pg_native_catalog_stage SET stage_epoch=$2,runtime=$3,generation=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton AND stage_epoch=$5", &[&ns,&epoch,&runtime,&generation.as_bytes(),&prior_epoch]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns,&operation,&request,&generation.as_bytes(),&epoch]).map_err(sqlstate::error)?;
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_changes(namespace,generation,previous,stage_epoch) VALUES($1,$2,$3,$4)", &[&ns,&generation.as_bytes(),&previous.as_bytes(),&epoch]).map_err(sqlstate::error)?;
-    super::super::changes::publish(tx, removed.iter().map(String::as_str))?;
+    super::super::changes::publish(tx, removed.iter().map(String::as_str))
+        .inspect_err(|e| eprintln!("477-withdrawal changes generation={generation} error={e:?}"))?;
     for (path, ledger) in files {
         super::super::native_keys::put_meta(
             tx,
             format!("source-retired:{path}").as_bytes(),
             &encoded(ledger)?,
-        )?;
+        )
+        .inspect_err(|e| eprintln!("477-withdrawal metadata error={e:?}"))?;
         tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
-    tx.check()?;
+    tx.check().inspect_err(|e| {
+        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+    })?;
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
 
@@ -222,12 +255,16 @@ fn defer(
             tx,
             format!("source-retired:{path}").as_bytes(),
             &encoded(ledger)?,
-        )?;
-        super::super::source_journal::invalidate(tx, path)?;
+        )
+        .inspect_err(|e| eprintln!("477-withdrawal metadata error={e:?}"))?;
+        super::super::source_journal::invalidate(tx, path)
+            .inspect_err(|e| eprintln!("477-withdrawal invalidate error={e:?}"))?;
         tx.driver.execute("UPDATE semon_pg_source_invalidations SET reason='removed' WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
     tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
-    tx.check()?;
+    tx.check().inspect_err(|e| {
+        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+    })?;
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
 
@@ -241,7 +278,9 @@ fn owners(
     after: &Option<Vec<u8>>,
     paths: Option<&Vec<Vec<u8>>>,
 ) -> Result<Option<Page>, StorageError> {
-    tx.check()?;
+    tx.check().inspect_err(|e| {
+        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+    })?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let rows = tx.driver.query("WITH page AS MATERIALIZED (SELECT r.key_digest,r.session_key,r.metadata FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND ($3::bytea IS NULL OR r.key_digest>$3) AND ($4::bytea[] IS NULL OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[]))) ORDER BY r.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END FROM page ORDER BY key_digest", &[&ns, &previous.as_bytes(), after, &paths]).map_err(sqlstate::error)?;
     if rows.is_empty() {
@@ -251,8 +290,18 @@ fn owners(
     for row in rows {
         let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
         let value: CatalogRow =
-            serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+            serde_json::from_slice(&bytes).map_err(|e| {
+                eprintln!(
+                    "477-withdrawal owner decode previous={previous} key={:x?} category={:?} line={} column={}",
+                    digest(&row.get::<_, Vec<u8>>(1)), e.classify(), e.line(), e.column()
+                );
+                StorageError::ScopeChanged
+            })?;
         if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
+            eprintln!(
+                "477-withdrawal owner key previous={previous} expected={:x?} actual={:x?}",
+                digest(&row.get::<_, Vec<u8>>(1)), digest(value.key.as_bytes())
+            );
             return Err(StorageError::ScopeChanged);
         }
         page.push((row.get(0), value));
