@@ -3208,17 +3208,14 @@ impl Stage {
         publication_phase("composite_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
-        crate::storage::catalog::publish_history_composition(
+        let history_plan_matches = crate::storage::catalog::history_composition_matches(
             &history,
             &prepared.rows,
             Some(&prepared.transcripts),
             history_plan,
-            history_captures,
             overview_budget,
         )
         .map_err(error)?;
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
         publication_phase("original_history");
         if !crate::storage::catalog::preserve_rows(
             &history,
@@ -3232,6 +3229,16 @@ impl Stage {
             // remain owned by the original generation until custody completes.
             tx.commit().map_err(error)?;
             return Ok((Outcome::Deferred, None));
+        }
+        if history_plan_matches {
+            crate::storage::catalog::apply_prepared_history_composition(
+                &history,
+                history_plan,
+                history_captures,
+            )
+            .map_err(error)?;
+            #[cfg(test)]
+            crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
         }
         publication_phase("slot_effects");
         if !prepared.transcripts.is_empty() {

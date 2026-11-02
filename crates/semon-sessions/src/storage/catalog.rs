@@ -1355,6 +1355,7 @@ fn plan_history_rows(
             for source in missing.values() {
                 let mut retained_cwd = None;
                 let mut ambiguous = false;
+                let mut cwd_receipt_ids = BTreeSet::new();
                 for receipt in snapshot.receipts.iter().filter(|receipt| {
                     receipt.sources.iter().any(|saved| saved == source)
                         && crate::retention::source_generation(&receipt.sources)
@@ -1377,12 +1378,14 @@ fn plan_history_rows(
                         break;
                     }
                     retained_cwd = Some(value.clone());
+                    cwd_receipt_ids.insert(receipt.id.clone());
                 }
                 match (retained_cwd, ambiguous) {
                     (Some(Some(cwd)), false) => {
                         cwds.insert(cwd);
+                        receipt_ids.extend(cwd_receipt_ids);
                     }
-                    (Some(None), false) => {}
+                    (Some(None), false) => receipt_ids.extend(cwd_receipt_ids),
                     _ => {
                         invalid_predecessor = true;
                         capture_cwds = None;
@@ -1770,4 +1773,447 @@ pub(crate) fn publish_history_composition<P: VerifiedHistoryCompositionStore>(
     }
     apply_history_composition(store, expected, captures)?;
     Ok(true)
+}
+
+#[cfg(test)]
+mod history_composition_tests {
+    use super::*;
+    use crate::slot_projection::{File, Projection, Recipe, SavedSlot, VERSION};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::cell::{Cell, RefCell};
+    use std::path::PathBuf;
+
+    fn source(path: &str, native_id: &str) -> CatalogSource {
+        CatalogSource {
+            path: PathBuf::from(path),
+            native_id: native_id.to_owned(),
+            dev: 1,
+            ino: 1,
+            size: 1,
+            modified_ns: 1,
+            changed_ns: None,
+            offset: 1,
+            prefix_sha256: [0; 32],
+            tail_sha256: [0; 32],
+            native_role: None,
+        }
+    }
+
+    fn row(name: &str, sources: Vec<CatalogSource>) -> CatalogRow {
+        let native_ids = sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        CatalogRow {
+            overview: None,
+            trace: None,
+            query_recipe: None,
+            query: None,
+            lifecycle: crate::model::summary::CatalogLifecycle::Current,
+            key: "lineage".into(),
+            name: name.into(),
+            harness: "codex".into(),
+            kind: "session".into(),
+            presentation_kind: None,
+            native_ids,
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: String::new(),
+            effort: None,
+            start: None,
+            last: None,
+            tokens: [0.0; 3],
+            cost: crate::pricing::Cost::default(),
+            sources,
+        }
+    }
+
+    fn slot(path: &str, cwd: &str, time: i64) -> SavedSlot {
+        SavedSlot {
+            recipe: Recipe::U,
+            file: Some(File {
+                path: PathBuf::from(path),
+                cwd: Some(cwd.to_owned()),
+            }),
+            offset: time as u64,
+            block: 0,
+            t: Some(time),
+            turn: Some(format!("turn-{time}")),
+            first: true,
+            field: None,
+            native_event_id: Some(format!("event-{time}")),
+            images: Vec::new(),
+        }
+    }
+
+    fn receipt(
+        id: &str,
+        sources: &[CatalogSource],
+        slots: &[String],
+        cwd_by_path: BTreeMap<PathBuf, Option<String>>,
+    ) -> VerifiedHistoryReceipt {
+        let cwds = cwd_by_path.values().filter_map(Clone::clone).collect();
+        VerifiedHistoryReceipt::verified(
+            id.to_owned(),
+            crate::retention::source_generation(sources).unwrap(),
+            sources.to_vec(),
+            slots.to_vec(),
+            crate::native_evidence::runtime::cwd_fingerprint(&cwds),
+            cwd_by_path,
+        )
+    }
+
+    fn compose_step(plan: &HistoryCompositionPlan) -> (&[String], &[String], &BTreeSet<String>) {
+        let HistoryCompositionStep::Compose {
+            receipt_ids,
+            slots,
+            capture_cwds: Some(cwds),
+            ..
+        } = &plan.steps[0]
+        else {
+            panic!("expected a capturable History composition")
+        };
+        (receipt_ids, slots, cwds)
+    }
+
+    struct PlanStore {
+        snapshot: RefCell<HistoryCompositionSnapshot>,
+        original: Cell<bool>,
+        effects: Cell<usize>,
+    }
+
+    impl CompositeHistoryStore for PlanStore {
+        type Error = ();
+        fn data(_: serde_json::Error) {}
+        fn original(&self, _: &str) -> Result<bool, Self::Error> {
+            Ok(self.original.get())
+        }
+        fn previous(&self, _: &str) -> Result<Option<String>, Self::Error> {
+            Ok(None)
+        }
+        fn history_exists(&self, _: &str) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+        fn retain_source(&self, _: &CatalogRow, _: &CatalogSource) -> Result<(), Self::Error> {
+            self.effects.set(self.effects.get() + 1);
+            Ok(())
+        }
+        fn relocated(
+            &self,
+            _: &CatalogSource,
+            _: &[CatalogSource],
+        ) -> Result<bool, Self::Error> {
+            Ok(false)
+        }
+        fn clear(&self, _: &str) -> Result<(), Self::Error> {
+            self.effects.set(self.effects.get() + 1);
+            Ok(())
+        }
+        fn previous_recipe(
+            &self,
+            _: &str,
+        ) -> Result<(bool, Option<HistoryRecipeHeader>), Self::Error> {
+            Ok((false, None))
+        }
+        fn recipe_slots(&self, _: &str, _: bool) -> Result<Vec<String>, Self::Error> {
+            Ok(Vec::new())
+        }
+        fn composed(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: bool,
+        ) -> Result<(), Self::Error> {
+            self.effects.set(self.effects.get() + 1);
+            Ok(())
+        }
+    }
+
+    impl VerifiedHistoryCompositionStore for PlanStore {
+        fn composition_snapshot(
+            &self,
+            _: &CatalogRow,
+            _: &mut crate::overview::SummaryPublicationBudget,
+        ) -> Result<HistoryCompositionSnapshot, Self::Error> {
+            Ok(self.snapshot.borrow().clone())
+        }
+        fn composed_verified(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: bool,
+            _: &[String],
+            _: &str,
+        ) -> Result<(), Self::Error> {
+            self.effects.set(self.effects.get() + 1);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn repeated_disappearance_keeps_exact_slot_and_cwd_receipts() {
+        let a = source("/sources/a.jsonl", "a");
+        let b = source("/sources/b.jsonl", "b");
+        let c = source("/sources/c.jsonl", "c");
+        let original = row("original", vec![a.clone(), b.clone(), c.clone()]);
+        let slot_a = slot("/sources/a.jsonl", "/cwd/a", 1);
+        let slot_b = slot("/sources/b.jsonl", "/cwd/b", 2);
+        let slot_c = slot("/sources/c.jsonl", "/cwd/c", 3);
+        let slot_a_text = serde_json::to_string(&slot_a).unwrap();
+        let slot_b_text = serde_json::to_string(&slot_b).unwrap();
+        let slot_c_text = serde_json::to_string(&slot_c).unwrap();
+        let cwd_by_path = BTreeMap::from([
+            (a.path.clone(), Some("/cwd/a".into())),
+            (b.path.clone(), Some("/cwd/b".into())),
+            (c.path.clone(), Some("/cwd/c".into())),
+        ]);
+        let slot_receipt = receipt(
+            "slot-receipt",
+            &original.sources,
+            &[slot_a_text.clone(), slot_b_text.clone()],
+            cwd_by_path.clone(),
+        );
+        let cwd_only_receipt = receipt(
+            "cwd-only-receipt",
+            &original.sources,
+            &[],
+            cwd_by_path.clone(),
+        );
+        let receipt_ids = vec![slot_receipt, cwd_only_receipt];
+
+        let first_current = row("first-current", vec![b.clone(), c.clone()]);
+        let first_projection = Projection {
+            key: first_current.key.clone(),
+            slots: vec![slot_b.clone(), slot_c.clone()],
+            repair: false,
+        };
+        let first_snapshot = HistoryCompositionSnapshot {
+            key: first_current.key.clone(),
+            original: false,
+            previous: Some(serde_json::to_string(&original).unwrap()),
+            history_exists: false,
+            recipe_history: false,
+            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_slots: vec![slot_a_text.clone(), slot_b_text.clone()],
+            relocated: BTreeSet::new(),
+            receipts: receipt_ids.clone(),
+            current_cwds: Some(BTreeSet::from(["/cwd/b".into(), "/cwd/c".into()])),
+            unavailable: false,
+        };
+        let first_plan = plan_history_rows(
+            std::slice::from_ref(&first_current),
+            Some(std::slice::from_ref(&first_projection)),
+            std::slice::from_ref(&first_snapshot),
+        )
+        .unwrap();
+        let (first_ids, first_slots, first_cwds) = compose_step(&first_plan);
+        assert_eq!(
+            first_ids,
+            &["cwd-only-receipt".to_owned(), "slot-receipt".to_owned()]
+        );
+        assert_eq!(
+            first_slots,
+            &[slot_a_text.clone(), slot_b_text.clone(), slot_c_text.clone()]
+        );
+        assert_eq!(first_cwds, &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()]));
+        let HistoryCompositionStep::Compose { metadata, generation, .. } = &first_plan.steps[0]
+        else { unreachable!() };
+        let first_history: CatalogRow = serde_json::from_str(metadata).unwrap();
+        let first_generation = generation.clone();
+
+        let metadata_only_current = row("metadata-only", vec![b.clone(), c.clone()]);
+        let metadata_only_plan = plan_history_rows(
+            std::slice::from_ref(&metadata_only_current),
+            Some(std::slice::from_ref(&first_projection)),
+            std::slice::from_ref(&first_snapshot),
+        )
+        .unwrap();
+        let HistoryCompositionStep::Compose {
+            metadata: metadata_only_metadata,
+            generation: metadata_only_generation,
+            ..
+        } = &metadata_only_plan.steps[0]
+        else { unreachable!() };
+        assert_eq!(metadata_only_generation, &first_generation);
+        assert_ne!(metadata_only_metadata, metadata);
+
+        let second_current = row("second-current", vec![c.clone()]);
+        let second_projection = Projection {
+            key: second_current.key.clone(),
+            slots: vec![slot_c],
+            repair: false,
+        };
+        let second_snapshot = HistoryCompositionSnapshot {
+            key: second_current.key.clone(),
+            original: false,
+            previous: Some(serde_json::to_string(&first_history).unwrap()),
+            history_exists: true,
+            recipe_history: true,
+            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&first_history.sources).unwrap()), false)),
+            recipe_slots: first_slots.to_vec(),
+            relocated: BTreeSet::new(),
+            receipts: receipt_ids,
+            current_cwds: Some(BTreeSet::from(["/cwd/c".into()])),
+            unavailable: false,
+        };
+        let second_plan = plan_history_rows(
+            std::slice::from_ref(&second_current),
+            Some(std::slice::from_ref(&second_projection)),
+            &[second_snapshot],
+        )
+        .unwrap();
+        let (second_ids, second_slots, second_cwds) = compose_step(&second_plan);
+        assert_eq!(
+            second_ids,
+            &["cwd-only-receipt".to_owned(), "slot-receipt".to_owned()]
+        );
+        assert_eq!(second_slots, &[slot_a_text, slot_b_text, slot_c_text]);
+        assert_eq!(second_cwds, &BTreeSet::from(["/cwd/a".into(), "/cwd/b".into(), "/cwd/c".into()]));
+        let HistoryCompositionStep::Compose { generation, .. } = &second_plan.steps[0]
+        else { unreachable!() };
+        assert_ne!(generation, &first_generation);
+    }
+
+    #[test]
+    fn unsupported_history_without_local_cwd_receipt_is_preserved() {
+        let a = source("/sources/a.jsonl", "a");
+        let b = source("/sources/b.jsonl", "b");
+        let original = row("original", vec![a.clone(), b.clone()]);
+        let previous = serde_json::to_string(&original).unwrap();
+        let slot_a = slot("/sources/a.jsonl", "/cwd/a", 1);
+        let current = row("current", vec![b.clone()]);
+        let projection = Projection {
+            key: current.key.clone(),
+            slots: Vec::new(),
+            repair: false,
+        };
+        let slot_text = serde_json::to_string(&slot_a).unwrap();
+        let snapshot = HistoryCompositionSnapshot {
+            key: current.key.clone(),
+            original: false,
+            previous: Some(previous),
+            history_exists: true,
+            recipe_history: true,
+            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_slots: vec![slot_text.clone()],
+            relocated: BTreeSet::new(),
+            receipts: Vec::new(),
+            current_cwds: Some(BTreeSet::from(["/cwd/b".into()])),
+            unavailable: false,
+        };
+        let mut wrong_receipt = receipt(
+            "wrong-cwd-fingerprint",
+            &original.sources,
+            &[slot_text],
+            BTreeMap::from([
+                (a.path.clone(), Some("/cwd/a".into())),
+                (b.path.clone(), Some("/cwd/b".into())),
+            ]),
+        );
+        wrong_receipt.cwd_fingerprint = "wrong fingerprint".into();
+        for receipts in [Vec::new(), vec![wrong_receipt]] {
+            let mut candidate = snapshot.clone();
+            candidate.receipts = receipts;
+            let plan = plan_history_rows(
+                std::slice::from_ref(&current),
+                Some(std::slice::from_ref(&projection)),
+                &[candidate],
+            )
+            .unwrap();
+            assert!(matches!(
+                plan.steps.as_slice(),
+                [HistoryCompositionStep::Preserve { .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn stale_preimage_and_new_original_marker_have_no_history_effects() {
+        let a = source("/sources/a.jsonl", "a");
+        let b = source("/sources/b.jsonl", "b");
+        let original = row("original", vec![a.clone(), b.clone()]);
+        let current = row("current", vec![b.clone()]);
+        let slot_a = slot("/sources/a.jsonl", "/cwd/a", 1);
+        let slot_b = slot("/sources/b.jsonl", "/cwd/b", 2);
+        let receipt = receipt(
+            "receipt-a-b",
+            &original.sources,
+            &[serde_json::to_string(&slot_a).unwrap()],
+            BTreeMap::from([
+                (a.path.clone(), Some("/cwd/a".into())),
+                (b.path.clone(), Some("/cwd/b".into())),
+            ]),
+        );
+        let snapshot = HistoryCompositionSnapshot {
+            key: current.key.clone(),
+            original: false,
+            previous: Some(serde_json::to_string(&original).unwrap()),
+            history_exists: false,
+            recipe_history: false,
+            recipe_header: Some((VERSION, Some(crate::retention::source_generation(&original.sources).unwrap()), false)),
+            recipe_slots: vec![serde_json::to_string(&slot_a).unwrap()],
+            relocated: BTreeSet::new(),
+            receipts: vec![receipt],
+            current_cwds: Some(BTreeSet::from(["/cwd/b".into()])),
+            unavailable: false,
+        };
+        let projection = Projection {
+            key: current.key.clone(),
+            slots: vec![slot_b],
+            repair: false,
+        };
+        let store = PlanStore {
+            snapshot: RefCell::new(snapshot.clone()),
+            original: Cell::new(false),
+            effects: Cell::new(0),
+        };
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let (plan, mut captures) = prepare_history_composition(
+            &store,
+            std::slice::from_ref(&current),
+            Some(std::slice::from_ref(&projection)),
+            None,
+            &mut budget,
+        )
+        .unwrap();
+        captures.values.insert(current.key.clone(), "capture".into());
+        assert!(matches!(plan.steps.as_slice(), [HistoryCompositionStep::Compose { .. }]));
+
+        store.snapshot.borrow_mut().receipts.clear();
+        let mut writer_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        assert!(
+            !publish_history_composition(
+                &store,
+                std::slice::from_ref(&current),
+                Some(std::slice::from_ref(&projection)),
+                &plan,
+                &captures,
+                &mut writer_budget,
+            )
+            .unwrap()
+        );
+        assert_eq!(store.effects.get(), 0, "stale plans cannot change History");
+
+        let original_store = PlanStore {
+            snapshot: RefCell::new(snapshot),
+            original: Cell::new(true),
+            effects: Cell::new(0),
+        };
+        apply_prepared_history_composition(&original_store, &plan, &captures).unwrap();
+        assert_eq!(
+            original_store.effects.get(),
+            0,
+            "custody completed after planning must keep original History immutable"
+        );
+    }
 }

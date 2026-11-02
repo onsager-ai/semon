@@ -245,6 +245,14 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=composite_clear");
         self.db.execute(
+            "DELETE FROM main.storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
+            params![self.namespace, key],
+        )?;
+        self.db.execute(
+            "DELETE FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+            params![self.namespace, key],
+        )?;
+        self.db.execute(
             "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
             params![self.namespace, format!("history_transfer:{key}")],
         )?;
@@ -451,16 +459,18 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                 && snapshot.recipe_header.is_some()
                 && let Some(stream) = self.stream
             {
-                let exact_current_metadata = (!history_exists)
-                    .then_some(snapshot.previous.as_deref())
-                    .flatten();
+                let Some(exact_owner_metadata) = snapshot.previous.as_deref() else {
+                    snapshot.unavailable = true;
+                    return Ok(snapshot);
+                };
                 match super::proof_generations::verified_publication_receipts(
                     self.db,
                     self.namespace,
                     &current.key,
                     stream,
+                    self.admission,
                     previous_row,
-                    exact_current_metadata,
+                    exact_owner_metadata,
                     if history_exists {
                         super::proof_generations::PublicationReceiptRef::History
                     } else {
@@ -494,7 +504,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         metadata: &str,
         texts: &[String],
         incomplete: bool,
-        _receipt_ids: &[String],
+        receipt_ids: &[String],
         capture: &str,
     ) -> rusqlite::Result<()> {
         #[cfg(test)]
@@ -523,16 +533,323 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         if projection_changed > 0 || metadata_changed > 0 {
             self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
         }
+        let stream = self.stream.ok_or(rusqlite::Error::InvalidQuery)?;
+        super::proof_generations::replace_verified_history_refs(
+            self.db,
+            self.namespace,
+            key,
+            receipt_ids,
+        )
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         super::proof_generations::native_history_observation_grant(
             self.db,
             self.namespace,
             key,
             self.admission,
-            self.stream.ok_or(rusqlite::Error::InvalidQuery)?,
+            stream,
             metadata,
             capture,
         )
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod verified_history_tests {
+    use super::*;
+    use crate::storage::catalog::VerifiedHistoryCompositionStore;
+    use crate::storage::selected::PresentationObservations;
+    use std::collections::BTreeSet;
+
+    fn row(name: &str) -> CatalogRow {
+        CatalogRow {
+            overview: None,
+            trace: None,
+            query_recipe: None,
+            query: None,
+            lifecycle: crate::model::summary::CatalogLifecycle::Current,
+            key: "lineage".into(),
+            name: name.into(),
+            harness: "codex".into(),
+            kind: "session".into(),
+            presentation_kind: None,
+            native_ids: vec!["native".into()],
+            parent: None,
+            parent_source: None,
+            repo: None,
+            branch: None,
+            model: String::new(),
+            effort: None,
+            start: None,
+            last: None,
+            tokens: [0.0; 3],
+            cost: crate::pricing::Cost::default(),
+            sources: vec![crate::model::summary::CatalogSource {
+                path: std::path::PathBuf::from("/source.jsonl"),
+                native_id: "native".into(),
+                dev: 1,
+                ino: 1,
+                size: 1,
+                modified_ns: 1,
+                changed_ns: None,
+                offset: 1,
+                prefix_sha256: [0; 32],
+                tail_sha256: [0; 32],
+                native_role: None,
+            }],
+        }
+    }
+
+    fn runtime_capture(row: &CatalogRow) -> String {
+        let mut observations = PresentationObservations {
+            source_runtime: Some("source-runtime".into()),
+            runtime: Some("runtime".into()),
+            ..PresentationObservations::default()
+        };
+        let cwds = BTreeSet::from(["/cwd".to_owned()]);
+        observations
+            .capture_runtime(row, &cwds, "source-runtime-v1:test".into())
+            .unwrap();
+        serde_json::to_string(&observations.runtime_capture_for(row).unwrap()).unwrap()
+    }
+
+    fn composition_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE session_history_projections(namespace TEXT,session_key TEXT,generation TEXT,source_generation TEXT,version INTEGER,total INTEGER,incomplete INTEGER,PRIMARY KEY(namespace,session_key));
+             CREATE TABLE session_history_catalog(namespace TEXT,session_key TEXT,metadata TEXT,query_activity INTEGER,query_active INTEGER,PRIMARY KEY(namespace,session_key));
+             CREATE TABLE session_history_slots(namespace TEXT,session_key TEXT,slot INTEGER,metadata TEXT,PRIMARY KEY(namespace,session_key,slot));
+             CREATE TABLE meta(namespace TEXT,key TEXT,value TEXT,PRIMARY KEY(namespace,key));
+             CREATE TABLE storage_proof_refs(namespace TEXT,session_key TEXT,kind TEXT,id TEXT,PRIMARY KEY(namespace,session_key,kind,id));
+             CREATE TABLE storage_proof_generations(namespace TEXT,id TEXT,session_key TEXT,admission INTEGER,stream TEXT,metadata TEXT,PRIMARY KEY(namespace,id,session_key));
+             CREATE TABLE storage_catalog_native_observation_grants(namespace TEXT,session_key TEXT,owner_kind TEXT,metadata_digest TEXT,admission INTEGER,stream TEXT,direct_capture TEXT,PRIMARY KEY(namespace,session_key,owner_kind));",
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn composed_history_keeps_only_verified_refs_and_refreshes_metadata_grant() {
+        let db = composition_db();
+        let namespace = "local";
+        let admission = 7;
+        let stream = "a".repeat(64);
+        let first = row("first");
+        let first_metadata = serde_json::to_string(&first).unwrap();
+        let source_generation = crate::retention::source_generation(&first.sources).unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current','receipt-one'),(?1,?2,'current','receipt-unselected')",
+            rusqlite::params![namespace, first.key],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_generations VALUES(?1,'receipt-one',?2,?3,?4,'original receipt metadata')",
+            rusqlite::params![namespace, first.key, admission, stream],
+        )
+        .unwrap();
+        let history = OriginalHistory {
+            db: &db,
+            namespace,
+            admission,
+            stream: Some(&stream),
+        };
+        let receipt_ids = vec!["receipt-one".to_owned()];
+        let texts = vec!["saved-slot".to_owned()];
+        let capture = runtime_capture(&first);
+        history
+            .composed_verified(
+                &first.key,
+                "same-generation",
+                &source_generation,
+                &first_metadata,
+                &texts,
+                false,
+                &receipt_ids,
+                &capture,
+            )
+            .unwrap();
+        let first_digest = crate::storage::proof_codec::digest(first_metadata.as_bytes());
+        let first_projection_generation: String = db
+            .query_row(
+                "SELECT generation FROM session_history_projections WHERE namespace=?1 AND session_key=?2",
+                rusqlite::params![namespace, first.key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let first_refs: Vec<String> = db
+            .prepare("SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id")
+            .unwrap()
+            .query_map(rusqlite::params![namespace, first.key], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(first_refs, ["receipt-one"]);
+        assert_eq!(first_projection_generation, "same-generation");
+
+        let updated = row("metadata-only update");
+        let updated_metadata = serde_json::to_string(&updated).unwrap();
+        let updated_capture = runtime_capture(&updated);
+        history
+            .composed_verified(
+                &updated.key,
+                "same-generation",
+                &source_generation,
+                &updated_metadata,
+                &texts,
+                false,
+                &receipt_ids,
+                &updated_capture,
+            )
+            .unwrap();
+        let updated_digest = crate::storage::proof_codec::digest(updated_metadata.as_bytes());
+        let (stored_metadata, projection_generation, grant_digest, grant_capture): (
+            String,
+            String,
+            String,
+            Option<String>,
+        ) = db
+            .query_row(
+                "SELECT h.metadata,p.generation,g.metadata_digest,g.direct_capture FROM session_history_catalog h JOIN session_history_projections p USING(namespace,session_key) JOIN storage_catalog_native_observation_grants g USING(namespace,session_key) WHERE h.namespace=?1 AND h.session_key=?2 AND g.owner_kind='history'",
+                rusqlite::params![namespace, updated.key],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stored_metadata, updated_metadata);
+        assert_eq!(projection_generation, first_projection_generation);
+        assert_eq!(grant_digest, updated_digest);
+        assert_ne!(grant_digest, first_digest);
+        assert_eq!(grant_capture.as_deref(), Some(updated_capture.as_str()));
+        let updated_refs: Vec<String> = db
+            .prepare("SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id")
+            .unwrap()
+            .query_map(rusqlite::params![namespace, updated.key], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(updated_refs, ["receipt-one"]);
+    }
+
+    #[test]
+    fn imported_history_ref_without_local_origin_grant_is_not_a_receipt() {
+        let db = composition_db();
+        let namespace = "local";
+        let stream = "b".repeat(64);
+        let owner = row("imported owner");
+        let metadata = serde_json::to_string(&owner).unwrap();
+        db.execute(
+            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            rusqlite::params![namespace, owner.key, metadata],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_refs VALUES(?1,?2,'history','imported-receipt')",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+        let wrong_metadata = serde_json::to_string(&row("wrong metadata")).unwrap();
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants VALUES(?1,?2,'history',?3,7,?4,NULL)",
+            rusqlite::params![
+                namespace,
+                owner.key,
+                crate::storage::proof_codec::digest(wrong_metadata.as_bytes()),
+                stream,
+            ],
+        )
+        .unwrap();
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let verified = super::super::proof_generations::verified_publication_receipts(
+            &db,
+            namespace,
+            &owner.key,
+            &stream,
+            7,
+            &owner,
+            &metadata,
+            super::super::proof_generations::PublicationReceiptRef::History,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(verified.is_empty());
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let imported = super::super::proof_generations::verified_publication_receipts(
+            &db,
+            namespace,
+            &owner.key,
+            &stream,
+            7,
+            &owner,
+            &metadata,
+            super::super::proof_generations::PublicationReceiptRef::History,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(imported.is_empty());
+    }
+
+    #[test]
+    fn retired_current_ref_does_not_create_history_origin_authority() {
+        let db = composition_db();
+        let namespace = "local";
+        let admission = 7;
+        let stream = "c".repeat(64);
+        let owner = row("original History");
+        let metadata = serde_json::to_string(&owner).unwrap();
+        let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
+        db.execute(
+            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            rusqlite::params![namespace, owner.key, metadata],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_catalog_native_observation_grants VALUES(?1,?2,'catalog',?3,?4,?5,NULL)",
+            rusqlite::params![namespace, owner.key, digest, admission, stream],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current','old-current-receipt')",
+            rusqlite::params![namespace, owner.key],
+        )
+        .unwrap();
+        super::super::proof_generations::retain_current_refs_for_unowned_history(
+            &db,
+            namespace,
+            &owner.key,
+            admission,
+            &stream,
+        )
+        .unwrap();
+        let (history_ref, history_grant): (bool, bool) = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' AND id='old-current-receipt'),EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history')",
+                rusqlite::params![namespace, owner.key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(history_ref, "the exact old ref remains available for custody transfer");
+        assert!(!history_grant, "Current ref transfer must never mint History origin");
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let verified = super::super::proof_generations::verified_publication_receipts(
+            &db,
+            namespace,
+            &owner.key,
+            &stream,
+            admission,
+            &owner,
+            &metadata,
+            super::super::proof_generations::PublicationReceiptRef::History,
+            &mut budget,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(verified.is_empty());
     }
 }

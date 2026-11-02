@@ -223,48 +223,166 @@ pub(super) fn publish(
             )
             .map_err(failed)?;
         }
+        retain_current_refs_for_unowned_history(
+            tx,
+            namespace,
+            &row.key,
+            admission,
+            stream,
+        )?;
         tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
         tx.execute(
             "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
             params![namespace, row.key, id.0],
         )
         .map_err(failed)?;
-        let history: Option<String> = tx.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![namespace, row.key], |r| r.get(0)).optional().map_err(failed)?;
-        let mut retained = std::collections::BTreeSet::new();
-        if let Some(history) = history {
-            if history.len() > 1_048_576 {
-                return Err(StorageError::HistoryRetentionBounds);
-            }
-            let history: CatalogRow =
-                serde_json::from_str(&history).map_err(|_| StorageError::Unavailable)?;
-            if history.sources.len() > 64 {
-                return Err(StorageError::HistoryRetentionBounds);
-            }
-            for source in &history.sources {
-                let digest =
-                    crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
-                let ids = tx.prepare("SELECT id FROM storage_proof_sources WHERE namespace=?1 AND session_key=?2 AND path=?3 AND ledger=?4 LIMIT 65").map_err(failed)?.query_map(params![namespace, row.key, source.path.to_string_lossy(), digest], |r| r.get::<_, String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-                retained.extend(ids);
-                if retained.len() > 64 {
-                    return Err(StorageError::HistoryRetentionBounds);
-                }
-            }
-        }
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'", params![namespace, row.key]).map_err(failed)?;
-        for retained in retained {
-            tx.execute(
-                "INSERT INTO storage_proof_refs VALUES(?1,?2,'history',?3)",
-                params![namespace, row.key, retained],
+        // Exact History references are installed by the verified composer.
+        // Reconstructing them from path/ledger matches would retain unrelated
+        // generations and let imported proof sources acquire local authority.
+    }
+    // Outgoing owners lose Current references after custody. History refs are
+    // either the exact local composition set or retention references copied
+    // from an exact local Current grant. They never grant History origin.
+    for row in &prepared.relationships.retired_owners {
+        retain_current_refs_for_unowned_history(
+            tx,
+            namespace,
+            &row.key,
+            admission,
+            stream,
+        )?;
+        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// Atomically retain only the publication receipts selected by the verified
+/// History planner. Every ID must still be referenced by this local owner.
+pub(crate) fn replace_verified_history_refs(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    receipt_ids: &[String],
+) -> Result<(), StorageError> {
+    if receipt_ids.len() > 64
+        || receipt_ids.iter().any(String::is_empty)
+        || receipt_ids.iter().collect::<std::collections::BTreeSet<_>>().len()
+            != receipt_ids.len()
+    {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    for id in receipt_ids {
+        let referenced: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind IN('current','history') AND id=?3)",
+                params![namespace, session_key, id],
+                |row| row.get(0),
             )
             .map_err(failed)?;
+        if !referenced {
+            return Err(StorageError::ScopeChanged);
         }
     }
-    // Outgoing owners are absent from prepared.rows. Their original custody
-    // has completed above publication's CAS, so move their existing selected
-    // authority to history before collection can observe an unreferenced gap.
-    for row in &prepared.relationships.retired_owners {
-        tx.execute("INSERT INTO storage_proof_refs(namespace,session_key,kind,id) SELECT r.namespace,r.session_key,'history',r.id FROM storage_proof_refs r WHERE r.namespace=?1 AND r.session_key=?2 AND r.kind='current' AND EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=r.namespace AND h.session_key=r.session_key) ON CONFLICT DO NOTHING", params![namespace,row.key]).map_err(failed)?;
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+    db.execute(
+        "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
+        params![namespace, session_key],
+    )
+    .map_err(failed)?;
+    for id in receipt_ids {
+        db.execute(
+            "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3)",
+            params![namespace, session_key, id],
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
+}
+
+fn normalized_owner_metadata(metadata: &str, session_key: &str) -> Result<String, StorageError> {
+    let mut row: CatalogRow =
+        serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+    if row.key != session_key {
+        return Err(StorageError::ScopeChanged);
+    }
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)
+}
+
+fn has_local_history_origin(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    metadata: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<bool, StorageError> {
+    let normalized = normalized_owner_metadata(metadata, session_key)?;
+    let digest = proof_codec::digest(normalized.as_bytes());
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.storage_catalog_native_observation_grants g ON g.namespace=h.namespace AND g.session_key=h.session_key WHERE h.namespace=?1 AND h.session_key=?2 AND h.metadata=?3 AND g.owner_kind='history' AND g.metadata_digest=?4 AND g.admission=?5 AND g.stream=?6)",
+        params![namespace, session_key, metadata, digest, admission, stream],
+        |row| row.get(0),
+    )
+    .map_err(failed)
+}
+
+/// Preserve exact Current refs as retention pointers for original History
+/// when its local History grant is absent. These refs cannot authorize reuse:
+/// verified History reads require a matching local History origin grant.
+pub(super) fn retain_current_refs_for_unowned_history(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<(), StorageError> {
+    let metadata: Option<String> = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(failed)?;
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    if has_local_history_origin(db, namespace, session_key, &metadata, admission, stream)? {
+        return Ok(());
+    }
+    let normalized = normalized_owner_metadata(&metadata, session_key)?;
+    let digest = proof_codec::digest(normalized.as_bytes());
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let has_local_current: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
+            params![namespace, session_key, digest, admission, stream],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if !has_local_current {
+        return Ok(());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' ORDER BY id LIMIT 65",
+        )
+        .map_err(failed)?;
+    let ids = statement
+        .query_map(params![namespace, session_key], |row| row.get::<_, String>(0))
+        .map_err(failed)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failed)?;
+    if ids.len() > 64 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    for id in ids {
+        db.execute(
+            "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3) ON CONFLICT DO NOTHING",
+            params![namespace, session_key, id],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
@@ -293,11 +411,24 @@ pub(crate) fn verified_publication_receipts(
     namespace: &str,
     session_key: &str,
     stream: &str,
+    publication_admission: u64,
     previous: &CatalogRow,
-    exact_current_metadata: Option<&str>,
+    exact_owner_metadata: &str,
     kind: PublicationReceiptRef,
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
+    if kind == PublicationReceiptRef::History {
+        if !has_local_history_origin(
+            db,
+            namespace,
+            session_key,
+            exact_owner_metadata,
+            publication_admission,
+            stream,
+        )? {
+            return Ok(Some(Vec::new()));
+        }
+    }
     let refs: i64 = db
         .query_row(
             "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind=?3",
@@ -374,7 +505,7 @@ pub(crate) fn verified_publication_receipts(
         if record.stream != stream || record.session_key != session_key {
             continue;
         }
-        if exact_current_metadata.is_some_and(|expected| record.metadata != expected) {
+        if kind == PublicationReceiptRef::Current && record.metadata != exact_owner_metadata {
             continue;
         }
         if kind == PublicationReceiptRef::Current {
@@ -422,7 +553,7 @@ pub(crate) fn verified_publication_receipts(
         {
             continue;
         }
-        if exact_current_metadata.is_some() && original.sources != previous.sources {
+        if kind == PublicationReceiptRef::Current && original.sources != previous.sources {
             continue;
         }
         let Ok(Some(observations)) = proof_codec::verify_presentation_observations(

@@ -12244,7 +12244,21 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
                 refused = true;
                 break;
             }
-            Ok((crate::events::Outcome::Deferred, None)) => {}
+            Ok((crate::events::Outcome::Deferred, None)) => {
+                let db = fixture.db();
+                let composition_effects: (i64, i64, i64) = db
+                    .query_row(
+                        "SELECT (SELECT count(*) FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='singleton'),(SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='singleton' AND kind='history'),(SELECT count(*) FROM main.storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='singleton' AND owner_kind='history')",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    composition_effects,
+                    (0, 0, 0),
+                    "deferred original custody must not publish composed History state"
+                );
+            }
             other => panic!("unexpected result while completing original History: {other:?}"),
         }
     }
