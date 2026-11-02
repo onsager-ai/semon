@@ -881,6 +881,7 @@ mod verified_history_tests {
         .unwrap();
         let namespace = "local";
         let admission = 7;
+        let sql_admission = i64::try_from(admission).unwrap();
         let stream = "e".repeat(64);
         let owner = row("original History");
         let metadata = serde_json::to_string(&owner).unwrap();
@@ -897,7 +898,7 @@ mod verified_history_tests {
         .unwrap();
         db.execute(
             "INSERT INTO storage_proof_generations VALUES(?1,'exact-receipt',?2,?3,?4,?5)",
-            rusqlite::params![namespace, owner.key, admission, stream, metadata],
+            rusqlite::params![namespace, owner.key, sql_admission, stream, metadata],
         )
         .unwrap();
         db.execute(
@@ -906,7 +907,7 @@ mod verified_history_tests {
                 namespace,
                 owner.key,
                 digest,
-                admission,
+                sql_admission,
                 stream,
                 runtime_capture(&owner)
             ],
@@ -919,7 +920,7 @@ mod verified_history_tests {
         let (grant_digest, capture): (String, Option<String>) = db
             .query_row(
                 "SELECT metadata_digest,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND admission=?3 AND stream=?4",
-                rusqlite::params![namespace, owner.key, admission, stream],
+                rusqlite::params![namespace, owner.key, sql_admission, stream],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
