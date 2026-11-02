@@ -45,6 +45,10 @@ use crate::{
 pub(crate) type PreparedTraceWitnesses = BTreeMap<(String, String), String>;
 
 #[cfg(test)]
+pub(crate) type FullCatalogCaptureHook =
+    Box<dyn FnOnce(&crate::storage::source_observations::FullCatalogStart)>;
+
+#[cfg(test)]
 thread_local! {
     static PREPARED_TRACE_WITNESS_CAPTURE: std::cell::RefCell<
         Option<(BTreeSet<String>, PreparedTraceWitnesses)>
@@ -631,11 +635,7 @@ thread_local! {
     /// Runs after a full Catalog captured pending source claims and derived its
     /// forced paths, but before it takes the corresponding shared Source locks.
     pub(crate) static AFTER_FULL_CATALOG_CAPTURE: std::cell::RefCell<
-        Option<
-            Box<
-                dyn FnOnce(&crate::storage::source_observations::FullCatalogStart),
-            >,
-        >,
+        Option<FullCatalogCaptureHook>,
     > = const { std::cell::RefCell::new(None) };
     /// Races after native query derivation, before projection publication.
     pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };

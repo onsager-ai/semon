@@ -12897,6 +12897,7 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
 fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_atomically() {
     use std::{cell::RefCell, rc::Rc};
 
+    #[derive(Clone, Debug, PartialEq, Eq)]
     struct FenceState {
         claims: Vec<(String, i64, String, i64)>,
         continuations: Vec<(String, Vec<u8>)>,
