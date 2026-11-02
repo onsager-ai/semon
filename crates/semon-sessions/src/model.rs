@@ -628,6 +628,15 @@ thread_local! {
     /// Runs once right after the scan read the files: a test appends there,
     /// as a writer would while a build runs.
     pub(crate) static AFTER_SCAN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs after a full Catalog captured pending source claims and derived its
+    /// forced paths, but before it takes the corresponding shared Source locks.
+    pub(crate) static AFTER_FULL_CATALOG_CAPTURE: std::cell::RefCell<
+        Option<
+            Box<
+                dyn FnOnce(&crate::storage::source_observations::FullCatalogStart),
+            >,
+        >,
+    > = const { std::cell::RefCell::new(None) };
     /// Races after native query derivation, before projection publication.
     pub(crate) static AFTER_QUERY_DERIVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -9111,6 +9120,12 @@ fn build_sources_inner(
                 } else if input.path.ends_with(".meta.json") {
                     forced_catalog_paths.insert(lock_key);
                 }
+            }
+            #[cfg(test)]
+            if let Some(hook) =
+                AFTER_FULL_CATALOG_CAPTURE.with(|hook| hook.borrow_mut().take())
+            {
+                hook(&snapshot);
             }
             let pending_locks = lock_keys
                 .iter()
