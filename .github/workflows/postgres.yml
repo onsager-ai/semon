@@ -48,28 +48,35 @@ jobs:
           SQL
       - name: Resolve optional driver lock in CI
         run: cargo metadata --format-version 1 > "$RUNNER_TEMP/pg-metadata.json"
+      - name: Compile diagnostic tests once
+        id: compile
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls --no-run 2>&1 | tee "$RUNNER_TEMP/477-compile.log"
       - name: Exact canonical Claude call-source regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::staged_agent_messages_match_the_shared_builder_without_duplicate_relations -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-claude-call.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-claude-call.log"
       - name: Exact selector metadata and event budgets
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::relation_stage::selector_metadata_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-selector-budget.log"
           grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/477-selector-budget.log"
       - name: Nested Claude source order and exact page relations
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_changes -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-claude-source-order.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-claude-source-order.log"
       - name: Exact imported Current handoff with unchanged assertions
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
@@ -88,7 +95,7 @@ jobs:
           cargo fmt --all
           git diff --binary > "$RUNNER_TEMP/477-format.patch"
       - name: Strict PostgreSQL Clippy
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
