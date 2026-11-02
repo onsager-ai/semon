@@ -460,21 +460,35 @@ impl PublicationReceiptRef {
     }
 }
 
+/// Exact owner and publication context used to authenticate stored receipts.
+pub(crate) struct PublicationReceiptRequest<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) session_key: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) publication_admission: u64,
+    pub(crate) previous: &'a CatalogRow,
+    pub(crate) exact_owner_metadata: &'a str,
+    pub(crate) kind: PublicationReceiptRef,
+}
+
 /// Authenticate local publication receipts that may supply predecessor
 /// slots. Current ownership also requires its exact native observation grant;
 /// retained History ownership requires the durable local History reference.
 /// The full CWD fingerprint is checked against an exact path-to-CWD map.
 pub(crate) fn verified_publication_receipts(
     db: &Connection,
-    namespace: &str,
-    session_key: &str,
-    stream: &str,
-    publication_admission: u64,
-    previous: &CatalogRow,
-    exact_owner_metadata: &str,
-    kind: PublicationReceiptRef,
+    request: PublicationReceiptRequest<'_>,
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
+    let PublicationReceiptRequest {
+        namespace,
+        session_key,
+        stream,
+        publication_admission,
+        previous,
+        exact_owner_metadata,
+        kind,
+    } = request;
     if kind == PublicationReceiptRef::History {
         let normalized = normalized_owner_metadata(exact_owner_metadata, session_key)?;
         if !has_local_history_origin(
