@@ -259,8 +259,8 @@ fn pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_or
             let changes = DirtyRows::between(old, index);
             let mutation = crate::source_change::AppendEvidence {
                 generation: crate::source_change::stat_generation(&data.ledger.stat).unwrap(),
-                before: data.ledger.stat.clone(),
-                after: next.ledger.stat.clone(),
+                before: data.ledger.stat,
+                after: next.ledger.stat,
             };
             let mutation_evidence = serde_json::to_vec(&mutation).unwrap();
             let foreign = ns("bundle-foreign\0🦀");

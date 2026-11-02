@@ -126,11 +126,11 @@ pub(super) fn source_continuation_snapshot(
              SELECT r.source_path,c.source_path IS NOT NULL,CASE WHEN octet_length(c.evidence)<=8192 THEN c.evidence END, \
                     i.revision,f.file_id,f.dev::text,f.ino::text,f.size::text,f.mtime_ns,f.resume_at::text, \
                     f.head_sha256,f.tail_sha256,f.ctime_ns, \
-                    EXISTS(SELECT 1 FROM semon_pg_native_source_mutations m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(m.source_path,m.source_path_digest,r.source_path)), \
+                    EXISTS(SELECT 1 FROM semon_pg_native_source_mutations m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.source_path=r.source_path), \
                     EXISTS(SELECT 1 FROM semon_pg_native_meta m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.key_digest=sha256(convert_to('raw-write-inflight:','UTF8') || r.source_path) AND semon_pg_native_key_matches(m.key,m.key_digest,convert_to('raw-write-inflight:','UTF8') || r.source_path)) \
              FROM requested r \
-             LEFT JOIN semon_pg_native_source_continuations c ON c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(c.source_path,c.source_path_digest,r.source_path) \
-             LEFT JOIN semon_pg_source_invalidations i ON i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.source_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(i.source_path,i.source_path_digest,r.source_path) \
+             LEFT JOIN semon_pg_native_source_continuations c ON c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.source_path=r.source_path \
+             LEFT JOIN semon_pg_source_invalidations i ON i.namespace_digest=sha256($1::bytea) AND i.namespace=$1 AND i.search_path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(i.source_path,i.search_path_digest,r.source_path) \
              LEFT JOIN semon_pg_native_files f ON f.namespace_digest=sha256($1::bytea) AND f.namespace=$1 AND f.path_digest=sha256(r.source_path) AND semon_pg_native_key_matches(f.path,f.path_digest,r.source_path) \
              ORDER BY r.source_path"
         ),
