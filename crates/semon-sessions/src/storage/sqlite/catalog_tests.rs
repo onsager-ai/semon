@@ -13060,3 +13060,260 @@ fn full_catalog_revision_fence_counts_owned_scan_and_refuses_external_advance_at
     let committed_state = committed_state.borrow().clone().unwrap();
     assert_eq!(state(&fixture.options), committed_state);
 }
+
+#[test]
+fn full_catalog_captures_pending_raw_create_before_inventory_and_holds_its_source_lock() {
+    use sha2::Digest;
+    use std::sync::mpsc;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct FenceState {
+        claimed: bool,
+        has_continuation: bool,
+        row: Option<String>,
+        head: Option<String>,
+    }
+
+    fn state(options: &Options, path: &str) -> FenceState {
+        let config = options.source.config(&options.cache).unwrap();
+        let owner = crate::events::store::configured::NativeOwnership::admit(&config).unwrap();
+        let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+        let db = journal.connection().unwrap();
+        let claimed = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_continuation = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_source_continuations WHERE namespace=semon_namespace() AND source_path=?1)",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let row = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='pending-create'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let head = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        FenceState {
+            claimed,
+            has_continuation,
+            row,
+            head,
+        }
+    }
+
+    struct ResumeCapture(Option<mpsc::SyncSender<()>>);
+    impl ResumeCapture {
+        fn release(&mut self) {
+            if let Some(resume) = self.0.take() {
+                let _ = resume.send(());
+            }
+        }
+    }
+    impl Drop for ResumeCapture {
+        fn drop(&mut self) {
+            self.release();
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.source("warm-catalog");
+    fixture.publish_existing();
+
+    let input = crate::inputs::Input {
+        root: crate::inputs::InputRoot::Claude,
+        path: "projects/project/pending-create.jsonl".into(),
+    };
+    let source_path = input.full_path(&fixture.options);
+    let source_path_text = source_path.to_string_lossy().into_owned();
+    fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+    assert!(!source_path.exists());
+
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source)
+        .unwrap();
+    cache.begin_scan().unwrap();
+    let published = cache.full_catalog_start().unwrap();
+    assert!(published.pending_paths.is_empty());
+    let published_state = state(&fixture.options, &source_path_text);
+    assert!(published_state.head.is_some());
+
+    // The producer uses the canonical source fence and durably records one
+    // exact invalidation before any Raw bytes exist.
+    let lock_key = crate::source_change::lock_key(&fixture.options, &input);
+    let source_lock =
+        crate::source_change::SourceLock::acquire(&fixture.options, &lock_key, true).unwrap();
+    crate::invalidate_session_sources(&fixture.options, std::slice::from_ref(&input)).unwrap();
+    let baseline = cache.full_catalog_start().unwrap();
+    assert_eq!(baseline.pending_paths, vec![source_path_text.clone()]);
+    let held_state = state(&fixture.options, &source_path_text);
+    assert!(held_state.claimed);
+    assert!(!held_state.has_continuation);
+    assert_eq!(held_state.head, published_state.head);
+    assert!(crate::source_projection_ready(
+        &fixture.options,
+        input.root.as_str(),
+        &input.path,
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(
+        fs::metadata(&source_path).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+
+    let bytes = format!(
+        "{}\n",
+        json!({"type":"user","sessionId":"pending-create","uuid":"pending-create-u1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"pending raw create"}})
+    )
+    .into_bytes();
+    let (captured_tx, captured_rx) = mpsc::sync_channel(1);
+    let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+    let (observed_tx, observed_rx) = mpsc::sync_channel(1);
+    let controller_options = fixture.options.clone();
+    let controller_input = input.clone();
+    let controller_path = source_path.clone();
+    let controller_path_text = source_path_text.clone();
+    let controller_bytes = bytes.clone();
+    let expected_head = published_state.head.clone();
+    let controller_source_lock = source_lock;
+    let controller = std::thread::spawn(move || {
+        let mut resume = ResumeCapture(Some(resume_tx));
+        let source_lock = controller_source_lock;
+        let captured = captured_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("full Catalog must report its captured pending baseline");
+        assert!(!captured.overflow);
+        assert_eq!(captured.pending_paths, vec![controller_path_text.clone()]);
+
+        let held = state(&controller_options, &controller_path_text);
+        assert!(held.claimed);
+        assert!(!held.has_continuation);
+        assert_eq!(held.head, expected_head);
+        assert!(held.row.is_none());
+        assert_eq!(
+            fs::metadata(&controller_path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert!(crate::source_projection_ready(
+            &controller_options,
+            controller_input.root.as_str(),
+            &controller_input.path,
+        )
+        .unwrap()
+        .is_none());
+
+        // The observer has captured the pending claim but still cannot finish
+        // inventory while the Raw producer retains its exclusive SourceLock.
+        resume.release();
+        let early_observation = observed_rx.recv_timeout(Duration::from_millis(250));
+        let completed_while_held = early_observation.is_ok();
+
+        let write_result = (move || -> std::io::Result<()> {
+            let mut raw = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&controller_path)?;
+            raw.write_all(&controller_bytes)?;
+            // The full Catalog API has no scan cutoff. Keep this fixture old
+            // mtime without treating it as evidence for a cutoff override.
+            raw.set_times(fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + Duration::from_secs(1),
+            ))?;
+            raw.sync_all()?;
+            Ok(())
+        })();
+        drop(source_lock);
+
+        let observed = match early_observation {
+            Ok(observed) => observed,
+            Err(mpsc::RecvTimeoutError::Timeout) => observed_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("full Catalog should resume after Raw completion"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+                "full Catalog observation channel disconnected".into(),
+            ),
+        };
+        assert!(write_result.is_ok(), "Raw producer failed: {write_result:?}");
+        assert!(
+            !completed_while_held,
+            "full Catalog completed while the Raw producer held its SourceLock"
+        );
+        assert_eq!(observed, Ok(()));
+        captured
+    });
+
+    crate::model::AFTER_FULL_CATALOG_CAPTURE.with(|hook| {
+        assert!(hook.borrow().is_none());
+        *hook.borrow_mut() = Some(Box::new(move |snapshot| {
+            let _ = captured_tx.send(snapshot.clone());
+            let _ = resume_rx.recv_timeout(Duration::from_secs(10));
+        }));
+    });
+    let mut dirty = false;
+    let mut texts = crate::model::Texts::default();
+    let observation = crate::model::observe_catalog(
+        &fixture.options,
+        &mut cache,
+        &mut dirty,
+        &mut texts,
+        crate::model::now_ms(),
+    );
+    let hook_consumed = crate::model::AFTER_FULL_CATALOG_CAPTURE
+        .with(|hook| hook.borrow_mut().take().is_none());
+    let _ = observed_tx.send(observation.as_ref().map(|_| ()).map_err(|error| error.to_string()));
+    let captured = controller.join().unwrap();
+    assert_eq!(captured, baseline);
+    assert!(hook_consumed, "full Catalog capture hook did not run");
+    observation.unwrap();
+
+    let final_state = state(&fixture.options, &source_path_text);
+    assert!(!final_state.claimed);
+    let metadata = final_state
+        .row
+        .as_deref()
+        .expect("completed Raw create must appear in the published Catalog");
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(metadata).unwrap();
+    let source = row
+        .sources
+        .iter()
+        .find(|source| source.path == source_path)
+        .expect("Catalog row must retain its physical source proof");
+    let prefix: [u8; 32] = sha2::Sha256::digest(&bytes).into();
+    assert_eq!(source.offset, bytes.len() as u64);
+    assert_eq!(source.size, bytes.len() as u64);
+    assert_eq!(source.prefix_sha256, prefix);
+    assert_eq!(fs::read(&source_path).unwrap(), bytes);
+
+    let ready = crate::source_projection_ready(
+        &fixture.options,
+        input.root.as_str(),
+        &input.path,
+    )
+    .unwrap()
+    .expect("published source projection must qualify after its claim is acknowledged");
+    assert_eq!(ready.source.path, input.path);
+    assert_eq!(ready.source.offset, source.offset);
+    assert_eq!(ready.source.prefix_sha256, prefix);
+    let proof = crate::session_source_proof(&fixture.options, input.root.as_str(), &input.path)
+        .unwrap()
+        .expect("published source must have a qualified physical proof");
+    assert_eq!(proof.source, ready.source);
+    assert_eq!(proof.size, bytes.len() as u64);
+    assert_eq!(proof.source.prefix_sha256, prefix);
+    assert!(cache.session_catalog_generation().is_some());
+}
