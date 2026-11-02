@@ -60,7 +60,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::catalog::source_continuation_tests:: -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-continuation-proof.log"
-          grep -F 'test result: ok. 4 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-proof.log"
+          grep -F 'test result: ok. 7 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-proof.log"
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-continuation-plan.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-plan.log"
       - name: Real PG ordinary ingest restart append and relocation
