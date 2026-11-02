@@ -5483,9 +5483,12 @@ impl<'a> Builder<'a> {
         tx: &Transcript,
         saved: Option<&crate::slot_projection::Projection>,
     ) -> Value {
-        let decorate = |mut recipe: Value| {
+        let prompt_fields = std::cell::RefCell::new(BTreeMap::new());
+        let decorate = |mut recipe: Value,
+                        source_file: Option<&SourceFile>,
+                        is_prompt_record: bool| {
             let kind = recipe["kind"].as_str().unwrap_or("");
-            if let Some(field) = saved
+            let field = saved
                 .into_iter()
                 .flat_map(|saved| &saved.slots)
                 .find_map(|slot| {
@@ -5507,7 +5510,46 @@ impl<'a> Builder<'a> {
                         ))
                     .then_some(field)
                 })
-            {
+                .cloned()
+                .or_else(|| {
+                    if self.history_records.is_some()
+                        || kind != "prompt"
+                        || !is_prompt_record
+                    {
+                        return None;
+                    }
+                    let source_file = source_file?;
+                    let path = recipe["path"].as_str()?;
+                    let offset = recipe["offset"].as_u64()?;
+                    let block = u32::try_from(recipe["block"].as_u64()?).ok()?;
+                    if source_file.path.to_str()? != path {
+                        return None;
+                    }
+                    let source = summary::source(source_file);
+                    let key = (source.path.clone(), offset, block);
+                    let mut fields = prompt_fields.borrow_mut();
+                    Some(
+                        fields
+                            .entry(key)
+                            .or_insert_with(|| {
+                                crate::native_field::capture_with_record(
+                                    offset,
+                                    block,
+                                    &crate::slot_projection::Recipe::U,
+                                    |at| {
+                                        crate::native_field::read_source_record(
+                                            &source,
+                                            at,
+                                            Some(self.records),
+                                        )
+                                    },
+                                )
+                                .0
+                            })
+                            .clone(),
+                    )
+                });
+            if let Some(field) = field {
                 recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
             }
             recipe
@@ -5520,6 +5562,8 @@ impl<'a> Builder<'a> {
             };
             decorate(
                 serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd,"source":summary::source(file)}),
+                Some(file),
+                found.k == Kind::U,
             )
         };
         let placed = |id: &str, place: Place| {
@@ -5551,13 +5595,17 @@ impl<'a> Builder<'a> {
                             if sources.next().is_some() {
                                 return None;
                             }
-                            Some(decorate(serde_json::json!({
-                                "path": path,
-                                "offset": slot.offset,
-                                "block": slot.block,
-                                "kind": "prompt",
-                                "source": summary::source(source)
-                            })))
+                            Some(decorate(
+                                serde_json::json!({
+                                    "path": path,
+                                    "offset": slot.offset,
+                                    "block": slot.block,
+                                    "kind": "prompt",
+                                    "source": summary::source(source)
+                                }),
+                                Some(source),
+                                true,
+                            ))
                         })
                 })
         };
@@ -5592,7 +5640,11 @@ impl<'a> Builder<'a> {
                     }
                     value["arg"] = serde_json::json!(preview.arg);
                     value["skip"] = serde_json::json!(preview.skip);
-                    fields[*field] = decorate(value);
+                    fields[*field] = decorate(
+                        value,
+                        Some(&self.files[preview.at.0]),
+                        event(self.files, preview.at).k == Kind::U,
+                    );
                 }
             } else if h.out.from == key {
                 let brief_at = placed(&h.out.id, Place::Out).or_else(|| {
@@ -5652,7 +5704,7 @@ impl<'a> Builder<'a> {
                     answer["offset"] = serde_json::json!(reply.o);
                     answer["block"] = serde_json::json!(reply.b);
                     answer["structured"] = serde_json::json!(reply.f & ANSWERED != 0);
-                    fields[field] = decorate(answer);
+                    fields[field] = decorate(answer, Some(&self.files[at.0]), false);
                 }
             }
             for (field, preview) in &h.foreign_previews {
@@ -5662,17 +5714,21 @@ impl<'a> Builder<'a> {
                 let Some(path) = preview.at.source.path.to_str() else {
                     continue;
                 };
-                fields[field.as_str()] = decorate(serde_json::json!({
-                    "path": path,
-                    "offset": preview.at.offset,
-                    "block": preview.at.block,
-                    "kind": preview.kind,
-                    "tool": preview.tool,
-                    "cwd": preview.cwd,
-                    "source": preview.at.source,
-                    "arg": preview.arg,
-                    "skip": preview.skip,
-                }));
+                fields[field.as_str()] = decorate(
+                    serde_json::json!({
+                        "path": path,
+                        "offset": preview.at.offset,
+                        "block": preview.at.block,
+                        "kind": preview.kind,
+                        "tool": preview.tool,
+                        "cwd": preview.cwd,
+                        "source": preview.at.source,
+                        "arg": preview.arg,
+                        "skip": preview.skip,
+                    }),
+                    None,
+                    false,
+                );
             }
             if h.out.from == key
                 && let Some(at) =
