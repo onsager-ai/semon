@@ -70,6 +70,13 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::businessflow::pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-continuation-businessflow.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-businessflow.log"
+      - name: Real PG continuation promotion and namespace isolation
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::native_bundle::tests::pg_native_bundle_real_parser_connected_initial_append_restart_and_metadata_oracle -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-continuation-promotion.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-continuation-promotion.log"
       - name: Real SQLite and PostgreSQL owned versus external revision fences
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
