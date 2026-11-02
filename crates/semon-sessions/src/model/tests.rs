@@ -6322,7 +6322,7 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 
 #[cfg(feature = "postgres")]
 #[test]
-fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
+fn pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pages() {
     use crate::storage::native_events::NativeEventStore;
 
     let home = Home::new();
@@ -6350,6 +6350,13 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
     let prior_inputs = crate::inputs(&options).unwrap();
     assert_eq!(prior_inputs.len(), 1);
     let mut pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    pg_cache
+        .discover_catalog_sources(&options, &prior_inputs, true)
+        .unwrap();
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
     for (at, input) in prior_inputs.iter().enumerate() {
         let path = input.full_path(&options);
         let receipt = pg_cache
@@ -6385,6 +6392,37 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
         .cloned()
         .collect::<Vec<_>>();
     assert_eq!(selected_inputs.len(), 72);
+    let component_paths = ["alpha", "beta"]
+        .map(|id| {
+            options
+                .claude_home
+                .join(format!("projects/-work-proj/{id}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    for (page_index, page) in selected_inputs.chunks(64).enumerate() {
+        let complete = (page_index + 1) * 64 >= selected_inputs.len();
+        pg_cache
+            .discover_catalog_sources(&options, page, complete)
+            .unwrap();
+    }
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
+    let pending = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending),
+        "the target bidirectional component was discovered as pending"
+    );
+    drop(pg_cache);
 
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
     let mut failure = None;
@@ -6460,16 +6498,6 @@ fn pg_staged_publication_diagnoses_large_bidirectional_message_pages() {
     let pending = pg_cache
         .pending_catalog_sources(128)
         .unwrap()
-        .into_iter()
-        .collect::<BTreeSet<_>>();
-    let component_paths = ["alpha", "beta"]
-        .map(|id| {
-            options
-                .claude_home
-                .join(format!("projects/-work-proj/{id}.jsonl"))
-                .to_string_lossy()
-                .into_owned()
-        })
         .into_iter()
         .collect::<BTreeSet<_>>();
     assert!(
