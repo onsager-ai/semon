@@ -1,15 +1,15 @@
 //! Source withdrawal owns a fresh immutable Catalog generation. Native rows,
 //! archive custody and every older proof/lease remain intact.
 use super::*;
-use crate::events::{Ledger, Outcome};
+use crate::events::{IndexWriteResult, Ledger, Outcome};
 use std::collections::BTreeSet;
 
 pub(in crate::storage::postgres) fn remove(
     tx: &mut PgTxn<'_>,
     files: &[(String, Option<Ledger>)],
-) -> Result<Outcome, StorageError> {
+) -> Result<IndexWriteResult, StorageError> {
     if files.is_empty() {
-        return Ok(Outcome::Written);
+        return Ok(IndexWriteResult::new(Outcome::Written, 0));
     }
     if files.len() > 64
         || files
@@ -26,7 +26,7 @@ pub(in crate::storage::postgres) fn remove(
     let ack=tx.driver.query("SELECT payload=$3 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns,&operation,&request]).map_err(sqlstate::error)?;
     if let Some(row) = ack.first() {
         return if row.get::<_, bool>(0) {
-            Ok(Outcome::Written)
+            Ok(IndexWriteResult::new(Outcome::Written, 0))
         } else {
             Err(StorageError::Conflict)
         };
@@ -42,7 +42,7 @@ pub(in crate::storage::postgres) fn remove(
         }
     }
     if replayed == files.len() {
-        return Ok(Outcome::Written);
+        return Ok(IndexWriteResult::new(Outcome::Written, 0));
     }
     let mut relocated = 0;
     for (path, ledger) in files {
@@ -55,23 +55,23 @@ pub(in crate::storage::postgres) fn remove(
         }
     }
     if relocated == files.len() {
-        return Ok(Outcome::Written);
+        return Ok(IndexWriteResult::new(Outcome::Written, 0));
     }
     let active:bool=tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND active)", &[&ns]).map_err(sqlstate::error)?.get(0);
     if active {
-        return Ok(Outcome::Conflict);
+        return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
     }
     for (path, expected) in files {
         let pending: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_source_mutations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2)", &[&ns, &path.as_bytes()]).map_err(sqlstate::error)?.get(0);
         if pending {
-            return Ok(Outcome::Conflict);
+            return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
         }
         if super::super::native_reader::ledger(tx, path)?
             .map(|(_, l)| l)
             .as_ref()
             != expected.as_ref()
         {
-            return Ok(Outcome::Conflict);
+            return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
         }
     }
     let previous = super::super::model_cache::generation(tx)?.ok_or(StorageError::ScopeChanged)?;
@@ -104,7 +104,7 @@ pub(in crate::storage::postgres) fn remove(
                     .and_then(|(_, l)| l.as_ref())
                     .ok_or(StorageError::ScopeChanged)?;
                 if !catalog::source_matches_ledger(source, ledger) {
-                    return Ok(Outcome::Conflict);
+                    return Ok(IndexWriteResult::new(Outcome::Conflict, 0));
                 }
             }
             removed.push(value.key.clone());
@@ -204,7 +204,10 @@ pub(in crate::storage::postgres) fn remove(
         tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
     tx.check()?;
-    Ok(Outcome::Written)
+    Ok(IndexWriteResult::new(
+        Outcome::Written,
+        files.len() as u64,
+    ))
 }
 
 /// Mixed or connected owners are rebuilt by the ordinary semantic producer.
@@ -214,7 +217,7 @@ fn defer(
     tx: &mut PgTxn<'_>,
     files: &[(String, Option<Ledger>)],
     intent: &[u8],
-) -> Result<Outcome, StorageError> {
+) -> Result<IndexWriteResult, StorageError> {
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     for (path, ledger) in files {
         tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&intent]).map_err(sqlstate::error)?;
@@ -228,7 +231,10 @@ fn defer(
     }
     tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
     tx.check()?;
-    Ok(Outcome::Written)
+    Ok(IndexWriteResult::new(
+        Outcome::Written,
+        files.len() as u64,
+    ))
 }
 
 type Page = Vec<(Vec<u8>, CatalogRow)>;

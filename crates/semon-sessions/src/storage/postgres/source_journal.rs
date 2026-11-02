@@ -8,9 +8,10 @@ use crate::storage::{
     LogicalSourceNamespace, StorageError,
     source_observations::{
         CATALOG_SEARCH_LIMIT, CatalogPendingBatch, CatalogPendingSearch, CatalogPendingTier,
-        SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims, SourceIntent,
-        SourceMutationReceipt, SourceObservationStore, SourceOperation, selected_projection_paths,
-        validate_catalog_pending_exclusions, validate_intent, validate_paths,
+        FullCatalogStart, SELECTED_PROJECTION_BYTES, SELECTED_PROJECTION_KEY, SourceClaims,
+        SourceIntent, SourceMutationReceipt, SourceObservationStore, SourceOperation,
+        selected_projection_paths, validate_catalog_pending_exclusions, validate_intent,
+        validate_paths,
     },
 };
 
@@ -374,6 +375,42 @@ impl SourceObservationStore for PgSourceJournal {
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
         validate_paths(paths)?;
         self.read(|tx| claims(tx, paths))
+    }
+    fn full_catalog_start(&self) -> Result<FullCatalogStart, StorageError> {
+        self.read(|tx| {
+            tx.check()?;
+            let namespace = tx.namespace.as_str().as_bytes();
+            let revision: i64 = tx
+                .driver
+                .query_one(
+                    "SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+                    &[&namespace],
+                )
+                .map_err(sqlstate::error)?
+                .try_get(0)
+                .map_err(|_| StorageError::Unavailable)?;
+            let rows = tx
+                .driver
+                .query(
+                    "SELECT source_path FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 ORDER BY revision,source_path LIMIT 257",
+                    &[&namespace],
+                )
+                .map_err(sqlstate::error)?;
+            let overflow = rows.len() > 256;
+            let pending_paths = rows
+                .into_iter()
+                .take(256)
+                .map(|row| {
+                    String::from_utf8(row.get(0)).map_err(|_| StorageError::ScopeChanged)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            validate_paths(&pending_paths)?;
+            Ok(FullCatalogStart {
+                revision,
+                pending_paths,
+                overflow,
+            })
+        })
     }
     fn pending_catalog_sources(
         &self,

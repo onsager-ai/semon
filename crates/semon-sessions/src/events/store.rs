@@ -2544,8 +2544,17 @@ impl IndexStore for SqliteStore {
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        self.publish_catalog_with_generation(publication, expected_generation, None, false, None)
+        self.publish_catalog_with_writer_revision(
+            publication,
+            expected_generation,
+            None,
+            false,
+            None,
+            CatalogWriter::Auto,
+            revision_fence,
+        )
     }
 
     fn session_slots(
@@ -2836,7 +2845,7 @@ impl IndexStore for SqliteStore {
     fn commit_initial_files(
         &mut self,
         files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
         let mut row_measurements = crate::native_timing::Measurements::new(timing);
@@ -2854,16 +2863,16 @@ impl IndexStore for SqliteStore {
         measurements.record("transaction", started, 1);
         let started = measurements.start();
         if !current(&transaction).map_err(failure)? {
-            return Ok(Outcome::Stale);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Stale, 0));
         }
         if !super::native_commit::initial_batch(files)
             .map_err(|message| StoreError::Data(message.into()))?
         {
-            return Ok(Outcome::Conflict);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Conflict, 0));
         }
         for (path, _, _) in files {
             if ledger_row(&transaction, path).map_err(failure)?.is_some() {
-                return Ok(Outcome::Conflict);
+                return Ok(crate::events::IndexWriteResult::new(Outcome::Conflict, 0));
             }
         }
         measurements.record("fences", started, files.len());
@@ -2871,8 +2880,9 @@ impl IndexStore for SqliteStore {
         let started = measurements.start();
         let layout = WriterLayout::new(&transaction).map_err(failure)?;
         let mut usage_deletes = UsageDeletes::default();
+        let mut source_revision_delta = 0_u64;
         for (path, ledger, index) in files {
-            write_index_changes_with_usage_deletes(
+            source_revision_delta += u64::from(write_index_changes_with_usage_deletes(
                 &transaction,
                 path,
                 ledger,
@@ -2884,7 +2894,7 @@ impl IndexStore for SqliteStore {
                 &layout,
                 &mut usage_deletes,
             )
-            .map_err(failure)?;
+            .map_err(failure)?);
         }
         drop(usage_deletes);
         measurements.record("write_index_changes", started, files.len());
@@ -2900,7 +2910,10 @@ impl IndexStore for SqliteStore {
             );
             row_measurements.emit(&crate::native_timing::id(&self.path), "index_rows");
         }
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
 
     fn commit_file(
@@ -2911,7 +2924,7 @@ impl IndexStore for SqliteStore {
         ledger: &Ledger,
         _physical_stat: &Stat,
         index: &FileIndex,
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         self.write_one_dirty(path, expected, changes, ledger, index)
             .map_err(failure)
     }
@@ -2950,7 +2963,10 @@ impl IndexStore for SqliteStore {
         read_file_ledgers(&transaction)
     }
 
-    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+    fn remove_files(
+        &mut self,
+        files: &[(String, Option<Ledger>)],
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         self.remove(files).map_err(failure)
     }
 
@@ -3419,6 +3435,27 @@ impl SqliteStore {
         semantic: Option<&crate::model::relation_stage::Batch>,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        self.publish_catalog_with_writer_revision(
+            publication,
+            expected_generation,
+            claims,
+            preserve_complete,
+            semantic,
+            writer,
+            None,
+        )
+    }
+
+    fn publish_catalog_with_writer_revision(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        claims: Option<&[(String, Option<i64>)]>,
+        preserve_complete: bool,
+        semantic: Option<&crate::model::relation_stage::Batch>,
+        writer: CatalogWriter,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
         let ownership = self.owner.clone();
         let owner = &ownership;
         #[cfg(any(test, feature = "test-hooks"))]
@@ -3504,6 +3541,21 @@ impl SqliteStore {
             let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
+            }
+            if let Some(fence) = revision_fence {
+                let expected_revision = fence.expected_revision();
+                let current_revision: Option<i64> = transaction
+                    .query_row(
+                        "SELECT revision FROM main.storage_source_journal WHERE namespace=semon_namespace()",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(failure)?;
+                if current_revision != expected_revision {
+                    self.semantic_rejection = Some("source_revision");
+                    return Ok(Outcome::Conflict);
+                }
             }
             use crate::storage::catalog::CatalogPublicationHead;
             let publication_head =
@@ -4428,6 +4480,7 @@ impl SqliteStore {
     ) -> rusqlite::Result<Outcome> {
         let changes = base.map(|base| super::DirtyRows::between(base, index));
         self.write_one_dirty(path, expected, changes.as_ref(), ledger, index)
+            .map(|result| result.outcome)
     }
 
     fn write_one_dirty(
@@ -4437,25 +4490,25 @@ impl SqliteStore {
         changes: Option<&super::DirtyRows>,
         ledger: &Ledger,
         index: &FileIndex,
-    ) -> rusqlite::Result<Outcome> {
+    ) -> rusqlite::Result<crate::events::IndexWriteResult> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !current(&transaction)? {
-            return Ok(Outcome::Stale);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Stale, 0));
         }
         require_current_sql(&transaction)?;
         let layout = WriterLayout::new(&transaction)?;
         let found = ledger_row(&transaction, path)?;
         if found.as_ref().map(|(_, ledger)| ledger) != expected {
-            return Ok(Outcome::Conflict);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Conflict, 0));
         }
         if changes.is_none()
             && let Some((file_id, _)) = found
         {
             clear(&transaction, file_id)?;
         }
-        write_index_changes(
+        let source_revision_delta = u64::from(write_index_changes(
             &transaction,
             path,
             ledger,
@@ -4463,25 +4516,35 @@ impl SqliteStore {
             changes,
             expected,
             &layout,
-        )?;
+        )?);
         transaction.commit()?;
         crate::pricing::runtime::notify_reprice();
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
 
     /// Drops files' rows: with a ledger, only if the row is still at it (or
     /// doesn't decode); without one, only if it still doesn't decode.
-    fn remove(&mut self, files: &[(String, Option<Ledger>)]) -> rusqlite::Result<Outcome> {
+    fn remove(
+        &mut self,
+        files: &[(String, Option<Ledger>)],
+    ) -> rusqlite::Result<crate::events::IndexWriteResult> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !current(&transaction)? {
-            return Ok(Outcome::Stale);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Stale, 0));
         }
         require_current_sql(&transaction)?;
-        remove_files_tx(&transaction, files, self.owner.config().namespace.as_str())?;
+        let source_revision_delta =
+            remove_files_tx(&transaction, files, self.owner.config().namespace.as_str())?;
         transaction.commit()?;
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
 
     /// Saves reported runs read from `~/.claude.json` and the stamp they
@@ -5884,7 +5947,7 @@ fn write_index_changes(
     changes: Option<&super::DirtyRows>,
     expected: Option<&Ledger>,
     layout: &WriterLayout<'_, '_>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     write_index_changes_with_usage_deletes(
         transaction,
         path,
@@ -5911,7 +5974,7 @@ fn write_index_changes_measured(
     expected: Option<&Ledger>,
     measurements: &mut crate::native_timing::Measurements,
     namespace: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let layout = WriterLayout::new(transaction)?;
     write_index_changes_with_usage_deletes(
         transaction,
@@ -5939,7 +6002,7 @@ fn write_index_changes_with_usage_deletes<'tx>(
     namespace: &str,
     layout: &WriterLayout<'tx, '_>,
     usage_deletes: &mut UsageDeletes<'tx>,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<bool> {
     let _shape_probe = configured::WriterShapeProbe::new(measurements.is_enabled());
     layout.ensure_current()?;
     #[cfg(test)]
@@ -5979,7 +6042,7 @@ fn write_index_changes_with_usage_deletes<'tx>(
         super::INDEX_WRITTEN_ROWS
             .with(|n| n.set(n.get() + (written_after - written_before) as u64));
     }
-    Ok(())
+    Ok(semantic_change)
 }
 
 // Actual SQLite row changes (including triggers), distinct from leaf input
@@ -14192,8 +14255,9 @@ pub(crate) fn remove_files_tx(
     transaction: &Transaction<'_>,
     files: &[(String, Option<Ledger>)],
     namespace: &str,
-) -> rusqlite::Result<()> {
+) -> rusqlite::Result<u64> {
     validate_copied_usage(transaction)?;
+    let mut source_revision_delta = 0_u64;
     for (path, expected) in files {
         match (ledger_row(transaction, path), expected) {
             (Ok(Some((_, found))), Some(expected)) if found == *expected => {
@@ -14213,6 +14277,7 @@ pub(crate) fn remove_files_tx(
                             path,
                             "removed",
                         )?;
+                        source_revision_delta += 1;
                     }
                     continue;
                 }
@@ -14277,8 +14342,9 @@ pub(crate) fn remove_files_tx(
             path,
             "removed",
         )?;
+        source_revision_delta += 1;
     }
-    Ok(())
+    Ok(source_revision_delta)
 }
 
 pub(crate) fn read_catalog_component_paths(

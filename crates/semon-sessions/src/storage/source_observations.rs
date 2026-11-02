@@ -45,6 +45,32 @@ pub struct CatalogPendingBatch {
 
 pub type SourceClaims = Vec<(String, Option<i64>)>;
 
+/// Immutable start witness for one complete native Catalog inventory.
+/// Pending paths are captured in the same qualified read snapshot as the
+/// journal revision. More than 256 paths is represented by `overflow` and
+/// must refuse publication without acknowledging any claims.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FullCatalogStart {
+    pub revision: i64,
+    pub pending_paths: Vec<String>,
+    pub overflow: bool,
+}
+
+/// Final publication fence for a complete Catalog inventory. `owned_delta`
+/// counts only invalidations committed by this producer after `baseline`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FullCatalogRevisionFence {
+    pub baseline: i64,
+    pub owned_delta: u64,
+}
+
+impl FullCatalogRevisionFence {
+    pub fn expected_revision(self) -> Option<i64> {
+        self.baseline
+            .checked_add(i64::try_from(self.owned_delta).ok()?)
+    }
+}
+
 /// Stable identity for one typed source-observation mutation. The namespace is
 /// bound into the ID; the digest binds the operation kind and payload. Callers
 /// retain this value across retries so an uncertain commit can be reconciled.
@@ -221,6 +247,9 @@ pub trait SourceObservationStore: Send {
     ) -> Result<SourceMutationReceipt, StorageError>;
     /// Revisions are durable CAS witnesses, not worker leases.
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError>;
+    /// Capture the qualified namespace revision and up to 256 pending paths
+    /// from one read snapshot before a complete Catalog inventory begins.
+    fn full_catalog_start(&self) -> Result<FullCatalogStart, StorageError>;
     /// Read one namespace-qualified snapshot, preferring selected upgrades,
     /// then a reserved FIFO turn, then admitted identity hints. Exclusions
     /// apply before the FIFO limit; reads never acknowledge durable claims.

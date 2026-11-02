@@ -246,10 +246,11 @@ impl IndexStore for ConfiguredIndex {
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let result = self
             .native
-            .publish_catalog(publication, expected_generation, None, false)
+            .publish_catalog(publication, expected_generation, None, false, revision_fence)
             .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
         self.acknowledge_publication(expected_generation, Some(&result));
         Ok(result)
@@ -262,7 +263,7 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<(Outcome, Option<String>), StoreError> {
         let result = self
             .native
-            .publish_catalog(publication, expected_generation, Some(claims), false)
+            .publish_catalog(publication, expected_generation, Some(claims), false, None)
             .and_then(|result| result.ok_or(StoreError::Configured(StorageError::Unavailable)))?;
         self.acknowledge_publication(expected_generation, Some(&result));
         Ok(result)
@@ -275,7 +276,7 @@ impl IndexStore for ConfiguredIndex {
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         let result =
             self.native
-                .publish_catalog(publication, expected_generation, Some(claims), true)?;
+                .publish_catalog(publication, expected_generation, Some(claims), true, None)?;
         self.acknowledge_publication(expected_generation, result.as_ref());
         Ok(result)
     }
@@ -468,11 +469,11 @@ impl IndexStore for ConfiguredIndex {
     fn commit_initial_files(
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         if !crate::events::native_commit::initial_batch(files)
             .map_err(|_| StoreError::Configured(StorageError::InvalidArguments))?
         {
-            return Ok(Outcome::Conflict);
+            return Ok(crate::events::IndexWriteResult::new(Outcome::Conflict, 0));
         }
         let files = files
             .iter()
@@ -497,7 +498,7 @@ impl IndexStore for ConfiguredIndex {
         ledger: &Ledger,
         physical_stat: &Stat,
         index: &FileIndex,
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         self.native
             .commit(&[(path, expected, changes, ledger, physical_stat, index)])
             .map_err(StoreError::Configured)
@@ -533,7 +534,10 @@ impl IndexStore for ConfiguredIndex {
     fn file_ledgers(&self) -> Result<Vec<(String, Option<Ledger>)>, StoreError> {
         self.native.file_ledgers()
     }
-    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+    fn remove_files(
+        &mut self,
+        files: &[(String, Option<Ledger>)],
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         self.native.remove_files(files)
     }
     fn save_runs(

@@ -336,6 +336,11 @@ impl SourceObservationStore for LoseEffectAck {
     fn claims(&self, paths: &[String]) -> Result<SourceClaims, StorageError> {
         self.inner.claims(paths)
     }
+    fn full_catalog_start(
+        &self,
+    ) -> Result<crate::storage::source_observations::FullCatalogStart, StorageError> {
+        self.inner.full_catalog_start()
+    }
     fn pending_catalog_sources(
         &self,
         limit: usize,

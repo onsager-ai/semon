@@ -1012,6 +1012,41 @@ impl SourceObservationStore for SourceJournal {
         claims(&db, self.config.namespace.as_str(), paths).map_err(failed)
     }
 
+    fn full_catalog_start(
+        &self,
+    ) -> Result<crate::storage::source_observations::FullCatalogStart, StorageError> {
+        let mut connection = self.writer()?;
+        let db = connection.transaction().map_err(failed)?;
+        self.validate(&db)?;
+        self.validate_journal_layout(&db)?;
+        let revision: Option<i64> = db
+            .query_row(
+                "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                [self.config.namespace.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
+        let revision = revision.ok_or(StorageError::ScopeChanged)?;
+        let mut statement = db
+            .prepare("SELECT source_path FROM main.session_catalog_invalidations WHERE namespace=?1 ORDER BY revision,source_path LIMIT 257")
+            .map_err(failed)?;
+        let paths = statement
+            .query_map([self.config.namespace.as_str()], |row| row.get::<_, String>(0))
+            .map_err(failed)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(failed)?;
+        let overflow = paths.len() > 256;
+        let pending_paths = paths.into_iter().take(256).collect::<Vec<_>>();
+        crate::storage::source_observations::validate_paths(&pending_paths)?;
+        db.commit().map_err(|_| StorageError::CommitUncertain)?;
+        Ok(crate::storage::source_observations::FullCatalogStart {
+            revision,
+            pending_paths,
+            overflow,
+        })
+    }
+
     fn pending_catalog_sources(
         &self,
         limit: usize,
@@ -1883,6 +1918,11 @@ mod tests {
         ) -> Result<crate::storage::source_observations::SourceClaims, StorageError> {
             self.inner.claims(paths)
         }
+        fn full_catalog_start(
+            &self,
+        ) -> Result<crate::storage::source_observations::FullCatalogStart, StorageError> {
+            self.inner.full_catalog_start()
+        }
         fn pending_catalog_sources(
             &self,
             limit: usize,
@@ -2671,7 +2711,7 @@ mod tests {
             observations: None,
         };
         assert!(matches!(
-            index.publish_session_catalog_fenced(&publication, None),
+            index.publish_session_catalog_fenced(&publication, None, None),
             Err(StoreError::Configured(
                 StorageError::NamespaceUpgradePending
             ))

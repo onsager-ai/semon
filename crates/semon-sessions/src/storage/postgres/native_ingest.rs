@@ -163,18 +163,28 @@ pub(super) fn commit(
     ledger: &Ledger,
     physical_stat: &Stat,
     index: &FileIndex,
-) -> Result<(), StorageError> {
+) -> Result<crate::events::IndexWriteResult, StorageError> {
     validate_input(intent, path, expected, ledger, physical_stat, index)?;
+    let mut source_revision_delta = 0;
     let result = pool.apply_operation(namespace, &identity(intent), control, |tx| {
         qualify_intent(tx, intent, path, expected)?;
-        complete(tx, intent, path, expected, changes, ledger, index)
+        let (completion, delta) = complete(tx, intent, path, expected, changes, ledger, index)?;
+        source_revision_delta = delta;
+        Ok(completion)
     });
     match result {
-        Ok(_) => Ok(()),
+        Ok(_) => Ok(crate::events::IndexWriteResult::new(
+            crate::events::Outcome::Written,
+            source_revision_delta,
+        )),
         Err(StorageError::CommitUncertain) => {
-            reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
+            let receipt = reconcile(pool, namespace, control, &intent.id, path, &intent.harness)?
                 .ok_or(StorageError::CommitUncertain)
-                .map(|_| ())
+                ?;
+            Ok(crate::events::IndexWriteResult::new(
+                crate::events::Outcome::Written,
+                source_revision_delta,
+            ))
         }
         Err(e) => Err(e),
     }
@@ -284,11 +294,11 @@ fn complete(
     changes: Option<&DirtyRows>,
     ledger: &Ledger,
     index: &FileIndex,
-) -> Result<serde_json::Value, StorageError> {
+) -> Result<(serde_json::Value, u64), StorageError> {
     let namespace = tx.namespace.clone();
     // The bundle is a family effect, never the source of a receipt. Require
     // the actual committed family authority below before recording outcome.
-    let _partial = super::native_bundle::stage(
+    let partial = super::native_bundle::stage(
         tx,
         crate::events::native_commit::Input {
             path,
@@ -315,9 +325,10 @@ fn complete(
         }
     }
     let revision = claim(tx, path)?;
-    Ok(
+    Ok((
         serde_json::json!({"operation_id":intent.id,"consumed_bytes":ledger.offset,"observed_revision":revision}),
-    )
+        partial.source_revision_delta,
+    ))
 }
 
 /// One Source-serialized transaction, with one durable native completion for
@@ -329,9 +340,9 @@ pub(super) fn commit_initial(
     control: &PgCancellation,
     intents: &std::collections::BTreeMap<String, Intent>,
     files: &[(String, Ledger, std::sync::Arc<FileIndex>)],
-) -> Result<(), StorageError> {
+) -> Result<u64, StorageError> {
     if files.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     if files.len() > 64 {
         return Err(StorageError::InvalidArguments);
@@ -353,6 +364,7 @@ pub(super) fn commit_initial(
         .map_err(|_| StorageError::InvalidArguments)?;
     let digest: [u8; 32] = Sha256::digest(encoded).into();
     let id = format!("{:x}", Sha256::digest(digest));
+    let mut source_revision_delta = 0;
     pool.apply_operation(
         namespace,
         &OperationIdentity {
@@ -374,14 +386,18 @@ pub(super) fn commit_initial(
             }
             for (path, ledger, index) in &ordered {
                 let intent = &intents[path];
+                let mut file_revision_delta = 0;
                 tx.apply_operation(&identity(intent), |tx| {
-                    complete(tx, intent, path, None, None, ledger, index)
+                    let (completion, delta) = complete(tx, intent, path, None, None, ledger, index)?;
+                    file_revision_delta = delta;
+                    Ok(completion)
                 })?;
+                source_revision_delta += file_revision_delta;
             }
             Ok(serde_json::json!({"entries": files.len()}))
         },
     )?;
-    Ok(())
+    Ok(source_revision_delta)
 }
 
 #[cfg(test)]

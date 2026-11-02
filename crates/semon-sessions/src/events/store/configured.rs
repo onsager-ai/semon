@@ -1366,6 +1366,7 @@ impl Writer {
         expected: Option<&str>,
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         connection
@@ -1402,13 +1403,14 @@ impl Writer {
             #[cfg(test)]
             traversal_observation: None,
         };
-        let result = store.publish_catalog_with_writer(
+        let result = store.publish_catalog_with_writer_revision(
             publication,
             expected,
             claims,
             closed,
             None,
             super::CatalogWriter::Auto,
+            revision_fence,
         )?;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {
@@ -1609,15 +1611,19 @@ impl Writer {
     pub(crate) fn remove_files(
         &self,
         files: &[(String, Option<Ledger>)],
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
-        super::remove_files_tx(&tx, files, self.config.namespace.as_str()).map_err(failure)?;
+        let source_revision_delta =
+            super::remove_files_tx(&tx, files, self.config.namespace.as_str()).map_err(failure)?;
         tx.commit()
             .map_err(|_| StoreError::Configured(StorageError::CommitUncertain))?;
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
 
     pub(crate) fn append_evidence(
@@ -1991,7 +1997,10 @@ impl Writer {
         Ok(())
     }
 
-    pub(crate) fn commit(&mut self, files: &[CommitFile<'_>]) -> Result<Outcome, StorageError> {
+    pub(crate) fn commit(
+        &mut self,
+        files: &[CommitFile<'_>],
+    ) -> Result<crate::events::IndexWriteResult, StorageError> {
         if files.is_empty()
             || files.len() > 64
             || files
@@ -2125,6 +2134,7 @@ impl Writer {
         }
         measurements.record("admission", admission_started, files.len());
         let apply_started = measurements.start();
+        let mut source_revision_delta = 0_u64;
         for ((path, expected, changes, ledger, _, index), write) in files.iter().zip(work) {
             if !write {
                 continue;
@@ -2141,7 +2151,7 @@ impl Writer {
                         .map_err(failed)?;
                 }
             }
-            write_index_changes_measured(
+            source_revision_delta += u64::from(write_index_changes_measured(
                 &tx,
                 path,
                 ledger,
@@ -2151,7 +2161,7 @@ impl Writer {
                 &mut row_measurements,
                 self.config.namespace.as_str(),
             )
-            .map_err(|error| failed(error))?;
+            .map_err(|error| failed(error))?);
             let intent = &self.intents[*path];
             tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }
@@ -2183,7 +2193,10 @@ impl Writer {
         if effect("commit_reply").is_err() {
             return Err(StorageError::CommitUncertain);
         }
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
 
     pub(crate) fn reconcile(

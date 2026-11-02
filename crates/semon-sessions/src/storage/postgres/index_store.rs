@@ -723,7 +723,7 @@ impl IndexStore for NativeIndex {
         ledger: &Ledger,
         physical_stat: &Stat,
         index: &FileIndex,
-    ) -> Result<Outcome, StoreError> {
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         let intent = self
             .intents
             .get(path)
@@ -744,14 +744,13 @@ impl IndexStore for NativeIndex {
             #[cfg(test)]
             eprintln!("PG_INDEX_REFUSED commit_file error={_error:?}");
         })
-        .map_err(err)?;
-        Ok(Outcome::Written)
+        .map_err(err)
     }
     fn commit_initial_files(
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
-    ) -> Result<Outcome, StoreError> {
-        native_ingest::commit_initial(
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
+        let source_revision_delta = native_ingest::commit_initial(
             &self.pool,
             &self.namespace,
             &self.control,
@@ -759,7 +758,10 @@ impl IndexStore for NativeIndex {
             files,
         )
         .map_err(err)?;
-        Ok(Outcome::Written)
+        Ok(crate::events::IndexWriteResult::new(
+            Outcome::Written,
+            source_revision_delta,
+        ))
     }
     fn select_reported_runs(
         &mut self,
@@ -817,7 +819,10 @@ impl IndexStore for NativeIndex {
             )
             .map_err(err)
     }
-    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
+    fn remove_files(
+        &mut self,
+        files: &[(String, Option<Ledger>)],
+    ) -> Result<crate::events::IndexWriteResult, StoreError> {
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::catalog_effects::withdrawal::remove(tx, files)
@@ -916,6 +921,7 @@ impl IndexStore for NativeIndex {
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected: Option<&str>,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
@@ -926,6 +932,7 @@ impl IndexStore for NativeIndex {
                     &[],
                     false,
                     None,
+                    revision_fence,
                 )
             })
             .map_err(err)
@@ -945,6 +952,7 @@ impl IndexStore for NativeIndex {
                     claims,
                     false,
                     None,
+                    None,
                 )
             })
             .map_err(err)
@@ -963,6 +971,7 @@ impl IndexStore for NativeIndex {
                     expected,
                     claims,
                     true,
+                    None,
                     None,
                 )
                 .map(Some)

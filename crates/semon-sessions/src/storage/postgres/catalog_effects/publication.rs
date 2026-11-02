@@ -286,6 +286,7 @@ pub(in crate::storage::postgres) fn publish(
     claims: &[(String, Option<i64>)],
     closed: bool,
     semantic: Option<Semantic<'_>>,
+    revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
 ) -> Result<(Outcome, Option<String>), StorageError> {
     let (operation, payload) = request(publication, expected, claims, closed, semantic.as_ref())?;
     let continuation_observation = match publication.observations {
@@ -302,7 +303,12 @@ pub(in crate::storage::postgres) fn publish(
     // replay. An acknowledged operation is checked before its now-stale CAS.
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE source_state_lock");
-    tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    let source_revision: i64 = tx
+        .driver
+        .query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns])
+        .map_err(sqlstate::error)?
+        .try_get(0)
+        .map_err(|_| StorageError::Unavailable)?;
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE operation_replay_lookup");
     let old = tx.driver.query("SELECT payload=$3,CASE WHEN octet_length(generation)=64 THEN generation END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND operation_id=$2", &[&ns, &operation, &payload]).map_err(sqlstate::error)?;
@@ -316,6 +322,11 @@ pub(in crate::storage::postgres) fn publish(
         )
         .map_err(|_| StorageError::ScopeChanged)?;
         return Ok((Outcome::Written, Some(generation)));
+    }
+    if let Some(fence) = revision_fence
+        && fence.expected_revision() != Some(source_revision)
+    {
+        return Ok((Outcome::Conflict, None));
     }
     if super::super::model_cache::generation(tx)?.as_deref() != expected {
         return Ok((Outcome::Conflict, None));

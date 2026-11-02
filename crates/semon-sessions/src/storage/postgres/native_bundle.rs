@@ -16,11 +16,13 @@ use crate::{
 #[allow(dead_code)] // Private coverage disclosure, never an ingest receipt.
 pub(super) struct PartialFile {
     pub(super) missing: &'static [&'static str],
+    pub(super) source_revision_delta: u64,
 }
 
 struct Writer<'a, 'tx> {
     tx: &'a mut PgTxn<'tx>,
     source: i64,
+    source_revision_delta: u64,
     pages: Option<super::native_pages::Prepared>,
     pending: Option<super::native_pages::Pending>,
 }
@@ -243,6 +245,7 @@ impl Effects for Writer<'_, '_> {
     fn invalidate(&mut self, path: &str, changed: bool) -> Result<(), StorageError> {
         if changed {
             super::source_journal::invalidate(self.tx, path)?;
+            self.source_revision_delta += 1;
         }
         self.boundary()
     }
@@ -331,15 +334,14 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
         }
     }
     let pages = super::native_pages::prepare(input.ledger, input.index)?;
-    shared::write(
-        &mut Writer {
-            tx,
-            source: 0,
-            pages: Some(pages),
-            pending: None,
-        },
-        input,
-    )?;
+    let mut writer = Writer {
+        tx,
+        source: 0,
+        source_revision_delta: 0,
+        pages: Some(pages),
+        pending: None,
+    };
+    shared::write(&mut writer, input)?;
     Ok(PartialFile {
         missing: &[
             "Catalog proof references, reader leases and GC",
@@ -347,6 +349,7 @@ pub(super) fn stage(tx: &mut PgTxn<'_>, input: Input<'_>) -> Result<PartialFile,
             "Raw/Catalog relocation qualification and Tree retirement",
             "complete durable ingest receipt and Raw qualification",
         ],
+        source_revision_delta: writer.source_revision_delta,
     })
 }
 

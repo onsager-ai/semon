@@ -1385,6 +1385,7 @@ fn scan(
         texts,
         cutoff,
         machine,
+        &BTreeSet::new(),
         ScanSelection::Current(selected),
     )
 }
@@ -1396,6 +1397,7 @@ fn scan_selected(
     texts: &mut Texts,
     cutoff: Option<i64>,
     machine: &MachineFacts,
+    forced_paths: &BTreeSet<String>,
     selection: ScanSelection<'_>,
 ) -> io::Result<(Vec<SourceFile>, BTreeSet<String>, std::time::Duration)> {
     let (selected, retire_missing, committed_only) = match selection {
@@ -1459,7 +1461,10 @@ fn scan_selected(
     let mut seen = BTreeSet::new();
     let mut skipped = BTreeSet::new();
     let outside = |path: &Path| {
-        cutoff.is_some_and(|cutoff| modified_ms(path).is_some_and(|modified| modified < cutoff))
+        !forced_paths.contains(path.to_string_lossy().as_ref())
+            && cutoff.is_some_and(|cutoff| {
+                modified_ms(path).is_some_and(|modified| modified < cutoff)
+            })
     };
     let mut paths = Vec::new();
     if let Some(selected) = selected {
@@ -8272,6 +8277,7 @@ pub(crate) fn prepare_semantic_index_sources(
         &mut Texts::default(),
         scan_cutoff(options, now),
         &facts,
+        &BTreeSet::new(),
         ScanSelection::Semantic(inputs),
     )?;
     verify_sidecars(&files)?;
@@ -9079,6 +9085,39 @@ fn build_sources_inner(
         _ => Vec::new(),
     };
     measurements.record("source_locks", started, _source_locks.len());
+    let mut forced_catalog_paths = BTreeSet::new();
+    let full_catalog_start = if target == BuildTarget::Catalog
+        && matches!(&selection, BuildSelection::Current(None))
+    {
+        let snapshot = cache.full_catalog_start()?;
+        if snapshot.overflow {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "complete Catalog has more than 256 pending source invalidations",
+            ));
+        }
+        let mut lock_keys = BTreeSet::new();
+        for path in &snapshot.pending_paths {
+            let input = crate::native_evidence::source_input(Path::new(path), options)
+                .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+            let lock_key = crate::source_change::lock_key(options, &input);
+            lock_keys.insert(lock_key.clone());
+            if input.path.ends_with(".jsonl") {
+                forced_catalog_paths
+                    .insert(input.full_path(options).to_string_lossy().into_owned());
+            } else if input.path.ends_with(".meta.json") {
+                forced_catalog_paths.insert(lock_key);
+            }
+        }
+        let pending_locks = lock_keys
+            .iter()
+            .map(|path| crate::source_change::SourceLock::acquire(options, path, false))
+            .collect::<io::Result<Vec<_>>>()?;
+        drop(pending_locks);
+        Some(snapshot)
+    } else {
+        None
+    };
     let query_runtime = measured!(
         "runtime_fingerprint",
         1,
@@ -9141,13 +9180,32 @@ fn build_sources_inner(
     let ordinary_current_sources = matches!(&selection, BuildSelection::Current(_));
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
-            let (files, skipped, duration) = timed!(
-                "scan",
-                archive_read_diagnostic!(
-                    "source_scan",
-                    scan(options, cache, dirty, texts, window_start, &facts, selected)
-                )?
-            );
+            let (files, skipped, duration) = if full_catalog_start.is_some() {
+                timed!(
+                    "scan",
+                    archive_read_diagnostic!(
+                        "source_scan",
+                        scan_selected(
+                            options,
+                            cache,
+                            dirty,
+                            texts,
+                            window_start,
+                            &facts,
+                            &forced_catalog_paths,
+                            ScanSelection::Current(selected),
+                        )
+                    )?
+                )
+            } else {
+                timed!(
+                    "scan",
+                    archive_read_diagnostic!(
+                        "source_scan",
+                        scan(options, cache, dirty, texts, window_start, &facts, selected)
+                    )?
+                )
+            };
             (selected, None, files, skipped, duration)
         }
         BuildSelection::Identity { inputs, .. }
@@ -9162,6 +9220,7 @@ fn build_sources_inner(
                     texts,
                     window_start,
                     &facts,
+                    &BTreeSet::new(),
                     ScanSelection::Committed(inputs)
                 )?
             );
@@ -10018,13 +10077,20 @@ fn build_sources_inner(
                 cache.discard_source_continuations();
             }
             let publication_started = std::time::Instant::now();
-            let generation = cache.publish_catalog_projection_fenced(
+            let revision_fence = full_catalog_start.as_ref().map(|snapshot| {
+                crate::storage::source_observations::FullCatalogRevisionFence {
+                    baseline: snapshot.revision,
+                    owned_delta: cache.source_revision_delta(),
+                }
+            });
+            let generation = cache.publish_catalog_projection_fenced_with_revision(
                 &crate::slot_projection::Publication {
                     rows,
                     transcripts: slot_projections.as_deref(),
                     observations: presentation.as_ref(),
                 },
                 catalog_base.as_deref(),
+                revision_fence.as_ref(),
             )?;
             if native_timing {
                 eprintln!(

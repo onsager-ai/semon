@@ -1031,7 +1031,7 @@ impl std::fmt::Display for StoreError {
 }
 
 /// What a store write did.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Written,
     /// The ledger row wasn't the one the change was based on: another
@@ -1043,6 +1043,30 @@ pub(crate) enum Outcome {
     /// The captured store or parser contract is no longer current. Nothing
     /// was written.
     Stale,
+}
+
+/// Result of one native index transaction, including the exact number of
+/// namespace revision increments it committed. Failed and replayed writes
+/// report zero owned delta.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IndexWriteResult {
+    pub(crate) outcome: Outcome,
+    pub(crate) source_revision_delta: u64,
+}
+
+impl IndexWriteResult {
+    pub(crate) fn new(outcome: Outcome, source_revision_delta: u64) -> Self {
+        Self {
+            outcome,
+            source_revision_delta,
+        }
+    }
+}
+
+impl PartialEq<Outcome> for IndexWriteResult {
+    fn eq(&self, other: &Outcome) -> bool {
+        self.outcome == *other
+    }
 }
 
 /// Everything a store holds, as read when it opens.
@@ -1161,6 +1185,7 @@ pub(crate) trait IndexStore: Send {
         &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
     ) -> Result<(Outcome, Option<String>), StoreError>;
 
     fn publish_partial_catalog(
@@ -1400,7 +1425,7 @@ pub(crate) trait IndexStore: Send {
     fn commit_initial_files(
         &mut self,
         files: &[(String, Ledger, Arc<FileIndex>)],
-    ) -> Result<Outcome, StoreError>;
+    ) -> Result<IndexWriteResult, StoreError>;
 
     /// Commits `path`'s new ledger and index if its ledger is still
     /// `expected`. `physical_stat` is the full file metadata captured before
@@ -1415,7 +1440,7 @@ pub(crate) trait IndexStore: Send {
         ledger: &Ledger,
         physical_stat: &Stat,
         index: &FileIndex,
-    ) -> Result<Outcome, StoreError>;
+    ) -> Result<IndexWriteResult, StoreError>;
 
     /// Exact native identities whose historical reported runs a scoped build needs.
     fn select_reported_runs(
@@ -1434,7 +1459,10 @@ pub(crate) trait IndexStore: Send {
     /// they are still at that ledger, so a file this process failed to read
     /// once keeps the rows another process keeps up; one given without a
     /// ledger (its row didn't decode) loses them only if they still don't.
-    fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError>;
+    fn remove_files(
+        &mut self,
+        files: &[(String, Option<Ledger>)],
+    ) -> Result<IndexWriteResult, StoreError>;
 
     /// Saves reported runs and the `~/.claude.json` stamp they were read at,
     /// and returns every reported run the store holds (other processes may
@@ -1571,6 +1599,7 @@ pub(crate) struct EventCache {
     scan_timing: bool,
     parse_duration: Duration,
     index_write_duration: Duration,
+    source_revision_delta: u64,
     scan_measurements: crate::native_timing::Measurements,
     /// Files reread from byte zero this scan: offsets in cached text may
     /// now refer to different records, even if their new size is larger.
@@ -2359,7 +2388,8 @@ impl EventCache {
                     .ok_or_else(|| io::Error::other("native producer unavailable"))?
                     .remove_files(&[(key.clone(), recorded)])
                 {
-                    Ok(Outcome::Written) => {
+                    Ok(result) if result.outcome == Outcome::Written => {
+                        self.record_source_revision_delta(result.source_revision_delta)?;
                         self.files.remove(&key);
                     }
                     Ok(_) => {
@@ -2388,6 +2418,15 @@ impl EventCache {
         self.observation_store()
             .ok_or_else(|| io::Error::other("source journal unavailable"))?
             .pending_catalog_sources(limit, search)
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn full_catalog_start(
+        &self,
+    ) -> io::Result<crate::storage::source_observations::FullCatalogStart> {
+        self.observation_store()
+            .ok_or_else(|| io::Error::other("source journal unavailable"))?
+            .full_catalog_start()
             .map_err(|error| io::Error::other(error.to_string()))
     }
 
@@ -3187,6 +3226,19 @@ impl EventCache {
         publication: &crate::slot_projection::Publication<'_>,
         expected_generation: Option<&str>,
     ) -> io::Result<Option<String>> {
+        self.publish_catalog_projection_fenced_with_revision(
+            publication,
+            expected_generation,
+            None,
+        )
+    }
+
+    pub(crate) fn publish_catalog_projection_fenced_with_revision(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+        revision_fence: Option<&crate::storage::source_observations::FullCatalogRevisionFence>,
+    ) -> io::Result<Option<String>> {
         if self.busy || !self.unpersisted.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -3197,7 +3249,7 @@ impl EventCache {
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_session_catalog_fenced(publication, expected_generation)
+            .publish_session_catalog_fenced(publication, expected_generation, revision_fence)
             .map_err(|error| io::Error::other(error.to_string()))?;
         match outcome {
             Outcome::Written => {
@@ -3237,6 +3289,7 @@ impl EventCache {
         self.scan_timing = crate::native_timing::enabled();
         self.parse_duration = Duration::ZERO;
         self.index_write_duration = Duration::ZERO;
+        self.source_revision_delta = 0;
         self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
         Ok(())
@@ -3527,10 +3580,20 @@ impl EventCache {
             .as_mut()
             .map(|store| store.remove_files(&self.gone));
         match removed {
-            Some(Ok(Outcome::Stale)) => {
+            Some(Ok(result)) if result.outcome == Outcome::Stale => {
                 return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
             }
-            Some(Ok(Outcome::Written | Outcome::Conflict | Outcome::Deferred)) => self.gone.clear(),
+            Some(Ok(result))
+                if matches!(
+                    result.outcome,
+                    Outcome::Written | Outcome::Conflict | Outcome::Deferred
+                ) =>
+            {
+                if matches!(result.outcome, Outcome::Written | Outcome::Deferred) {
+                    self.record_source_revision_delta(result.source_revision_delta)?;
+                }
+                self.gone.clear();
+            }
             Some(Err(error)) => self.store_failed(&error)?,
             None => {}
         }
@@ -3661,7 +3724,7 @@ impl EventCache {
             return Ok(());
         }
         let started = self.scan_timing.then(Instant::now);
-        let outcome = self
+        let result = self
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("cold batch store unavailable"))?
@@ -3670,12 +3733,13 @@ impl EventCache {
         if let Some(started) = started {
             self.index_write_duration += started.elapsed();
         }
-        if outcome != Outcome::Written {
+        if result.outcome != Outcome::Written {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
                 "cold index batch generation changed",
             ));
         }
+        self.record_source_revision_delta(result.source_revision_delta)?;
         for (path, _, _) in files {
             self.unpersisted.remove(&path);
         }
@@ -3786,21 +3850,34 @@ impl EventCache {
             self.index_write_duration += started.elapsed();
         }
         match committed {
-            Some(Ok(Outcome::Written)) => {
+            Some(Ok(result)) if result.outcome == Outcome::Written => {
+                self.record_source_revision_delta(result.source_revision_delta)?;
                 self.unpersisted.remove(path);
                 Ok(false)
             }
-            Some(Ok(Outcome::Conflict)) => Ok(true),
-            Some(Ok(Outcome::Deferred)) => {
+            Some(Ok(result)) if result.outcome == Outcome::Conflict => Ok(true),
+            Some(Ok(result)) if result.outcome == Outcome::Deferred => {
                 Err(io::Error::other(crate::storage::StorageError::Conflict))
             }
-            Some(Ok(Outcome::Stale)) => {
+            Some(Ok(result)) if result.outcome == Outcome::Stale => {
                 Err(io::Error::other(crate::storage::StorageError::ScopeChanged))
             }
             Some(Err(StoreError::Configured(crate::storage::StorageError::Conflict))) => Ok(true),
             Some(Err(error)) => Err(io::Error::other(configured_error(error))),
             None => Err(io::Error::other(crate::storage::StorageError::Unavailable)),
         }
+    }
+
+    fn record_source_revision_delta(&mut self, delta: u64) -> io::Result<()> {
+        self.source_revision_delta = self
+            .source_revision_delta
+            .checked_add(delta)
+            .ok_or_else(|| io::Error::other("native source revision delta overflow"))?;
+        Ok(())
+    }
+
+    pub(crate) fn source_revision_delta(&self) -> u64 {
+        self.source_revision_delta
     }
 }
 
