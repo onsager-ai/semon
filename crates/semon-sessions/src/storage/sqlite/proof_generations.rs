@@ -114,6 +114,17 @@ pub(crate) struct PreparedPresentations<'a> {
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
+/// Request and owner fences shared by ordinary issuance and replay.
+pub(crate) struct OrdinaryReceipt<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) admission: u64,
+    pub(crate) stream: &'a str,
+    pub(crate) base_generation: Option<&'a str>,
+    pub(crate) source_revision: i64,
+    pub(crate) claims: &'a str,
+    pub(crate) metadata: &'a str,
+}
+
 struct PreparedPresentationRoot {
     base: String,
     manifest: String,
@@ -309,21 +320,21 @@ pub(crate) fn publish(
 /// custody so later mutable owner reconciliation remains authoritative.
 pub(crate) fn publish_ordinary(
     tx: &Transaction<'_>,
-    namespace: &str,
-    admission: u64,
-    stream: &str,
+    receipt: &OrdinaryReceipt<'_>,
     base: &str,
-    base_generation: Option<&str>,
-    source_revision: i64,
-    claims: &str,
-    metadata: &str,
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
+    let OrdinaryReceipt {
+        namespace,
+        admission,
+        stream,
+        base_generation,
+        source_revision,
+        claims,
+        metadata,
+    } = *receipt;
     validate_receipt_inputs(&presentations.inputs)?;
-    validate_receipt_presentations(
-        presentations.inputs.rows,
-        presentations.presentations,
-    )?;
+    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -342,17 +353,7 @@ pub(crate) fn publish_ordinary(
         captured_presentations,
     )?;
     let sql_admission = prepared.admission;
-    let existing = classify_ordinary_receipt(
-        tx,
-        namespace,
-        &publication,
-        base_generation,
-        source_revision,
-        claims,
-        metadata,
-        &root,
-        &prepared,
-    )?;
+    let existing = classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)?;
     if existing == ExistingReceipt::Fresh {
         insert_presentation_root(tx, namespace, &publication, &root)?;
         tx.execute(
@@ -385,6 +386,108 @@ pub(crate) fn publish_ordinary(
         )?;
     }
     Ok(())
+}
+
+/// Authenticate a retry against the currently owned immutable receipt. Captured
+/// context comes from that receipt: a retry must not observe a new live context.
+pub(crate) fn replay_ordinary(
+    tx: &Transaction<'_>,
+    receipt: &OrdinaryReceipt<'_>,
+    inputs: PresentationInputs<'_>,
+    metadata: &[String],
+    observed_at: i64,
+) -> Result<bool, StorageError> {
+    validate_receipt_inputs(&inputs)?;
+    let Some(first) = inputs.rows.first() else {
+        return Ok(false);
+    };
+    let saved: Option<(String, String, String, String)> = tx
+        .query_row(
+            "SELECT g.id,g.publication,r.base,r.manifest FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND p.epoch IS NULL AND p.base_generation IS ?5 AND p.source_revision=?6 AND p.claims=?7 AND p.metadata=?8 AND octet_length(r.manifest)<=1048576 ORDER BY g.id LIMIT 1",
+            params![
+                receipt.namespace,
+                first.key,
+                receipt.admission,
+                receipt.stream,
+                receipt.base_generation,
+                receipt.source_revision,
+                receipt.claims,
+                receipt.metadata
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(failed)?;
+    let Some((id, publication, base, manifest)) = saved else {
+        return Ok(false);
+    };
+    let manifest = proof_codec::decode_presentation_manifest(&manifest)?;
+    if manifest.catalog_generation != inputs.catalog_generation {
+        return Ok(false);
+    }
+    let mut captured = Vec::with_capacity(inputs.rows.len());
+    for row in inputs.rows {
+        let text: String = tx
+            .query_row(
+                "SELECT metadata FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3 AND octet_length(metadata)<=8388608",
+                params![receipt.namespace, id, row.key],
+                |saved| saved.get(0),
+            )
+            .optional()
+            .map_err(failed)?
+            .ok_or(StorageError::ScopeChanged)?;
+        captured.push((row.key.clone(), text));
+    }
+    let projection_witness = inputs
+        .projections
+        .unwrap_or_default()
+        .iter()
+        .map(|projection| (&projection.key, &projection.slots, projection.repair))
+        .collect::<Vec<_>>();
+    let base_bytes = serde_json::to_vec(&(
+        "ordinary-catalog-presentation-v1",
+        inputs.catalog_generation,
+        metadata,
+        &projection_witness,
+        inputs.observations,
+        &captured,
+        observed_at,
+    ))
+    .map_err(|_| StorageError::Unavailable)?;
+    if proof_codec::digest(&base_bytes) != base
+        || catalog_publication_id(receipt.namespace, inputs.catalog_generation, &base)? != publication
+    {
+        return Ok(false);
+    }
+    let root = prepare_presentation_root(&base, &captured, &inputs)?;
+    let prepared = prepare_proof_publication(
+        receipt.namespace,
+        receipt.admission,
+        receipt.stream,
+        &publication,
+        &root.digest,
+        &inputs,
+        &captured,
+    )?;
+    if prepared.id != id
+        || classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)?
+            != ExistingReceipt::ExactReplay
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    for row in inputs.rows {
+        let current: bool = tx
+            .query_row(
+                "SELECT count(*)=1 AND min(id)=?3 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+                params![receipt.namespace, row.key, id],
+                |saved| saved.get(0),
+            )
+            .map_err(failed)?;
+        if !current {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    Ok(true)
 }
 
 fn prepare_proof_publication(
@@ -427,16 +530,13 @@ fn prepare_proof_publication(
             .iter()
             .map(|source| PreparedProofSource {
                 path: source.path.to_string_lossy().into_owned(),
-                ledger: crate::source_carrier::ledger_digest(
-                    &crate::source_carrier::ledger(source),
-                ),
+                ledger: crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(
+                    source,
+                )),
             })
             .collect::<Vec<_>>();
         sources.sort_by(|left, right| left.path.cmp(&right.path));
-        if sources
-            .windows(2)
-            .any(|pair| pair[0].path == pair[1].path)
-        {
+        if sources.windows(2).any(|pair| pair[0].path == pair[1].path) {
             return Err(StorageError::ScopeChanged);
         }
         prepared_rows.push(PreparedProofRow {
@@ -490,7 +590,13 @@ fn insert_proof_row(
     for source in &row.sources {
         tx.execute(
             "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
-            params![namespace, publication.id, row.key, source.path, source.ledger],
+            params![
+                namespace,
+                publication.id,
+                row.key,
+                source.path,
+                source.ledger
+            ],
         )
         .map_err(failed)?;
     }
@@ -514,7 +620,11 @@ fn publish_current_ref(
         stream,
         overview_budget,
     )?;
-    tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, session_key]).map_err(failed)?;
+    tx.execute(
+        "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+        params![namespace, session_key],
+    )
+    .map_err(failed)?;
     tx.execute(
         "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
         params![namespace, session_key, id],
@@ -528,15 +638,19 @@ fn publish_current_ref(
 
 fn classify_ordinary_receipt(
     tx: &Transaction<'_>,
-    namespace: &str,
+    receipt: &OrdinaryReceipt<'_>,
     publication: &str,
-    base_generation: Option<&str>,
-    source_revision: i64,
-    claims: &str,
-    metadata: &str,
     root: &PreparedPresentationRoot,
     proof: &PreparedProofPublication,
 ) -> Result<ExistingReceipt, StorageError> {
+    let OrdinaryReceipt {
+        namespace,
+        base_generation,
+        source_revision,
+        claims,
+        metadata,
+        ..
+    } = *receipt;
     let semantic_count: i64 = tx
         .query_row(
             "SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2",
