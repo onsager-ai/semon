@@ -1857,6 +1857,13 @@ struct Sess {
 type Ref = (usize, usize);
 type CompleteSenderTurns = (Vec<Turn>, BTreeMap<String, Ref>);
 
+struct SpawnTurnAnchor {
+    session: usize,
+    id: String,
+    at: i64,
+    first_prompt: Option<Ref>,
+}
+
 struct H {
     out: Handoff,
     from: Option<usize>,
@@ -5870,8 +5877,10 @@ impl<'a> Builder<'a> {
 
     /// Matching selects incident relationships, not the sender's turn boundaries.
     /// Complete native receipts are needed even when their edges belong to a
-    /// different message page. These temporary boundaries carry no sender claim
-    /// and never enter the staged relationships or published projection.
+    /// different message page. An exact cached Claude call also supplies the
+    /// initial turn boundary when its Agent header is outside the selected
+    /// page. These temporary boundaries carry no sender claim and never enter
+    /// the staged relationships or published projection.
     fn complete_sender_turns(&mut self) -> io::Result<Option<CompleteSenderTurns>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
@@ -5929,6 +5938,73 @@ impl<'a> Builder<'a> {
                 boundaries.push(at);
             }
         }
+
+        let mut spawn_anchors = Vec::new();
+        for sender in &senders {
+            if self.sessions[*sender].kind != SessKind::Agent
+                || self.matching_session_header_selected(*sender)
+            {
+                continue;
+            }
+            let mut call_ids = BTreeSet::new();
+            let mut ambiguous = false;
+            for file in &self.sessions[*sender].files {
+                let Role::Agent(meta) = &self.files[*file].role else {
+                    ambiguous = true;
+                    break;
+                };
+                let Some(id) = &meta.tool_use_id else {
+                    ambiguous = true;
+                    break;
+                };
+                call_ids.insert(id.clone());
+            }
+            if ambiguous || call_ids.len() != 1 {
+                continue;
+            }
+            let Some(tool_use_id) = call_ids.pop_first() else {
+                continue;
+            };
+            let Some(Some(location)) = self.staged_claude_call_locations.get(&tool_use_id) else {
+                continue;
+            };
+            let call = location
+                .local(self)?
+                .ok_or_else(|| io::Error::other("staged Claude call source not selected"))?;
+            let id = stable_id(
+                "s",
+                &format!("spawn:claude:{}", self.sessions[*sender].key),
+            );
+            if self.ids.contains_key(&id) || self.head.contains_key(sender) {
+                continue;
+            }
+            let first_prompt = self
+                .events_of(*sender)
+                .into_iter()
+                .find(|at| event(self.files, *at).k == Kind::U);
+            let existing_incoming = first_prompt.is_some_and(|at| {
+                self.placed.get(&at).is_some_and(|placements| {
+                    placements.iter().any(|(handoff, place)| {
+                        *place == Place::In
+                            && self.handoffs[*handoff].to == Some(*sender)
+                            && matches!(self.handoffs[*handoff].out.kind, "ask" | "relay" | "spawn")
+                    })
+                })
+            });
+            if existing_incoming {
+                continue;
+            }
+            spawn_anchors.push(SpawnTurnAnchor {
+                session: *sender,
+                id,
+                at: event(self.files, call).t.unwrap_or(self.sessions[*sender].out.start),
+                first_prompt,
+            });
+        }
+
+        // All fallible receipt and exact-call selection is complete before the
+        // temporary boundary state is installed; splitting and restoration do
+        // not return errors.
         let original = self.handoffs.len();
         let mut synthetic_starts = BTreeMap::new();
         for at in &boundaries {
@@ -5958,6 +6034,40 @@ impl<'a> Builder<'a> {
             self.placed.insert(*at, vec![(index, Place::In)]);
             synthetic_starts.insert(id, *at);
         }
+        let mut temporary_spawn_ids = BTreeSet::new();
+        let mut spawn_placement_restore = Vec::new();
+        let mut spawn_head_restore = Vec::new();
+        for anchor in &spawn_anchors {
+            let index = self.handoffs.len();
+            self.handoffs.push(H {
+                out: Handoff::new(
+                    anchor.id.clone(),
+                    "spawn",
+                    (String::new(), self.sessions[anchor.session].key.clone()),
+                    anchor.at,
+                    "done",
+                    "",
+                ),
+                from: None,
+                to: Some(anchor.session),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                foreign_previews: BTreeMap::new(),
+                inline: false,
+            });
+            temporary_spawn_ids.insert(anchor.id.clone());
+            if let Some(at) = anchor.first_prompt {
+                let previous = self.placed.get(&at).cloned();
+                self.placed
+                    .entry(at)
+                    .or_default()
+                    .insert(0, (index, Place::In));
+                spawn_placement_restore.push((at, previous));
+            } else {
+                let previous = self.head.insert(anchor.session, index);
+                spawn_head_restore.push((anchor.session, previous));
+            }
+        }
         let mut turns = Vec::new();
         let mut origins = BTreeMap::new();
         for sender in senders {
@@ -5966,6 +6076,9 @@ impl<'a> Builder<'a> {
                 let Some(start) = turn.start.as_deref() else {
                     continue;
                 };
+                if temporary_spawn_ids.contains(start) {
+                    continue;
+                }
                 let at = synthetic_starts.get(start).copied().or_else(|| {
                     self.placed.iter().find_map(|(at, entries)| {
                         entries
@@ -5986,6 +6099,20 @@ impl<'a> Builder<'a> {
         }
         for at in boundaries {
             self.placed.remove(&at);
+        }
+        for (at, previous) in spawn_placement_restore {
+            if let Some(previous) = previous {
+                self.placed.insert(at, previous);
+            } else {
+                self.placed.remove(&at);
+            }
+        }
+        for (session, previous) in spawn_head_restore {
+            if let Some(previous) = previous {
+                self.head.insert(session, previous);
+            } else {
+                self.head.remove(&session);
+            }
         }
         self.handoffs.truncate(original);
         Ok(Some((turns, origins)))

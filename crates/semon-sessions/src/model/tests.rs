@@ -10361,14 +10361,100 @@ fn staged_agent_messages_match_the_shared_builder_without_duplicate_relations() 
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        let unique: BTreeSet<&String> = edges.iter().collect();
-        assert_eq!(unique.len(), edges.len(), "{key}: duplicate staged edges");
-        for edge in &edges {
-            assert!(
-                ids.contains(edge.as_str()),
-                "{key}: staged edge {edge} the shared builder doesn't draw"
-            );
-        }
+        let stored: BTreeSet<String> = edges.iter().cloned().collect();
+        assert_eq!(stored.len(), edges.len(), "{key}: duplicate staged edges");
+        assert!(stored.iter().all(|edge| ids.contains(edge.as_str())));
+        let expected: BTreeSet<String> = oracle
+            .handoffs
+            .iter()
+            .filter(|handoff| matches!(handoff.kind, "spawn" | "relay"))
+            .filter(|handoff| handoff.from == key || handoff.to.as_deref() == Some(key))
+            .map(|handoff| handoff.id.clone())
+            .collect();
+        assert_eq!(stored, expected, "{key}: persisted staged edges");
+    }
+}
+
+#[test]
+fn nested_claude_call_page_keeps_spawn_turn_anchor_when_source_order_changes() {
+    let home = down_and_nested_home();
+    home.build_query();
+    let mut cache = EventCache::open(&home.options.cache, &home.options.source).unwrap();
+    let mut inputs = crate::inputs(&home.options).unwrap();
+    inputs.retain(|input| input.path.ends_with(".jsonl"));
+    assert_eq!(inputs.len(), 4);
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let source_for = |suffix: &str| {
+        full.rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.to_string_lossy().ends_with(suffix))
+            .unwrap()
+            .clone()
+    };
+    let mid_source = source_for("agent-mid.jsonl");
+    let leaf_source = source_for("agent-leaf.jsonl");
+    let index = cache.selected_index(&mid_source.path).unwrap();
+    let (at, found) = index
+        .events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| event.id.as_deref() == Some("t-leaf"))
+        .unwrap();
+    let call = relation_stage::Location {
+        source: mid_source,
+        offset: found.o,
+        block: found.b,
+        kind: found.k,
+        occurrence: index.events[..at]
+            .iter()
+            .filter(|event| event.o == found.o && event.b == found.b && event.k == found.k)
+            .count(),
+    };
+    let mut page = full.relationships.clone();
+    page.relations.clear();
+    page.matching_locations = Some(vec![call]);
+    page.matching_header_paths = Some(vec![leaf_source.path.to_string_lossy().into_owned()]);
+    let expected: BTreeSet<String> = full
+        .relationships
+        .relations
+        .values()
+        .filter(|relation| relation.from == "leaf" || relation.to.as_deref() == Some("leaf"))
+        .map(|relation| relation.id.clone())
+        .collect();
+    assert!(expected.contains(&stable_id("s", "spawn:claude:leaf")));
+
+    let mut reversed_inputs = inputs.clone();
+    reversed_inputs.reverse();
+    for (label, ordered_inputs) in [
+        ("source order", inputs.as_slice()),
+        ("reversed source order", reversed_inputs.as_slice()),
+    ] {
+        let prepared =
+            prepare_staged_sources(&home.options, &mut cache, ordered_inputs, &page, true, NOW)
+                .unwrap();
+        let actual: BTreeSet<String> = prepared
+            .relationships
+            .relations
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(actual, expected, "{label}: page relations");
+        let spawn = prepared
+            .relationships
+            .relations
+            .values()
+            .find(|relation| {
+                relation.kind == "spawn"
+                    && relation.from == "mid"
+                    && relation.to.as_deref() == Some("leaf")
+            })
+            .unwrap();
+        assert_eq!(
+            &spawn.source_turn,
+            &relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:mid")),
+            "{label}: canonical parent turn"
+        );
     }
 }
 
