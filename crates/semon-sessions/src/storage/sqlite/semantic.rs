@@ -25,6 +25,17 @@ const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 type RelationSourceStage = (bool, bool, bool, Option<i64>, Option<String>, bool);
 type PresentationStage = (String, Option<String>, Option<String>, i64, bool);
 type SemanticBatchStage = (i64, String, Option<String>, String, i64, Option<String>);
+type RefusedPublicationStage = (
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+    bool,
+    i64,
+    Option<String>,
+);
 
 fn relation_owner_source_paths(
     physical: &(
@@ -1160,11 +1171,11 @@ fn publication_claim_path_hex(path: &str) -> String {
 }
 
 fn decode_publication_claim_path_hex(encoded: &str) -> Option<String> {
-    if encoded.len() % 2 != 0 || encoded.len() > 8192 {
+    if !encoded.len().is_multiple_of(2) || encoded.len() > 8192 {
         return None;
     }
     let mut bytes = Vec::with_capacity(encoded.len() / 2);
-    for pair in encoded.as_bytes().chunks_exact(2) {
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
         let high = match pair[0] {
             b'0'..=b'9' => pair[0] - b'0',
             b'a'..=b'f' => pair[0] - b'a' + 10,
@@ -1273,17 +1284,7 @@ pub(crate) fn catalog_publication_blocker(
     {
         return Ok(None);
     }
-    let stage: Option<(
-        i64,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        i64,
-        bool,
-        i64,
-        Option<String>,
-    )> = db
+    let stage: Option<RefusedPublicationStage> = db
         .query_row(
             "SELECT stage.epoch,stage.phase,stage.generation,stage.original_generation,stage.runtime,stage.revision,stage.resetting,journal.revision,(SELECT value FROM main.meta WHERE namespace=stage.namespace AND key='catalog_generation') FROM main.catalog_semantic_stage stage JOIN main.storage_source_journal journal ON journal.namespace=stage.namespace WHERE stage.namespace=?1 AND stage.singleton=1",
             [ns],

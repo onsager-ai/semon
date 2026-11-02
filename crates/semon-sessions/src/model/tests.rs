@@ -5759,7 +5759,7 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
             )
             .unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&prior).unwrap()["name"],
+            serde_json::from_str::<Value>(&prior).unwrap()["key"],
             "prior"
         );
         db.query_row(
@@ -6230,7 +6230,9 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     let path = String::from_utf8(
         encoded_path
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = (pair[0] as char).to_digit(16).unwrap() as u8;
                 let low = (pair[1] as char).to_digit(16).unwrap() as u8;
