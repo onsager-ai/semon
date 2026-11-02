@@ -10364,10 +10364,10 @@ fn staged_agent_messages_match_the_shared_builder_without_duplicate_relations() 
         let stored: BTreeSet<String> = edges.iter().cloned().collect();
         assert_eq!(stored.len(), edges.len(), "{key}: duplicate staged edges");
         assert!(stored.iter().all(|edge| ids.contains(edge.as_str())));
+        // Trace publication includes human asks as well as agent messages.
         let expected: BTreeSet<String> = oracle
             .handoffs
             .iter()
-            .filter(|handoff| matches!(handoff.kind, "spawn" | "relay"))
             .filter(|handoff| handoff.from == key || handoff.to.as_deref() == Some(key))
             .map(|handoff| handoff.id.clone())
             .collect();
