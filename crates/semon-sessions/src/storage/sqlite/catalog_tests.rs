@@ -12134,7 +12134,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         )
     };
 
-    fs::remove_file(first_copy).unwrap();
+    fs::remove_file(&first_copy).unwrap();
     fixture.publish_existing();
 
     let (history_slots, history_refs) = {
