@@ -5956,6 +5956,20 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
             rows.sort();
             state.push((table, rows));
         }
+        let mut statement = db
+            .prepare(
+                "SELECT key,value FROM main.meta WHERE namespace=semon_namespace() AND key<>'catalog_semantic_group_admission'",
+            )
+            .unwrap();
+        let mut rows = statement
+            .query_map([], |row| {
+                Ok(format!("{}\u{1f}{}", row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows.sort();
+        state.push(("meta", rows));
         (head, state)
     };
 
@@ -6023,6 +6037,118 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     assert!(deferred, "oversized aggregate must first reduce its group bound");
     assert!(refused, "one oversized bidirectional owner must refuse publication");
     assert_eq!(snapshot().0, prior_head, "refusal preserves Catalog head");
+
+    drop(stage);
+    let mut resumed_stage = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resumed_stage.begin(&paths[..64], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    drop(resumed_stage);
+
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let namespace = config.namespace.as_str();
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge),
+        "same-runtime resume keeps the refused publication blocker"
+    );
+
+    let hint_text: String = db
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let hint: Value = serde_json::from_str(&hint_text).unwrap();
+    let refusal = &hint["refusal"];
+    let reject_marker = |invalid: Value, label: &str| {
+        let text = invalid.to_string();
+        db.execute(
+            "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_semantic_group_admission'",
+            rusqlite::params![text, namespace],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace)
+                .unwrap(),
+            None,
+            "stale {label} fence must not report a publication blocker"
+        );
+        db.execute(
+            "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_semantic_group_admission'",
+            rusqlite::params![hint_text, namespace],
+        )
+        .unwrap();
+    };
+    for (field, stale) in [
+        (
+            "epoch",
+            json!(refusal["epoch"].as_i64().unwrap() + 1),
+        ),
+        (
+            "source_revision",
+            json!(refusal["source_revision"].as_i64().unwrap() + 1),
+        ),
+        ("base_generation", json!("stale-catalog-head")),
+        ("runtime_sha256", json!("0".repeat(64))),
+    ] {
+        let mut invalid = hint.clone();
+        invalid["refusal"][field] = stale;
+        reject_marker(invalid, field);
+    }
+
+    let selected_claim = refusal["selected_claims"][0].clone();
+    let encoded_path = selected_claim["source_path_hex"].as_str().unwrap();
+    let path = String::from_utf8(
+        encoded_path
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap() as u8;
+                let low = (pair[1] as char).to_digit(16).unwrap() as u8;
+                (high << 4) | low
+            })
+            .collect(),
+    )
+    .unwrap();
+    let prior_claim = selected_claim["claim"].as_i64();
+    let stale_claim = Some(prior_claim.map_or(0, |claim| claim + 1));
+    assert_eq!(
+        db.execute(
+        "UPDATE main.catalog_semantic_sources SET claim=?1 WHERE namespace=?2 AND source_path=?3",
+        rusqlite::params![stale_claim, namespace, path],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        None,
+        "changed selected source claim must not report a publication blocker"
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_sources SET claim=?1 WHERE namespace=?2 AND source_path=?3",
+            rusqlite::params![prior_claim, namespace, path],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge),
+        "restored marker and selected claim remain valid"
+    );
+    drop(db);
 
     let page = crate::session_catalog_page(&home.options, "fixture", "limit=100");
     assert_eq!(page.status, 200);
