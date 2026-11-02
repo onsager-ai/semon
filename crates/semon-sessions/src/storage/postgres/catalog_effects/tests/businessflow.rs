@@ -4173,6 +4173,58 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // explicitly; a current-path entry alone cannot authorize an old prefix.
     next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
+    fn first_body_difference(
+        actual: &serde_json::Value,
+        expected: &serde_json::Value,
+        pointer: &str,
+    ) {
+        if let (Some(actual), Some(expected)) = (actual.as_object(), expected.as_object()) {
+            for key in actual.keys().chain(expected.keys()) {
+                if actual.get(key) != expected.get(key) {
+                    let pointer = format!("{pointer}/{key}");
+                    if let (Some(actual), Some(expected)) = (actual.get(key), expected.get(key)) {
+                        first_body_difference(actual, expected, &pointer);
+                    } else {
+                        eprintln!(
+                            "pg_history_body_difference pointer={pointer} missing_field=true"
+                        );
+                    }
+                    return;
+                }
+            }
+        } else if let (Some(actual), Some(expected)) = (actual.as_array(), expected.as_array()) {
+            eprintln!(
+                "pg_history_body_difference pointer={pointer} actual_count={} expected_count={}",
+                actual.len(),
+                expected.len()
+            );
+            if let Some((index, (actual, expected))) = actual
+                .iter()
+                .zip(expected)
+                .enumerate()
+                .find(|(_, (actual, expected))| actual != expected)
+            {
+                first_body_difference(actual, expected, &format!("{pointer}/{index}"));
+            }
+        } else {
+            let actual = actual.to_string();
+            let expected = expected.to_string();
+            eprintln!(
+                "pg_history_body_difference pointer={pointer} actual_bytes={} expected_bytes={} actual_sha256={:x} expected_sha256={:x}",
+                actual.len(),
+                expected.len(),
+                sha2::Sha256::digest(actual.as_bytes()),
+                sha2::Sha256::digest(expected.as_bytes())
+            );
+        }
+    }
+    if next_bodies[&appended_key]["body"] != append_history_body {
+        first_body_difference(
+            &next_bodies[&appended_key]["body"],
+            &append_history_body,
+            "",
+        );
+    }
     assert!(
         next_bodies[&appended_key]["body"] == append_history_body,
         "PG History-selected body must match SQLite after the same append"
