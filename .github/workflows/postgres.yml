@@ -61,6 +61,18 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::staged_agent_messages_match_the_shared_builder_without_duplicate_relations -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-claude-call.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-claude-call.log"
+      - name: Claude parent fallback and ambiguity policy
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in model::tests::staged_claude_ambiguity_and_received_copy_policy_match_shared_builder model::tests::repeated_tool_ids_use_the_explicit_claude_parent events::store::semantic_stage::tests::unbound_parent_reduction_preserves_explicit_model_parent storage::sqlite::semantic::scoped_reduction_tests::scoped_parent_reduction_preserves_causal_parent_and_native_fallback_behavior; do
+            output="$RUNNER_TEMP/477-${test##*::}.log"
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$output"; then result=1; fi
+            tail -n 45 "$output"
+          done
+          exit "$result"
       - name: Exact selector metadata and event budgets
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
