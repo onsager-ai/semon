@@ -11983,6 +11983,781 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 }
 
 #[test]
+fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
+    use crate::storage::{proof_lifetime::ProofReaderLease, selected::SelectedSnapshotStore};
+
+    let fixture = Fixture::new();
+    let first = fixture.source("first");
+    let first_copy = fixture
+        .options
+        .claude_home
+        .join("projects/project/first-copy.jsonl");
+    let mut first_raw = fs::read_to_string(&first).unwrap();
+    first_raw.push_str(&format!(
+        "{}\n",
+        json!({"type":"continued-in","sessionId":"first","continuedInSessionId":"first-copy","timestamp":"2026-10-01T00:00:00Z"})
+    ));
+    fs::write(&first, first_raw).unwrap();
+    fs::write(
+        &first_copy,
+        format!(
+            "{}\n",
+            json!({"type":"user","sessionId":"first-copy","uuid":"first-copy","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt copy"}})
+        ),
+    )
+    .unwrap();
+    fixture.publish_existing();
+
+    let config = fixture
+        .options
+        .source
+        .config(&fixture.options.cache)
+        .unwrap();
+    let semantic = crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap();
+    let runtime = semantic.reader_binding().unwrap().reader_runtime().unwrap();
+
+    let (
+        original_slots,
+        missing_source_slots,
+        original_refs,
+        original_publication,
+        original_catalog_generation,
+        original_selected_slots,
+    ) = {
+        let db = fixture.db();
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='first' AND lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current: crate::model::summary::CatalogRow = serde_json::from_str(&metadata).unwrap();
+        assert_eq!(current.sources.len(), 2);
+        let slots = db
+            .prepare(
+                "SELECT metadata FROM main.session_slots WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            !slots.is_empty(),
+            "the real Current publication must own native slots"
+        );
+        let missing_source_slots = slots
+            .iter()
+            .filter(|text| {
+                let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text).unwrap();
+                slot.source_paths().contains(&&first_copy)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !missing_source_slots.is_empty(),
+            "the original projection must contain slots from the disappearing source"
+        );
+        let refs = db
+            .prepare(
+                "SELECT r.id,g.slots FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='current' ORDER BY r.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            !refs.is_empty(),
+            "the real Current publication must own receipts"
+        );
+        let receipt: (String, Option<i64>, String, String) = db
+            .query_row(
+                "SELECT g.publication,p.epoch,g.proof,p.proof_digest FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='current' ORDER BY r.id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt.1, None, "ordinary receipts have no Stage epoch");
+        assert_eq!(receipt.2, receipt.3);
+        let catalog_generation: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            receipt.0, catalog_generation,
+            "the receipt identity also binds its projection and presentation"
+        );
+        let id = runtime.current_generation("first").unwrap();
+        assert_eq!(id.0, refs[0].0);
+        let lease = runtime
+            .selected_generation("first", &id, &"4".repeat(64), 60_000)
+            .unwrap();
+        let host = crate::storage::selected::HostSourceBinding {
+            source_key: "local".into(),
+            snapshot: lease.snapshot().clone(),
+        };
+        let selected = lease
+            .open_selected(
+                &fixture.options,
+                &host,
+                &crate::SelectedReadControl::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            selected.snapshot.publication_generation, receipt.0,
+            "the selected lease keeps its receipt identity"
+        );
+        assert_eq!(
+            selected.witness.catalog.get("catalog_generation"),
+            Some(&catalog_generation),
+            "the selected witness keeps its actual Catalog generation"
+        );
+        (
+            slots,
+            missing_source_slots,
+            refs,
+            receipt.0,
+            catalog_generation,
+            selected.slots.clone(),
+        )
+    };
+
+    fs::remove_file(&first_copy).unwrap();
+    fixture.publish_existing();
+
+    let (history_slots, history_refs) = {
+        let mut db = fixture.db();
+        let metadata: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='first'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut history: crate::model::summary::CatalogRow =
+            serde_json::from_str(&metadata).unwrap();
+        assert_eq!(
+            history.lifecycle,
+            crate::model::summary::CatalogLifecycle::Retained
+        );
+        assert_eq!(history.sources.len(), 2);
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+        let normalized = serde_json::to_string(&history).unwrap();
+        let digest = crate::storage::proof_codec::digest(normalized.as_bytes());
+        let slots = db
+            .prepare(
+                "SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let refs = db
+            .prepare(
+                "SELECT r.id,g.slots FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='history' ORDER BY r.id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+        let tx = db.transaction().unwrap();
+        let runtime = binding.runtime_binding_at(&tx).unwrap();
+        let grant = tx
+            .query_row(
+                "SELECT metadata_digest,admission,stream FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='first' AND owner_kind='history'",
+                [runtime.namespace.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?)),
+            )
+            .unwrap();
+        let current_metadata: String = tx
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key='first' AND lifecycle='current'",
+                [runtime.namespace.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let current: crate::model::summary::CatalogRow =
+            serde_json::from_str(&current_metadata).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(grant.0, digest);
+        assert_eq!(grant.1, i64::try_from(runtime.admission).unwrap());
+        assert_eq!(grant.2, runtime.stream_epoch);
+        assert_eq!(current.sources.len(), 1);
+        (slots, refs)
+    };
+    assert_eq!(history_slots, original_slots);
+    assert_eq!(history_refs, original_refs);
+    assert!(
+        missing_source_slots
+            .iter()
+            .all(|slot| history_slots.contains(slot)),
+        "History retains the exact slots from the disappeared source"
+    );
+
+    // Update the remaining Current source and run ordinary Stage composition
+    // again through the retained History owner and its exact local grant.
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&first).unwrap(),
+        "{}",
+        json!({"type":"assistant","sessionId":"first","uuid":"repeated-history","parentUuid":"first","timestamp":"2026-10-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"updated native answer"}]}})
+    )
+    .unwrap();
+    fixture.publish_existing();
+
+    let mut db = fixture.db();
+    let repeated_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='first'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut repeated_history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&repeated_metadata).unwrap();
+    assert_eq!(
+        repeated_history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    repeated_history.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let repeated_digest = crate::storage::proof_codec::digest(
+        serde_json::to_string(&repeated_history).unwrap().as_bytes(),
+    );
+    let repeated_slots = db
+        .prepare(
+            "SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let repeated_refs = db
+        .prepare(
+            "SELECT r.id,g.slots FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='history' ORDER BY r.id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    let repeated_current_slots = db
+        .prepare(
+            "SELECT metadata FROM main.session_slots WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        repeated_current_slots
+            .iter()
+            .all(|slot| repeated_slots.contains(slot))
+    );
+    assert!(
+        missing_source_slots
+            .iter()
+            .all(|slot| repeated_slots.contains(slot))
+    );
+    assert!(repeated_current_slots.iter().any(|text| {
+        serde_json::from_str::<crate::slot_projection::SavedSlot>(text)
+            .unwrap()
+            .native_event_id
+            .as_deref()
+            == Some("repeated-history")
+    }));
+    assert_eq!(repeated_refs, history_refs);
+    let retained_id = crate::storage::proof_lifetime::ProofGenerationId(original_refs[0].0.clone());
+    assert!(repeated_refs.iter().any(|(id, _)| id == &retained_id.0));
+    let retained_lease = runtime
+        .selected_generation("first", &retained_id, &"5".repeat(64), 60_000)
+        .unwrap();
+    let retained_host = crate::storage::selected::HostSourceBinding {
+        source_key: "local".into(),
+        snapshot: retained_lease.snapshot().clone(),
+    };
+    let retained = retained_lease
+        .open_selected(
+            &fixture.options,
+            &retained_host,
+            &crate::SelectedReadControl::default(),
+        )
+        .unwrap();
+    assert_eq!(retained.snapshot.proof_generation, retained_id);
+    assert_eq!(
+        retained.snapshot.publication_generation,
+        original_publication
+    );
+    assert_eq!(
+        retained.witness.catalog.get("catalog_generation"),
+        Some(&original_catalog_generation)
+    );
+    assert_eq!(
+        serde_json::to_string(&retained.slots).unwrap(),
+        serde_json::to_string(&original_selected_slots).unwrap(),
+        "History opens the exact retained receipt's original slots"
+    );
+    assert!(
+        retained
+            .slots
+            .iter()
+            .any(|slot| slot.source_paths().contains(&&first_copy))
+    );
+    let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let tx = db.transaction().unwrap();
+    let runtime = binding.runtime_binding_at(&tx).unwrap();
+    let repeated_grant: (String, i64, String) = tx
+        .query_row(
+            "SELECT metadata_digest,admission,stream FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='first' AND owner_kind='history'",
+            [runtime.namespace.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(repeated_grant.0, repeated_digest);
+    assert_eq!(repeated_grant.1, i64::try_from(runtime.admission).unwrap());
+    assert_eq!(repeated_grant.2, runtime.stream_epoch);
+}
+
+#[test]
+fn ordinary_empty_catalog_moves_current_receipt_to_history() {
+    let fixture = Fixture::new();
+    let source = fixture.source("receipt-owner");
+    fixture.publish_existing();
+
+    let current_refs = {
+        let db = fixture.db();
+        let refs = db
+            .prepare(
+                "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current' ORDER BY id",
+            )
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            !refs.is_empty(),
+            "ordinary publication must issue a Current receipt"
+        );
+        let history_count: i64 = db
+            .query_row(
+                "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(history_count, 0);
+        refs
+    };
+
+    fs::remove_file(source).unwrap();
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        current_count, 0,
+        "withdrawn owner must release Current refs"
+    );
+    let history_refs = db
+        .prepare(
+            "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND kind='history' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(
+        history_refs, current_refs,
+        "empty ordinary publication must retain the exact outgoing receipt"
+    );
+    let history_metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let history: crate::model::summary::CatalogRow =
+        serde_json::from_str(&history_metadata).unwrap();
+    assert_eq!(
+        history.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
+    let current_count: i64 = db
+        .query_row(
+            "SELECT count(*) FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='receipt-owner' AND lifecycle='current'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current_count, 0, "ordinary output should be empty");
+}
+
+#[test]
+fn semantic_stage_history_ref_budget_overflow_rolls_back_and_defers() {
+    let fixture = Fixture::new();
+    let ids = ["withdrawn-a", "withdrawn-b"];
+    let relative = ids
+        .iter()
+        .map(|id| {
+            fixture.codex_source_with_records(
+                id,
+                id,
+                None,
+                None,
+                1,
+                &[
+                    json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"sanitized prompt"}]}}),
+                    json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized answer"}]}}),
+                ],
+            )
+        })
+        .collect::<Vec<_>>();
+    let paths = relative
+        .iter()
+        .map(|path| fixture.options.codex_home.join(path))
+        .collect::<Vec<_>>();
+    let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
+    facts.codex_rollouts = Some(relative.iter().cloned().collect());
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    fixture.publish_existing();
+
+    let db = fixture.db();
+    let namespace: String = db
+        .query_row("SELECT semon_namespace()", [], |row| row.get(0))
+        .unwrap();
+    let current_rows = db
+        .prepare(
+            "SELECT session_key,metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND lifecycle='current' ORDER BY session_key",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(current_rows.len(), 2);
+    let owner_keys = current_rows
+        .iter()
+        .map(|(key, _)| key.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    for (key, metadata) in &current_rows {
+        assert!(metadata.len() < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
+        let refs = db
+            .prepare(
+                "SELECT kind,id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY kind,id",
+            )
+            .unwrap()
+            .query_map([key], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert!(
+            !refs.is_empty(),
+            "ordinary Current publication has a receipt"
+        );
+        assert!(refs.iter().all(|(kind, _)| kind == "current"));
+        let epoch: Option<i64> = db
+            .query_row(
+                "SELECT p.epoch FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof WHERE r.namespace=semon_namespace() AND r.session_key=?1 AND r.kind='current' ORDER BY r.id LIMIT 1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            epoch, None,
+            "the source receipt came from ordinary publication"
+        );
+        let (slot_count, slot_bytes): (i64, i64) = db
+            .query_row(
+                "SELECT count(*),COALESCE(sum(octet_length(metadata)),0) FROM main.session_slots WHERE namespace=semon_namespace() AND session_key=?1",
+                [key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(slot_count > 0 && slot_count <= 64);
+        assert!((0..1_048_576).contains(&slot_bytes));
+    }
+    drop(db);
+
+    facts.codex_rollouts = Some(std::collections::BTreeSet::new());
+    crate::write_facts(
+        fixture.options.facts.as_ref().unwrap(),
+        &facts,
+        &fixture.options.source,
+    )
+    .unwrap();
+    let (mut cache, batch, prepared) = fixture.prepare_publication(&paths);
+    assert_eq!(
+        batch.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
+    let prepared = prepared.prepared();
+    assert!(prepared.rows.is_empty());
+    assert!(prepared.transcripts.is_empty());
+    assert_eq!(prepared.withdrawals.len(), 2);
+    assert_eq!(prepared.relationships.retired_owners.len(), 2);
+    assert_eq!(
+        prepared
+            .relationships
+            .retired_owners
+            .iter()
+            .map(|row| row.key.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        owner_keys
+    );
+    let withdrawn_paths = prepared
+        .withdrawals
+        .iter()
+        .map(|withdrawal| withdrawal.path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_paths = paths
+        .iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(withdrawn_paths, expected_paths);
+
+    let mut stage = fixture.stage();
+    let first = stage.publish(&batch, prepared).unwrap();
+    assert_eq!(first.0, crate::events::Outcome::Deferred);
+    assert_eq!(first.1, None);
+
+    let snapshot = |db: &Connection| {
+        let head: Option<String> = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let current = db
+            .prepare(
+                "SELECT session_key,metadata FROM main.session_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let history = db
+            .prepare(
+                "SELECT session_key,metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() ORDER BY session_key",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let history_slots = db
+            .prepare(
+                "SELECT session_key,slot,metadata FROM main.session_history_slots WHERE namespace=semon_namespace() ORDER BY session_key,slot",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let history_slot_parts = db
+            .prepare(
+                "SELECT session_key,slot,part,hex(bytes) FROM main.session_history_slot_parts WHERE namespace=semon_namespace() ORDER BY session_key,slot,part",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let history_projections = db
+            .prepare(
+                "SELECT session_key,generation,source_generation,version,total,incomplete FROM main.session_history_projections WHERE namespace=semon_namespace() ORDER BY session_key",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let grants = db
+            .prepare(
+                "SELECT session_key,owner_kind,metadata_digest,admission,stream,direct_capture FROM main.storage_catalog_native_observation_grants WHERE namespace=semon_namespace() ORDER BY session_key,owner_kind",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let refs = db
+            .prepare(
+                "SELECT session_key,kind,id FROM main.storage_proof_refs WHERE namespace=semon_namespace() ORDER BY session_key,kind,id",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        let claims =
+            crate::storage::sqlite::source_journal::claims(db, &namespace, &batch.paths).unwrap();
+        let publication_progress = db
+            .prepare(
+                "SELECT source_path,publication_done,ack_done FROM main.catalog_semantic_sources WHERE namespace=semon_namespace() ORDER BY source_path",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (
+            head,
+            current,
+            history,
+            grants,
+            refs,
+            claims,
+            publication_progress,
+            history_slots,
+            history_slot_parts,
+            history_projections,
+        )
+    };
+
+    let db = fixture.db();
+    let before = snapshot(&db);
+    assert_eq!(
+        before.1.len(),
+        2,
+        "Current rows remain under their old head"
+    );
+    assert_eq!(
+        before.2.len(),
+        1,
+        "one original owner is checkpointed per attempt"
+    );
+    assert!(before.4.iter().all(|(_, kind, _)| kind == "current"));
+    assert!(
+        before
+            .3
+            .iter()
+            .all(|(_, kind, _, _, _, _)| kind == "catalog")
+    );
+    assert_eq!(before.5, prepared.claims);
+    let checkpoint_key = &before.2[0].0;
+    let checkpoint_owner = prepared
+        .relationships
+        .retired_owners
+        .iter()
+        .find(|row| &row.key == checkpoint_key)
+        .unwrap();
+    let mut expected_checkpoint = checkpoint_owner.clone();
+    expected_checkpoint.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    assert_eq!(
+        before.2[0].1,
+        serde_json::to_string(&expected_checkpoint).unwrap()
+    );
+    let retained_metadata_bytes = prepared
+        .relationships
+        .retired_owners
+        .iter()
+        .map(|row| {
+            let mut retained = row.clone();
+            retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            serde_json::to_string(&retained).unwrap().len()
+        })
+        .sum::<usize>();
+    assert!(retained_metadata_bytes > 1);
+    assert!(retained_metadata_bytes < crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET);
+    drop(db);
+
+    crate::overview::cap_stage_summary_budget_for_test(retained_metadata_bytes - 1);
+    let overflow = stage.publish(&batch, prepared).unwrap();
+    assert_eq!(overflow.0, crate::events::Outcome::Deferred);
+    assert_eq!(overflow.1, None, "overflow did not publish a generation");
+
+    let db = fixture.db();
+    assert_eq!(snapshot(&db), before);
+    assert_eq!(
+        crate::storage::sqlite::source_journal::claims(&db, &namespace, &batch.paths).unwrap(),
+        prepared.claims,
+        "defer keeps the source claims for the pending publication"
+    );
+    drop(db);
+
+    let retry = cache.semantic_batch(64).unwrap().unwrap();
+    assert_eq!(
+        retry.phase,
+        crate::model::relation_stage::Phase::Publication
+    );
+    assert_eq!(
+        retry.paths.len(),
+        1,
+        "two independent withdrawals split into groups"
+    );
+    assert!(batch.paths.contains(&retry.paths[0]));
+}
+
+#[test]
 fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() {
     let fixture = Fixture::new();
     let first = fixture.source("first");
@@ -12244,7 +13019,21 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
                 refused = true;
                 break;
             }
-            Ok((crate::events::Outcome::Deferred, None)) => {}
+            Ok((crate::events::Outcome::Deferred, None)) => {
+                let db = fixture.db();
+                let composition_effects: (i64, i64, i64) = db
+                    .query_row(
+                        "SELECT (SELECT count(*) FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='singleton'),(SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key='singleton' AND kind='history'),(SELECT count(*) FROM main.storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='singleton' AND owner_kind='history')",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    composition_effects,
+                    (0, 0, 0),
+                    "deferred original custody must not publish composed History state"
+                );
+            }
             other => panic!("unexpected result while completing original History: {other:?}"),
         }
     }

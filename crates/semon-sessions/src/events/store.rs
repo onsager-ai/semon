@@ -3115,6 +3115,28 @@ impl SqliteStore {
             .map_err(failure)?;
         let mut published = None;
         let result = (|| {
+            let metadata_bytes = metadata
+                .iter()
+                .try_fold(0usize, |total, text| total.checked_add(text.len()))
+                .ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
+            let mut history_budget =
+                crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
+            let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
+            let (history_plan, history_captures) = {
+                let history = crate::storage::sqlite::history::OriginalHistory::admitted(
+                    &self.connection,
+                    &admitted,
+                )
+                .map_err(StoreError::Configured)?;
+                crate::storage::catalog::prepare_history_composition(
+                    &history,
+                    rows,
+                    publication.transcripts,
+                    publication.observations,
+                    &mut history_budget,
+                )
+                .map_err(failure)?
+            };
             let transaction = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3133,7 +3155,6 @@ impl SqliteStore {
                     |_| Ok(1_i64),
                 )
                 .map_err(failure)?;
-            let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
@@ -3301,6 +3322,14 @@ impl SqliteStore {
             let history =
                 crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, &admitted)
                     .map_err(StoreError::Configured)?;
+            let history_plan_matches = crate::storage::catalog::history_composition_matches(
+                &history,
+                rows,
+                publication.transcripts,
+                &history_plan,
+                &mut history_budget,
+            )
+            .map_err(failure)?;
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition");
             let continuations = publication
@@ -3321,12 +3350,14 @@ impl SqliteStore {
             }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
-            crate::storage::catalog::publish_history_rows(
-                &history,
-                publication.rows,
-                publication.transcripts,
-            )
-            .map_err(failure)?;
+            if history_plan_matches {
+                crate::storage::catalog::apply_prepared_history_composition(
+                    &history,
+                    &history_plan,
+                    &history_captures,
+                )
+                .map_err(failure)?;
+            }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition_complete");
             stage("history", &transaction);
@@ -3718,6 +3749,119 @@ impl SqliteStore {
                     .map_err(failure)?;
             }
             stage("slots", &transaction);
+            let stream =
+                owner
+                    .config()
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or(StoreError::Configured(
+                        crate::storage::StorageError::ScopeChanged,
+                    ))?;
+            if semantic.is_none()
+                && !rows.is_empty()
+                && let Some(observations) = publication.observations
+            {
+                let projections = publication.transcripts.ok_or(StoreError::Configured(
+                    crate::storage::StorageError::Unavailable,
+                ))?;
+                crate::storage::sqlite::semantic::validate_publication_support(&transaction)
+                    .map_err(StoreError::Configured)?;
+                let observed_at: i64 = transaction
+                    .query_row(
+                        "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_observed_at') AND key='catalog_observed_at'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(failure)?
+                    .parse()
+                    .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
+                let captured = crate::storage::sqlite::proof_generations::capture_presentations(
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
+                        rows,
+                        projections: Some(projections),
+                        observations: Some(observations),
+                    },
+                    observed_at,
+                )
+                .map_err(StoreError::Configured)?;
+                let projection_witness = projections
+                    .iter()
+                    .map(|projection| (&projection.key, &projection.slots, projection.repair))
+                    .collect::<Vec<_>>();
+                let base_bytes = serde_json::to_vec(&(
+                    "ordinary-catalog-presentation-v1",
+                    &generation,
+                    &metadata,
+                    &projection_witness,
+                    observations,
+                    &captured,
+                    observed_at,
+                ))
+                .map_err(|error| StoreError::Data(error.to_string()))?;
+                let base = crate::storage::proof_codec::digest(&base_bytes);
+                let source_revision: i64 = transaction
+                    .query_row(
+                        "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                        [owner.config().namespace.as_str()],
+                        |row| row.get(0),
+                    )
+                    .map_err(failure)?;
+                let claims_text = serde_json::to_string(&claims)
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
+                let metadata_text = serde_json::to_string(&metadata)
+                    .map_err(|error| StoreError::Data(error.to_string()))?;
+                let receipt_publication =
+                    crate::storage::sqlite::proof_generations::publish_ordinary(
+                        &transaction,
+                        owner.config().namespace.as_str(),
+                        owner.admission(),
+                        stream,
+                        &base,
+                        previous.as_deref(),
+                        source_revision,
+                        &claims_text,
+                        &metadata_text,
+                        crate::storage::sqlite::proof_generations::PreparedPresentations {
+                            inputs:
+                                crate::storage::sqlite::proof_generations::PresentationInputs {
+                                    catalog_generation: &generation,
+                                    rows,
+                                    projections: Some(projections),
+                                    observations: Some(observations),
+                                },
+                            presentations: &captured,
+                            overview_budget: &mut history_budget,
+                        },
+                    );
+                match receipt_publication {
+                    Ok(()) => {}
+                    Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
+                        error,
+                    )) => return Err(StoreError::Configured(error)),
+                    Err(
+                        crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
+                    ) => return Ok(Outcome::Deferred),
+                }
+            }
+            match crate::storage::sqlite::proof_generations::retain_outgoing_history_refs(
+                &transaction,
+                owner.config().namespace.as_str(),
+                owner.admission(),
+                stream,
+                &withdrawn,
+                &mut history_budget,
+            ) {
+                Ok(()) => {}
+                Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
+                    error,
+                )) => return Err(StoreError::Configured(error)),
+                Err(
+                    crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
+                ) => return Ok(Outcome::Deferred),
+            }
             commit_boundary.capture(&transaction);
             for scope in ["current", "retained_history"] {
                 let incomplete: i64 = transaction
@@ -3781,14 +3925,6 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let stream =
-                owner
-                    .config()
-                    .expected_stream_epoch
-                    .as_deref()
-                    .ok_or(StoreError::Configured(
-                        crate::storage::StorageError::ScopeChanged,
-                    ))?;
             let mut grant_owners = std::collections::BTreeSet::new();
             grant_owners.extend(rows.iter().map(|row| row.key.clone()));
             grant_owners.extend(affected.iter().cloned());
@@ -9896,6 +10032,239 @@ mod tests {
         assert!(catalog_batch_bytes(&rows[10..12], &metadata, CatalogWriter::Auto).is_some());
         eprintln!("catalog_publication_probe round=scoped");
         catalog_write_pair(&mut batch, &mut row_wise, &rows[10..12], &projections, true);
+        drop(batch);
+        drop(row_wise);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_receipt_rejects_missing_or_duplicate_projections_without_mutation() {
+        let root = scratch("catalog-receipt-projection-shape");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut batch, row_wise) = catalog_pair(&options);
+        let generation: String = batch
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let receipt_count: i64 = batch
+            .connection
+            .query_row(
+                "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND kind='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            receipt_count > 0,
+            "the baseline must come from a real ordinary receipt publication"
+        );
+        let before = catalog_state(&batch.connection);
+        let observations = crate::storage::selected::PresentationObservations::default();
+        let missing_all = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: None,
+            observations: Some(&observations),
+        };
+        let result = batch.publish_catalog_with_generation(
+            &missing_all,
+            Some(&generation),
+            None,
+            false,
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "missing projection input must refuse issuance"
+        );
+        assert_eq!(
+            catalog_state(&batch.connection),
+            before,
+            "missing projection input refusal must preserve the existing receipt"
+        );
+
+        let copy_projections = || {
+            projections
+                .iter()
+                .map(|projection| crate::slot_projection::Projection {
+                    key: projection.key.clone(),
+                    slots: projection.slots.clone(),
+                    repair: projection.repair,
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut missing = copy_projections();
+        let missing_key = &rows[0].key;
+        let original_len = missing.len();
+        missing.retain(|projection| &projection.key != missing_key);
+        assert!(missing.len() < original_len);
+
+        let mut duplicate = copy_projections();
+        duplicate.push(crate::slot_projection::Projection {
+            key: projections[0].key.clone(),
+            slots: projections[0].slots.clone(),
+            repair: projections[0].repair,
+        });
+        for (label, malformed) in [("missing", missing), ("duplicate", duplicate)] {
+            let publication = crate::slot_projection::Publication {
+                rows: &rows,
+                transcripts: Some(&malformed),
+                observations: Some(&observations),
+            };
+            let result = batch.publish_catalog_with_generation(
+                &publication,
+                Some(&generation),
+                None,
+                false,
+                None,
+            );
+            assert!(
+                result.is_err(),
+                "{label} row projection must refuse issuance"
+            );
+            assert_eq!(
+                catalog_state(&batch.connection),
+                before,
+                "{label} projection refusal must roll back head, rows, claims, grants and proofs"
+            );
+        }
+
+        drop(batch);
+        drop(row_wise);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_receipt_exact_replay_and_partial_or_mismatched_rows_are_atomic() {
+        let root = scratch("catalog-receipt-exact-replay");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
+        let generation: String = batch
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observations = crate::storage::selected::PresentationObservations::default();
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: Some(&projections),
+            observations: Some(&observations),
+        };
+        let claims = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| {
+                let revision = batch
+                    .connection
+                    .query_row(
+                        "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
+                        [&path],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .unwrap();
+                (path, revision)
+            })
+            .collect::<Vec<_>>();
+        let publish = |store: &mut SqliteStore| {
+            store.publish_catalog_with_generation(
+                &publication,
+                Some(&generation),
+                Some(&claims),
+                true,
+                None,
+            )
+        };
+
+        let first = publish(&mut batch).unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        let committed = catalog_state(&batch.connection);
+        assert_eq!(publish(&mut batch).unwrap(), first);
+        assert_eq!(
+            catalog_state(&batch.connection),
+            committed,
+            "an exact prepared-source replay preserves the committed receipt state"
+        );
+
+        assert_eq!(publish(&mut row_wise).unwrap().0, Outcome::Written);
+        let key = &rows[0].key;
+        let source_path = rows[0].sources[0].path.to_string_lossy().into_owned();
+        let current_id = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key=?1 AND kind='current'",
+                    [key],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+
+        let partial_id = current_id(&batch.connection);
+        batch
+            .connection
+            .execute(
+                "DELETE FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![partial_id, key, source_path],
+            )
+            .unwrap();
+        let partial_before = catalog_state(&batch.connection);
+        let partial = publish(&mut batch);
+        assert!(
+            matches!(
+                partial,
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged
+                ))
+            ),
+            "a real receipt with a missing source ledger must refuse replay"
+        );
+        assert_eq!(catalog_state(&batch.connection), partial_before);
+
+        let mismatch_id = current_id(&row_wise.connection);
+        let ledger: String = row_wise
+            .connection
+            .query_row(
+                "SELECT ledger FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![mismatch_id, key, source_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        row_wise
+            .connection
+            .execute(
+                "DELETE FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![mismatch_id, key, source_path],
+            )
+            .unwrap();
+        row_wise
+            .connection
+            .execute(
+                "INSERT INTO main.storage_proof_sources VALUES(semon_namespace(),?1,?2,?3,?4)",
+                params![mismatch_id, key, format!("{source_path}.mismatch"), ledger],
+            )
+            .unwrap();
+        let mismatch_before = catalog_state(&row_wise.connection);
+        let mismatch = publish(&mut row_wise);
+        assert!(
+            matches!(
+                mismatch,
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged
+                ))
+            ),
+            "a same-count source ledger mismatch must refuse replay"
+        );
+        assert_eq!(catalog_state(&row_wise.connection), mismatch_before);
+
         drop(batch);
         drop(row_wise);
         fs::remove_dir_all(root).unwrap();

@@ -832,6 +832,12 @@ impl AdmittedSource {
     pub(super) fn namespace(&self) -> &str {
         self.config.namespace.as_str()
     }
+    pub(super) fn admission(&self) -> u64 {
+        self.admission
+    }
+    pub(super) fn stream_epoch(&self) -> Option<&str> {
+        self.config.expected_stream_epoch.as_deref()
+    }
     pub(super) fn validate_publication(&self, db: &Connection) -> Result<(), StorageError> {
         if self.owner.is_none() {
             return Err(StorageError::NamespaceUpgradePending);
@@ -996,7 +1002,7 @@ impl SemanticStaging {
 const SEMANTIC_SUPPORT_SCHEMA: &[(&str, &str)] = &[
     (
         "storage_semantic_publications",
-        "CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER NOT NULL,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,generation)) STRICT, WITHOUT ROWID;",
+        "CREATE TABLE IF NOT EXISTS storage_semantic_publications(namespace TEXT NOT NULL,generation TEXT NOT NULL,epoch INTEGER,admission INTEGER NOT NULL,base_generation TEXT,source_revision INTEGER NOT NULL,proof_digest TEXT NOT NULL,claims TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,generation)) STRICT, WITHOUT ROWID;",
     ),
     (
         "storage_semantic_publication_generation",
@@ -1019,6 +1025,30 @@ const SEMANTIC_SUPPORT_SCHEMA: &[(&str, &str)] = &[
         "CREATE TRIGGER IF NOT EXISTS storage_semantic_proof_immutable_delete BEFORE DELETE ON storage_semantic_publications BEGIN SELECT RAISE(ABORT,'immutable semantic proof'); END;",
     ),
 ];
+
+/// Validate the current authored receipt schema before an ordinary Catalog
+/// publisher inserts a receipt with no Stage epoch. This is validation only:
+/// an older NOT NULL shape is refused without DDL repair or migration.
+pub(crate) fn validate_publication_support(db: &Connection) -> Result<(), StorageError> {
+    for (name, sql) in SEMANTIC_SUPPORT_SCHEMA {
+        let expected = sql.replace(" IF NOT EXISTS", "");
+        let expected = expected.trim_end_matches(';');
+        let actual: Option<String> = db
+            .query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
+        if actual.as_deref() != Some(expected) {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+    }
+    super::proof_generations::validate(db)?;
+    super::catalog_namespace::validate_guard(db, "storage_semantic_publications")?;
+    Ok(())
+}
 
 /// Provision the current semantic profile only while enrolling a namespace.
 pub(crate) fn enroll(
@@ -3009,7 +3039,35 @@ impl Stage {
         batch: &Batch,
         prepared: &PreparedSources,
     ) -> Result<(Outcome, Option<String>), StoreError> {
-        match self.publish_transaction(batch, prepared) {
+        let metadata_bytes = prepared.rows.iter().try_fold(0usize, |total, row| {
+            let bytes = serde_json::to_vec(row)
+                .map_err(|error| StoreError::Data(error.to_string()))?
+                .len();
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| refuse(PUBLICATION_GROUP_BUDGET))
+        })?;
+        let mut overview_budget =
+            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
+        let (history_plan, history_captures) = {
+            let history = super::history::OriginalHistory::admitted(&self.db, &self.source)
+                .map_err(StoreError::Configured)?;
+            crate::storage::catalog::prepare_history_composition(
+                &history,
+                &prepared.rows,
+                Some(&prepared.transcripts),
+                prepared.presentation_observations(),
+                &mut overview_budget,
+            )
+            .map_err(error)?
+        };
+        match self.publish_transaction(
+            batch,
+            prepared,
+            &history_plan,
+            &history_captures,
+            &mut overview_budget,
+        ) {
             Err(StoreError::Data(reason)) if reason == PUBLICATION_GROUP_BUDGET => {
                 #[cfg(test)]
                 if DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.replace(false)) {
@@ -3197,6 +3255,9 @@ impl Stage {
         &mut self,
         batch: &Batch,
         prepared: &PreparedSources,
+        history_plan: &crate::storage::catalog::HistoryCompositionPlan,
+        history_captures: &crate::storage::catalog::HistoryCompositionCaptures,
+        overview_budget: &mut crate::overview::SummaryPublicationBudget,
     ) -> Result<(Outcome, Option<String>), StoreError> {
         use crate::storage::catalog::CatalogPublicationHead;
         use sha2::{Digest, Sha256};
@@ -3247,8 +3308,6 @@ impl Stage {
         if metadata_bytes > crate::overview::SEMANTIC_OVERVIEW_METADATA_BUDGET {
             return Err(refuse(PUBLICATION_GROUP_BUDGET));
         }
-        let mut overview_budget =
-            crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
         let claims_text =
             serde_json::to_string(&prepared.claims).map_err(|e| StoreError::Data(e.to_string()))?;
         let metadata_text =
@@ -3497,9 +3556,18 @@ impl Stage {
             let actual:Option<String> = tx.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2 AND version=?3",params![ns,projection.key,crate::slot_projection::VERSION],|r|r.get(0)).optional().map_err(error)?;
             projections_unchanged &= actual.as_ref() == Some(&expected);
         }
-        publication_phase("original_history");
+        publication_phase("composite_history");
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
+        let history_plan_matches = crate::storage::catalog::history_composition_matches(
+            &history,
+            &prepared.rows,
+            Some(&prepared.transcripts),
+            history_plan,
+            overview_budget,
+        )
+        .map_err(error)?;
+        publication_phase("original_history");
         if !crate::storage::catalog::preserve_rows(
             &history,
             &prepared.rows,
@@ -3513,15 +3581,16 @@ impl Stage {
             tx.commit().map_err(error)?;
             return Ok((Outcome::Deferred, None));
         }
-        publication_phase("composite_history");
-        crate::storage::catalog::publish_history_rows(
-            &history,
-            &prepared.rows,
-            Some(&prepared.transcripts),
-        )
-        .map_err(error)?;
-        #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
+        if history_plan_matches {
+            crate::storage::catalog::apply_prepared_history_composition(
+                &history,
+                history_plan,
+                history_captures,
+            )
+            .map_err(error)?;
+            #[cfg(test)]
+            crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
+        }
         publication_phase("slot_effects");
         if !prepared.transcripts.is_empty() {
             crate::storage::catalog::publish_slot_rows(
@@ -3593,7 +3662,7 @@ impl Stage {
                 row,
                 &mut overview_measurements,
                 &trace,
-                &mut overview_budget,
+                overview_budget,
             )
             .map_err(error)?;
         }
@@ -3707,8 +3776,12 @@ impl Stage {
             let presentations = match super::proof_generations::capture_presentations(
                 &tx,
                 ns,
-                &generation,
-                prepared,
+                super::proof_generations::PresentationInputs {
+                    catalog_generation: &generation,
+                    rows: &prepared.rows,
+                    projections: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
+                },
                 selected_observed_at,
             ) {
                 Err(StorageError::HistoryRetentionBounds) => {
@@ -3723,7 +3796,12 @@ impl Stage {
                 &generation,
                 &proof_digest,
                 &presentations,
-                prepared,
+                super::proof_generations::PresentationInputs {
+                    catalog_generation: &generation,
+                    rows: &prepared.rows,
+                    projections: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
+                },
             )
             .map_err(StoreError::Configured)?;
             tx.execute(
@@ -3765,11 +3843,44 @@ impl Stage {
                 &generation,
                 &proof_digest,
                 super::proof_generations::PreparedPresentations {
-                    prepared,
-                    rows: &presentations,
+                    inputs: super::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
+                        rows: &prepared.rows,
+                        projections: Some(&prepared.transcripts),
+                        observations: prepared.presentation_observations(),
+                    },
+                    presentations: &presentations,
+                    overview_budget,
                 },
             )
-            .map_err(StoreError::Configured)?;
+            .map_err(|error| match error {
+                super::proof_generations::PublicationError::Storage(error) => {
+                    StoreError::Configured(error)
+                }
+                super::proof_generations::PublicationError::BudgetOverflow => {
+                    refuse(PUBLICATION_GROUP_BUDGET)
+                }
+            })?;
+            super::proof_generations::retain_outgoing_history_refs(
+                &tx,
+                ns,
+                self.source.admission,
+                self.source
+                    .config
+                    .expected_stream_epoch
+                    .as_deref()
+                    .ok_or_else(|| refuse("semantic_stream_epoch"))?,
+                &prepared.relationships.retired_owners,
+                overview_budget,
+            )
+            .map_err(|error| match error {
+                super::proof_generations::PublicationError::Storage(error) => {
+                    StoreError::Configured(error)
+                }
+                super::proof_generations::PublicationError::BudgetOverflow => {
+                    refuse(PUBLICATION_GROUP_BUDGET)
+                }
+            })?;
             for metadata in &metadata {
                 super::proof_generations::native_observation_grant(
                     &tx,
@@ -4142,23 +4253,7 @@ impl Stage {
             )
             .map_err(failed)?;
         }
-        for (name, sql) in SEMANTIC_SUPPORT_SCHEMA {
-            let expected = sql.replace(" IF NOT EXISTS", "");
-            let expected = expected.trim_end_matches(';');
-            let actual: Option<String> = tx
-                .query_row(
-                    "SELECT sql FROM main.sqlite_schema WHERE name=?1",
-                    [name],
-                    |r| r.get(0),
-                )
-                .optional()
-                .map_err(failed)?;
-            if actual.as_deref() != Some(expected) {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-        }
-        super::proof_generations::validate(&tx)?;
-        super::catalog_namespace::validate_guard(&tx, "storage_semantic_publications")?;
+        validate_publication_support(&tx)?;
         for table in crate::events::store::configured::semantic_tables()
             .iter()
             .copied()

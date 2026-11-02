@@ -101,9 +101,123 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(super) struct PreparedPresentations<'a> {
-    pub(super) prepared: &'a crate::model::PreparedSources,
-    pub(super) rows: &'a [(String, String)],
+pub(crate) struct PresentationInputs<'a> {
+    pub(crate) catalog_generation: &'a str,
+    pub(crate) rows: &'a [CatalogRow],
+    pub(crate) projections: Option<&'a [crate::slot_projection::Projection]>,
+    pub(crate) observations: Option<&'a crate::storage::selected::PresentationObservations>,
+}
+
+pub(crate) struct PreparedPresentations<'a> {
+    pub(crate) inputs: PresentationInputs<'a>,
+    pub(crate) presentations: &'a [(String, String)],
+    pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
+}
+
+struct PreparedPresentationRoot {
+    base: String,
+    manifest: String,
+    digest: String,
+}
+
+struct PreparedProofSource {
+    path: String,
+    ledger: String,
+}
+
+struct PreparedProofRow {
+    key: String,
+    metadata: String,
+    query_recipe: Option<String>,
+    slots: String,
+    prefix: String,
+    presentation: String,
+    sources: Vec<PreparedProofSource>,
+}
+
+struct PreparedProofPublication {
+    id: String,
+    publication: String,
+    proof: String,
+    admission: i64,
+    stream: String,
+    rows: Vec<PreparedProofRow>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExistingReceipt {
+    Fresh,
+    ExactReplay,
+}
+
+/// Validate the selected-receipt input shape shared by ordinary and Stage
+/// issuers. Unknown observation fields remain valid; the typed object itself
+/// and one projection per Catalog row are required for a nonempty receipt.
+fn validate_receipt_inputs(inputs: &PresentationInputs<'_>) -> Result<(), StorageError> {
+    let PresentationInputs {
+        rows,
+        projections,
+        observations,
+        ..
+    } = inputs;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    if observations.is_none() {
+        return Err(StorageError::Unavailable);
+    }
+    let projections = projections.ok_or(StorageError::Unavailable)?;
+    let mut row_keys = std::collections::BTreeSet::new();
+    if rows.iter().any(|row| !row_keys.insert(row.key.as_str())) {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut projection_keys = std::collections::BTreeSet::new();
+    if projections
+        .iter()
+        .any(|projection| !projection_keys.insert(projection.key.as_str()))
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    if row_keys.iter().any(|key| !projection_keys.contains(key)) {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
+fn validate_receipt_presentations(
+    rows: &[CatalogRow],
+    presentations: &[(String, String)],
+) -> Result<(), StorageError> {
+    if rows.len() != presentations.len() {
+        return Err(StorageError::ScopeChanged);
+    }
+    let row_keys = rows
+        .iter()
+        .map(|row| row.key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let presentation_keys = presentations
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if row_keys.len() != rows.len()
+        || presentation_keys.len() != presentations.len()
+        || row_keys != presentation_keys
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) enum PublicationError {
+    Storage(StorageError),
+    BudgetOverflow,
+}
+
+impl From<StorageError> for PublicationError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(error)
+    }
 }
 
 #[cfg(test)]
@@ -144,7 +258,7 @@ fn prepared_query_recipe_for_test(
     Ok(Some(payload))
 }
 
-pub(super) fn publish(
+pub(crate) fn publish(
     tx: &Transaction<'_>,
     namespace: &str,
     admission: u64,
@@ -152,121 +266,908 @@ pub(super) fn publish(
     publication: &str,
     proof: &str,
     presentations: PreparedPresentations<'_>,
-) -> Result<(), StorageError> {
-    let prepared = presentations.prepared;
-    let presentations = presentations.rows;
-    let id = ProofGenerationId::derive(namespace, admission, stream, proof);
-    let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+) -> Result<(), PublicationError> {
+    validate_receipt_inputs(&presentations.inputs)?;
+    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
+    let PreparedPresentations {
+        inputs,
+        presentations: captured_presentations,
+        overview_budget,
+    } = presentations;
+    let prepared = prepare_proof_publication(
+        namespace,
+        admission,
+        stream,
+        publication,
+        proof,
+        &inputs,
+        captured_presentations,
+    )?;
     for row in &prepared.rows {
-        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
-        let projection = prepared.transcripts.iter().find(|p| p.key == row.key);
-        let slots = serde_json::to_string(&projection.map(|p| &p.slots))
-            .map_err(|_| StorageError::Unavailable)?;
-        let prefix = crate::retention::source_generation(&row.sources)
-            .map_err(|_| StorageError::Unavailable)?;
-        let record = proof_codec::GenerationRecord {
-            namespace: namespace.to_owned(),
-            id: id.clone(),
-            session_key: row.key.clone(),
-            publication: publication.to_owned(),
-            proof: proof.to_owned(),
+        insert_proof_row(tx, namespace, &prepared, row)?;
+        publish_current_ref(
+            tx,
+            namespace,
             admission,
-            stream: stream.to_owned(),
-            metadata,
-            slots,
-            prefix,
-        };
-        // These values came directly from the prepared model in this owner
-        // transaction. Production does not decode this freshly encoded row.
-        #[cfg(not(test))]
-        let query_recipe: Option<String> = None;
-        #[cfg(test)]
-        let query_recipe = prepared_query_recipe_for_test(row, &record.metadata)?;
+            stream,
+            &prepared.id,
+            &row.key,
+            overview_budget,
+        )?;
+    }
+    Ok(())
+}
+
+/// Publish an ordinary Catalog receipt. Immutable rows are inserted only for a
+/// fresh receipt; a byte exact receipt replay still reapplies local Current
+/// custody so later mutable owner reconciliation remains authoritative.
+pub(crate) fn publish_ordinary(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    base: &str,
+    base_generation: Option<&str>,
+    source_revision: i64,
+    claims: &str,
+    metadata: &str,
+    presentations: PreparedPresentations<'_>,
+) -> Result<(), PublicationError> {
+    validate_receipt_inputs(&presentations.inputs)?;
+    validate_receipt_presentations(
+        presentations.inputs.rows,
+        presentations.presentations,
+    )?;
+    let PreparedPresentations {
+        inputs,
+        presentations: captured_presentations,
+        overview_budget,
+    } = presentations;
+    let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
+    let publication = catalog_publication_id(namespace, inputs.catalog_generation, base)?;
+    let proof = root.digest.clone();
+    let prepared = prepare_proof_publication(
+        namespace,
+        admission,
+        stream,
+        &publication,
+        &proof,
+        &inputs,
+        captured_presentations,
+    )?;
+    let sql_admission = prepared.admission;
+    let existing = classify_ordinary_receipt(
+        tx,
+        namespace,
+        &publication,
+        base_generation,
+        source_revision,
+        claims,
+        metadata,
+        &root,
+        &prepared,
+    )?;
+    if existing == ExistingReceipt::Fresh {
+        insert_presentation_root(tx, namespace, &publication, &root)?;
         tx.execute(
-            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO storage_semantic_publications(namespace,generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
             params![
                 namespace,
-                record.id.0,
-                record.session_key,
-                record.publication,
-                record.proof,
+                publication,
                 sql_admission,
-                record.stream,
-                record.metadata,
-                record.slots,
-                record.prefix,
-                query_recipe
+                base_generation,
+                source_revision,
+                proof,
+                claims,
+                metadata
             ],
         )
         .map_err(failed)?;
+    }
+    for row in &prepared.rows {
+        if existing == ExistingReceipt::Fresh {
+            insert_proof_row(tx, namespace, &prepared, row)?;
+        }
+        publish_current_ref(
+            tx,
+            namespace,
+            admission,
+            stream,
+            &prepared.id,
+            &row.key,
+            overview_budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_proof_publication(
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    publication: &str,
+    proof: &str,
+    inputs: &PresentationInputs<'_>,
+    presentations: &[(String, String)],
+) -> Result<PreparedProofPublication, StorageError> {
+    let id = ProofGenerationId::derive(namespace, admission, stream, proof);
+    let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let rows = inputs.rows;
+    let projections = inputs.projections;
+    let mut prepared_rows = Vec::with_capacity(rows.len());
+    for row in rows {
         let presentation = presentations
             .iter()
             .find(|(key, _)| key == &row.key)
             .ok_or(StorageError::Unavailable)?;
-        tx.execute(
-            "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
-            params![namespace, id.0, row.key, presentation.1],
-        )
-        .map_err(failed)?;
-        for source in &row.sources {
-            let digest =
-                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
-            tx.execute(
-                "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    namespace,
-                    id.0,
-                    row.key,
-                    source.path.to_string_lossy(),
-                    digest
-                ],
-            )
-            .map_err(failed)?;
+        let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
+        let projection = projections
+            .unwrap_or_default()
+            .iter()
+            .find(|projection| projection.key == row.key)
+            .ok_or(StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
+        let prefix = crate::retention::source_generation(&row.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        // These values came directly from the model inputs in this owner
+        // transaction. Production does not decode this freshly encoded row.
+        #[cfg(not(test))]
+        let query_recipe: Option<String> = None;
+        #[cfg(test)]
+        let query_recipe = prepared_query_recipe_for_test(row, &metadata)?;
+        let mut sources = row
+            .sources
+            .iter()
+            .map(|source| PreparedProofSource {
+                path: source.path.to_string_lossy().into_owned(),
+                ledger: crate::source_carrier::ledger_digest(
+                    &crate::source_carrier::ledger(source),
+                ),
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.path.cmp(&right.path));
+        if sources
+            .windows(2)
+            .any(|pair| pair[0].path == pair[1].path)
+        {
+            return Err(StorageError::ScopeChanged);
         }
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
-        tx.execute(
-            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
-            params![namespace, row.key, id.0],
-        )
-        .map_err(failed)?;
-        let history: Option<String> = tx.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2", params![namespace, row.key], |r| r.get(0)).optional().map_err(failed)?;
-        let mut retained = std::collections::BTreeSet::new();
-        if let Some(history) = history {
-            if history.len() > 1_048_576 {
-                return Err(StorageError::HistoryRetentionBounds);
-            }
-            let history: CatalogRow =
-                serde_json::from_str(&history).map_err(|_| StorageError::Unavailable)?;
-            if history.sources.len() > 64 {
-                return Err(StorageError::HistoryRetentionBounds);
-            }
-            for source in &history.sources {
-                let digest =
-                    crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
-                let ids = tx.prepare("SELECT id FROM storage_proof_sources WHERE namespace=?1 AND session_key=?2 AND path=?3 AND ledger=?4 LIMIT 65").map_err(failed)?.query_map(params![namespace, row.key, source.path.to_string_lossy(), digest], |r| r.get::<_, String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-                retained.extend(ids);
-                if retained.len() > 64 {
-                    return Err(StorageError::HistoryRetentionBounds);
-                }
-            }
-        }
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'", params![namespace, row.key]).map_err(failed)?;
-        for retained in retained {
-            tx.execute(
-                "INSERT INTO storage_proof_refs VALUES(?1,?2,'history',?3)",
-                params![namespace, row.key, retained],
-            )
-            .map_err(failed)?;
-        }
+        prepared_rows.push(PreparedProofRow {
+            key: row.key.clone(),
+            metadata,
+            query_recipe,
+            slots,
+            prefix,
+            presentation: presentation.1.clone(),
+            sources,
+        });
     }
-    // Outgoing owners are absent from prepared.rows. Their original custody
-    // has completed above publication's CAS, so move their existing selected
-    // authority to history before collection can observe an unreferenced gap.
-    for row in &prepared.relationships.retired_owners {
-        tx.execute("INSERT INTO storage_proof_refs(namespace,session_key,kind,id) SELECT r.namespace,r.session_key,'history',r.id FROM storage_proof_refs r WHERE r.namespace=?1 AND r.session_key=?2 AND r.kind='current' AND EXISTS(SELECT 1 FROM session_history_catalog h WHERE h.namespace=r.namespace AND h.session_key=r.session_key) ON CONFLICT DO NOTHING", params![namespace,row.key]).map_err(failed)?;
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace,row.key]).map_err(failed)?;
+    Ok(PreparedProofPublication {
+        id: id.0,
+        publication: publication.to_owned(),
+        proof: proof.to_owned(),
+        admission: sql_admission,
+        stream: stream.to_owned(),
+        rows: prepared_rows,
+    })
+}
+
+fn insert_proof_row(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    publication: &PreparedProofPublication,
+    row: &PreparedProofRow,
+) -> Result<(), StorageError> {
+    tx.execute(
+        "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
+            namespace,
+            publication.id,
+            row.key,
+            publication.publication,
+            publication.proof,
+            publication.admission,
+            publication.stream,
+            row.metadata,
+            row.slots,
+            row.prefix,
+            row.query_recipe
+        ],
+    )
+    .map_err(failed)?;
+    tx.execute(
+        "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
+        params![namespace, publication.id, row.key, row.presentation],
+    )
+    .map_err(failed)?;
+    for source in &row.sources {
+        tx.execute(
+            "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
+            params![namespace, publication.id, row.key, source.path, source.ledger],
+        )
+        .map_err(failed)?;
     }
     Ok(())
+}
+
+fn publish_current_ref(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    id: &str,
+    session_key: &str,
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    retain_current_refs_for_unowned_history(
+        tx,
+        namespace,
+        session_key,
+        admission,
+        stream,
+        overview_budget,
+    )?;
+    tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, session_key]).map_err(failed)?;
+    tx.execute(
+        "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
+        params![namespace, session_key, id],
+    )
+    .map_err(failed)?;
+    // Exact History references are installed by the verified composer.
+    // Reconstructing them from path/ledger matches would retain unrelated
+    // generations and let imported proof sources acquire local authority.
+    Ok(())
+}
+
+fn classify_ordinary_receipt(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    publication: &str,
+    base_generation: Option<&str>,
+    source_revision: i64,
+    claims: &str,
+    metadata: &str,
+    root: &PreparedPresentationRoot,
+    proof: &PreparedProofPublication,
+) -> Result<ExistingReceipt, StorageError> {
+    let semantic_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2",
+            params![namespace, publication],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let semantic_matches: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND epoch IS NULL AND admission=?3 AND base_generation IS ?4 AND source_revision=?5 AND proof_digest=?6 AND claims=?7 AND metadata=?8)",
+            params![
+                namespace,
+                publication,
+                proof.admission,
+                base_generation,
+                source_revision,
+                proof.proof,
+                claims,
+                metadata
+            ],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let root_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_presentation_roots WHERE namespace=?1 AND (publication=?2 OR digest=?3)",
+            params![namespace, publication, root.digest],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let generation_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_generations WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let presentation_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_presentations WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let source_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_sources WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if semantic_count == 0
+        && root_count == 0
+        && generation_count == 0
+        && presentation_count == 0
+        && source_count == 0
+    {
+        return Ok(ExistingReceipt::Fresh);
+    }
+    let source_total = proof.rows.iter().try_fold(0usize, |total, row| {
+        total
+            .checked_add(row.sources.len())
+            .ok_or(StorageError::ScopeChanged)
+    })?;
+    let expected_counts = (
+        i64::try_from(proof.rows.len()).map_err(|_| StorageError::ScopeChanged)?,
+        i64::try_from(proof.rows.len()).map_err(|_| StorageError::ScopeChanged)?,
+        i64::try_from(source_total).map_err(|_| StorageError::ScopeChanged)?,
+    );
+    if semantic_count != 1
+        || !semantic_matches
+        || root_count != 1
+        || generation_count != expected_counts.0
+        || presentation_count != expected_counts.1
+        || source_count != expected_counts.2
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let root_matches: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2 AND publication=?3 AND base=?4 AND manifest=?5)",
+            params![namespace, root.digest, publication, root.base, root.manifest],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if !root_matches {
+        return Err(StorageError::ScopeChanged);
+    }
+    for row in &proof.rows {
+        let generation_matches: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3 AND publication=?4 AND proof=?5 AND admission=?6 AND stream=?7 AND metadata=?8 AND slots=?9 AND prefix=?10 AND query_recipe IS ?11)",
+                params![
+                    namespace,
+                    proof.id,
+                    row.key,
+                    proof.publication,
+                    proof.proof,
+                    proof.admission,
+                    proof.stream,
+                    row.metadata,
+                    row.slots,
+                    row.prefix,
+                    row.query_recipe.as_deref()
+                ],
+                |saved| saved.get(0),
+            )
+            .map_err(failed)?;
+        if !generation_matches {
+            return Err(StorageError::ScopeChanged);
+        }
+        let presentation_matches: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3 AND metadata=?4)",
+                params![namespace, proof.id, row.key, row.presentation],
+                |saved| saved.get(0),
+            )
+            .map_err(failed)?;
+        if !presentation_matches {
+            return Err(StorageError::ScopeChanged);
+        }
+        for source in &row.sources {
+            let source_matches: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM storage_proof_sources WHERE namespace=?1 AND id=?2 AND session_key=?3 AND path=?4 AND ledger=?5)",
+                    params![namespace, proof.id, row.key, source.path, source.ledger],
+                    |saved| saved.get(0),
+                )
+                .map_err(failed)?;
+            if !source_matches {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+    }
+    Ok(ExistingReceipt::ExactReplay)
+}
+
+/// Retain outgoing owners' exact Current receipts after History composition,
+/// then release their Current references before grant reconciliation.
+pub(crate) fn retain_outgoing_history_refs(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    outgoing_owners: &[CatalogRow],
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    // History refs are either the exact local composition set or retention
+    // references copied from an exact local Current grant. They never grant
+    // History origin.
+    for row in outgoing_owners {
+        retain_current_refs_for_unowned_history(
+            tx,
+            namespace,
+            &row.key,
+            admission,
+            stream,
+            overview_budget,
+        )?;
+        tx.execute(
+            "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+            params![namespace, row.key],
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
+}
+
+/// Atomically retain only the publication receipts selected by the verified
+/// History planner. Every ID must still be referenced by this local owner.
+pub(crate) fn replace_verified_history_refs(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    receipt_ids: &[String],
+) -> Result<(), StorageError> {
+    if receipt_ids.len() > 64
+        || receipt_ids.iter().any(String::is_empty)
+        || receipt_ids
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != receipt_ids.len()
+    {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    for id in receipt_ids {
+        let referenced: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind IN('current','history') AND id=?3)",
+                params![namespace, session_key, id],
+                |row| row.get(0),
+            )
+            .map_err(failed)?;
+        if !referenced {
+            return Err(StorageError::ScopeChanged);
+        }
+    }
+    db.execute(
+        "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
+        params![namespace, session_key],
+    )
+    .map_err(failed)?;
+    for id in receipt_ids {
+        db.execute(
+            "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3)",
+            params![namespace, session_key, id],
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
+}
+
+fn normalized_owner_metadata(metadata: &str, session_key: &str) -> Result<String, StorageError> {
+    let mut row: CatalogRow =
+        serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+    if row.key != session_key {
+        return Err(StorageError::ScopeChanged);
+    }
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)
+}
+
+fn has_local_history_origin(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    metadata: &str,
+    normalized_metadata: &str,
+    admission: u64,
+    stream: &str,
+) -> Result<bool, StorageError> {
+    let digest = proof_codec::digest(normalized_metadata.as_bytes());
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.storage_catalog_native_observation_grants g ON g.namespace=h.namespace AND g.session_key=h.session_key WHERE h.namespace=?1 AND h.session_key=?2 AND h.metadata=?3 AND g.owner_kind='history' AND g.metadata_digest=?4 AND g.admission=?5 AND g.stream=?6)",
+        params![namespace, session_key, metadata, digest, admission, stream],
+        |row| row.get(0),
+    )
+    .map_err(failed)
+}
+
+/// Preserve exact Current refs as retention pointers for original History
+/// when its local History grant is absent. These refs cannot authorize reuse:
+/// verified History reads require a matching local History origin grant.
+pub(super) fn retain_current_refs_for_unowned_history(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    let metadata_bytes: Option<i64> = db
+        .query_row(
+            "SELECT octet_length(metadata) FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    let Some(metadata_bytes) = metadata_bytes else {
+        return Ok(());
+    };
+    let metadata_bytes = usize::try_from(metadata_bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if budget.charge(metadata_bytes).is_err() {
+        return Err(PublicationError::BudgetOverflow);
+    }
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            params![namespace, session_key],
+            |row| row.get(0),
+        )
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    let normalized = normalized_owner_metadata(&metadata, session_key)?;
+    if has_local_history_origin(
+        db,
+        namespace,
+        session_key,
+        &metadata,
+        &normalized,
+        admission,
+        stream,
+    )? {
+        return Ok(());
+    }
+    let digest = proof_codec::digest(normalized.as_bytes());
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let has_local_current: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
+            params![namespace, session_key, digest, admission, stream],
+            |row| row.get(0),
+        )
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    if !has_local_current {
+        return Ok(());
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current' ORDER BY id LIMIT 65",
+        )
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    let ids = statement
+        .query_map(params![namespace, session_key], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| PublicationError::Storage(failed(error)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    if ids.len() > 64 {
+        return Err(StorageError::HistoryRetentionBounds.into());
+    }
+    for id in ids {
+        db.execute(
+            "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3) ON CONFLICT DO NOTHING",
+            params![namespace, session_key, id],
+        )
+        .map_err(|error| PublicationError::Storage(failed(error)))?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PublicationReceiptRef {
+    Current,
+    History,
+}
+
+impl PublicationReceiptRef {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::History => "history",
+        }
+    }
+}
+
+/// Exact owner and publication context used to authenticate stored receipts.
+pub(crate) struct PublicationReceiptRequest<'a> {
+    pub(crate) namespace: &'a str,
+    pub(crate) session_key: &'a str,
+    pub(crate) stream: &'a str,
+    pub(crate) publication_admission: u64,
+    pub(crate) previous: &'a CatalogRow,
+    pub(crate) exact_owner_metadata: &'a str,
+    pub(crate) kind: PublicationReceiptRef,
+}
+
+/// Authenticate local publication receipts that may supply predecessor
+/// slots. Current ownership also requires its exact native observation grant;
+/// retained History ownership requires the durable local History reference.
+/// The full CWD fingerprint is checked against an exact path-to-CWD map.
+pub(crate) fn verified_publication_receipts(
+    db: &Connection,
+    request: PublicationReceiptRequest<'_>,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<Option<Vec<crate::storage::catalog::VerifiedHistoryReceipt>>, StorageError> {
+    let PublicationReceiptRequest {
+        namespace,
+        session_key,
+        stream,
+        publication_admission,
+        previous,
+        exact_owner_metadata,
+        kind,
+    } = request;
+    if kind == PublicationReceiptRef::History {
+        let normalized = normalized_owner_metadata(exact_owner_metadata, session_key)?;
+        if !has_local_history_origin(
+            db,
+            namespace,
+            session_key,
+            exact_owner_metadata,
+            &normalized,
+            publication_admission,
+            stream,
+        )? {
+            return Ok(Some(Vec::new()));
+        }
+    }
+    let refs: i64 = db
+        .query_row(
+            "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind=?3",
+            params![namespace, session_key, kind.kind()],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if refs <= 0 || refs > 64 {
+        return Ok(Some(Vec::new()));
+    }
+    let bytes: i64 = db
+        .query_row(
+            "SELECT COALESCE(sum(octet_length(f.id)+octet_length(g.publication)+octet_length(g.proof)+octet_length(g.prefix)+octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.base)+octet_length(r.manifest)+octet_length(v.metadata)),0) FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3",
+            params![namespace, session_key, kind.kind()],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let Ok(bytes) = usize::try_from(bytes) else {
+        return Ok(Some(Vec::new()));
+    };
+    if budget.charge(bytes).is_err() {
+        return Ok(None);
+    }
+    let mut statement = db
+        .prepare(
+            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,g.metadata,g.slots,g.prefix,r.base,r.manifest,v.metadata FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 ORDER BY g.id LIMIT 65",
+        )
+        .map_err(failed)?;
+    let rows = statement
+        .query_map(params![namespace, session_key, kind.kind()], |row| {
+            Ok((
+                proof_codec::GenerationRecord {
+                    namespace: namespace.to_owned(),
+                    id: ProofGenerationId(row.get(0)?),
+                    session_key: session_key.to_owned(),
+                    publication: row.get(1)?,
+                    proof: row.get(2)?,
+                    admission: u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    stream: row.get(4)?,
+                    metadata: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    slots: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    prefix: row.get(7)?,
+                },
+                row.get::<_, String>(8)?,
+                row.get::<_, Option<String>>(9)?,
+                row.get::<_, Option<String>>(10)?,
+            ))
+        })
+        .map_err(failed)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(failed)?;
+    drop(statement);
+    let mut verified = Vec::new();
+    for (record, base, manifest, presentation) in rows {
+        let (Some(manifest), Some(presentation)) = (manifest, presentation) else {
+            continue;
+        };
+        let decoded_bytes = record
+            .metadata
+            .len()
+            .checked_add(record.slots.len().saturating_mul(2))
+            .and_then(|bytes| bytes.checked_add(base.len()))
+            .and_then(|bytes| bytes.checked_add(manifest.len()))
+            .and_then(|bytes| bytes.checked_add(presentation.len()));
+        if decoded_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
+            return Ok(None);
+        }
+        if record.stream != stream || record.session_key != session_key {
+            continue;
+        }
+        if kind == PublicationReceiptRef::Current && record.metadata != exact_owner_metadata {
+            continue;
+        }
+        if kind == PublicationReceiptRef::Current {
+            let admission =
+                i64::try_from(record.admission).map_err(|_| StorageError::Unavailable)?;
+            let digest = proof_codec::digest(record.metadata.as_bytes());
+            let granted: bool = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5)",
+                    params![namespace, session_key, digest, admission, stream],
+                    |row| row.get(0),
+                )
+                .map_err(failed)?;
+            if !granted {
+                continue;
+            }
+        }
+        let id = record.id.clone();
+        let publication = record.publication.clone();
+        let proof = record.proof.clone();
+        let admission = record.admission;
+        let prefix = record.prefix.clone();
+        let Ok((record, original)) = proof_codec::decode_generation(
+            record,
+            proof_codec::ExpectedGeneration {
+                namespace,
+                id: &id,
+                admission,
+                stream,
+                proof: &proof,
+                publication: &publication,
+                prefix: &prefix,
+            },
+        ) else {
+            continue;
+        };
+        if original.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+            continue;
+        }
+        if original.key != previous.key
+            || original.harness != previous.harness
+            || original
+                .sources
+                .iter()
+                .any(|source| !previous.sources.contains(source))
+        {
+            continue;
+        }
+        if kind == PublicationReceiptRef::Current && original.sources != previous.sources {
+            continue;
+        }
+        let Ok(Some(observations)) = proof_codec::verify_presentation_observations(
+            session_key,
+            &record.metadata,
+            &record.slots,
+            &presentation,
+            &base,
+            &manifest,
+            &record.proof,
+        ) else {
+            continue;
+        };
+        let Ok(source_generation) = crate::retention::source_generation(&original.sources) else {
+            continue;
+        };
+        let Some(saved_fingerprint) = serde_json::to_value(&observations).ok().and_then(|value| {
+            value
+                .get("runtime_cwd_fingerprints")?
+                .get(&source_generation)?
+                .as_str()
+                .map(str::to_owned)
+        }) else {
+            continue;
+        };
+        if observations.runtime_for(&original).is_none() {
+            continue;
+        }
+        let Ok(slots) =
+            serde_json::from_str::<Vec<crate::slot_projection::SavedSlot>>(&record.slots)
+        else {
+            continue;
+        };
+        if slots.len() > 64 {
+            continue;
+        }
+        let source_by_path: std::collections::BTreeMap<_, _> = original
+            .sources
+            .iter()
+            .map(|source| (&source.path, source))
+            .collect();
+        let mut slot_cwds = std::collections::BTreeMap::new();
+        let mut slots_valid = true;
+        for slot in &slots {
+            for (path, cwd) in slot.source_cwds() {
+                if !source_by_path.contains_key(path) {
+                    slots_valid = false;
+                    break;
+                }
+                if slot_cwds
+                    .insert(path.clone(), cwd.map(str::to_owned))
+                    .is_some_and(|saved| saved != cwd.map(str::to_owned))
+                {
+                    slots_valid = false;
+                    break;
+                }
+            }
+            if !slots_valid {
+                break;
+            }
+        }
+        if !slots_valid {
+            continue;
+        }
+        let source_paths: std::collections::BTreeSet<_> = original
+            .sources
+            .iter()
+            .map(|source| source.path.clone())
+            .collect();
+        if source_paths.len() != original.sources.len() {
+            continue;
+        }
+        let ledger_bytes = original
+            .sources
+            .len()
+            .checked_mul(std::mem::size_of::<crate::events::Ledger>());
+        if ledger_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
+            return Ok(None);
+        }
+        let cwd_bytes = super::catalog::runtime_source_cwd_bytes(db, &original.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let current_cwds_budgeted = budget.charge(cwd_bytes).is_ok();
+        let current_cwds = if current_cwds_budgeted {
+            super::catalog::runtime_source_cwds_by_path_if_current(db, &original.sources)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        let cwd_by_path = match current_cwds {
+            Some(current) => current,
+            None if slot_cwds
+                .keys()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>()
+                == source_paths =>
+            {
+                slot_cwds
+            }
+            None => continue,
+        };
+        if cwd_by_path
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            != source_paths
+        {
+            continue;
+        }
+        let cwds: std::collections::BTreeSet<_> =
+            cwd_by_path.values().filter_map(Clone::clone).collect();
+        if crate::native_evidence::runtime::cwd_fingerprint(&cwds) != saved_fingerprint {
+            continue;
+        }
+        let slot_texts = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StorageError::Unavailable)?;
+        verified.push(crate::storage::catalog::VerifiedHistoryReceipt::verified(
+            record.id.0,
+            source_generation,
+            original.sources,
+            slot_texts,
+            saved_fingerprint,
+            cwd_by_path,
+        ));
+    }
+    Ok(Some(verified))
 }
 
 /// Add durable references before the existing proof-copy/collection algorithm.
@@ -995,7 +1896,46 @@ fn verify_immutable_observation(
     } else {
         false
     };
-    if !stage_grant && !transfer_grant {
+    let mut physical_owner = selected.clone();
+    physical_owner.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let physical_owner_metadata =
+        serde_json::to_string(&physical_owner).map_err(|_| StorageError::Unavailable)?;
+    let physical_owner_digest = proof_codec::digest(physical_owner_metadata.as_bytes());
+    let receipt_metadata_digest = proof_codec::digest(record.metadata.as_bytes());
+    // A grant for newly composed owner metadata cannot authorize an older
+    // receipt whose authenticated row differs from that physical owner.
+    let physical_owner_grant = if record.admission == current.admission
+        && record.stream == current.stream_epoch
+        && physical_owner_digest == receipt_metadata_digest
+    {
+        let owner_kind = match reference_kind {
+            "current" => Some("catalog"),
+            "history" => Some("history"),
+            _ => None,
+        };
+        if let Some(owner_kind) = owner_kind {
+            let admission =
+                i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
+            db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
+                params![
+                    current.namespace.as_str(),
+                    selected.key,
+                    owner_kind,
+                    physical_owner_digest,
+                    admission,
+                    current.stream_epoch,
+                ],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(ObservationPreparationError::Sql)?
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if !stage_grant && !transfer_grant && !physical_owner_grant {
         diagnose_observation_refusal("immutable_destination_or_local_grant");
         return Err(StorageError::ScopeChanged.into());
     }
@@ -1016,9 +1956,26 @@ pub(super) fn reusable_presentations(
     prepared: &crate::model::PreparedSources,
 ) -> Result<bool, StorageError> {
     let ns = current.namespace.as_str();
+    let catalog_generation: String = tx
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_generation'",
+            [ns],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
     // Capture after publication effects, in the same transaction, so changed
     // History, relative context and source observations cannot masquerade as reuse.
-    let requested = capture_presentations(tx, ns, "", prepared, 0)?;
+    let requested = capture_presentations(
+        tx,
+        ns,
+        PresentationInputs {
+            catalog_generation: &catalog_generation,
+            rows: &prepared.rows,
+            projections: Some(&prepared.transcripts),
+            observations: prepared.presentation_observations(),
+        },
+        0,
+    )?;
     let mut reusable = !prepared.rows.is_empty();
     if prepared
         .rows
@@ -1958,6 +2915,62 @@ pub(crate) fn native_catalog_observation_grant(
     Ok(())
 }
 
+/// Store a fresh composed-row runtime capture in the existing physical
+/// History grant. This grants the new row's observation only; it never grants
+/// authority to carry predecessor slots.
+pub(crate) fn native_history_observation_grant(
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    admission: u64,
+    stream: &str,
+    metadata: &str,
+    capture: &str,
+) -> Result<(), StorageError> {
+    if capture.len() > DIRECT_CAPTURE_MAX_BYTES || stream.len() != 64 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    let mut row: CatalogRow =
+        serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
+    if row.key != session_key {
+        return Err(StorageError::ScopeChanged);
+    }
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let owner_metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    let capture_value: crate::storage::selected::PresentationObservations =
+        serde_json::from_str(capture).map_err(|_| StorageError::ScopeChanged)?;
+    if !capture_value.is_runtime_capture_for(&row) {
+        return Err(StorageError::ScopeChanged);
+    }
+    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let direct_capture = if exact_immutable_observation_owner(
+        db,
+        namespace,
+        session_key,
+        "history",
+        admission,
+        stream,
+        &owner_metadata,
+    )? {
+        None
+    } else {
+        Some(capture)
+    };
+    db.execute(
+        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
+        params![
+            namespace,
+            session_key,
+            proof_codec::digest(owner_metadata.as_bytes()),
+            admission,
+            stream,
+            direct_capture
+        ],
+    )
+    .map_err(failed)?;
+    Ok(())
+}
+
 pub(crate) fn clear_native_observation_captures_owned_by_proofs(
     db: &Connection,
     namespace: &str,
@@ -2399,16 +3412,22 @@ pub(crate) fn reconcile_native_observation_owners(
         )
         .map_err(failed)?;
     }
-    // A new Catalog proof does not replace the old exact grant's History
-    // custody. Each physical owner qualifies against its own row digest.
-    if !history_proof_owned && !history_owned && history_capture.is_some() {
+    // Preserve the old exact Catalog grant when its row becomes History,
+    // including when immutable receipts own the observation. Refs alone do
+    // not create a grant: the old producer digest, admission and stream match.
+    if !history_owned && history_capture.is_some() {
         let digest = history_digest.as_ref().ok_or(StorageError::Unavailable)?;
+        let capture = if history_proof_owned {
+            None
+        } else {
+            history_capture.flatten()
+        };
         db.execute(
             "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
-            params![namespace, session_key, digest, admission, stream, history_capture.flatten()],
+            params![namespace, session_key, digest, admission, stream, capture],
         )
         .map_err(failed)?;
-    } else if !history_owned && !history_proof_owned {
+    } else if !history_owned {
         db.execute(
             "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
             params![namespace, session_key],
@@ -2640,84 +3659,95 @@ fn joined_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
 
 /// The caller has completed every producer write in the same publication TX.
 /// Capture typed metadata, never Raw bodies, before committing the proof root.
-pub(super) fn capture_presentations(
+pub(crate) fn capture_presentations(
     tx: &Transaction<'_>,
     ns: &str,
-    generation: &str,
-    prepared: &crate::model::PreparedSources,
+    inputs: PresentationInputs<'_>,
     observed_at: i64,
 ) -> Result<Vec<(String, String)>, StorageError> {
+    validate_receipt_inputs(&inputs)?;
     #[cfg(test)]
     if FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.replace(false)) {
         return Err(StorageError::HistoryRetentionBounds);
     }
     use crate::storage::selected::{CapturedContext, PresentationWitness};
+    let PresentationInputs {
+        catalog_generation,
+        rows,
+        projections,
+        observations,
+    } = inputs;
+    proof_codec::validate_catalog_generation(catalog_generation)?;
     let lookup = super::selected::Context::owned(tx);
     let mut result = Vec::new();
     let mut bytes = 0usize;
-    for row in &prepared.rows {
-        let witness = if let Some(projection) =
-            prepared.transcripts.iter().find(|p| p.key == row.key)
-        {
-            let texts = projection
-                .slots
-                .iter()
-                .map(serde_json::to_string)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|_| StorageError::Unavailable)?;
-            let header_generation = crate::slot_projection::generation(&texts, &row.sources)
-                .map_err(|_| StorageError::Unavailable)?;
-            let header: (String,u32,i64) = tx.query_row("SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",params![ns,row.key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-            if header.0 != header_generation
-                || header.1 != crate::slot_projection::VERSION
-                || usize::try_from(header.2).ok() != Some(texts.len())
-            {
-                return Err(StorageError::ScopeChanged);
-            }
-            let has_history = tx.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",params![ns,row.key],|r|r.get(0)).map_err(failed)?;
-            let catalog = [
-                (
-                    "catalog_version".into(),
-                    crate::model::summary::CATALOG_VERSION.to_string(),
-                ),
-                ("catalog_generation".into(), generation.to_owned()),
-                (
-                    "slot_projection_catalog_generation".into(),
-                    generation.to_owned(),
-                ),
-                ("catalog_completeness".into(), "partial".into()),
-                ("catalog_observed_at".into(), observed_at.to_string()),
-            ]
-            .into_iter()
-            .collect();
-            let mut observations = prepared
-                .presentation_observations()
-                .cloned()
-                .ok_or(StorageError::Unavailable)?;
-            let context = CapturedContext::capture(
-                &lookup,
-                row,
-                &projection.slots,
-                &mut |relative, _owner| {
-                    observations.capture_relative_status(relative, || {
-                        super::catalog::runtime_source_cwds(tx, &relative.sources)
-                    })
-                },
-            )
+    for row in rows {
+        let projection = projections
+            .unwrap_or_default()
+            .iter()
+            .find(|projection| projection.key == row.key)
+            .ok_or(StorageError::Unavailable)?;
+        let texts = projection
+            .slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|_| StorageError::Unavailable)?;
-            Some(PresentationWitness {
-                header_generation,
-                version: header.1,
-                total: texts.len(),
-                has_history,
-                catalog,
-                context,
-                relative_statuses: std::mem::take(&mut observations.relative_statuses),
-                observations,
+        let header_generation = crate::slot_projection::generation(&texts, &row.sources)
+            .map_err(|_| StorageError::Unavailable)?;
+        let header: (String, u32, i64) = tx
+            .query_row(
+                "SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                params![ns, row.key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .map_err(failed)?;
+        if header.0 != header_generation
+            || header.1 != crate::slot_projection::VERSION
+            || usize::try_from(header.2).ok() != Some(texts.len())
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+        let has_history = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",
+                params![ns, row.key],
+                |r| r.get(0),
+            )
+            .map_err(failed)?;
+        let catalog = [
+            (
+                "catalog_version".into(),
+                crate::model::summary::CATALOG_VERSION.to_string(),
+            ),
+            ("catalog_generation".into(), catalog_generation.to_owned()),
+            (
+                "slot_projection_catalog_generation".into(),
+                catalog_generation.to_owned(),
+            ),
+            ("catalog_completeness".into(), "partial".into()),
+            ("catalog_observed_at".into(), observed_at.to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let mut observations = observations.cloned().ok_or(StorageError::Unavailable)?;
+        let context =
+            CapturedContext::capture(&lookup, row, &projection.slots, &mut |relative, _owner| {
+                observations.capture_relative_status(relative, || {
+                    super::catalog::runtime_source_cwds(tx, &relative.sources)
+                })
             })
-        } else {
-            None
-        };
+            .map_err(|_| StorageError::Unavailable)?;
+        let witness = Some(PresentationWitness {
+            header_generation,
+            version: header.1,
+            total: texts.len(),
+            has_history,
+            catalog,
+            context,
+            relative_statuses: std::mem::take(&mut observations.relative_statuses),
+            observations,
+        });
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         bytes = bytes.saturating_add(text.len());
         if bytes > 8 * 1048576 {
@@ -2728,49 +3758,98 @@ pub(super) fn capture_presentations(
     Ok(result)
 }
 
-pub(super) fn bind_presentations(
+pub(crate) fn bind_presentations(
     tx: &Transaction<'_>,
     ns: &str,
     publication: &str,
     base: &str,
     rows: &[(String, String)],
-    prepared: &crate::model::PreparedSources,
+    inputs: PresentationInputs<'_>,
 ) -> Result<String, StorageError> {
+    validate_receipt_inputs(&inputs)?;
+    validate_receipt_presentations(inputs.rows, rows)?;
+    let root = prepare_presentation_root(base, rows, &inputs)?;
+    insert_presentation_root(tx, ns, publication, &root)?;
+    Ok(root.digest)
+}
+
+fn prepare_presentation_root(
+    base: &str,
+    rows: &[(String, String)],
+    inputs: &PresentationInputs<'_>,
+) -> Result<PreparedPresentationRoot, StorageError> {
+    let catalog_generation = inputs.catalog_generation;
+    let catalog_rows = inputs.rows;
+    let projections = inputs.projections;
+    let observations = inputs.observations;
+    proof_codec::validate_catalog_generation(catalog_generation)?;
     let mut entries = Vec::new();
     for (key, text) in rows {
-        let row = prepared
-            .rows
+        let row = catalog_rows
             .iter()
             .find(|row| &row.key == key)
             .ok_or(StorageError::Unavailable)?;
         let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
-        let projection = prepared
-            .transcripts
+        let projection = projections
+            .unwrap_or_default()
             .iter()
-            .find(|projection| &projection.key == key);
-        let slots = serde_json::to_string(&projection.map(|projection| &projection.slots))
-            .map_err(|_| StorageError::Unavailable)?;
+            .find(|projection| &projection.key == key)
+            .ok_or(StorageError::Unavailable)?;
+        let slots =
+            serde_json::to_string(&projection.slots).map_err(|_| StorageError::Unavailable)?;
         entries.push((
             key.clone(),
             proof_codec::presentation_entry(&metadata, &slots, text)?,
         ));
     }
     let manifest = serde_json::to_string(&PresentationManifest {
+        catalog_generation: (*catalog_generation).to_owned(),
         entries,
-        observations: prepared.presentation_observations().cloned(),
+        observations: observations.cloned(),
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
         return Err(StorageError::HistoryRetentionBounds);
     }
     let joined = joined_digest(base, &manifest)?;
+    Ok(PreparedPresentationRoot {
+        base: base.to_owned(),
+        manifest,
+        digest: joined,
+    })
+}
+
+fn insert_presentation_root(
+    tx: &Transaction<'_>,
+    ns: &str,
+    publication: &str,
+    root: &PreparedPresentationRoot,
+) -> Result<(), StorageError> {
     tx.execute(
         "INSERT INTO storage_proof_presentation_roots VALUES(?1,?2,?3,?4,?5)",
-        params![ns, publication, base, manifest, joined],
+        params![ns, publication, root.base, root.manifest, root.digest],
     )
     .map_err(failed)?;
-    Ok(joined)
+    Ok(())
 }
+
+/// Give an ordinary Catalog receipt an identity bound to its exact metadata
+/// generation and finalized projection/presentation root.
+pub(crate) fn catalog_publication_id(
+    namespace: &str,
+    catalog_generation: &str,
+    proof_digest: &str,
+) -> Result<String, StorageError> {
+    let identity = serde_json::to_vec(&(
+        "catalog-proof-publication-v1",
+        namespace,
+        catalog_generation,
+        proof_digest,
+    ))
+    .map_err(|_| StorageError::Unavailable)?;
+    Ok(proof_codec::digest(&identity))
+}
+
 pub(super) fn replayed_presentation(
     db: &Connection,
     ns: &str,
@@ -2782,10 +3861,11 @@ pub(super) fn replayed_presentation(
     let Some((saved, manifest, joined)) = row else {
         return Ok(false);
     };
-    Ok(saved == base
-        && manifest.len() <= 1048576
-        && joined == expected
-        && joined_digest(&saved, &manifest)? == joined)
+    if saved != base || manifest.len() > 1048576 || joined != expected {
+        return Ok(false);
+    }
+    proof_codec::decode_presentation_manifest(&manifest)?;
+    Ok(joined_digest(&saved, &manifest)? == joined)
 }
 fn validate_presentation(
     db: &Connection,
@@ -2825,8 +3905,13 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
             serde_json::from_str(&text).map_err(io::Error::other)?;
         let mut witness =
             witness.ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
-        let manifest: PresentationManifest =
-            serde_json::from_str(&manifest).map_err(io::Error::other)?;
+        let manifest =
+            proof_codec::decode_presentation_manifest(&manifest).map_err(io::Error::other)?;
+        let witness_catalog_generation = witness
+            .catalog
+            .get("catalog_generation")
+            .cloned()
+            .ok_or_else(|| io::Error::other("selected catalog generation unavailable"))?;
         witness.observations = manifest
             .observations
             .ok_or_else(|| io::Error::other("selected observation witness unavailable"))?;
@@ -2846,8 +3931,7 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
             || crate::slot_projection::generation(&texts, &self.row.sources)
                 .map_err(io::Error::other)?
                 != witness.header_generation
-            || witness.catalog.get("catalog_generation")
-                != Some(&self.snapshot.publication_generation)
+            || manifest.catalog_generation != witness_catalog_generation
         {
             return Err(io::Error::other("selected witness changed"));
         }

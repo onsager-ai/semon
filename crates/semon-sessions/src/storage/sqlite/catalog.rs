@@ -341,10 +341,21 @@ pub(crate) fn runtime_source_cwds_if_current(
     db: &Connection,
     sources: &[CatalogSource],
 ) -> io::Result<Option<std::collections::BTreeSet<String>>> {
+    Ok(runtime_source_cwds_by_path_if_current(db, sources)?
+        .map(|by_path| by_path.into_values().flatten().collect()))
+}
+
+/// Preserve the exact source-to-CWD association after checking every source
+/// against its committed Native ledger. A set alone cannot prove which CWD
+/// belongs to a retained source when a receipt covers several sources.
+pub(crate) fn runtime_source_cwds_by_path_if_current(
+    db: &Connection,
+    sources: &[CatalogSource],
+) -> io::Result<Option<std::collections::BTreeMap<std::path::PathBuf, Option<String>>>> {
     if sources.is_empty() || sources.len() > 64 {
         return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
     }
-    let mut cwds = std::collections::BTreeSet::new();
+    let mut cwds = std::collections::BTreeMap::new();
     for source in sources {
         let path = source.path.to_string_lossy();
         let ledger = crate::events::store::ledger_row(db, &path).map_err(io::Error::other)?;
@@ -359,11 +370,41 @@ pub(crate) fn runtime_source_cwds_if_current(
                 |row| row.get(0),
             )
             .map_err(io::Error::other)?;
-        if let Some(cwd) = cwd {
-            cwds.insert(cwd);
+        if cwds.insert(source.path.clone(), cwd).is_some() {
+            return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
         }
     }
     Ok(Some(cwds))
+}
+
+/// Return the bounded bytes that a path-keyed CWD read may materialize. The
+/// caller charges these before asking for the CWD strings themselves.
+pub(crate) fn runtime_source_cwd_bytes(
+    db: &Connection,
+    sources: &[CatalogSource],
+) -> io::Result<usize> {
+    if sources.len() > 64 {
+        return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+    }
+    let mut bytes = 0usize;
+    for source in sources {
+        let path = source.path.to_string_lossy();
+        let value: Option<i64> = db
+            .query_row(
+                "SELECT COALESCE(octet_length(path)+COALESCE(octet_length(cwd),0),0) FROM main.files WHERE namespace=semon_namespace() AND path=?1",
+                [path.as_ref()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(io::Error::other)?;
+        let Some(value) = value else {
+            continue;
+        };
+        bytes = bytes
+            .checked_add(usize::try_from(value).map_err(io::Error::other)?)
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))?;
+    }
+    Ok(bytes)
 }
 
 /// Bound Home/Query readers select through the same admitted snapshot as
