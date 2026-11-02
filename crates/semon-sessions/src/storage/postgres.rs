@@ -339,7 +339,10 @@ pub(crate) fn catalog_page(
                 admit_search,
                 &mut admission,
             )
-            .map_err(|_| super::StorageError::Unavailable)?;
+            .map_err(|error| {
+                eprintln!("diagnostic catalog snapshot error: {error:?}");
+                super::StorageError::Unavailable
+            })?;
             Ok((reply, admission))
         },
     )

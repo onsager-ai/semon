@@ -61,6 +61,13 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_semantic_stage_empty_probe_resumes_without_mutation -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-empty-probe.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-empty-probe.log"
+      - name: Aggregate and count-only refusal bounds
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::semantic_stage::publication_refusal_tests::aggregate_and_count_only_refusals_remain_busy -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-oversized-bounds.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-oversized-bounds.log"
       - name: Post-ingest oversized PostgreSQL refusal diagnosis and size bounds
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
