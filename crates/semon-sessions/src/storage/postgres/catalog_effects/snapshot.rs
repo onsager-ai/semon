@@ -37,7 +37,10 @@ pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
         let ns = namespace.as_str().as_bytes();
         let row = tx.driver.query_one("INSERT INTO semon_pg_native_catalog_leases(namespace,lease_id,generation,expires_at) SELECT $1,convert_to(gen_random_uuid()::text,'UTF8'),$2,(extract(epoch FROM clock_timestamp())*1000)::bigint+60000 WHERE EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2) RETURNING lease_id", &[&ns, &generation.as_bytes()]).map_err(sqlstate::error)?;
         Ok(row.get::<_, Vec<u8>>(0))
+    }).inspect_err(|error| {
+        eprintln!("PG_READ_DIAG lease_acquire error={error:?}");
     })?;
+    eprintln!("PG_READ_DIAG lease_ready");
     let result = with_generation(pool, namespace, control, generation, |snapshot| {
         let now = crate::model::now_ms();
         let tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
@@ -46,7 +49,10 @@ pub(in crate::storage::postgres) fn with_admitted_snapshot<T>(
         if !live {
             return Err(StorageError::ScopeChanged);
         }
+        eprintln!("PG_READ_DIAG snapshot_live");
         read(snapshot)
+    }).inspect_err(|error| {
+        eprintln!("PG_READ_DIAG admitted_read error={error:?}");
     });
     // A cancelled transaction may prevent release; the lease still has a hard
     // expiry. Cleanup never removes a proof generation.

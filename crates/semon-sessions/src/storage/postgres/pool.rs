@@ -85,12 +85,17 @@ impl Driver {
     }
     fn run<T>(
         &self,
+        sql: &str,
         future: impl Future<Output = Result<T, tokio_postgres::Error>>,
     ) -> Result<T, DriverError> {
+        #[cfg(test)]
+        let started = Instant::now();
         if self.interrupted.get() {
+            #[cfg(test)]
+            eprintln!("PG_READ_DIAG already_interrupted sql={sql}");
             return Err(DriverError::Interrupted);
         }
-        self.handle.block_on(async {
+        let result = self.handle.block_on(async {
             tokio::pin!(future);
             tokio::select! {
                 biased;
@@ -119,31 +124,45 @@ impl Driver {
                     Err(DriverError::Interrupted)
                 }
             }
-        })
+        });
+        #[cfg(test)]
+        if std::env::var_os("SEMON_PG_READ_DIAGNOSTIC").is_some()
+            && (result.is_err() || started.elapsed() >= Duration::from_millis(100))
+        {
+            eprintln!(
+                "PG_READ_DIAG sql_ms={} remaining_ms={} cancelled={} error={:?} sql={sql}",
+                started.elapsed().as_millis(),
+                self.deadline.saturating_duration_since(Instant::now()).as_millis(),
+                self.control.is_cancelled(),
+                result.as_ref().err(),
+            );
+        }
+        let _ = sql;
+        result
     }
     pub(super) fn batch_execute(&self, sql: &str) -> Result<(), DriverError> {
-        self.run(self.raw.batch_execute(sql))
+        self.run(sql, self.raw.batch_execute(sql))
     }
     pub(super) fn query(
         &self,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Vec<Row>, DriverError> {
-        self.run(self.raw.query(sql, params))
+        self.run(sql, self.raw.query(sql, params))
     }
     pub(super) fn query_one(
         &self,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<Row, DriverError> {
-        self.run(self.raw.query_one(sql, params))
+        self.run(sql, self.raw.query_one(sql, params))
     }
     pub(super) fn execute(
         &self,
         sql: &str,
         params: &[&(dyn ToSql + Sync)],
     ) -> Result<u64, DriverError> {
-        self.run(self.raw.execute(sql, params))
+        self.run(sql, self.raw.execute(sql, params))
     }
     pub(super) fn rollback(&mut self) -> Result<(), DriverError> {
         // A real rollback ACK may establish noncommit. Cancel alone never does.
@@ -327,6 +346,8 @@ impl PgPool {
         let deadline = cancel.deadline(Instant::now() + self.inner.limits.acquire_timeout);
         loop {
             if cancel.is_cancelled() || Instant::now() >= deadline {
+                #[cfg(test)]
+                eprintln!("PG_READ_DIAG acquire_busy cancelled={}", cancel.is_cancelled());
                 return Err(StorageError::Busy);
             }
             let mut state = self
@@ -381,6 +402,8 @@ impl PgPool {
                     continue;
                 }
                 if cancel.is_cancelled() || Instant::now() >= deadline {
+                    #[cfg(test)]
+                    eprintln!("PG_READ_DIAG acquire_busy cancelled={}", cancel.is_cancelled());
                     return Err(StorageError::Busy);
                 }
                 return Ok(lease);

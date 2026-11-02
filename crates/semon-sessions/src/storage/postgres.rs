@@ -320,7 +320,10 @@ pub(crate) fn catalog_page(
     super::StorageError,
 > {
     let control = &control.for_selected_read();
-    let generation = configured_generation(config, pool, control)?;
+    let generation = configured_generation(config, pool, control).inspect_err(|error| {
+        eprintln!("PG_READ_DIAG configured_generation error={error:?}");
+    })?;
+    eprintln!("PG_READ_DIAG generation_ready");
     catalog_effects::snapshot::with_admitted_generation(
         pool,
         &config.namespace,
@@ -336,7 +339,11 @@ pub(crate) fn catalog_page(
                 admit_search,
                 &mut admission,
             )
-            .map_err(|_| super::StorageError::Unavailable)?;
+            .map_err(|error| {
+                eprintln!("PG_READ_DIAG renderer error={error:?}");
+                super::StorageError::Unavailable
+            })?;
+            eprintln!("PG_READ_DIAG renderer_done");
             Ok((reply, admission))
         },
     )

@@ -25,8 +25,16 @@ pub(super) struct PgTxn<'a> {
     pub(super) control: &'a PgCancellation,
 }
 impl PgTxn<'_> {
+    #[track_caller]
     pub(super) fn check(&self) -> Result<(), StorageError> {
         if self.control.is_cancelled() || Instant::now() >= self.deadline {
+            #[cfg(test)]
+            eprintln!(
+                "PG_READ_DIAG tx_check_busy caller={} cancelled={} overdue_ms={}",
+                std::panic::Location::caller(),
+                self.control.is_cancelled(),
+                Instant::now().saturating_duration_since(self.deadline).as_millis(),
+            );
             Err(StorageError::Busy)
         } else {
             Ok(())
@@ -68,7 +76,13 @@ impl PgPool {
         {
             return Err(StorageError::NamespaceMismatch);
         }
-        let mut lease = self.acquire(control)?;
+        #[cfg(test)]
+        let diagnostic_started = Instant::now();
+        let mut lease = self.acquire(control).inspect_err(|error| {
+            #[cfg(test)]
+            eprintln!("PG_READ_DIAG tx_acquire error={error:?}");
+            let _ = error;
+        })?;
         let limits = self.inner.limits;
         let deadline = control.deadline(Instant::now() + limits.txn_deadline);
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
@@ -158,6 +172,13 @@ impl PgPool {
                 {
                     return Err(StorageError::ScopeChanged);
                 }
+            }
+            #[cfg(test)]
+            if std::env::var_os("SEMON_PG_READ_DIAGNOSTIC").is_some() {
+                eprintln!(
+                    "PG_READ_DIAG tx_setup_ms={}",
+                    diagnostic_started.elapsed().as_millis()
+                );
             }
             let value = operation(&mut tx)?;
             tx.check()?;
