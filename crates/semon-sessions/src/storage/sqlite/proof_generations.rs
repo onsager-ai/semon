@@ -114,6 +114,42 @@ pub(crate) struct PreparedPresentations<'a> {
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
+struct PreparedPresentationRoot {
+    base: String,
+    manifest: String,
+    digest: String,
+}
+
+struct PreparedProofSource {
+    path: String,
+    ledger: String,
+}
+
+struct PreparedProofRow {
+    key: String,
+    metadata: String,
+    query_recipe: Option<String>,
+    slots: String,
+    prefix: String,
+    presentation: String,
+    sources: Vec<PreparedProofSource>,
+}
+
+struct PreparedProofPublication {
+    id: String,
+    publication: String,
+    proof: String,
+    admission: i64,
+    stream: String,
+    rows: Vec<PreparedProofRow>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExistingReceipt {
+    Fresh,
+    ExactReplay,
+}
+
 /// Validate the selected-receipt input shape shared by ordinary and Stage
 /// issuers. Unknown observation fields remain valid; the typed object itself
 /// and one projection per Catalog row are required for a nonempty receipt.
@@ -244,13 +280,130 @@ pub(crate) fn publish(
         presentations: captured_presentations,
         overview_budget,
     } = presentations;
-    let PresentationInputs {
-        rows, projections, ..
-    } = inputs;
+    let prepared = prepare_proof_publication(
+        namespace,
+        admission,
+        stream,
+        publication,
+        proof,
+        &inputs,
+        captured_presentations,
+    )?;
+    for row in &prepared.rows {
+        insert_proof_row(tx, namespace, &prepared, row)?;
+        publish_current_ref(
+            tx,
+            namespace,
+            admission,
+            stream,
+            &prepared.id,
+            &row.key,
+            overview_budget,
+        )?;
+    }
+    Ok(())
+}
+
+/// Publish an ordinary Catalog receipt. Immutable rows are inserted only for a
+/// fresh receipt; a byte exact receipt replay still reapplies local Current
+/// custody so later mutable owner reconciliation remains authoritative.
+pub(crate) fn publish_ordinary(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    base: &str,
+    base_generation: Option<&str>,
+    source_revision: i64,
+    claims: &str,
+    metadata: &str,
+    presentations: PreparedPresentations<'_>,
+) -> Result<(), PublicationError> {
+    validate_receipt_inputs(&presentations.inputs)?;
+    validate_receipt_presentations(
+        presentations.inputs.rows,
+        presentations.presentations,
+    )?;
+    let PreparedPresentations {
+        inputs,
+        presentations: captured_presentations,
+        overview_budget,
+    } = presentations;
+    let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
+    let publication =
+        catalog_publication_id(namespace, inputs.catalog_generation, &root.digest)?;
+    let proof = root.digest.clone();
+    let prepared = prepare_proof_publication(
+        namespace,
+        admission,
+        stream,
+        &publication,
+        &proof,
+        &inputs,
+        captured_presentations,
+    )?;
+    let sql_admission = prepared.admission;
+    let existing = classify_ordinary_receipt(
+        tx,
+        namespace,
+        &publication,
+        base_generation,
+        source_revision,
+        claims,
+        metadata,
+        &root,
+        &prepared,
+    )?;
+    if existing == ExistingReceipt::Fresh {
+        insert_presentation_root(tx, namespace, &publication, &root)?;
+        tx.execute(
+            "INSERT INTO storage_semantic_publications(namespace,generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
+            params![
+                namespace,
+                publication,
+                sql_admission,
+                base_generation,
+                source_revision,
+                proof,
+                claims,
+                metadata
+            ],
+        )
+        .map_err(failed)?;
+    }
+    for row in &prepared.rows {
+        if existing == ExistingReceipt::Fresh {
+            insert_proof_row(tx, namespace, &prepared, row)?;
+        }
+        publish_current_ref(
+            tx,
+            namespace,
+            admission,
+            stream,
+            &prepared.id,
+            &row.key,
+            overview_budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn prepare_proof_publication(
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    publication: &str,
+    proof: &str,
+    inputs: &PresentationInputs<'_>,
+    presentations: &[(String, String)],
+) -> Result<PreparedProofPublication, StorageError> {
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let rows = inputs.rows;
+    let projections = inputs.projections;
+    let mut prepared_rows = Vec::with_capacity(rows.len());
     for row in rows {
-        let presentation = captured_presentations
+        let presentation = presentations
             .iter()
             .find(|(key, _)| key == &row.key)
             .ok_or(StorageError::Unavailable)?;
@@ -264,80 +417,262 @@ pub(crate) fn publish(
             .map_err(|_| StorageError::Unavailable)?;
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
-        let record = proof_codec::GenerationRecord {
-            namespace: namespace.to_owned(),
-            id: id.clone(),
-            session_key: row.key.clone(),
-            publication: publication.to_owned(),
-            proof: proof.to_owned(),
-            admission,
-            stream: stream.to_owned(),
-            metadata,
-            slots,
-            prefix,
-        };
         // These values came directly from the model inputs in this owner
         // transaction. Production does not decode this freshly encoded row.
         #[cfg(not(test))]
         let query_recipe: Option<String> = None;
         #[cfg(test)]
-        let query_recipe = prepared_query_recipe_for_test(row, &record.metadata)?;
-        tx.execute(
-            "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-            params![
-                namespace,
-                record.id.0,
-                record.session_key,
-                record.publication,
-                record.proof,
-                sql_admission,
-                record.stream,
-                record.metadata,
-                record.slots,
-                record.prefix,
-                query_recipe
-            ],
-        )
-        .map_err(failed)?;
-        tx.execute(
-            "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
-            params![namespace, id.0, row.key, presentation.1],
-        )
-        .map_err(failed)?;
-        for source in &row.sources {
-            let digest =
-                crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source));
-            tx.execute(
-                "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
-                params![
-                    namespace,
-                    id.0,
-                    row.key,
-                    source.path.to_string_lossy(),
-                    digest
-                ],
-            )
-            .map_err(failed)?;
+        let query_recipe = prepared_query_recipe_for_test(row, &metadata)?;
+        let mut sources = row
+            .sources
+            .iter()
+            .map(|source| PreparedProofSource {
+                path: source.path.to_string_lossy().into_owned(),
+                ledger: crate::source_carrier::ledger_digest(
+                    &crate::source_carrier::ledger(source),
+                ),
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.path.cmp(&right.path));
+        if sources
+            .windows(2)
+            .any(|pair| pair[0].path == pair[1].path)
+        {
+            return Err(StorageError::ScopeChanged);
         }
-        retain_current_refs_for_unowned_history(
-            tx,
+        prepared_rows.push(PreparedProofRow {
+            key: row.key.clone(),
+            metadata,
+            query_recipe,
+            slots,
+            prefix,
+            presentation: presentation.1.clone(),
+            sources,
+        });
+    }
+    Ok(PreparedProofPublication {
+        id: id.0,
+        publication: publication.to_owned(),
+        proof: proof.to_owned(),
+        admission: sql_admission,
+        stream: stream.to_owned(),
+        rows: prepared_rows,
+    })
+}
+
+fn insert_proof_row(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    publication: &PreparedProofPublication,
+    row: &PreparedProofRow,
+) -> Result<(), StorageError> {
+    tx.execute(
+        "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+        params![
             namespace,
-            &row.key,
-            admission,
-            stream,
-            overview_budget,
-        )?;
-        tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, row.key]).map_err(failed)?;
+            publication.id,
+            row.key,
+            publication.publication,
+            publication.proof,
+            publication.admission,
+            publication.stream,
+            row.metadata,
+            row.slots,
+            row.prefix,
+            row.query_recipe
+        ],
+    )
+    .map_err(failed)?;
+    tx.execute(
+        "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
+        params![namespace, publication.id, row.key, row.presentation],
+    )
+    .map_err(failed)?;
+    for source in &row.sources {
         tx.execute(
-            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
-            params![namespace, row.key, id.0],
+            "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
+            params![namespace, publication.id, row.key, source.path, source.ledger],
         )
         .map_err(failed)?;
-        // Exact History references are installed by the verified composer.
-        // Reconstructing them from path/ledger matches would retain unrelated
-        // generations and let imported proof sources acquire local authority.
     }
     Ok(())
+}
+
+fn publish_current_ref(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    id: &str,
+    session_key: &str,
+    overview_budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    retain_current_refs_for_unowned_history(
+        tx,
+        namespace,
+        session_key,
+        admission,
+        stream,
+        overview_budget,
+    )?;
+    tx.execute("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'", params![namespace, session_key]).map_err(failed)?;
+    tx.execute(
+        "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
+        params![namespace, session_key, id],
+    )
+    .map_err(failed)?;
+    // Exact History references are installed by the verified composer.
+    // Reconstructing them from path/ledger matches would retain unrelated
+    // generations and let imported proof sources acquire local authority.
+    Ok(())
+}
+
+fn classify_ordinary_receipt(
+    tx: &Transaction<'_>,
+    namespace: &str,
+    publication: &str,
+    base_generation: Option<&str>,
+    source_revision: i64,
+    claims: &str,
+    metadata: &str,
+    root: &PreparedPresentationRoot,
+    proof: &PreparedProofPublication,
+) -> Result<ExistingReceipt, StorageError> {
+    let semantic_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2",
+            params![namespace, publication],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let semantic_matches: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_semantic_publications WHERE namespace=?1 AND generation=?2 AND epoch IS NULL AND admission=?3 AND base_generation IS ?4 AND source_revision=?5 AND proof_digest=?6 AND claims=?7 AND metadata=?8)",
+            params![
+                namespace,
+                publication,
+                proof.admission,
+                base_generation,
+                source_revision,
+                proof.proof,
+                claims,
+                metadata
+            ],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let root_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_presentation_roots WHERE namespace=?1 AND (publication=?2 OR digest=?3)",
+            params![namespace, publication, root.digest],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let generation_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_generations WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let presentation_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_presentations WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    let source_count: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM storage_proof_sources WHERE namespace=?1 AND id=?2",
+            params![namespace, proof.id],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if semantic_count == 0
+        && root_count == 0
+        && generation_count == 0
+        && presentation_count == 0
+        && source_count == 0
+    {
+        return Ok(ExistingReceipt::Fresh);
+    }
+    let source_total = proof.rows.iter().try_fold(0usize, |total, row| {
+        total
+            .checked_add(row.sources.len())
+            .ok_or(StorageError::ScopeChanged)
+    })?;
+    let expected_counts = (
+        i64::try_from(proof.rows.len()).map_err(|_| StorageError::ScopeChanged)?,
+        i64::try_from(proof.rows.len()).map_err(|_| StorageError::ScopeChanged)?,
+        i64::try_from(source_total).map_err(|_| StorageError::ScopeChanged)?,
+    );
+    if semantic_count != 1
+        || !semantic_matches
+        || root_count != 1
+        || generation_count != expected_counts.0
+        || presentation_count != expected_counts.1
+        || source_count != expected_counts.2
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let root_matches: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2 AND publication=?3 AND base=?4 AND manifest=?5)",
+            params![namespace, root.digest, publication, root.base, root.manifest],
+            |row| row.get(0),
+        )
+        .map_err(failed)?;
+    if !root_matches {
+        return Err(StorageError::ScopeChanged);
+    }
+    for row in &proof.rows {
+        let generation_matches: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_generations WHERE namespace=?1 AND id=?2 AND session_key=?3 AND publication=?4 AND proof=?5 AND admission=?6 AND stream=?7 AND metadata=?8 AND slots=?9 AND prefix=?10 AND query_recipe IS ?11)",
+                params![
+                    namespace,
+                    proof.id,
+                    row.key,
+                    proof.publication,
+                    proof.proof,
+                    proof.admission,
+                    proof.stream,
+                    row.metadata,
+                    row.slots,
+                    row.prefix,
+                    row.query_recipe.as_deref()
+                ],
+                |saved| saved.get(0),
+            )
+            .map_err(failed)?;
+        if !generation_matches {
+            return Err(StorageError::ScopeChanged);
+        }
+        let presentation_matches: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM storage_proof_presentations WHERE namespace=?1 AND id=?2 AND session_key=?3 AND metadata=?4)",
+                params![namespace, proof.id, row.key, row.presentation],
+                |saved| saved.get(0),
+            )
+            .map_err(failed)?;
+        if !presentation_matches {
+            return Err(StorageError::ScopeChanged);
+        }
+        for source in &row.sources {
+            let source_matches: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM storage_proof_sources WHERE namespace=?1 AND id=?2 AND session_key=?3 AND path=?4 AND ledger=?5)",
+                    params![namespace, proof.id, row.key, source.path, source.ledger],
+                    |saved| saved.get(0),
+                )
+                .map_err(failed)?;
+            if !source_matches {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
+    }
+    Ok(ExistingReceipt::ExactReplay)
 }
 
 /// Retain outgoing owners' exact Current receipts after History composition,
@@ -3399,12 +3734,20 @@ pub(crate) fn bind_presentations(
 ) -> Result<String, StorageError> {
     validate_receipt_inputs(&inputs)?;
     validate_receipt_presentations(inputs.rows, rows)?;
-    let PresentationInputs {
-        catalog_generation,
-        rows: catalog_rows,
-        projections,
-        observations,
-    } = inputs;
+    let root = prepare_presentation_root(base, rows, &inputs)?;
+    insert_presentation_root(tx, ns, publication, &root)?;
+    Ok(root.digest)
+}
+
+fn prepare_presentation_root(
+    base: &str,
+    rows: &[(String, String)],
+    inputs: &PresentationInputs<'_>,
+) -> Result<PreparedPresentationRoot, StorageError> {
+    let catalog_generation = inputs.catalog_generation;
+    let catalog_rows = inputs.rows;
+    let projections = inputs.projections;
+    let observations = inputs.observations;
     proof_codec::validate_catalog_generation(catalog_generation)?;
     let mut entries = Vec::new();
     for (key, text) in rows {
@@ -3426,7 +3769,7 @@ pub(crate) fn bind_presentations(
         ));
     }
     let manifest = serde_json::to_string(&PresentationManifest {
-        catalog_generation: catalog_generation.to_owned(),
+        catalog_generation: (*catalog_generation).to_owned(),
         entries,
         observations: observations.cloned(),
     })
@@ -3435,12 +3778,25 @@ pub(crate) fn bind_presentations(
         return Err(StorageError::HistoryRetentionBounds);
     }
     let joined = joined_digest(base, &manifest)?;
+    Ok(PreparedPresentationRoot {
+        base: base.to_owned(),
+        manifest,
+        digest: joined,
+    })
+}
+
+fn insert_presentation_root(
+    tx: &Transaction<'_>,
+    ns: &str,
+    publication: &str,
+    root: &PreparedPresentationRoot,
+) -> Result<(), StorageError> {
     tx.execute(
         "INSERT INTO storage_proof_presentation_roots VALUES(?1,?2,?3,?4,?5)",
-        params![ns, publication, base, manifest, joined],
+        params![ns, publication, root.base, root.manifest, root.digest],
     )
     .map_err(failed)?;
-    Ok(joined)
+    Ok(())
 }
 
 /// Give an ordinary Catalog receipt an identity bound to its exact metadata
