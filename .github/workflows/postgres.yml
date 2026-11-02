@@ -1,5 +1,5 @@
 # Diagnostic branch only; never an integration gate or a replacement for postgres.yml.
-name: 477 post-discovery oversized PostgreSQL diagnostic
+name: 477 post-ingest oversized PostgreSQL diagnostic
 on:
   workflow_dispatch:
 permissions:
@@ -61,12 +61,12 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_semantic_stage_empty_probe_resumes_without_mutation -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-empty-probe.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-empty-probe.log"
-      - name: Post-discovery oversized PostgreSQL refusal and rollback diagnosis
+      - name: Post-ingest oversized PostgreSQL refusal and rollback diagnosis
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           set -o pipefail
-          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pages -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-oversized.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-pg-oversized.log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-pg-oversized.log"
       - name: Formatting
         id: formatting
@@ -93,5 +93,5 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: 477-pg-oversized-diagnostic
+          name: 477-pg-post-ingest-oversized-diagnostic
           path: ${{ runner.temp }}/477-*

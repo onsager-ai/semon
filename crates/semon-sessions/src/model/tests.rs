@@ -6322,7 +6322,7 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
 
 #[cfg(feature = "postgres")]
 #[test]
-fn pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pages() {
+fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages() {
     use crate::storage::native_events::NativeEventStore;
 
     let home = Home::new();
@@ -6425,6 +6425,48 @@ fn pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pa
         component_paths.is_subset(&pending),
         "the target bidirectional component was discovered as pending"
     );
+
+    // This diagnostic enters NativeEvidence only after real PG native ingest
+    // receipts. Discover persists membership and claims; it does not produce
+    // Index ledgers. This isolates post-ingestion Stage refusal and says
+    // nothing about fresh PG cold-ingestion qualification.
+    let selected_paths = selected_inputs
+        .iter()
+        .map(|input| input.full_path(&options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    for (at, input) in selected_inputs.iter().enumerate() {
+        let path = input.full_path(&options);
+        let receipt = pg_cache
+            .ingest(&format!("{:064x}", at + 2), &path, "claude")
+            .unwrap();
+        assert_eq!(receipt.consumed_bytes, fs::metadata(&path).unwrap().len());
+    }
+    assert_eq!(
+        pg_cache.session_catalog_generation(),
+        prior_generation,
+        "native ingestion must preserve the prior published Catalog head"
+    );
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
+    for page in selected_paths.chunks(64) {
+        let ledgers = pg_cache.stored_ledger_batch(page).unwrap();
+        assert_eq!(ledgers.len(), page.len());
+        for (path, ledger) in page.iter().zip(ledgers) {
+            let ledger = ledger.expect("native ingest must commit each selected PG ledger");
+            assert_eq!(ledger.offset, fs::metadata(path).unwrap().len());
+        }
+    }
+    let pending_after_ingest = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending_after_ingest),
+        "the target component claims remain pending after native ingestion"
+    );
     drop(pg_cache);
 
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
@@ -6474,7 +6516,7 @@ fn pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pa
         "semantic-stage save reported no exceeded bound"
     );
     eprintln!(
-        "pg_oversized_native_diagnostic phase={} before_phase={} before_epoch={} error_kind={:?} error={} candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
+        "pg_post_ingest_oversized_native_diagnostic phase={} before_phase={} before_epoch={} error_kind={:?} error={} candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
         diagnostic.phase,
         before.phase.as_deref().unwrap_or("absent"),
         before.epoch.unwrap_or_default(),
