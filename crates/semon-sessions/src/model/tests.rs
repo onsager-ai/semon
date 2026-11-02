@@ -6373,7 +6373,10 @@ fn pg_post_discovery_staged_publication_diagnoses_large_bidirectional_message_pa
         .publish_partial_catalog_fenced(&prior_prepared)
         .unwrap();
     assert_eq!(prior_outcome, crate::events::Outcome::Written);
-    assert!(prior_generation.is_some(), "PG publication returned no head");
+    assert!(
+        prior_generation.is_some(),
+        "PG publication returned no head"
+    );
     assert_eq!(pg_cache.session_catalog_generation(), prior_generation);
     drop(pg_cache);
 
