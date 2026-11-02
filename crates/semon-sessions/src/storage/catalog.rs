@@ -923,6 +923,23 @@ pub(crate) trait CatalogPublicationHead {
     ) -> Result<(), super::StorageError>;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogPublicationBlocker {
+    PublicationTooLarge,
+}
+
+impl CatalogPublicationBlocker {
+    pub(crate) const fn code(self) -> &'static str {
+        match self {
+            Self::PublicationTooLarge => "publication_too_large",
+        }
+    }
+
+    pub(crate) const fn retryable(self) -> bool {
+        false
+    }
+}
+
 pub(crate) trait CatalogSnapshot {
     fn runtime_generation(&self, options: &crate::Options) -> io::Result<String> {
         crate::native_evidence::query_runtime_generation(options)
@@ -963,6 +980,11 @@ pub(crate) trait CatalogSnapshot {
     }
     fn require_current(&self) -> io::Result<()>;
     fn publication_value(&self, key: &str) -> io::Result<Option<String>>;
+    /// A bounded, typed explanation for the current partial publication.
+    /// Adapters without an equivalent durable stage refusal return `None`.
+    fn publication_blocker(&self) -> io::Result<Option<CatalogPublicationBlocker>> {
+        Ok(None)
+    }
     fn catalog_search_paths(
         &self,
         lookup: &crate::events::CatalogSearchLookup<'_>,

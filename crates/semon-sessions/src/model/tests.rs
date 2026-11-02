@@ -5641,11 +5641,10 @@ fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
 
 #[test]
 fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
-    assert_staged_bidirectional_message_pages(360);
+    staged_publication_refuses_large_bidirectional_message_pages();
 }
 
-fn assert_staged_bidirectional_message_pages(rounds: i64) {
-    let home = Home::new();
+fn write_bidirectional_message_page_fixture(home: &Home, rounds: i64) {
     let ts = |hour: i64, minute: i64| {
         format!(
             "2026-09-{:02}T{:02}:{minute:02}:00.000Z",
@@ -5721,6 +5720,359 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
         let id = format!("independent-{n:03}");
         home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
     }
+}
+
+fn staged_publication_refuses_large_bidirectional_message_pages() {
+    let home = Home::new();
+    home.top("prior", &[human("prior", ts(5, 0), "Last admitted Catalog")]);
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(complete, "prior Catalog publication did not complete");
+
+    let prior_head: Option<String> = {
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(
+                &home.options.source.config(&home.options.cache).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let prior: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='prior' AND lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&prior).unwrap()["name"], "prior");
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    };
+    assert!(prior_head.is_some());
+
+    // Preserve the exact 360-round native fixture and its 70 independent sources.
+    write_bidirectional_message_page_fixture(&home, 360);
+    let inputs = crate::inputs(&home.options).unwrap();
+    let prior_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/prior.jsonl");
+    let selected_inputs = inputs
+        .iter()
+        .filter(|input| input.full_path(&home.options) != prior_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(selected_inputs.len(), 72);
+
+    // Keep the shared full model and ordinary native Query as independent oracles.
+    let mut native_options = home.options.clone();
+    native_options.cache = home.root.join("large-native-oracle.json");
+    let native = home.build_at(&native_options, NOW);
+    assert!(native.sessions.contains_key("alpha"));
+    assert!(native.sessions.contains_key("beta"));
+    assert_eq!(
+        native
+            .sessions
+            .keys()
+            .filter(|key| key.starts_with("independent-"))
+            .count(),
+        70
+    );
+
+    let mut full_options = home.options.clone();
+    full_options.cache = home.root.join("large-full-model-oracle.json");
+    let full_inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/alpha.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/beta.jsonl".into(),
+        },
+    ];
+    let mut full_cache = EventCache::open(&full_options.cache, &full_options.source).unwrap();
+    let full = prepare_sources(&full_options, &mut full_cache, &full_inputs, NOW).unwrap();
+    let full_rows: BTreeMap<_, _> = full
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    assert_eq!(full_rows.len(), 2);
+    assert!(full.relationships.relations.len() >= 720);
+    let mut owned_origins = 0;
+    for (id, relation) in &full.relationships.relations {
+        let native_edge = native
+            .handoffs
+            .iter()
+            .find(|edge| edge.id == *id)
+            .unwrap_or_else(|| panic!("native Query omitted full-model edge {id}"));
+        assert_eq!(native_edge.from, relation.from, "{id}: native sender");
+        assert_eq!(native_edge.to, relation.to, "{id}: native receiver");
+        let expected = relation
+            .query_content
+            .get("origin")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let (Some(sender), Some(receiver_key)) = (
+            full_rows.get(relation.from.as_str()),
+            relation.to.as_deref(),
+        ) && let Some(receiver) = full_rows.get(receiver_key)
+        {
+            let sender_origin = sender
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            let receiver_origin = receiver
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            assert_eq!(sender_origin, expected, "{id}: full-build origin owner");
+            if !expected.is_null() {
+                owned_origins += 1;
+                assert!(
+                    sender
+                        .sources
+                        .iter()
+                        .any(|source| source.path.to_str() == expected["path"].as_str()),
+                    "{id}: origin source belongs to the full-build sender"
+                );
+                assert_eq!(
+                    receiver_origin,
+                    Value::Null,
+                    "{id}: full-build receiver does not own the origin"
+                );
+            }
+        }
+    }
+    assert!(owned_origins > 0, "fixture has sender-owned origins");
+
+    enroll_stage_inventory(&home.options, &inputs);
+    let mut paths = selected_inputs
+        .iter()
+        .map(|input| input.full_path(&home.options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut stage = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stage.begin(&paths[..64], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+
+    let snapshot = || {
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let head: Option<String> = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let tables = [
+            "session_catalog",
+            "session_catalog_sources",
+            "session_catalog_changes",
+            "session_history_catalog",
+            "session_history_projections",
+            "session_history_slots",
+            "session_history_slot_parts",
+            "session_overview",
+            "session_trace_headers",
+            "session_trace_turns",
+            "session_trace_edges",
+            "session_slot_projections",
+            "session_slots",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+            "storage_proof_refs",
+            "storage_semantic_publications",
+            "storage_semantic_model_batches",
+            "storage_source_journal",
+            "session_catalog_invalidations",
+            "catalog_semantic_stage",
+            "catalog_semantic_frontier",
+            "catalog_semantic_sources",
+            "catalog_semantic_prior_owners",
+            "catalog_semantic_prior_sources",
+            "catalog_semantic_inputs",
+            "catalog_semantic_keys",
+            "catalog_semantic_endpoints",
+            "catalog_semantic_native",
+            "catalog_semantic_owner_sources",
+            "catalog_semantic_paths",
+            "catalog_semantic_names",
+            "catalog_semantic_events",
+            "catalog_semantic_relations",
+        ];
+        let mut state = Vec::with_capacity(tables.len());
+        for table in tables {
+            let mut statement = db
+                .prepare(&format!(
+                    "SELECT * FROM main.{table} WHERE namespace=semon_namespace()"
+                ))
+                .unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map(|values| values.join("\u{1f}"))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort();
+            state.push((table, rows));
+        }
+        (head, state)
+    };
+
+    let mut deferred = false;
+    let mut refused = false;
+    for _ in 0..512 {
+        let batch = stage.batch(64).unwrap().expect("active stage remains");
+        if batch.paths.is_empty() {
+            continue;
+        }
+        let selected: BTreeSet<_> = batch.paths.iter().cloned().collect();
+        let batch_inputs = selected_inputs
+            .iter()
+            .filter(|input| {
+                selected.contains(&input.full_path(&home.options).to_string_lossy().into_owned())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(batch_inputs.len(), batch.paths.len());
+        let prepared = prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW)
+            .unwrap();
+        if batch.phase == relation_stage::Phase::Publication {
+            let before_record = snapshot();
+            match stage.record(&batch, prepared.prepared()) {
+                Err(crate::events::StoreError::Configured(
+                    crate::storage::StorageError::HistoryRetentionBounds,
+                )) => {
+                    assert_eq!(snapshot(), before_record);
+                    refused = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected typed publication record failure: {error:?}"),
+                Ok(crate::events::Outcome::Deferred) => {
+                    deferred = true;
+                    cache.end_scan();
+                    cache.release_published_indexes();
+                    continue;
+                }
+                Ok(crate::events::Outcome::Written) => {
+                    let before_publish = snapshot();
+                    match stage.publish(&batch, prepared.prepared()) {
+                        Err(crate::events::StoreError::Configured(
+                            crate::storage::StorageError::HistoryRetentionBounds,
+                        )) => {
+                            assert_eq!(snapshot(), before_publish);
+                            refused = true;
+                            break;
+                        }
+                        Err(error) => panic!("unexpected typed publication failure: {error:?}"),
+                        Ok((crate::events::Outcome::Deferred, None)) => deferred = true,
+                        Ok(result) => panic!("oversized fixture unexpectedly published: {result:?}"),
+                    }
+                }
+                Ok(outcome) => panic!("unexpected publication record outcome: {outcome:?}"),
+            }
+        } else {
+            assert_eq!(
+                stage.record(&batch, prepared.prepared()).unwrap(),
+                crate::events::Outcome::Written
+            );
+        }
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    assert!(deferred, "oversized aggregate must first reduce its group bound");
+    assert!(refused, "one oversized bidirectional owner must refuse publication");
+    assert_eq!(snapshot().0, prior_head, "refusal preserves Catalog head");
+
+    let page = crate::session_catalog_page(&home.options, "fixture", "limit=100");
+    assert_eq!(page.status, 200);
+    let body: Value = serde_json::from_slice(&page.body).unwrap();
+    assert_eq!(body["completeness"]["state"], "partial");
+    assert_eq!(body["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(body["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(body["freshness"], "updating");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["key"], "prior");
+
+    let mut search_admitted = false;
+    let mut on_search = |_admission: crate::catalog::CatalogSearchAdmission| {
+        search_admitted = true;
+        false
+    };
+    let search = crate::catalog::page_with_gate(
+        &home.options,
+        "fixture",
+        crate::catalog::Request::parse("q=prior&limit=100").unwrap(),
+        || Ok(()),
+        Some(&mut on_search),
+    );
+    assert_eq!(search.status, 200);
+    let search: Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(search["completeness"]["state"], "partial");
+    assert_eq!(search["completeness"]["blocker"]["code"], "publication_too_large");
+    assert_eq!(search["freshness"], "updating");
+    assert_eq!(search["items"][0]["key"], "prior");
+    assert_eq!(search["search"]["index_complete"], false);
+    assert!(search_admitted);
+
+    let mut complete_request = crate::catalog::Request::parse("limit=100").unwrap();
+    complete_request.require_complete = true;
+    let complete = crate::storage::read_local_catalog_page(
+        &home.options,
+        "fixture",
+        &complete_request,
+    )
+    .unwrap();
+    assert_eq!(complete.status, 503);
+    let complete: Value = serde_json::from_slice(&complete.body).unwrap();
+    assert_eq!(complete["error"]["code"], "publication_too_large");
+    assert_eq!(complete["error"]["retryable"], false);
+}
+
+fn assert_staged_bidirectional_message_pages(rounds: i64) {
+    let home = Home::new();
+    write_bidirectional_message_page_fixture(&home, rounds);
     let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
     let mut full_options = home.options.clone();
     full_options.cache = home.root.join("full-origin-oracle.json");
