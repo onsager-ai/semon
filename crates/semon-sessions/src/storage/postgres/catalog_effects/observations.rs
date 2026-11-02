@@ -33,8 +33,14 @@ pub(super) fn publication(
     if *admission != current.admission || stream != &current.stream_epoch {
         return Err(StorageError::ScopeChanged);
     }
+    let mut measurements = crate::native_timing::Measurements::new(
+        std::env::var_os("SEMON_PG_READ_DIAGNOSTIC").is_some(),
+    );
+    let started = measurements.start();
     let ns = current.namespace.as_str().as_bytes();
     let operations = tx.driver.query("SELECT operation_id,CASE WHEN octet_length(payload)<=1048576 THEN payload END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
+    measurements.record("publication_fetch", started, operations.len());
+    let started = measurements.start();
     if operations.len() != 1 {
         return Err(StorageError::ScopeChanged);
     }
@@ -48,6 +54,8 @@ pub(super) fn publication(
         return Err(StorageError::ScopeChanged);
     }
     crate::selected_read::charge(64, payload.len()).map_err(|_| StorageError::Busy)?;
+    measurements.record("publication_hash", started, payload.len());
+    let started = measurements.start();
     let payload: serde_json::Value =
         serde_json::from_slice(&payload).map_err(|_| StorageError::ScopeChanged)?;
     let original: serde_json::Value =
@@ -61,7 +69,11 @@ pub(super) fn publication(
     {
         return Err(StorageError::ScopeChanged);
     }
-    serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)
+    let observations =
+        serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged);
+    measurements.record("publication_decode_and_membership", started, 1);
+    measurements.emit("postgres", "catalog_publication_observation");
+    observations
 }
 
 pub(super) fn issue_history(

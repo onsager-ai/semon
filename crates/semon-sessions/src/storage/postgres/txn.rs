@@ -86,7 +86,18 @@ impl PgPool {
             let _ = error;
         })?;
         let limits = self.inner.limits;
-        let deadline = control.deadline(Instant::now() + limits.txn_deadline);
+        let transaction_started = Instant::now();
+        let deadline = control.deadline(transaction_started + limits.txn_deadline);
+        #[cfg(test)]
+        if std::env::var_os("SEMON_PG_READ_DIAGNOSTIC").is_some() {
+            eprintln!(
+                "PG_READ_DIAG tx_budget_ms={} configured_ms={}",
+                deadline
+                    .saturating_duration_since(transaction_started)
+                    .as_millis(),
+                limits.txn_deadline.as_millis(),
+            );
+        }
         let connection = lease.connection.as_mut().ok_or(StorageError::Unavailable)?;
         connection.client.context(deadline, control, limits);
         let exclusive_admission = matches!(kind, TxnKind::StoreWrite);
