@@ -3802,30 +3802,6 @@ impl SqliteStore {
                 ))
                 .map_err(|error| StoreError::Data(error.to_string()))?;
                 let base = crate::storage::proof_codec::digest(&base_bytes);
-                let publication =
-                    crate::storage::sqlite::proof_generations::catalog_publication_id(
-                        owner.config().namespace.as_str(),
-                        &generation,
-                        &base,
-                    )
-                    .map_err(StoreError::Configured)?;
-                let proof_digest = crate::storage::sqlite::proof_generations::bind_presentations(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    &publication,
-                    &base,
-                    &captured,
-                    crate::storage::sqlite::proof_generations::PresentationInputs {
-                        catalog_generation: &generation,
-                        rows,
-                        projections: Some(projections),
-                        observations: Some(observations),
-                    },
-                )
-                .map_err(StoreError::Configured)?;
-                let admission = i64::try_from(owner.admission()).map_err(|_| {
-                    StoreError::Configured(crate::storage::StorageError::ScopeChanged)
-                })?;
                 let source_revision: i64 = transaction
                     .query_row(
                         "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
@@ -3837,39 +3813,29 @@ impl SqliteStore {
                     .map_err(|error| StoreError::Data(error.to_string()))?;
                 let metadata_text = serde_json::to_string(&metadata)
                     .map_err(|error| StoreError::Data(error.to_string()))?;
-                transaction
-                    .execute(
-                        "INSERT INTO main.storage_semantic_publications(namespace,generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata) VALUES(?1,?2,NULL,?3,?4,?5,?6,?7,?8)",
-                        params![
-                            owner.config().namespace.as_str(),
-                            publication,
-                            admission,
-                            previous,
-                            source_revision,
-                            proof_digest,
-                            claims_text,
-                            metadata_text
-                        ],
-                    )
-                    .map_err(failure)?;
-                let receipt_publication = crate::storage::sqlite::proof_generations::publish(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    owner.admission(),
-                    stream,
-                    &publication,
-                    &proof_digest,
-                    crate::storage::sqlite::proof_generations::PreparedPresentations {
-                        inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
-                            catalog_generation: &generation,
-                            rows,
-                            projections: Some(projections),
-                            observations: Some(observations),
+                let receipt_publication =
+                    crate::storage::sqlite::proof_generations::publish_ordinary(
+                        &transaction,
+                        owner.config().namespace.as_str(),
+                        owner.admission(),
+                        stream,
+                        &base,
+                        previous.as_deref(),
+                        source_revision,
+                        &claims_text,
+                        &metadata_text,
+                        crate::storage::sqlite::proof_generations::PreparedPresentations {
+                            inputs:
+                                crate::storage::sqlite::proof_generations::PresentationInputs {
+                                    catalog_generation: &generation,
+                                    rows,
+                                    projections: Some(projections),
+                                    observations: Some(observations),
+                                },
+                            presentations: &captured,
+                            overview_budget: &mut history_budget,
                         },
-                        presentations: &captured,
-                        overview_budget: &mut history_budget,
-                    },
-                );
+                    );
                 match receipt_publication {
                     Ok(()) => {}
                     Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
@@ -10165,6 +10131,139 @@ mod tests {
                 "{label} projection refusal must roll back head, rows, claims, grants and proofs"
             );
         }
+
+        drop(batch);
+        drop(row_wise);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_receipt_exact_replay_and_partial_or_mismatched_rows_are_atomic() {
+        let root = scratch("catalog-receipt-exact-replay");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut batch, mut row_wise) = catalog_pair(&options);
+        let generation: String = batch
+            .connection
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observations = crate::storage::selected::PresentationObservations::default();
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: Some(&projections),
+            observations: Some(&observations),
+        };
+        let claims = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| {
+                let revision = batch
+                    .connection
+                    .query_row(
+                        "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
+                        [&path],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()
+                    .unwrap();
+                (path, revision)
+            })
+            .collect::<Vec<_>>();
+        let publish = |store: &mut SqliteStore| {
+            store.publish_catalog_with_generation(
+                &publication,
+                Some(&generation),
+                Some(&claims),
+                true,
+                None,
+            )
+        };
+
+        let first = publish(&mut batch).unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        let committed = catalog_state(&batch.connection);
+        assert_eq!(publish(&mut batch).unwrap(), first);
+        assert_eq!(
+            catalog_state(&batch.connection),
+            committed,
+            "an exact prepared-source replay preserves the committed receipt state"
+        );
+
+        assert_eq!(publish(&mut row_wise).unwrap().0, Outcome::Written);
+        let key = &rows[0].key;
+        let source_path = rows[0].sources[0].path.to_string_lossy().into_owned();
+        let current_id = |connection: &Connection| {
+            connection
+                .query_row(
+                    "SELECT id FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND session_key=?1 AND kind='current'",
+                    [key],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap()
+        };
+
+        let partial_id = current_id(&batch.connection);
+        batch
+            .connection
+            .execute(
+                "DELETE FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![partial_id, key, source_path],
+            )
+            .unwrap();
+        let partial_before = catalog_state(&batch.connection);
+        let partial = publish(&mut batch);
+        assert!(
+            matches!(
+                partial,
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged
+                ))
+            ),
+            "a real receipt with a missing source ledger must refuse replay"
+        );
+        assert_eq!(catalog_state(&batch.connection), partial_before);
+
+        let mismatch_id = current_id(&row_wise.connection);
+        let ledger: String = row_wise
+            .connection
+            .query_row(
+                "SELECT ledger FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![mismatch_id, key, source_path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        row_wise
+            .connection
+            .execute(
+                "DELETE FROM main.storage_proof_sources WHERE namespace=semon_namespace() AND id=?1 AND session_key=?2 AND path=?3",
+                params![mismatch_id, key, source_path],
+            )
+            .unwrap();
+        row_wise
+            .connection
+            .execute(
+                "INSERT INTO main.storage_proof_sources VALUES(semon_namespace(),?1,?2,?3,?4)",
+                params![mismatch_id, key, format!("{source_path}.mismatch"), ledger],
+            )
+            .unwrap();
+        let mismatch_before = catalog_state(&row_wise.connection);
+        let mismatch = publish(&mut row_wise);
+        assert!(
+            matches!(
+                mismatch,
+                Err(StoreError::Configured(
+                    crate::storage::StorageError::ScopeChanged
+                ))
+            ),
+            "a same-count source ledger mismatch must refuse replay"
+        );
+        assert_eq!(catalog_state(&row_wise.connection), mismatch_before);
 
         drop(batch);
         drop(row_wise);
