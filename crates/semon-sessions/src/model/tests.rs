@@ -6369,10 +6369,12 @@ fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
             )
             .unwrap();
     }
-    let prepared = crate::model::prepare_sources(&options, &mut cache, &inputs, NOW).unwrap();
-    assert_eq!(prepared.rows.len(), expected.len());
-    let (_, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
-    assert!(generation.is_some());
+    for batch in inputs.chunks(55) {
+        let prepared = crate::model::prepare_sources(&options, &mut cache, batch, NOW).unwrap();
+        assert_eq!(prepared.rows.len(), batch.len());
+        let (_, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert!(generation.is_some());
+    }
     drop(cache);
 
     let mut request = crate::catalog::Request::parse("limit=100").unwrap();
