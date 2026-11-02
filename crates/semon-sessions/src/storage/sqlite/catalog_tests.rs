@@ -12006,7 +12006,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     .unwrap();
     fixture.publish_existing();
 
-    let (original_slots, original_refs) = {
+    let (original_slots, missing_source_slots, original_refs) = {
         let db = fixture.db();
         let metadata: String = db
             .query_row(
@@ -12031,6 +12031,21 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             !slots.is_empty(),
             "the real Current publication must own native slots"
         );
+        let missing_source_slots = slots
+            .iter()
+            .filter(|text| {
+                let slot: crate::slot_projection::SavedSlot =
+                    serde_json::from_str(text).unwrap();
+                slot.source_paths()
+                    .iter()
+                    .any(|path| *path == &first_copy)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            !missing_source_slots.is_empty(),
+            "the original projection must contain slots from the disappearing source"
+        );
         let refs = db
             .prepare(
                 "SELECT r.id,g.slots FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key WHERE r.namespace=semon_namespace() AND r.session_key='first' AND r.kind='current' ORDER BY r.id",
@@ -12041,7 +12056,7 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert!(!refs.is_empty(), "the real Current publication must own receipts");
-        (slots, refs)
+        (slots, missing_source_slots, refs)
     };
 
     fs::remove_file(first_copy).unwrap();
@@ -12112,6 +12127,12 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     };
     assert_eq!(history_slots, original_slots);
     assert_eq!(history_refs, original_refs);
+    assert!(
+        missing_source_slots
+            .iter()
+            .all(|slot| history_slots.contains(slot)),
+        "History retains the exact slots from the disappeared source"
+    );
 
     // Update the remaining Current source and run ordinary Stage composition
     // again through the retained History owner and its exact local grant.
@@ -12159,8 +12180,32 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert!(!repeated_slots.is_empty());
-    assert!(original_slots.iter().all(|slot| repeated_slots.contains(slot)));
+    let repeated_current_slots = db
+        .prepare(
+            "SELECT metadata FROM main.session_slots WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot",
+        )
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        repeated_current_slots
+            .iter()
+            .all(|slot| repeated_slots.contains(slot))
+    );
+    assert!(
+        missing_source_slots
+            .iter()
+            .all(|slot| repeated_slots.contains(slot))
+    );
+    assert!(repeated_current_slots.iter().any(|text| {
+        serde_json::from_str::<crate::slot_projection::SavedSlot>(text)
+            .unwrap()
+            .native_event_id
+            .as_deref()
+            == Some("repeated-history")
+    }));
     assert_eq!(repeated_refs, history_refs);
     let binding = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
