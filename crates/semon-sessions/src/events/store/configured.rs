@@ -13962,6 +13962,62 @@ mod tests {
                 })
             }
 
+            fn state_with_refusal_hint(
+                f: &Fixture,
+                mut state: BTreeMap<String, Vec<Vec<rusqlite::types::Value>>>,
+                namespace: &str,
+            ) -> BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+                let value: String = f
+                    .db()
+                    .query_row(
+                        "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+                        [namespace],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                let meta = state.get_mut("meta").unwrap();
+                let marker =
+                    rusqlite::types::Value::Text("catalog_semantic_group_admission".to_owned());
+                let row = vec![
+                    rusqlite::types::Value::Text(namespace.to_owned()),
+                    marker.clone(),
+                    rusqlite::types::Value::Text(value),
+                ];
+                if let Some(existing) = meta.iter_mut().find(|existing| {
+                    existing.first() == Some(&rusqlite::types::Value::Text(namespace.to_owned()))
+                        && existing.get(1) == Some(&marker)
+                }) {
+                    *existing = row;
+                } else {
+                    let index = meta
+                        .iter()
+                        .position(|existing| match (&existing[0], &existing[1]) {
+                            (
+                                rusqlite::types::Value::Text(existing_namespace),
+                                rusqlite::types::Value::Text(existing_key),
+                            ) => {
+                                existing_namespace.as_str() > namespace
+                                    || (existing_namespace.as_str() == namespace
+                                        && existing_key.as_str()
+                                            > "catalog_semantic_group_admission")
+                            }
+                            _ => false,
+                        })
+                        .unwrap_or(meta.len());
+                    meta.insert(index, row);
+                }
+                state
+            }
+
+            fn typed_refusal(
+                f: &Fixture,
+                namespace: &str,
+            ) -> Option<crate::storage::catalog::CatalogPublicationBlocker> {
+                let db = f.db();
+                crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace)
+                    .unwrap()
+            }
+
             fn selected_inputs(
                 inputs: &[crate::Input],
                 options: &crate::Options,
@@ -14470,7 +14526,8 @@ mod tests {
             }
 
             #[test]
-            fn one_oversized_record_refuses_without_a_receipt_or_hint() {
+            fn one_oversized_record_refuses_without_a_publication_receipt_but_keeps_typed_refusal()
+            {
                 let (f, _, options, _) = model_sources();
                 let options = &options[0];
                 let inputs = inputs(1);
@@ -14487,8 +14544,15 @@ mod tests {
                         .record_semantic_batch(&batch, model.prepared())
                         .is_err()
                 );
-                assert_eq!(shared_state(&f), before);
-                assert_eq!(hint(&f, "source-a"), None);
+                assert_eq!(
+                    shared_state(&f),
+                    state_with_refusal_hint(&f, before, "source-a")
+                );
+                assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 1)));
+                assert_eq!(
+                    typed_refusal(&f, "source-a"),
+                    Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+                );
                 assert_eq!(
                     f.db()
                         .query_row(
@@ -14547,8 +14611,15 @@ mod tests {
                         .publish_semantic_catalog(&batch, model.prepared())
                         .is_err()
                 );
-                assert_eq!(shared_state(&f), before);
-                assert_eq!(hint(&f, "source-a"), None);
+                assert_eq!(
+                    shared_state(&f),
+                    state_with_refusal_hint(&f, before, "source-a")
+                );
+                assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 1)));
+                assert_eq!(
+                    typed_refusal(&f, "source-a"),
+                    Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+                );
             }
         }
     }

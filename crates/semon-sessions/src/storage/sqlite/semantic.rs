@@ -25,6 +25,17 @@ const RELATION_METADATA_BATCH_LIMIT: usize = 1048576;
 type RelationSourceStage = (bool, bool, bool, Option<i64>, Option<String>, bool);
 type PresentationStage = (String, Option<String>, Option<String>, i64, bool);
 type SemanticBatchStage = (i64, String, Option<String>, String, i64, Option<String>);
+type RefusedPublicationStage = (
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+    bool,
+    i64,
+    Option<String>,
+);
 
 fn relation_owner_source_paths(
     physical: &(
@@ -179,25 +190,25 @@ fn agent_tool_use_ids(
 /// Select the exact Claude Agent call for every loaded Agent source. Each
 /// call owner can itself be an Agent, so keep adding its own call source until
 /// the canonical call chain is closed.
-fn relation_spawn_call_context(
-    db: &Connection,
-    namespace: &str,
-    physical: &(
-         impl crate::events::store::semantic_stage::ContextPort
-         + crate::events::store::semantic_stage::OwnerClosurePort
-     ),
-    epoch: i64,
-    used: &mut usize,
-    budget: &mut RelationPageReadBudget,
-    mut loaded_paths: std::collections::BTreeSet<String>,
-    preloaded: &std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
-) -> rusqlite::Result<(
-    std::collections::BTreeSet<String>,
-    std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
-    std::collections::BTreeMap<String, Option<crate::model::relation_stage::Location>>,
-)> {
+fn relation_spawn_call_context<Physical>(
+    request: RelationSpawnCallInput<'_, Physical>,
+) -> rusqlite::Result<RelationSpawnCallResult>
+where
+    Physical: crate::events::store::semantic_stage::ContextPort
+        + crate::events::store::semantic_stage::OwnerClosurePort,
+{
     use crate::model::relation_stage::{Selector, select_with};
 
+    let RelationSpawnCallInput {
+        db,
+        namespace,
+        physical,
+        epoch,
+        used,
+        budget,
+        mut loaded_paths,
+        preloaded,
+    } = request;
     if loaded_paths.len() > RELATION_OUTPUT_LIMIT {
         return Err(crate::events::store::semantic_stage::context_budget());
     }
@@ -257,7 +268,7 @@ fn relation_spawn_call_context(
 
             let mut frontier = closure;
             while !frontier.is_empty() {
-                let frontier_paths = frontier.iter().cloned().collect::<Vec<_>>();
+                let frontier_paths = frontier.to_vec();
                 let context = crate::events::store::semantic_stage::context_with_budget(
                     physical,
                     &frontier_paths,
@@ -318,7 +329,11 @@ fn relation_spawn_call_context(
     }
 
     endpoints.retain(|key, _| !preloaded.contains_key(key));
-    Ok((paths, endpoints, claude_call_locations))
+    Ok(RelationSpawnCallResult {
+        paths,
+        endpoints,
+        claude_call_locations,
+    })
 }
 
 struct RelationPage {
@@ -334,6 +349,24 @@ struct RelationPage {
 struct RelationPageReadBudget {
     metadata_reads: usize,
     metadata_bytes: usize,
+}
+
+struct RelationSpawnCallInput<'a, Physical> {
+    db: &'a Connection,
+    namespace: &'a str,
+    physical: &'a Physical,
+    epoch: i64,
+    used: &'a mut usize,
+    budget: &'a mut RelationPageReadBudget,
+    loaded_paths: std::collections::BTreeSet<String>,
+    preloaded: &'a std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+}
+
+struct RelationSpawnCallResult {
+    paths: std::collections::BTreeSet<String>,
+    endpoints: std::collections::BTreeMap<String, crate::model::relation_stage::Endpoint>,
+    claude_call_locations:
+        std::collections::BTreeMap<String, Option<crate::model::relation_stage::Location>>,
 }
 
 struct RelationScope {
@@ -1100,6 +1133,231 @@ struct PublicationGroupHint {
     source_revision: i64,
     original_generation: Option<String>,
     max_groups: usize,
+    #[serde(default)]
+    refusal: Option<PublicationGroupRefusal>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationGroupRefusal {
+    version: u8,
+    code: String,
+    epoch: i64,
+    source_revision: i64,
+    base_generation: Option<String>,
+    runtime_sha256: String,
+    selected_claims: Vec<PublicationSourceClaim>,
+    selected_claims_sha256: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicationSourceClaim {
+    source_path_hex: String,
+    claim: Option<i64>,
+}
+
+const PUBLICATION_GROUP_HINT_MAX_BYTES: usize = 1024 * 1024;
+
+fn read_publication_group_hint_value(
+    db: &Connection,
+    ns: &str,
+) -> Result<Option<String>, StoreError> {
+    let stored: Option<(i64, Option<String>)> = db
+        .query_row(
+            "SELECT octet_length(value),CASE WHEN octet_length(value)<=?3 THEN value END FROM main.meta WHERE namespace=?1 AND key=?2",
+            params![ns, PUBLICATION_GROUP_HINT_KEY, PUBLICATION_GROUP_HINT_MAX_BYTES as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((bytes, value)) = stored else {
+        return Ok(None);
+    };
+    if bytes < 0 || bytes as usize > PUBLICATION_GROUP_HINT_MAX_BYTES {
+        return Err(refuse("semantic_publication_group_hint"));
+    }
+    value
+        .map(Some)
+        .ok_or_else(|| refuse("semantic_publication_group_hint"))
+}
+
+fn publication_claim_path_hex(path: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(path.len() * 2);
+    for byte in path.bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_publication_claim_path_hex(encoded: &str) -> Option<String> {
+    if !encoded.len().is_multiple_of(2) || encoded.len() > 8192 {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(encoded.len() / 2);
+    for pair in encoded.as_bytes().as_chunks::<2>().0 {
+        let high = match pair[0] {
+            b'0'..=b'9' => pair[0] - b'0',
+            b'a'..=b'f' => pair[0] - b'a' + 10,
+            _ => return None,
+        };
+        let low = match pair[1] {
+            b'0'..=b'9' => pair[1] - b'0',
+            b'a'..=b'f' => pair[1] - b'a' + 10,
+            _ => return None,
+        };
+        bytes.push((high << 4) | low);
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
+fn publication_claims_sha256(claims: &[PublicationSourceClaim]) -> Result<String, StoreError> {
+    let bytes = serde_json::to_vec(claims).map_err(|error| StoreError::Data(error.to_string()))?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn publication_claims_current(
+    db: &Connection,
+    ns: &str,
+    claims: &[PublicationSourceClaim],
+) -> Result<bool, StoreError> {
+    if claims.is_empty() || claims.len() > 64 {
+        return Ok(false);
+    }
+    let mut decoded = Vec::with_capacity(claims.len());
+    let mut previous: Option<String> = None;
+    for claim in claims {
+        let Some(path) = decode_publication_claim_path_hex(&claim.source_path_hex) else {
+            return Ok(false);
+        };
+        if path.is_empty()
+            || path.len() > 4096
+            || previous.as_ref().is_some_and(|previous| previous >= &path)
+        {
+            return Ok(false);
+        }
+        previous = Some(path.clone());
+        decoded.push((path, claim.claim));
+    }
+    let values = (0..decoded.len())
+        .map(|index| format!("(?{},?{})", index * 2 + 1, index * 2 + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let namespace_parameter = decoded.len() * 2 + 1;
+    let sql = format!(
+        "WITH selected(source_path,claim) AS (VALUES {values}) SELECT count(*) FROM selected JOIN main.catalog_semantic_sources staged ON staged.namespace=?{namespace_parameter} AND staged.source_path=selected.source_path AND staged.claim IS selected.claim AND staged.publication_done=0 AND staged.ack_done=0"
+    );
+    let mut binds = Vec::with_capacity(namespace_parameter);
+    for (path, claim) in decoded {
+        binds.push(rusqlite::types::Value::Text(path));
+        binds.push(claim.map_or(
+            rusqlite::types::Value::Null,
+            rusqlite::types::Value::Integer,
+        ));
+    }
+    binds.push(rusqlite::types::Value::Text(ns.to_owned()));
+    let matched: i64 = db
+        .query_row(&sql, rusqlite::params_from_iter(binds), |row| row.get(0))
+        .map_err(error)?;
+    Ok(matched == claims.len() as i64)
+}
+
+/// Return a blocker only while the exact refused group is still pending under
+/// its admitted semantic stage and moving Catalog head. The selected source
+/// claims are checked in one bounded indexed projection, with no owner plan.
+pub(crate) fn catalog_publication_blocker(
+    db: &Connection,
+    ns: &str,
+) -> std::io::Result<Option<crate::storage::catalog::CatalogPublicationBlocker>> {
+    let value = read_publication_group_hint_value(db, ns)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let hint: PublicationGroupHint = serde_json::from_str(&value).map_err(std::io::Error::other)?;
+    if !(1..=64).contains(&hint.max_groups) {
+        return Err(std::io::Error::other(StorageError::ScopeChanged));
+    }
+    let Some(refusal) = hint.refusal else {
+        return Ok(None);
+    };
+    if refusal.version != 1
+        || refusal.code != "publication_too_large"
+        || hint.max_groups != 1
+        || refusal.epoch != hint.epoch
+        || refusal.source_revision != hint.source_revision
+        || refusal.selected_claims.len() > 64
+        || refusal.selected_claims_sha256
+            != publication_claims_sha256(&refusal.selected_claims)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+    {
+        return Ok(None);
+    }
+    let stage: Option<RefusedPublicationStage> = db
+        .query_row(
+            "SELECT stage.epoch,stage.phase,stage.generation,stage.original_generation,stage.runtime,stage.revision,stage.resetting,journal.revision,(SELECT value FROM main.meta WHERE namespace=stage.namespace AND key='catalog_generation') FROM main.catalog_semantic_stage stage JOIN main.storage_source_journal journal ON journal.namespace=stage.namespace WHERE stage.namespace=?1 AND stage.singleton=1",
+            [ns],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(std::io::Error::other)?;
+    let Some((
+        epoch,
+        phase,
+        generation,
+        original_generation,
+        runtime,
+        stage_revision,
+        resetting,
+        journal_revision,
+        head,
+    )) = stage
+    else {
+        return Ok(None);
+    };
+    if phase != "publication"
+        || resetting
+        || epoch != hint.epoch
+        || stage_revision != hint.source_revision
+        || stage_revision != journal_revision
+        || runtime != hint.runtime
+        || original_generation != hint.original_generation
+        || refusal.base_generation != generation
+        || refusal.base_generation != head
+        || refusal.runtime_sha256 != sha256_hex(runtime.as_bytes())
+        || !publication_claims_current(db, ns, &refusal.selected_claims)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+    {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge,
+    ))
 }
 
 fn read_publication_group_hint(
@@ -1110,15 +1368,7 @@ fn read_publication_group_hint(
     source_revision: i64,
     original_generation: Option<&str>,
 ) -> Result<Option<usize>, StoreError> {
-    let value: Option<String> = db
-        .query_row(
-            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
-            params![ns, PUBLICATION_GROUP_HINT_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some(value) = value else {
+    let Some(value) = read_publication_group_hint_value(db, ns)? else {
         return Ok(None);
     };
     let hint: PublicationGroupHint =
@@ -1139,12 +1389,62 @@ fn write_publication_group_hint(
     hint: &PublicationGroupHint,
 ) -> Result<(), StoreError> {
     let value = serde_json::to_string(hint).map_err(|error| StoreError::Data(error.to_string()))?;
+    if value.len() > PUBLICATION_GROUP_HINT_MAX_BYTES {
+        return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
+    }
     db.execute(
         "INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",
         params![ns, PUBLICATION_GROUP_HINT_KEY, value],
     )
     .map_err(error)?;
     Ok(())
+}
+
+fn clear_publication_group_refusal(db: &Connection, ns: &str) -> Result<(), StoreError> {
+    let Some(value) = read_publication_group_hint_value(db, ns)? else {
+        return Ok(());
+    };
+    let mut hint: PublicationGroupHint =
+        serde_json::from_str(&value).map_err(|error| StoreError::Data(error.to_string()))?;
+    if hint.refusal.take().is_some() {
+        write_publication_group_hint(db, ns, &hint)?;
+    }
+    Ok(())
+}
+
+fn publication_group_refusal(batch: &Batch) -> Result<PublicationGroupRefusal, StoreError> {
+    if batch.source_claims.is_empty() || batch.source_claims.len() > 64 {
+        return Err(StoreError::Configured(StorageError::Conflict));
+    }
+    let mut selected_claims = batch
+        .source_claims
+        .iter()
+        .map(|(path, claim)| PublicationSourceClaim {
+            source_path_hex: publication_claim_path_hex(path),
+            claim: *claim,
+        })
+        .collect::<Vec<_>>();
+    selected_claims.sort_by(|left, right| left.source_path_hex.cmp(&right.source_path_hex));
+    if selected_claims
+        .iter()
+        .any(|claim| claim.source_path_hex.is_empty() || claim.source_path_hex.len() > 8192)
+        || selected_claims
+            .windows(2)
+            .any(|pair| pair[0].source_path_hex >= pair[1].source_path_hex)
+    {
+        return Err(StoreError::Configured(StorageError::Conflict));
+    }
+    let selected_claims_sha256 = publication_claims_sha256(&selected_claims)?;
+    Ok(PublicationGroupRefusal {
+        version: 1,
+        code: "publication_too_large".to_owned(),
+        epoch: batch.epoch,
+        source_revision: batch.source_revision,
+        base_generation: batch.base_generation.clone(),
+        runtime_sha256: sha256_hex(batch.runtime.as_bytes()),
+        selected_claims,
+        selected_claims_sha256,
+    })
 }
 
 fn clear_publication_group_hint(db: &Connection, ns: &str) -> rusqlite::Result<()> {
@@ -1176,14 +1476,7 @@ fn rebind_publication_group_hint(
             |row| row.get(0),
         )
         .map_err(error)?;
-    let value: Option<String> = db
-        .query_row(
-            "SELECT value FROM main.meta WHERE namespace=?1 AND key=?2",
-            params![ns, PUBLICATION_GROUP_HINT_KEY],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(error)?;
+    let value = read_publication_group_hint_value(db, ns)?;
     let Some(value) = value else {
         return Ok(());
     };
@@ -1201,6 +1494,11 @@ fn rebind_publication_group_hint(
         && !current.3
     {
         hint.epoch = new_epoch;
+        if let Some(refusal) = hint.refusal.as_mut()
+            && refusal.epoch == old_epoch
+        {
+            refusal.epoch = new_epoch;
+        }
         write_publication_group_hint(db, ns, &hint)?;
     } else {
         clear_publication_group_hint(db, ns).map_err(error)?;
@@ -1827,6 +2125,19 @@ fn defer_oversized_publication_record(
         return Ok(Outcome::Conflict);
     }
     if groups == 1 {
+        write_publication_group_hint(
+            &tx,
+            ns,
+            &PublicationGroupHint {
+                epoch: batch.epoch,
+                runtime: batch.runtime.clone(),
+                source_revision: batch.source_revision,
+                original_generation,
+                max_groups: 1,
+                refusal: Some(publication_group_refusal(batch)?),
+            },
+        )?;
+        tx.commit().map_err(error)?;
         return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
     }
     let narrowed_groups = (groups / 2).max(1);
@@ -1848,6 +2159,7 @@ fn defer_oversized_publication_record(
             source_revision: batch.source_revision,
             original_generation,
             max_groups,
+            refusal: None,
         },
     )?;
     tx.commit().map_err(error)?;
@@ -2620,7 +2932,8 @@ impl crate::events::store::semantic_stage::ReductionStore for ScopedReduction<'_
         if ambiguous {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        c.execute("UPDATE main.catalog_semantic_endpoints SET parent_key=COALESCE((SELECT session_key FROM main.catalog_semantic_native n WHERE n.namespace=?1 AND n.harness=COALESCE(catalog_semantic_endpoints.parent_native_harness,catalog_semantic_endpoints.harness) AND n.native_id=catalog_semantic_endpoints.parent_native),parent_key),parent_resolved=1,family_cost=cost WHERE namespace=?1 AND session_key=?2",params![ns,key])?;
+        // Keep the producer-resolved parent; native identity fills gaps.
+        c.execute("UPDATE main.catalog_semantic_endpoints SET parent_key=COALESCE(parent_key,(SELECT session_key FROM main.catalog_semantic_native n WHERE n.namespace=?1 AND n.harness=COALESCE(catalog_semantic_endpoints.parent_native_harness,catalog_semantic_endpoints.harness) AND n.native_id=catalog_semantic_endpoints.parent_native)),parent_resolved=1,family_cost=cost WHERE namespace=?1 AND session_key=?2",params![ns,key])?;
         c.execute("UPDATE main.catalog_semantic_endpoints SET root_key=CASE WHEN parent_key IS NULL OR NOT EXISTS(SELECT 1 FROM main.catalog_semantic_endpoints p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.parent_key) THEN session_key ELSE (SELECT root_key FROM main.catalog_semantic_endpoints p WHERE p.namespace=?1 AND p.session_key=catalog_semantic_endpoints.parent_key) END WHERE namespace=?1 AND session_key=?2",params![ns,key])?;
         c.execute("UPDATE main.catalog_semantic_paths SET root_key=(SELECT root_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2) WHERE namespace=?1 AND session_key=?2",params![ns,key])?;
         c.execute("UPDATE main.catalog_semantic_endpoints SET children_pending=children_pending+1 WHERE namespace=?1 AND session_key=(SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace=?1 AND session_key=?2)",params![ns,key])?;
@@ -2840,6 +3153,19 @@ impl Stage {
             return Ok((Outcome::Conflict, None));
         }
         if groups == 1 {
+            write_publication_group_hint(
+                &tx,
+                ns,
+                &PublicationGroupHint {
+                    epoch: batch.epoch,
+                    runtime: batch.runtime.clone(),
+                    source_revision: batch.source_revision,
+                    original_generation: original_generation.clone(),
+                    max_groups: 1,
+                    refusal: Some(publication_group_refusal(batch)?),
+                },
+            )?;
+            tx.commit().map_err(error)?;
             return Err(StoreError::Configured(StorageError::HistoryRetentionBounds));
         }
         let removed = tx
@@ -2860,6 +3186,7 @@ impl Stage {
                 source_revision: batch.source_revision,
                 original_generation,
                 max_groups: (groups / 2).max(1),
+                refusal: None,
             },
         )?;
         tx.commit().map_err(error)?;
@@ -3575,6 +3902,7 @@ impl Stage {
             params![ns, generation],
         )
         .map_err(error)?;
+        clear_publication_group_refusal(&tx, ns)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_head").map_err(error)?;
         publication_phase("commit");
@@ -4544,26 +4872,27 @@ impl Stage {
                 companions.extend(context.parent_paths(&actors.into_iter().collect::<Vec<_>>()));
                 let mut loaded_paths = companions.clone();
                 loaded_paths.extend(paths.iter().cloned());
-                let (spawn_paths, spawn_endpoints, call_locations) =
-                    match relation_spawn_call_context(
-                        &tx,
-                        ns,
-                        &physical,
-                        epoch,
-                        &mut relation_context_bytes,
-                        &mut relation_read_budget,
-                        loaded_paths,
-                        &context.endpoints,
-                    ) {
-                        Ok(spawn_context) => spawn_context,
-                        Err(source_error) if relation_context_budget_error(&source_error) => {
-                            return Err(refuse("semantic_source_budget"));
-                        }
-                        Err(source_error) => return Err(error(source_error)),
-                    };
-                companions.extend(spawn_paths);
-                context.endpoints.extend(spawn_endpoints);
-                context.claude_call_locations.extend(call_locations);
+                let spawn_context = match relation_spawn_call_context(RelationSpawnCallInput {
+                    db: &tx,
+                    namespace: ns,
+                    physical: &physical,
+                    epoch,
+                    used: &mut relation_context_bytes,
+                    budget: &mut relation_read_budget,
+                    loaded_paths,
+                    preloaded: &context.endpoints,
+                }) {
+                    Ok(spawn_context) => spawn_context,
+                    Err(source_error) if relation_context_budget_error(&source_error) => {
+                        return Err(refuse("semantic_source_budget"));
+                    }
+                    Err(source_error) => return Err(error(source_error)),
+                };
+                companions.extend(spawn_context.paths);
+                context.endpoints.extend(spawn_context.endpoints);
+                context
+                    .claude_call_locations
+                    .extend(spawn_context.claude_call_locations);
                 // Sender sources carry their exact claims and context, while
                 // this receipt page remains the only relation cursor.
                 paths = vec![selected.clone()];
@@ -5398,5 +5727,165 @@ impl Stage {
         crate::events::store::configured::effect("semantic_record").map_err(error)?;
         tx.commit().map_err(error)?;
         Ok(Outcome::Written)
+    }
+}
+
+#[cfg(test)]
+mod scoped_reduction_tests {
+    use super::*;
+    use crate::events::store::semantic_stage::ReductionStore;
+
+    fn reduction_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE main.catalog_semantic_endpoints(namespace TEXT NOT NULL,session_key TEXT NOT NULL,harness TEXT NOT NULL,parent_native TEXT,parent_native_harness TEXT,parent_key TEXT,root_key TEXT,cost REAL,family_cost REAL,parent_resolved INTEGER NOT NULL DEFAULT 0,cost_done INTEGER NOT NULL DEFAULT 0,children_pending INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(namespace,session_key));
+             CREATE TABLE main.catalog_semantic_native(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL);
+             CREATE TABLE main.catalog_semantic_paths(namespace TEXT NOT NULL,session_key TEXT NOT NULL,root_key TEXT,path TEXT NOT NULL);",
+        )
+        .unwrap();
+        db
+    }
+
+    fn endpoint(
+        db: &Connection,
+        key: &str,
+        harness: &str,
+        parent_native: Option<&str>,
+        parent_native_harness: Option<&str>,
+        parent_key: Option<&str>,
+        root_key: Option<&str>,
+    ) {
+        db.execute(
+            "INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,parent_native,parent_native_harness,parent_key,root_key,cost,family_cost) VALUES('scope',?1,?2,?3,?4,?5,?6,1,1)",
+            params![key, harness, parent_native, parent_native_harness, parent_key, root_key],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scoped_parent_reduction_preserves_causal_parent_and_native_fallback_behavior() {
+        let db = reduction_db();
+        endpoint(&db, "lead", "claude", None, None, None, Some("lead"));
+        endpoint(&db, "mid", "claude", None, None, None, Some("mid"));
+        endpoint(
+            &db,
+            "leaf",
+            "claude",
+            Some("lead"),
+            Some("claude"),
+            Some("mid"),
+            None,
+        );
+        endpoint(
+            &db,
+            "codex:shared",
+            "codex",
+            None,
+            None,
+            None,
+            Some("codex:shared"),
+        );
+        endpoint(
+            &db,
+            "codex-child",
+            "codex",
+            Some("shared"),
+            Some("codex"),
+            None,
+            None,
+        );
+        endpoint(
+            &db,
+            "claude-directory-parent",
+            "claude",
+            None,
+            None,
+            None,
+            Some("claude-directory-parent"),
+        );
+        endpoint(
+            &db,
+            "directory-only-child",
+            "claude",
+            Some("directory-parent-id"),
+            Some("claude"),
+            None,
+            None,
+        );
+        endpoint(
+            &db,
+            "unresolved-child",
+            "codex",
+            Some("not-staged"),
+            Some("codex"),
+            None,
+            None,
+        );
+        db.execute(
+            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','claude','lead','lead'),('scope','codex','shared','codex:shared'),('scope','claude','directory-parent-id','claude-directory-parent')",
+            [],
+        )
+        .unwrap();
+
+        let reducer = ScopedReduction {
+            db: &db,
+            ns: "scope",
+        };
+        reducer.parent("leaf").unwrap();
+        reducer.parent("codex-child").unwrap();
+        reducer.parent("directory-only-child").unwrap();
+        reducer.parent("unresolved-child").unwrap();
+
+        let parent: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='leaf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, "mid", "the explicit causal parent wins");
+        let alias: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='codex-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias, "codex:shared", "native lookup preserves key aliases");
+        let directory_parent: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='directory-only-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(directory_parent, "claude-directory-parent");
+        let unresolved: Option<String> = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='unresolved-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, None, "an absent native owner stays unresolved");
+
+        endpoint(&db, "ambiguous-child", "codex", None, None, None, None);
+        db.execute(
+            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','codex','duplicate','ambiguous-child'),('scope','codex','duplicate','peer')",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            reducer.parent("ambiguous-child"),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
+        let resolved: bool = db
+            .query_row(
+                "SELECT parent_resolved FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='ambiguous-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!resolved, "ambiguity refusal leaves the endpoint untouched");
     }
 }

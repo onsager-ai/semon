@@ -906,6 +906,17 @@ pub(crate) fn read_page_snapshot_with_search(
     if version.as_deref() != Some(CATALOG_VERSION.to_string().as_str()) {
         return Err(page_read_error("catalog_version_mismatch", "catalog version").into());
     }
+    let publication_blocker = transaction.publication_blocker()?;
+    if request.require_complete
+        && let Some(blocker) = publication_blocker
+    {
+        return Ok(error(
+            503,
+            blocker.code(),
+            "The current Catalog publication exceeds storage bounds. The last published Catalog remains available.",
+            blocker.retryable(),
+        ));
+    }
     if request.require_complete {
         match meta("catalog_completeness")?.as_deref() {
             None | Some("complete") => {}
@@ -952,7 +963,7 @@ pub(crate) fn read_page_snapshot_with_search(
             ));
         }
         let collection_complete = match meta("catalog_completeness")?.as_deref() {
-            None | Some("complete") => true,
+            None | Some("complete") => publication_blocker.is_none(),
             Some("partial") => false,
             _ => {
                 return Err(page_read_error(
@@ -1077,13 +1088,24 @@ pub(crate) fn read_page_snapshot_with_search(
             false,
         ));
     }
-    let completeness = meta("catalog_completeness")?.unwrap_or_else(|| "complete".into());
+    let completeness = if publication_blocker.is_some() {
+        "partial".to_owned()
+    } else {
+        meta("catalog_completeness")?.unwrap_or_else(|| "complete".into())
+    };
     if !matches!(completeness.as_str(), "partial" | "complete") {
         return Err(page_read_error(
             "catalog_completeness_invalid",
             "catalog completeness is invalid",
         )
         .into());
+    }
+    let mut completeness_value = json!({"state":&completeness});
+    if let Some(blocker) = publication_blocker {
+        completeness_value["blocker"] = json!({
+            "code": blocker.code(),
+            "retryable": blocker.retryable(),
+        });
     }
     if admit_search
         && completeness == "partial"
@@ -1480,7 +1502,7 @@ pub(crate) fn read_page_snapshot_with_search(
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":true,"global_union":false},
-        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
+        "completeness":completeness_value,"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     );
     measurements.record("catalog_page_total", total_started, 1);
     if timing_enabled {

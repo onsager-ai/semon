@@ -512,11 +512,11 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     };
     let input = crate::Input {
         root: crate::InputRoot::Claude,
-        path: "projects/sanitized/successor.jsonl".into(),
+        path: "projects/sanitized-successor/catalog.jsonl".into(),
     };
     let old_path = old.full_path(options);
     let path = input.full_path(options);
-    // A second path for the same native session withdraws the old source.
+    // A second path with the same canonical Claude basename withdraws the old source.
     // Same-path append has no missing source and legitimately clears history.
     let mut body = std::fs::read_to_string(&old_path).unwrap();
     body.push_str(&format!("{}\n", serde_json::json!({"type":"user","sessionId":"catalog","uuid":"u130","parentUuid":"u129","timestamp":"2026-10-01T00:01:00Z","cwd":"/sanitized","message":{"role":"user","content":"sanitized successor"}})));
@@ -541,6 +541,7 @@ pub(crate) fn advance_catalog_with_retirement_observer(
     assert!(finish_catalog(&mut cache, options, std::slice::from_ref(&old)).is_empty());
     // Complete the ordinary withdrawal before the same native identity returns.
     // This retains the paged original recipe rather than composing a short one.
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, body).unwrap();
     cache.ingest(&"8".repeat(64), &path, "claude").unwrap();
     cache.flush_cold_writes().unwrap();

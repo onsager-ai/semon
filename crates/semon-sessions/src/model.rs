@@ -1867,6 +1867,13 @@ struct Sess {
 type Ref = (usize, usize);
 type CompleteSenderTurns = (Vec<Turn>, BTreeMap<String, Ref>);
 
+struct SpawnTurnAnchor {
+    session: usize,
+    id: String,
+    at: i64,
+    first_prompt: Option<Ref>,
+}
+
 struct H {
     out: Handoff,
     from: Option<usize>,
@@ -5486,35 +5493,71 @@ impl<'a> Builder<'a> {
         tx: &Transcript,
         saved: Option<&crate::slot_projection::Projection>,
     ) -> Value {
-        let decorate = |mut recipe: Value| {
-            let kind = recipe["kind"].as_str().unwrap_or("");
-            if let Some(field) = saved
-                .into_iter()
-                .flat_map(|saved| &saved.slots)
-                .find_map(|slot| {
-                    let field = slot.field.as_ref()?;
-                    (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
-                        && Some(field.record_offset) == recipe["offset"].as_u64()
-                        && Some(u64::from(field.block)) == recipe["block"].as_u64()
-                        && matches!(
-                            (kind, field.kind),
-                            (
-                                "assistant" | "prompt" | "trace_prompt",
-                                crate::native_field::NativeFieldKind::Text
-                            ) | (
-                                "tool_result",
-                                crate::native_field::NativeFieldKind::ClaudeResult
-                                    | crate::native_field::NativeFieldKind::CodexResult
-                                    | crate::native_field::NativeFieldKind::CodexResultObject
-                            )
-                        ))
-                    .then_some(field)
-                })
-            {
-                recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
-            }
-            recipe
-        };
+        let prompt_fields = std::cell::RefCell::new(BTreeMap::new());
+        let decorate =
+            |mut recipe: Value, source_file: Option<&SourceFile>, is_prompt_record: bool| {
+                let kind = recipe["kind"].as_str().unwrap_or("");
+                let field = saved
+                    .into_iter()
+                    .flat_map(|saved| &saved.slots)
+                    .find_map(|slot| {
+                        let field = slot.field.as_ref()?;
+                        (slot.file.as_ref()?.path.to_str() == recipe["path"].as_str()
+                            && Some(field.record_offset) == recipe["offset"].as_u64()
+                            && Some(u64::from(field.block)) == recipe["block"].as_u64()
+                            && matches!(
+                                (kind, field.kind),
+                                (
+                                    "assistant" | "prompt" | "trace_prompt",
+                                    crate::native_field::NativeFieldKind::Text
+                                ) | (
+                                    "tool_result",
+                                    crate::native_field::NativeFieldKind::ClaudeResult
+                                        | crate::native_field::NativeFieldKind::CodexResult
+                                        | crate::native_field::NativeFieldKind::CodexResultObject
+                                )
+                            ))
+                        .then_some(field)
+                    })
+                    .cloned()
+                    .or_else(|| {
+                        if self.history_records.is_some() || kind != "prompt" || !is_prompt_record {
+                            return None;
+                        }
+                        let source_file = source_file?;
+                        let path = recipe["path"].as_str()?;
+                        let offset = recipe["offset"].as_u64()?;
+                        let block = u32::try_from(recipe["block"].as_u64()?).ok()?;
+                        if source_file.path.to_str()? != path {
+                            return None;
+                        }
+                        let source = summary::source(source_file);
+                        let key = (source.path.clone(), offset, block);
+                        let mut fields = prompt_fields.borrow_mut();
+                        fields
+                            .entry(key)
+                            .or_insert_with(|| {
+                                crate::native_field::capture_with_record(
+                                    offset,
+                                    block,
+                                    &crate::slot_projection::Recipe::U,
+                                    |at| {
+                                        crate::native_field::read_source_record(
+                                            &source,
+                                            at,
+                                            Some(self.records),
+                                        )
+                                    },
+                                )
+                                .0
+                            })
+                            .clone()
+                    });
+                if let Some(field) = field {
+                    recipe["field"] = serde_json::to_value(field).expect("owned native descriptor");
+                }
+                recipe
+            };
         let recipe = |at: Ref, kind: &str| {
             let file = &self.files[at.0];
             let found = event(self.files, at);
@@ -5523,6 +5566,8 @@ impl<'a> Builder<'a> {
             };
             decorate(
                 serde_json::json!({"path":path,"offset":found.o,"block":found.b,"kind":kind,"tool":found.n,"cwd":file.summary.cwd,"source":summary::source(file)}),
+                Some(file),
+                found.k == Kind::U,
             )
         };
         let placed = |id: &str, place: Place| {
@@ -5554,13 +5599,17 @@ impl<'a> Builder<'a> {
                             if sources.next().is_some() {
                                 return None;
                             }
-                            Some(decorate(serde_json::json!({
-                                "path": path,
-                                "offset": slot.offset,
-                                "block": slot.block,
-                                "kind": "prompt",
-                                "source": summary::source(source)
-                            })))
+                            Some(decorate(
+                                serde_json::json!({
+                                    "path": path,
+                                    "offset": slot.offset,
+                                    "block": slot.block,
+                                    "kind": "prompt",
+                                    "source": summary::source(source)
+                                }),
+                                Some(source),
+                                true,
+                            ))
                         })
                 })
         };
@@ -5595,7 +5644,11 @@ impl<'a> Builder<'a> {
                     }
                     value["arg"] = serde_json::json!(preview.arg);
                     value["skip"] = serde_json::json!(preview.skip);
-                    fields[*field] = decorate(value);
+                    fields[*field] = decorate(
+                        value,
+                        Some(&self.files[preview.at.0]),
+                        event(self.files, preview.at).k == Kind::U,
+                    );
                 }
             } else if h.out.from == key {
                 let brief_at = placed(&h.out.id, Place::Out).or_else(|| {
@@ -5655,7 +5708,7 @@ impl<'a> Builder<'a> {
                     answer["offset"] = serde_json::json!(reply.o);
                     answer["block"] = serde_json::json!(reply.b);
                     answer["structured"] = serde_json::json!(reply.f & ANSWERED != 0);
-                    fields[field] = decorate(answer);
+                    fields[field] = decorate(answer, Some(&self.files[at.0]), false);
                 }
             }
             for (field, preview) in &h.foreign_previews {
@@ -5665,17 +5718,21 @@ impl<'a> Builder<'a> {
                 let Some(path) = preview.at.source.path.to_str() else {
                     continue;
                 };
-                fields[field.as_str()] = decorate(serde_json::json!({
-                    "path": path,
-                    "offset": preview.at.offset,
-                    "block": preview.at.block,
-                    "kind": preview.kind,
-                    "tool": preview.tool,
-                    "cwd": preview.cwd,
-                    "source": preview.at.source,
-                    "arg": preview.arg,
-                    "skip": preview.skip,
-                }));
+                fields[field.as_str()] = decorate(
+                    serde_json::json!({
+                        "path": path,
+                        "offset": preview.at.offset,
+                        "block": preview.at.block,
+                        "kind": preview.kind,
+                        "tool": preview.tool,
+                        "cwd": preview.cwd,
+                        "source": preview.at.source,
+                        "arg": preview.arg,
+                        "skip": preview.skip,
+                    }),
+                    None,
+                    false,
+                );
             }
             if h.out.from == key
                 && let Some(at) =
@@ -5880,8 +5937,10 @@ impl<'a> Builder<'a> {
 
     /// Matching selects incident relationships, not the sender's turn boundaries.
     /// Complete native receipts are needed even when their edges belong to a
-    /// different message page. These temporary boundaries carry no sender claim
-    /// and never enter the staged relationships or published projection.
+    /// different message page. An exact cached Claude call also supplies the
+    /// initial turn boundary when its Agent header is outside the selected
+    /// page. These temporary boundaries recover the canonical turn and prompt
+    /// origin, while their handoffs remain absent from staged relationships.
     fn complete_sender_turns(&mut self) -> io::Result<Option<CompleteSenderTurns>> {
         let Some(epoch) = self.staged_epoch.filter(|_| self.matching_refs.is_some()) else {
             return Ok(None);
@@ -5939,6 +5998,72 @@ impl<'a> Builder<'a> {
                 boundaries.push(at);
             }
         }
+
+        let mut spawn_anchors = Vec::new();
+        for sender in &senders {
+            if self.sessions[*sender].kind != SessKind::Agent
+                || self.matching_session_header_selected(*sender)
+            {
+                continue;
+            }
+            let mut call_ids = BTreeSet::new();
+            let mut ambiguous = false;
+            for file in &self.sessions[*sender].files {
+                let Role::Agent(meta) = &self.files[*file].role else {
+                    ambiguous = true;
+                    break;
+                };
+                let Some(id) = &meta.tool_use_id else {
+                    ambiguous = true;
+                    break;
+                };
+                call_ids.insert(id.clone());
+            }
+            if ambiguous || call_ids.len() != 1 {
+                continue;
+            }
+            let Some(tool_use_id) = call_ids.pop_first() else {
+                continue;
+            };
+            let Some(Some(location)) = self.staged_claude_call_locations.get(&tool_use_id) else {
+                continue;
+            };
+            let call = location
+                .local(self)?
+                .ok_or_else(|| io::Error::other("staged Claude call source not selected"))?;
+            let id = stable_id("s", &format!("spawn:claude:{}", self.sessions[*sender].key));
+            if self.ids.contains_key(&id) || self.head.contains_key(sender) {
+                continue;
+            }
+            let first_prompt = self
+                .events_of(*sender)
+                .into_iter()
+                .find(|at| event(self.files, *at).k == Kind::U);
+            let existing_incoming = first_prompt.is_some_and(|at| {
+                self.placed.get(&at).is_some_and(|placements| {
+                    placements.iter().any(|(handoff, place)| {
+                        *place == Place::In
+                            && self.handoffs[*handoff].to == Some(*sender)
+                            && matches!(self.handoffs[*handoff].out.kind, "ask" | "relay" | "spawn")
+                    })
+                })
+            });
+            if existing_incoming {
+                continue;
+            }
+            spawn_anchors.push(SpawnTurnAnchor {
+                session: *sender,
+                id,
+                at: event(self.files, call)
+                    .t
+                    .unwrap_or(self.sessions[*sender].out.start),
+                first_prompt,
+            });
+        }
+
+        // All fallible receipt and exact-call selection is complete before the
+        // temporary boundary state is installed; splitting and restoration do
+        // not return errors.
         let original = self.handoffs.len();
         let mut synthetic_starts = BTreeMap::new();
         for at in &boundaries {
@@ -5968,6 +6093,42 @@ impl<'a> Builder<'a> {
             self.placed.insert(*at, vec![(index, Place::In)]);
             synthetic_starts.insert(id, *at);
         }
+        let mut temporary_spawn_ids = BTreeSet::new();
+        let mut temporary_spawn_origins = BTreeMap::new();
+        let mut spawn_placement_restore = Vec::new();
+        let mut spawn_head_restore = Vec::new();
+        for anchor in &spawn_anchors {
+            let index = self.handoffs.len();
+            self.handoffs.push(H {
+                out: Handoff::new(
+                    anchor.id.clone(),
+                    "spawn",
+                    (String::new(), self.sessions[anchor.session].key.clone()),
+                    anchor.at,
+                    "done",
+                    "",
+                ),
+                from: None,
+                to: Some(anchor.session),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                foreign_previews: BTreeMap::new(),
+                inline: false,
+            });
+            temporary_spawn_ids.insert(anchor.id.clone());
+            temporary_spawn_origins.insert(anchor.id.clone(), anchor.first_prompt);
+            if let Some(at) = anchor.first_prompt {
+                let previous = self.placed.get(&at).cloned();
+                self.placed
+                    .entry(at)
+                    .or_default()
+                    .insert(0, (index, Place::In));
+                spawn_placement_restore.push((at, previous));
+            } else {
+                let previous = self.head.insert(anchor.session, index);
+                spawn_head_restore.push((anchor.session, previous));
+            }
+        }
         let mut turns = Vec::new();
         let mut origins = BTreeMap::new();
         for sender in senders {
@@ -5976,6 +6137,14 @@ impl<'a> Builder<'a> {
                 let Some(start) = turn.start.as_deref() else {
                     continue;
                 };
+                if temporary_spawn_ids.contains(start) {
+                    if let Some(Some(at)) = temporary_spawn_origins.get(start) {
+                        for edge in &turn.sent {
+                            origins.insert(edge.clone(), *at);
+                        }
+                    }
+                    continue;
+                }
                 let at = synthetic_starts.get(start).copied().or_else(|| {
                     self.placed.iter().find_map(|(at, entries)| {
                         entries
@@ -5996,6 +6165,20 @@ impl<'a> Builder<'a> {
         }
         for at in boundaries {
             self.placed.remove(&at);
+        }
+        for (at, previous) in spawn_placement_restore {
+            if let Some(previous) = previous {
+                self.placed.insert(at, previous);
+            } else {
+                self.placed.remove(&at);
+            }
+        }
+        for (session, previous) in spawn_head_restore {
+            if let Some(previous) = previous {
+                self.head.insert(session, previous);
+            } else {
+                self.head.remove(&session);
+            }
         }
         self.handoffs.truncate(original);
         Ok(Some((turns, origins)))
