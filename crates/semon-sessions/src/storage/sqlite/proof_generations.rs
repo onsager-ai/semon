@@ -959,6 +959,11 @@ pub(super) fn retain_current_refs_for_unowned_history(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| PublicationError::Storage(failed(error)))?;
     if ids.len() > 64 {
+        #[cfg(test)]
+        eprintln!(
+            "proof_publication_bounds stage=retain_current_refs count={}",
+            ids.len()
+        );
         return Err(StorageError::HistoryRetentionBounds.into());
     }
     for id in ids {
@@ -3784,6 +3789,7 @@ pub(crate) fn capture_presentations(
     validate_receipt_inputs(&inputs)?;
     #[cfg(test)]
     if FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.replace(false)) {
+        eprintln!("proof_publication_bounds stage=injected_capture_failure");
         return Err(StorageError::HistoryRetentionBounds);
     }
     use crate::storage::selected::{CapturedContext, PresentationWitness};
@@ -3867,6 +3873,13 @@ pub(crate) fn capture_presentations(
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         bytes = bytes.saturating_add(text.len());
         if bytes > 8 * 1048576 {
+            #[cfg(test)]
+            eprintln!(
+                "proof_publication_bounds stage=capture_presentations rows={} completed={} row_bytes={} aggregate_bytes={bytes}",
+                rows.len(),
+                result.len(),
+                text.len()
+            );
             return Err(StorageError::HistoryRetentionBounds);
         }
         result.push((row.key.clone(), text));
@@ -3925,6 +3938,12 @@ fn prepare_presentation_root(
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
+        #[cfg(test)]
+        eprintln!(
+            "proof_publication_bounds stage=presentation_manifest rows={} bytes={}",
+            rows.len(),
+            manifest.len()
+        );
         return Err(StorageError::HistoryRetentionBounds);
     }
     let joined = joined_digest(base, &manifest)?;
