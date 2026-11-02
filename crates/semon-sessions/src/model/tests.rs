@@ -5641,11 +5641,10 @@ fn catalog_runtime_staged_parent_turn_survives_bidirectional_message_pages() {
 
 #[test]
 fn catalog_runtime_staged_publication_replays_large_incident_relationships() {
-    assert_staged_bidirectional_message_pages(360);
+    staged_publication_refuses_large_bidirectional_message_pages();
 }
 
-fn assert_staged_bidirectional_message_pages(rounds: i64) {
-    let home = Home::new();
+fn write_bidirectional_message_page_fixture(home: &Home, rounds: i64) {
     let ts = |hour: i64, minute: i64| {
         format!(
             "2026-09-{:02}T{:02}:{minute:02}:00.000Z",
@@ -5721,6 +5720,609 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
         let id = format!("independent-{n:03}");
         home.top(&id, &[human(&id, ts(6, 0), "Independent history")]);
     }
+}
+
+fn staged_publication_refuses_large_bidirectional_message_pages() {
+    let home = Home::new();
+    home.top(
+        "prior",
+        &[human("prior", ts(5, 0), "Last admitted Catalog")],
+    );
+    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let mut complete = false;
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .unwrap()
+        {
+            complete = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(complete, "prior Catalog publication did not complete");
+
+    let prior_head: Option<String> = {
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(
+                &home.options.source.config(&home.options.cache).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let prior: String = db
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='prior' AND lifecycle='current'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&prior).unwrap()["key"],
+            "prior"
+        );
+        db.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
+    };
+    assert!(prior_head.is_some());
+
+    // Preserve the exact 360-round native fixture and its 70 independent sources.
+    write_bidirectional_message_page_fixture(&home, 360);
+    let inputs = crate::inputs(&home.options).unwrap();
+    let prior_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/prior.jsonl");
+    let selected_inputs = inputs
+        .iter()
+        .filter(|input| input.full_path(&home.options) != prior_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(selected_inputs.len(), 72);
+
+    // Keep the shared full model and ordinary native Query as independent oracles.
+    let mut native_options = home.options.clone();
+    native_options.cache = home.root.join("large-native-oracle.json");
+    let native = home.build_at(&native_options, NOW);
+    assert!(native.sessions.contains_key("alpha"));
+    assert!(native.sessions.contains_key("beta"));
+    assert_eq!(
+        native
+            .sessions
+            .keys()
+            .filter(|key| key.starts_with("independent-"))
+            .count(),
+        70
+    );
+
+    let mut full_options = home.options.clone();
+    full_options.cache = home.root.join("large-full-model-oracle.json");
+    let full_inputs = [
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/alpha.jsonl".into(),
+        },
+        crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/beta.jsonl".into(),
+        },
+    ];
+    let mut full_cache = EventCache::open(&full_options.cache, &full_options.source).unwrap();
+    let full = prepare_sources(&full_options, &mut full_cache, &full_inputs, NOW).unwrap();
+    let full_rows: BTreeMap<_, _> = full
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    assert_eq!(full_rows.len(), 2);
+    assert!(full.relationships.relations.len() >= 720);
+    let mut owned_origins = 0;
+    for (id, relation) in &full.relationships.relations {
+        let native_edge = native
+            .handoffs
+            .iter()
+            .find(|edge| edge.id == *id)
+            .unwrap_or_else(|| panic!("native Query omitted full-model edge {id}"));
+        assert_eq!(native_edge.from, relation.from, "{id}: native sender");
+        assert_eq!(native_edge.to, relation.to, "{id}: native receiver");
+        let expected = relation
+            .query_content
+            .get("origin")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if let (Some(sender), Some(receiver_key)) = (
+            full_rows.get(relation.from.as_str()),
+            relation.to.as_deref(),
+        ) && let Some(receiver) = full_rows.get(receiver_key)
+        {
+            let sender_origin = sender
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            let receiver_origin = receiver
+                .overview
+                .as_ref()
+                .map(|overview| overview.query_recipe(id)["origin"].clone())
+                .unwrap_or(Value::Null);
+            assert_eq!(sender_origin, expected, "{id}: full-build origin owner");
+            if !expected.is_null() {
+                owned_origins += 1;
+                assert!(
+                    sender
+                        .sources
+                        .iter()
+                        .any(|source| source.path.to_str() == expected["path"].as_str()),
+                    "{id}: origin source belongs to the full-build sender"
+                );
+                assert_eq!(
+                    receiver_origin,
+                    Value::Null,
+                    "{id}: full-build receiver does not own the origin"
+                );
+            }
+        }
+    }
+    assert!(owned_origins > 0, "fixture has sender-owned origins");
+
+    enroll_stage_inventory(&home.options, &inputs);
+    let mut paths = selected_inputs
+        .iter()
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let mut stage = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        stage.begin(&paths[..64], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+
+    let snapshot = || {
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let head: Option<String> = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=semon_namespace() AND key='catalog_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let tables = [
+            "session_catalog",
+            "session_catalog_sources",
+            "session_catalog_changes",
+            "session_history_catalog",
+            "session_history_projections",
+            "session_history_slots",
+            "session_history_slot_parts",
+            "session_overview",
+            "session_trace_headers",
+            "session_trace_turns",
+            "session_trace_edges",
+            "session_slot_projections",
+            "session_slots",
+            "session_search_coverage",
+            "session_search_documents",
+            "session_search_memberships",
+            "session_search_counts",
+            "storage_proof_refs",
+            "storage_semantic_publications",
+            "storage_semantic_model_batches",
+            "storage_source_journal",
+            "session_catalog_invalidations",
+            "catalog_semantic_stage",
+            "catalog_semantic_frontier",
+            "catalog_semantic_sources",
+            "catalog_semantic_prior_owners",
+            "catalog_semantic_prior_sources",
+            "catalog_semantic_inputs",
+            "catalog_semantic_keys",
+            "catalog_semantic_endpoints",
+            "catalog_semantic_native",
+            "catalog_semantic_owner_sources",
+            "catalog_semantic_paths",
+            "catalog_semantic_names",
+            "catalog_semantic_events",
+            "catalog_semantic_relations",
+        ];
+        let mut state = Vec::with_capacity(tables.len());
+        for table in tables {
+            let mut statement = db
+                .prepare(&format!(
+                    "SELECT * FROM main.{table} WHERE namespace=semon_namespace()"
+                ))
+                .unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                        .map(|values| values.join("\u{1f}"))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            rows.sort();
+            state.push((table, rows));
+        }
+        let mut statement = db
+            .prepare(
+                "SELECT key,value FROM main.meta WHERE namespace=semon_namespace() AND key<>'catalog_semantic_group_admission'",
+            )
+            .unwrap();
+        let mut rows = statement
+            .query_map([], |row| {
+                Ok(format!(
+                    "{}\u{1f}{}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        rows.sort();
+        state.push(("meta", rows));
+        (head, state)
+    };
+
+    let mut deferred = false;
+    let mut refused = false;
+    for _ in 0..512 {
+        let batch = stage.batch(64).unwrap().expect("active stage remains");
+        if batch.paths.is_empty() {
+            continue;
+        }
+        let selected: BTreeSet<_> = batch.paths.iter().cloned().collect();
+        let batch_inputs = selected_inputs
+            .iter()
+            .filter(|input| {
+                selected.contains(
+                    &input
+                        .full_path(&home.options)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(batch_inputs.len(), batch.paths.len());
+        let prepared =
+            prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
+        if batch.phase == relation_stage::Phase::Publication {
+            let before_record = snapshot();
+            match stage.record(&batch, prepared.prepared()) {
+                Err(crate::events::StoreError::Configured(
+                    crate::storage::StorageError::HistoryRetentionBounds,
+                )) => {
+                    assert_eq!(snapshot(), before_record);
+                    refused = true;
+                    break;
+                }
+                Err(error) => panic!("unexpected typed publication record failure: {error:?}"),
+                Ok(crate::events::Outcome::Deferred) => {
+                    deferred = true;
+                    cache.end_scan();
+                    cache.release_published_indexes();
+                    continue;
+                }
+                Ok(crate::events::Outcome::Written) => {
+                    let before_publish = snapshot();
+                    match stage.publish(&batch, prepared.prepared()) {
+                        Err(crate::events::StoreError::Configured(
+                            crate::storage::StorageError::HistoryRetentionBounds,
+                        )) => {
+                            assert_eq!(snapshot(), before_publish);
+                            refused = true;
+                            break;
+                        }
+                        Err(error) => panic!("unexpected typed publication failure: {error:?}"),
+                        Ok((crate::events::Outcome::Deferred, None)) => deferred = true,
+                        Ok(result) => {
+                            panic!("oversized fixture unexpectedly published: {result:?}")
+                        }
+                    }
+                }
+                Ok(outcome) => panic!("unexpected publication record outcome: {outcome:?}"),
+            }
+        } else {
+            assert_eq!(
+                stage.record(&batch, prepared.prepared()).unwrap(),
+                crate::events::Outcome::Written
+            );
+        }
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    assert!(
+        deferred,
+        "oversized aggregate must first reduce its group bound"
+    );
+    assert!(
+        refused,
+        "one oversized bidirectional owner must refuse publication"
+    );
+    assert_eq!(snapshot().0, prior_head, "refusal preserves Catalog head");
+
+    drop(stage);
+    let mut resumed_stage = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        resumed_stage.begin(&paths[..64], &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    drop(resumed_stage);
+
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    let namespace = config.namespace.as_str();
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge),
+        "same-runtime resume keeps the refused publication blocker"
+    );
+
+    let hint_text: String = db
+        .query_row(
+            "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let hint: Value = serde_json::from_str(&hint_text).unwrap();
+    let refusal = &hint["refusal"];
+    let reject_marker = |invalid: Value, label: &str| {
+        let text = invalid.to_string();
+        db.execute(
+            "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_semantic_group_admission'",
+            rusqlite::params![text, namespace],
+        )
+        .unwrap();
+        assert_eq!(
+            crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+            None,
+            "stale {label} fence must not report a publication blocker"
+        );
+        db.execute(
+            "UPDATE main.meta SET value=?1 WHERE namespace=?2 AND key='catalog_semantic_group_admission'",
+            rusqlite::params![hint_text, namespace],
+        )
+        .unwrap();
+    };
+    for (field, stale) in [
+        ("epoch", json!(refusal["epoch"].as_i64().unwrap() + 1)),
+        (
+            "source_revision",
+            json!(refusal["source_revision"].as_i64().unwrap() + 1),
+        ),
+        ("base_generation", json!("stale-catalog-head")),
+        ("runtime_sha256", json!("0".repeat(64))),
+    ] {
+        let mut invalid = hint.clone();
+        invalid["refusal"][field] = stale;
+        reject_marker(invalid, field);
+    }
+
+    let live_blocker =
+        || crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap();
+    let assert_hint_unchanged = || {
+        let current: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_semantic_group_admission'",
+                [namespace],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            current, hint_text,
+            "live fence checks preserve refusal bytes"
+        );
+    };
+
+    let source_revision: i64 = db
+        .query_row(
+            "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.storage_source_journal SET revision=revision+1 WHERE namespace=?1",
+            [namespace],
+        )
+        .unwrap(),
+        1
+    );
+    let advanced_revision: i64 = db
+        .query_row(
+            "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(advanced_revision, source_revision + 1);
+    assert_hint_unchanged();
+    assert_eq!(live_blocker(), None, "journal revision fences the refusal");
+    assert_eq!(
+        db.execute(
+            "UPDATE main.storage_source_journal SET revision=?1 WHERE namespace=?2",
+            rusqlite::params![source_revision, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_hint_unchanged();
+
+    let stage_runtime: String = db
+        .query_row(
+            "SELECT runtime FROM main.catalog_semantic_stage WHERE namespace=?1",
+            [namespace],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(stage_runtime, "stale-runtime-fence");
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_stage SET runtime='stale-runtime-fence' WHERE namespace=?1",
+            [namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_hint_unchanged();
+    assert_eq!(
+        live_blocker(),
+        None,
+        "live stage runtime fences the refusal"
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_stage SET runtime=?1 WHERE namespace=?2",
+            rusqlite::params![stage_runtime, namespace],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        live_blocker(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+    assert_hint_unchanged();
+
+    let selected_claim = refusal["selected_claims"][0].clone();
+    let encoded_path = selected_claim["source_path_hex"].as_str().unwrap();
+    let path = String::from_utf8(
+        encoded_path
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| {
+                let high = (pair[0] as char).to_digit(16).unwrap() as u8;
+                let low = (pair[1] as char).to_digit(16).unwrap() as u8;
+                (high << 4) | low
+            })
+            .collect(),
+    )
+    .unwrap();
+    let prior_claim = selected_claim["claim"].as_i64();
+    let stale_claim = Some(prior_claim.map_or(0, |claim| claim + 1));
+    assert_eq!(
+        db.execute(
+        "UPDATE main.catalog_semantic_sources SET claim=?1 WHERE namespace=?2 AND source_path=?3",
+        rusqlite::params![stale_claim, namespace, path],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        None,
+        "changed selected source claim must not report a publication blocker"
+    );
+    assert_eq!(
+        db.execute(
+            "UPDATE main.catalog_semantic_sources SET claim=?1 WHERE namespace=?2 AND source_path=?3",
+            rusqlite::params![prior_claim, namespace, path],
+        )
+        .unwrap(),
+        1
+    );
+    assert_eq!(
+        crate::storage::sqlite::semantic::catalog_publication_blocker(&db, namespace).unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge),
+        "restored marker and selected claim remain valid"
+    );
+    drop(db);
+
+    let page = crate::session_catalog_page(&home.options, "fixture", "limit=100");
+    assert_eq!(page.status, 200);
+    let body: Value = serde_json::from_slice(&page.body).unwrap();
+    assert_eq!(body["completeness"]["state"], "partial");
+    assert_eq!(
+        body["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
+    assert_eq!(body["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(body["freshness"], "updating");
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["key"], "prior");
+
+    let mut search_admitted = false;
+    let mut on_search = |_admission: crate::catalog::CatalogSearchAdmission| {
+        search_admitted = true;
+        false
+    };
+    let search = crate::catalog::page_with_gate(
+        &home.options,
+        "fixture",
+        crate::catalog::Request::parse("q=prior&limit=100").unwrap(),
+        || Ok(()),
+        Some(&mut on_search),
+    );
+    assert_eq!(search.status, 200);
+    let search: Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(search["completeness"]["state"], "partial");
+    assert_eq!(
+        search["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
+    assert_eq!(search["freshness"], "updating");
+    assert_eq!(search["items"][0]["key"], "prior");
+    assert_eq!(search["search"]["index_complete"], false);
+    assert!(search_admitted);
+
+    let mut complete_request = crate::catalog::Request::parse("limit=100").unwrap();
+    complete_request.require_complete = true;
+    let complete =
+        crate::storage::read_local_catalog_page(&home.options, "fixture", &complete_request)
+            .unwrap();
+    assert_eq!(complete.status, 503);
+    let complete: Value = serde_json::from_slice(&complete.body).unwrap();
+    assert_eq!(complete["error"]["code"], "publication_too_large");
+    assert_eq!(complete["error"]["retryable"], false);
+}
+
+fn assert_staged_bidirectional_message_pages(rounds: i64) {
+    let home = Home::new();
+    write_bidirectional_message_page_fixture(&home, rounds);
     let oracle = assert_queued_identity_matches_oracle(&home, &home.options);
     let mut full_options = home.options.clone();
     full_options.cache = home.root.join("full-origin-oracle.json");
@@ -10361,15 +10963,391 @@ fn staged_agent_messages_match_the_shared_builder_without_duplicate_relations() 
             .unwrap()
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
-        let unique: BTreeSet<&String> = edges.iter().collect();
-        assert_eq!(unique.len(), edges.len(), "{key}: duplicate staged edges");
-        for edge in &edges {
-            assert!(
-                ids.contains(edge.as_str()),
-                "{key}: staged edge {edge} the shared builder doesn't draw"
-            );
-        }
+        let stored: BTreeSet<String> = edges.iter().cloned().collect();
+        assert_eq!(stored.len(), edges.len(), "{key}: duplicate staged edges");
+        assert!(stored.iter().all(|edge| ids.contains(edge.as_str())));
+        // Trace publication includes human asks as well as agent messages.
+        let expected: BTreeSet<String> = oracle
+            .handoffs
+            .iter()
+            .filter(|handoff| handoff.from == key || handoff.to.as_deref() == Some(key))
+            .map(|handoff| handoff.id.clone())
+            .collect();
+        assert_eq!(stored, expected, "{key}: persisted staged edges");
     }
+}
+
+fn staged_claude_header_batch(
+    home: &Home,
+    cache: &mut EventCache,
+    header_path: &std::path::Path,
+) -> relation_stage::Batch {
+    let paths = crate::inputs(&home.options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| input.path.ends_with(".jsonl"))
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let header_path = header_path.to_string_lossy().into_owned();
+    for _ in 0..128 {
+        let batch = cache
+            .semantic_batch(64)
+            .unwrap()
+            .expect("active semantic stage");
+        if batch.phase == relation_stage::Phase::Relations
+            && batch
+                .context
+                .matching_header_paths
+                .as_ref()
+                .is_some_and(|selected| selected.iter().any(|path| path == &header_path))
+        {
+            return batch;
+        }
+        if batch.paths.is_empty() {
+            assert!(matches!(
+                batch.phase,
+                relation_stage::Phase::Indexing | relation_stage::Phase::Identity
+            ));
+            continue;
+        }
+        assert_ne!(batch.phase, relation_stage::Phase::Publication);
+        let batch_inputs = batch
+            .paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Claude,
+                path: std::path::Path::new(path)
+                    .strip_prefix(&home.options.claude_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            prepare_semantic_batch(&home.options, cache, &batch_inputs, &batch, NOW).unwrap();
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
+        cache.end_scan();
+        cache.release_published_indexes();
+    }
+    panic!("semantic stage did not select the requested Claude header page");
+}
+
+#[test]
+fn nested_claude_header_page_keeps_spawn_turn_and_origin_when_source_order_changes() {
+    let home = down_and_nested_home();
+    home.build_query();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let mut inputs = crate::inputs(&home.options).unwrap();
+    inputs.retain(|input| input.path.ends_with(".jsonl"));
+    assert_eq!(inputs.len(), 4);
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let source_for = |suffix: &str| {
+        full.rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .find(|source| source.path.to_string_lossy().ends_with(suffix))
+            .unwrap()
+            .clone()
+    };
+    let lead_source = source_for("lead.jsonl");
+    let leaf_source = source_for("agent-leaf.jsonl");
+    let selected_spawn = stable_id("s", "spawn:claude:leaf");
+    let full_spawn = full
+        .relationships
+        .relations
+        .get(&selected_spawn)
+        .expect("full build contains the selected leaf spawn");
+    assert_eq!(
+        full_spawn.source_turn,
+        relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:mid"))
+    );
+    let expected_origin = full_spawn
+        .query_content
+        .get("origin")
+        .cloned()
+        .unwrap_or(Value::Null);
+    assert!(
+        expected_origin.is_object(),
+        "full spawn has a prompt origin"
+    );
+    assert!(
+        expected_origin["field"].is_object(),
+        "full spawn origin has its exact native prompt descriptor"
+    );
+
+    let batch = staged_claude_header_batch(&home, &mut cache, &leaf_source.path);
+    assert_eq!(batch.phase, relation_stage::Phase::Relations);
+    assert_eq!(batch.context.epoch, Some(batch.epoch));
+    assert_eq!(batch.relation_cursors.len(), 1);
+    assert_eq!(
+        batch.relation_cursors[0].path,
+        leaf_source.path.to_string_lossy().into_owned()
+    );
+    let tm = batch
+        .context
+        .claude_call_locations
+        .get("tm")
+        .and_then(Option::as_ref)
+        .expect("the semantic batch carries the exact cached parent call");
+    assert_eq!(tm.source.path, lead_source.path);
+    assert_eq!(tm.kind, Kind::Tool);
+    assert!(
+        batch
+            .paths
+            .iter()
+            .any(|path| std::path::Path::new(path) == tm.source.path.as_path())
+    );
+    let matching_headers: BTreeSet<_> = batch
+        .context
+        .matching_header_paths
+        .as_ref()
+        .expect("the selected relation page carries its exact header")
+        .iter()
+        .cloned()
+        .collect();
+    let matching_locations = batch
+        .context
+        .matching_locations
+        .as_ref()
+        .expect("the selected relation page carries its exact event locations");
+    let location_matches = |candidate: &relation_stage::Location| {
+        matching_locations.iter().any(|selected| {
+            candidate.source == selected.source
+                && candidate.offset == selected.offset
+                && candidate.block == selected.block
+                && candidate.kind == selected.kind
+                && candidate.occurrence == selected.occurrence
+        })
+    };
+    let expected_page: BTreeSet<_> = full
+        .relationships
+        .relations
+        .iter()
+        .filter(|(_, relation)| {
+            let header_selected = relation.kind == "spawn"
+                && relation.to.as_ref().is_some_and(|owner| {
+                    full.rows
+                        .iter()
+                        .find(|row| &row.key == owner)
+                        .is_some_and(|row| {
+                            row.sources.iter().any(|source| {
+                                matching_headers
+                                    .contains(&source.path.to_string_lossy().into_owned())
+                            })
+                        })
+                });
+            let location_selected = relation
+                .placements
+                .iter()
+                .any(|placement| location_matches(&placement.at))
+                || relation.after.iter().any(location_matches);
+            header_selected || location_selected
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    assert!(expected_page.contains(&selected_spawn));
+    let nested_relay = full
+        .relationships
+        .relations
+        .values()
+        .find(|relation| {
+            relation.kind == "relay"
+                && relation.from == "leaf"
+                && relation.to.as_deref() == Some("mid")
+        })
+        .expect("full build contains the selected leaf-to-mid relay");
+    assert!(
+        expected_page.contains(&nested_relay.id),
+        "matching send and receipt select the leaf-to-mid relay"
+    );
+    assert_eq!(
+        expected_page.len(),
+        2,
+        "the exact batch selects both relations"
+    );
+
+    let inputs_for = |paths: &[String]| {
+        paths
+            .iter()
+            .map(|path| crate::Input {
+                root: crate::InputRoot::Claude,
+                path: std::path::Path::new(path)
+                    .strip_prefix(&home.options.claude_home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let forward_inputs = inputs_for(&batch.paths);
+    let mut reverse_inputs = forward_inputs.clone();
+    reverse_inputs.reverse();
+    let namespace = home.options.source.namespace().unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let cursor_state = |db: &rusqlite::Connection| {
+        let mut statement = db
+            .prepare("SELECT source_path,relation_after,relation_done FROM catalog_semantic_sources WHERE namespace=?1 ORDER BY source_path")
+            .unwrap();
+        statement
+            .query_map([namespace.as_str()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    (row.get::<_, String>(1)?, row.get::<_, bool>(2)?),
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+            .unwrap()
+    };
+    let relation_ids = |db: &rusqlite::Connection| {
+        let mut statement = db
+            .prepare("SELECT relation_id FROM catalog_semantic_relations WHERE namespace=?1 ORDER BY relation_id")
+            .unwrap();
+        statement
+            .query_map([namespace.as_str()], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<BTreeSet<String>>>()
+            .unwrap()
+    };
+    let before_cursors = cursor_state(&db);
+    let persisted_before = relation_ids(&db);
+    let forward =
+        prepare_semantic_batch(&home.options, &mut cache, &forward_inputs, &batch, NOW).unwrap();
+    let reverse =
+        prepare_semantic_batch(&home.options, &mut cache, &reverse_inputs, &batch, NOW).unwrap();
+    let selected_witnesses = |prepared: &PreparedSources| {
+        prepared
+            .relationships
+            .relations
+            .iter()
+            .map(|(id, relation)| {
+                (
+                    id.clone(),
+                    (
+                        relation.source_turn.clone(),
+                        relation
+                            .query_content
+                            .get("origin")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let expected_witnesses: BTreeMap<_, _> = expected_page
+        .iter()
+        .map(|id| {
+            let relation = &full.relationships.relations[id];
+            (
+                id.clone(),
+                (
+                    relation.source_turn.clone(),
+                    relation
+                        .query_content
+                        .get("origin")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+            )
+        })
+        .collect();
+    assert_eq!(
+        selected_witnesses(forward.prepared()),
+        expected_witnesses,
+        "source order: selected page relation has full-build source turn and origin"
+    );
+    assert_eq!(
+        selected_witnesses(reverse.prepared()),
+        expected_witnesses,
+        "reversed source order: selected page relation has full-build source turn and origin"
+    );
+    assert_eq!(
+        cursor_state(&db),
+        before_cursors,
+        "preparation leaves cursors unchanged"
+    );
+
+    assert_eq!(
+        cache
+            .record_semantic_batch(&batch, forward.prepared())
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    cache.end_scan();
+    cache.release_published_indexes();
+    let after_cursors = cursor_state(&db);
+    let changed_cursors: BTreeSet<_> = before_cursors
+        .iter()
+        .filter_map(|(path, before)| {
+            after_cursors
+                .get(path)
+                .is_some_and(|after| after != before)
+                .then_some(path.clone())
+        })
+        .collect();
+    assert_eq!(
+        changed_cursors,
+        BTreeSet::from([batch.relation_cursors[0].path.clone()]),
+        "recording the selected page moves only its primary cursor"
+    );
+    let primary_after = after_cursors
+        .get(&batch.relation_cursors[0].path)
+        .expect("primary relation cursor remains staged");
+    assert_eq!(primary_after.0, batch.relation_cursors[0].end);
+    let primary_done: bool = db
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM catalog_semantic_events WHERE namespace=?1 AND source_path=?2 AND event_key>?3 AND copied=0 AND qualified=1)",
+            rusqlite::params![namespace.as_str(), batch.relation_cursors[0].path, batch.relation_cursors[0].end],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(primary_after.1, primary_done);
+    let persisted_after = relation_ids(&db);
+    let added: BTreeSet<_> = persisted_after
+        .difference(&persisted_before)
+        .cloned()
+        .collect();
+    assert_eq!(
+        added,
+        expected_page
+            .difference(&persisted_before)
+            .cloned()
+            .collect()
+    );
+    let persisted_relation: String = db
+        .query_row(
+            "SELECT metadata FROM catalog_semantic_relations WHERE namespace=?1 AND relation_id=?2",
+            rusqlite::params![namespace.as_str(), selected_spawn],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let persisted_relation: Value = serde_json::from_str(&persisted_relation).unwrap();
+    let prepared_relation = forward
+        .prepared()
+        .relationships
+        .relations
+        .get(&selected_spawn)
+        .unwrap();
+    assert_eq!(
+        persisted_relation,
+        serde_json::to_value(prepared_relation).unwrap()
+    );
 }
 
 #[test]
