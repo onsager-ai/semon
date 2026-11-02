@@ -2679,166 +2679,6 @@ impl crate::events::store::semantic_stage::ReductionStore for ScopedReduction<'_
     }
 }
 
-#[cfg(test)]
-mod scoped_reduction_tests {
-    use super::*;
-    use crate::events::store::semantic_stage::ReductionStore;
-
-    fn reduction_db() -> Connection {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch(
-            "CREATE TABLE main.catalog_semantic_endpoints(namespace TEXT NOT NULL,session_key TEXT NOT NULL,harness TEXT NOT NULL,parent_native TEXT,parent_native_harness TEXT,parent_key TEXT,root_key TEXT,cost REAL,family_cost REAL,parent_resolved INTEGER NOT NULL DEFAULT 0,cost_done INTEGER NOT NULL DEFAULT 0,children_pending INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(namespace,session_key));
-             CREATE TABLE main.catalog_semantic_native(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL);
-             CREATE TABLE main.catalog_semantic_paths(namespace TEXT NOT NULL,session_key TEXT NOT NULL,root_key TEXT,path TEXT NOT NULL);",
-        )
-        .unwrap();
-        db
-    }
-
-    fn endpoint(
-        db: &Connection,
-        key: &str,
-        harness: &str,
-        parent_native: Option<&str>,
-        parent_native_harness: Option<&str>,
-        parent_key: Option<&str>,
-        root_key: Option<&str>,
-    ) {
-        db.execute(
-            "INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,parent_native,parent_native_harness,parent_key,root_key,cost,family_cost) VALUES('scope',?1,?2,?3,?4,?5,?6,1,1)",
-            params![key, harness, parent_native, parent_native_harness, parent_key, root_key],
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn scoped_parent_reduction_preserves_causal_parent_and_native_fallback_behavior() {
-        let db = reduction_db();
-        endpoint(&db, "lead", "claude", None, None, None, Some("lead"));
-        endpoint(&db, "mid", "claude", None, None, None, Some("mid"));
-        endpoint(
-            &db,
-            "leaf",
-            "claude",
-            Some("lead"),
-            Some("claude"),
-            Some("mid"),
-            None,
-        );
-        endpoint(
-            &db,
-            "codex:shared",
-            "codex",
-            None,
-            None,
-            None,
-            Some("codex:shared"),
-        );
-        endpoint(
-            &db,
-            "codex-child",
-            "codex",
-            Some("shared"),
-            Some("codex"),
-            None,
-            None,
-        );
-        endpoint(
-            &db,
-            "claude-directory-parent",
-            "claude",
-            None,
-            None,
-            None,
-            Some("claude-directory-parent"),
-        );
-        endpoint(
-            &db,
-            "directory-only-child",
-            "claude",
-            Some("directory-parent-id"),
-            Some("claude"),
-            None,
-            None,
-        );
-        endpoint(
-            &db,
-            "unresolved-child",
-            "codex",
-            Some("not-staged"),
-            Some("codex"),
-            None,
-            None,
-        );
-        db.execute(
-            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','claude','lead','lead'),('scope','codex','shared','codex:shared'),('scope','claude','directory-parent-id','claude-directory-parent')",
-            [],
-        )
-        .unwrap();
-
-        let reducer = ScopedReduction {
-            db: &db,
-            ns: "scope",
-        };
-        reducer.parent("leaf").unwrap();
-        reducer.parent("codex-child").unwrap();
-        reducer.parent("directory-only-child").unwrap();
-        reducer.parent("unresolved-child").unwrap();
-
-        let parent: String = db
-            .query_row(
-                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='leaf'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(parent, "mid", "the explicit causal parent wins");
-        let alias: String = db
-            .query_row(
-                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='codex-child'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(alias, "codex:shared", "native lookup preserves key aliases");
-        let directory_parent: String = db
-            .query_row(
-                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='directory-only-child'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(directory_parent, "claude-directory-parent");
-        let unresolved: Option<String> = db
-            .query_row(
-                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='unresolved-child'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(unresolved, None, "an absent native owner stays unresolved");
-
-        endpoint(&db, "ambiguous-child", "codex", None, None, None, None);
-        db.execute(
-            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','codex','duplicate','ambiguous-child'),('scope','codex','duplicate','peer')",
-            [],
-        )
-        .unwrap();
-        assert!(matches!(
-            reducer.parent("ambiguous-child"),
-            Err(rusqlite::Error::InvalidQuery)
-        ));
-        let resolved: bool = db
-            .query_row(
-                "SELECT parent_resolved FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='ambiguous-child'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(!resolved, "ambiguity refusal leaves the endpoint untouched");
-    }
-}
-
 fn error(error: rusqlite::Error) -> StoreError {
     if let rusqlite::Error::ToSqlConversionFailure(cause) = &error
         && cause.is::<crate::events::store::semantic_stage::PhysicalOwnerSourceBudget>()
@@ -5582,5 +5422,165 @@ impl Stage {
         crate::events::store::configured::effect("semantic_record").map_err(error)?;
         tx.commit().map_err(error)?;
         Ok(Outcome::Written)
+    }
+}
+
+#[cfg(test)]
+mod scoped_reduction_tests {
+    use super::*;
+    use crate::events::store::semantic_stage::ReductionStore;
+
+    fn reduction_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE main.catalog_semantic_endpoints(namespace TEXT NOT NULL,session_key TEXT NOT NULL,harness TEXT NOT NULL,parent_native TEXT,parent_native_harness TEXT,parent_key TEXT,root_key TEXT,cost REAL,family_cost REAL,parent_resolved INTEGER NOT NULL DEFAULT 0,cost_done INTEGER NOT NULL DEFAULT 0,children_pending INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(namespace,session_key));
+             CREATE TABLE main.catalog_semantic_native(namespace TEXT NOT NULL,harness TEXT NOT NULL,native_id TEXT NOT NULL,session_key TEXT NOT NULL);
+             CREATE TABLE main.catalog_semantic_paths(namespace TEXT NOT NULL,session_key TEXT NOT NULL,root_key TEXT,path TEXT NOT NULL);",
+        )
+        .unwrap();
+        db
+    }
+
+    fn endpoint(
+        db: &Connection,
+        key: &str,
+        harness: &str,
+        parent_native: Option<&str>,
+        parent_native_harness: Option<&str>,
+        parent_key: Option<&str>,
+        root_key: Option<&str>,
+    ) {
+        db.execute(
+            "INSERT INTO main.catalog_semantic_endpoints(namespace,session_key,harness,parent_native,parent_native_harness,parent_key,root_key,cost,family_cost) VALUES('scope',?1,?2,?3,?4,?5,?6,1,1)",
+            params![key, harness, parent_native, parent_native_harness, parent_key, root_key],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scoped_parent_reduction_preserves_causal_parent_and_native_fallback_behavior() {
+        let db = reduction_db();
+        endpoint(&db, "lead", "claude", None, None, None, Some("lead"));
+        endpoint(&db, "mid", "claude", None, None, None, Some("mid"));
+        endpoint(
+            &db,
+            "leaf",
+            "claude",
+            Some("lead"),
+            Some("claude"),
+            Some("mid"),
+            None,
+        );
+        endpoint(
+            &db,
+            "codex:shared",
+            "codex",
+            None,
+            None,
+            None,
+            Some("codex:shared"),
+        );
+        endpoint(
+            &db,
+            "codex-child",
+            "codex",
+            Some("shared"),
+            Some("codex"),
+            None,
+            None,
+        );
+        endpoint(
+            &db,
+            "claude-directory-parent",
+            "claude",
+            None,
+            None,
+            None,
+            Some("claude-directory-parent"),
+        );
+        endpoint(
+            &db,
+            "directory-only-child",
+            "claude",
+            Some("directory-parent-id"),
+            Some("claude"),
+            None,
+            None,
+        );
+        endpoint(
+            &db,
+            "unresolved-child",
+            "codex",
+            Some("not-staged"),
+            Some("codex"),
+            None,
+            None,
+        );
+        db.execute(
+            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','claude','lead','lead'),('scope','codex','shared','codex:shared'),('scope','claude','directory-parent-id','claude-directory-parent')",
+            [],
+        )
+        .unwrap();
+
+        let reducer = ScopedReduction {
+            db: &db,
+            ns: "scope",
+        };
+        reducer.parent("leaf").unwrap();
+        reducer.parent("codex-child").unwrap();
+        reducer.parent("directory-only-child").unwrap();
+        reducer.parent("unresolved-child").unwrap();
+
+        let parent: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='leaf'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, "mid", "the explicit causal parent wins");
+        let alias: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='codex-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias, "codex:shared", "native lookup preserves key aliases");
+        let directory_parent: String = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='directory-only-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(directory_parent, "claude-directory-parent");
+        let unresolved: Option<String> = db
+            .query_row(
+                "SELECT parent_key FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='unresolved-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, None, "an absent native owner stays unresolved");
+
+        endpoint(&db, "ambiguous-child", "codex", None, None, None, None);
+        db.execute(
+            "INSERT INTO main.catalog_semantic_native(namespace,harness,native_id,session_key) VALUES('scope','codex','duplicate','ambiguous-child'),('scope','codex','duplicate','peer')",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(
+            reducer.parent("ambiguous-child"),
+            Err(rusqlite::Error::InvalidQuery)
+        ));
+        let resolved: bool = db
+            .query_row(
+                "SELECT parent_resolved FROM main.catalog_semantic_endpoints WHERE namespace='scope' AND session_key='ambiguous-child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!resolved, "ambiguity refusal leaves the endpoint untouched");
     }
 }
