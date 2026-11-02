@@ -599,11 +599,9 @@ mod verified_history_tests {
     }
 
     fn runtime_capture(row: &CatalogRow) -> String {
-        let mut observations = PresentationObservations {
-            source_runtime: Some("source-runtime".into()),
-            runtime: Some("runtime".into()),
-            ..PresentationObservations::default()
-        };
+        let mut observations = PresentationObservations::default();
+        observations.source_runtime = Some("source-runtime".into());
+        observations.runtime = Some("runtime".into());
         let cwds = BTreeSet::from(["/cwd".to_owned()]);
         observations
             .capture_runtime(row, &cwds, "source-runtime-v1:test".into())
