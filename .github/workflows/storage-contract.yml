@@ -58,6 +58,20 @@ jobs:
             tail -n 55 "$output"
           done
           exit "$result"
+      - name: Exact ordinary receipt replay and original History grants
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          case_number=0
+          for test in events::store::tests::ordinary_receipt_exact_replay_and_partial_or_mismatched_rows_are_atomic model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable; do
+            case_number=$((case_number+1))
+            output="$RUNNER_TEMP/477-history-auth-$case_number.log"
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$output" 2>&1 || result=1
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$output"; then result=1; fi
+            tail -n 65 "$output"
+          done
+          exit "$result"
       - name: Formatting
         id: formatting
         if: ${{ !cancelled() }}
