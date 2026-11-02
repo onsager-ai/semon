@@ -104,6 +104,7 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
 pub(super) struct PreparedPresentations<'a> {
     pub(super) prepared: &'a crate::model::PreparedSources,
     pub(super) rows: &'a [(String, String)],
+    pub(super) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
 #[derive(Debug)]
@@ -164,10 +165,12 @@ pub(super) fn publish(
     publication: &str,
     proof: &str,
     presentations: PreparedPresentations<'_>,
-    overview_budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<(), PublicationError> {
-    let prepared = presentations.prepared;
-    let presentations = presentations.rows;
+    let PreparedPresentations {
+        prepared,
+        rows: presentations,
+        overview_budget,
+    } = presentations;
     let id = ProofGenerationId::derive(namespace, admission, stream, proof);
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
     for row in &prepared.rows {
@@ -416,7 +419,7 @@ pub(super) fn retain_current_refs_for_unowned_history(
         .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|error| PublicationError::Storage(failed(error)))?;
     if ids.len() > 64 {
-        return Err(StorageError::HistoryRetentionBounds);
+        return Err(StorageError::HistoryRetentionBounds.into());
     }
     for id in ids {
         db.execute(

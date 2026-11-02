@@ -3485,8 +3485,8 @@ impl Stage {
                 super::proof_generations::PreparedPresentations {
                     prepared,
                     rows: &presentations,
+                    overview_budget,
                 },
-                overview_budget,
             )
             .map_err(|error| match error {
                 super::proof_generations::PublicationError::Storage(error) => {
