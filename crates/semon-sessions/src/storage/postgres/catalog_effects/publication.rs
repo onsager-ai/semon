@@ -438,6 +438,14 @@ pub(in crate::storage::postgres) fn publish(
     #[cfg(test)]
     eprintln!("PG_PUBLISH_STAGE owner_state");
     let prior = tx.driver.query("SELECT stage_epoch,runtime,generation FROM semon_pg_native_catalog_stage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
+    #[cfg(test)]
+    eprintln!(
+        "PG_PUBLISH_DIAGNOSTIC owner_state row_count={} expected_present={} observation_runtime_present={} prior_present={}",
+        publication.rows.len(),
+        expected.is_some(),
+        observation_runtime.is_some(),
+        !prior.is_empty(),
+    );
     let old_epoch = prior.first().map(|row| row.get::<_, i64>(0));
     let old_runtime = prior
         .first()
