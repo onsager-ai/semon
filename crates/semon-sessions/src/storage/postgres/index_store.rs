@@ -815,11 +815,17 @@ impl IndexStore for NativeIndex {
         self.pool
             .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
                 super::catalog_effects::withdrawal::remove(tx, files).inspect_err(|error| {
-                    eprintln!("477-withdrawal dispatch body files={} error={error:?}", files.len());
+                    eprintln!(
+                        "477-withdrawal dispatch body files={} error={error:?}",
+                        files.len()
+                    );
                 })
             })
             .inspect_err(|error| {
-                eprintln!("477-withdrawal dispatch transaction files={} error={error:?}", files.len());
+                eprintln!(
+                    "477-withdrawal dispatch transaction files={} error={error:?}",
+                    files.len()
+                );
             })
             .map_err(err)
     }

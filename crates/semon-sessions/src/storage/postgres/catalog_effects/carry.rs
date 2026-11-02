@@ -214,7 +214,9 @@ pub(super) fn trace_families(
         &args,
     ).map_err(sqlstate::error)?;
     if inserted != eligible as u64 {
-        eprintln!("477-withdrawal trace header previous={previous} generation={generation} expected={eligible} actual={inserted}");
+        eprintln!(
+            "477-withdrawal trace header previous={previous} generation={generation} expected={eligible} actual={inserted}"
+        );
         return Err(StorageError::ScopeChanged);
     }
     tx.check()
@@ -313,7 +315,9 @@ pub(in crate::storage::postgres) fn unmentioned(
         // Every carried Source keeps the proof that admitted it.
         let unproven: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=sha256($1::bytea) AND s.namespace=$1 AND s.generation=$2 AND s.key_digest=ANY($3::bytea[]) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_proofs p WHERE p.namespace_digest=s.namespace_digest AND p.namespace=s.namespace AND p.generation=s.generation AND p.path_digest=s.path_digest))", &[&ns, &generation.as_bytes(), &keys]).map_err(sqlstate::error)?.get(0);
         if unproven {
-            eprintln!("477-withdrawal carry unproven previous={previous} generation={generation} owners={keys:x?}");
+            eprintln!(
+                "477-withdrawal carry unproven previous={previous} generation={generation} owners={keys:x?}"
+            );
             return Err(StorageError::ScopeChanged);
         }
         carried += keys.len() as u64;

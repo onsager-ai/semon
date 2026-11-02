@@ -20,7 +20,10 @@ pub(in crate::storage::postgres) fn remove(
     }
     let request = encoded(&("source-withdrawal-v1", files))?;
     let operation = digest(&request);
-    eprintln!("477-withdrawal begin operation={operation:x?} files={}", files.len());
+    eprintln!(
+        "477-withdrawal begin operation={operation:x?} files={}",
+        files.len()
+    );
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     tx.driver.query_one("SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 FOR UPDATE", &[&ns]).map_err(sqlstate::error)?;
     // Reconcile the exact full-value ACK before inspecting a successor head.
@@ -52,7 +55,8 @@ pub(in crate::storage::postgres) fn remove(
             path,
             ledger.as_ref().ok_or(StorageError::InvalidArguments)?,
         )
-        .inspect_err(|e| eprintln!("477-withdrawal relocation_removed error={e:?}"))? {
+        .inspect_err(|e| eprintln!("477-withdrawal relocation_removed error={e:?}"))?
+        {
             relocated += 1;
         }
     }
@@ -96,8 +100,9 @@ pub(in crate::storage::postgres) fn remove(
     let mut removed = Vec::new();
     let mut connected = false;
     let mut after = None;
-    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))
-        .inspect_err(|e| eprintln!("477-withdrawal affected owners generation={previous} error={e:?}"))? {
+    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn)).inspect_err(|e| {
+        eprintln!("477-withdrawal affected owners generation={previous} error={e:?}")
+    })? {
         for (_, value) in &page {
             let hits = value
                 .sources
@@ -133,8 +138,9 @@ pub(in crate::storage::postgres) fn remove(
     let mut after = None;
     while !connected
         && !removed.is_empty()
-        && let Some(page) = owners(tx, &previous, &after, None)
-            .inspect_err(|e| eprintln!("477-withdrawal related owners generation={previous} error={e:?}"))?
+        && let Some(page) = owners(tx, &previous, &after, None).inspect_err(|e| {
+            eprintln!("477-withdrawal related owners generation={previous} error={e:?}")
+        })?
     {
         for (_, row) in &page {
             if removed.contains(&row.key) {
@@ -175,12 +181,10 @@ pub(in crate::storage::postgres) fn remove(
             .inspect_err(|e| eprintln!("477-withdrawal defer error={e:?}"));
     };
     let prior_epoch: i64 = stage.get(0);
-    let epoch = prior_epoch
-        .checked_add(1)
-        .ok_or_else(|| {
-            eprintln!("477-withdrawal epoch overflow actual={prior_epoch}");
-            StorageError::ScopeChanged
-        })?;
+    let epoch = prior_epoch.checked_add(1).ok_or_else(|| {
+        eprintln!("477-withdrawal epoch overflow actual={prior_epoch}");
+        StorageError::ScopeChanged
+    })?;
     let runtime: Vec<u8> = stage.get(1);
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;
@@ -212,13 +216,16 @@ pub(in crate::storage::postgres) fn remove(
             crate::CatalogReadScope::RetainedHistory,
         ] {
             effects.counts(scope).inspect_err(|e| {
-                eprintln!("477-withdrawal counts scope={scope:?} generation={generation} error={e:?}");
+                eprintln!(
+                    "477-withdrawal counts scope={scope:?} generation={generation} error={e:?}"
+                );
             })?;
         }
     }
     let tx = effects.tx.into_inner();
-    super::search::publish_state(tx, &generation)
-        .inspect_err(|e| eprintln!("477-withdrawal publish_state generation={generation} error={e:?}"))?;
+    super::search::publish_state(tx, &generation).inspect_err(|e| {
+        eprintln!("477-withdrawal publish_state generation={generation} error={e:?}")
+    })?;
     if tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2,semantic_pending=false WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation=$3", &[&ns,&generation,&previous]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     if tx.driver.execute("UPDATE semon_pg_native_catalog_stage SET stage_epoch=$2,runtime=$3,generation=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND singleton AND stage_epoch=$5", &[&ns,&epoch,&runtime,&generation.as_bytes(),&prior_epoch]).map_err(sqlstate::error)?!=1 {return Err(StorageError::Conflict);}
     tx.driver.execute("INSERT INTO semon_pg_native_catalog_operations(namespace,operation_id,payload,generation,stage_epoch) VALUES($1,$2,$3,$4,$5)", &[&ns,&operation,&request,&generation.as_bytes(),&epoch]).map_err(sqlstate::error)?;
@@ -235,7 +242,10 @@ pub(in crate::storage::postgres) fn remove(
         tx.driver.execute("DELETE FROM semon_pg_source_invalidations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND source_path=$2 AND reason='removed'", &[&ns,&path.as_bytes()]).map_err(sqlstate::error)?;
     }
     tx.check().inspect_err(|e| {
-        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+        eprintln!(
+            "477-withdrawal transaction check line={} error={e:?}",
+            line!()
+        );
     })?;
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
@@ -263,7 +273,10 @@ fn defer(
     }
     tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
     tx.check().inspect_err(|e| {
-        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+        eprintln!(
+            "477-withdrawal transaction check line={} error={e:?}",
+            line!()
+        );
     })?;
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
@@ -279,7 +292,10 @@ fn owners(
     paths: Option<&Vec<Vec<u8>>>,
 ) -> Result<Option<Page>, StorageError> {
     tx.check().inspect_err(|e| {
-        eprintln!("477-withdrawal transaction check line={} error={e:?}", line!());
+        eprintln!(
+            "477-withdrawal transaction check line={} error={e:?}",
+            line!()
+        );
     })?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let rows = tx.driver.query("WITH page AS MATERIALIZED (SELECT r.key_digest,r.session_key,r.metadata FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND ($3::bytea IS NULL OR r.key_digest>$3) AND ($4::bytea[] IS NULL OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[]))) ORDER BY r.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END FROM page ORDER BY key_digest", &[&ns, &previous.as_bytes(), after, &paths]).map_err(sqlstate::error)?;
@@ -300,7 +316,8 @@ fn owners(
         if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
             eprintln!(
                 "477-withdrawal owner key previous={previous} expected={:x?} actual={:x?}",
-                digest(&row.get::<_, Vec<u8>>(1)), digest(value.key.as_bytes())
+                digest(&row.get::<_, Vec<u8>>(1)),
+                digest(value.key.as_bytes())
             );
             return Err(StorageError::ScopeChanged);
         }

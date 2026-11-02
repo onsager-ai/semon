@@ -134,6 +134,9 @@ pub(in crate::storage::postgres) fn verify_state(
     let valid: bool = tx.driver.query_one("WITH documents AS MATERIALIZED (SELECT scope,key_digest,session_key,complete FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2), owners AS MATERIALIZED (SELECT key_digest,session_key,true AS current FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 UNION ALL SELECT o.key_digest,o.session_key,false FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key)), coverage AS MATERIALIZED (SELECT scope,incomplete FROM semon_pg_native_catalog_search_coverage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2), publications AS MATERIALIZED (SELECT * FROM semon_pg_native_catalog_search_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2) SELECT (SELECT count(*) FROM coverage)=2 AND (SELECT count(*) FROM publications)=2 AND NOT EXISTS(SELECT 1 FROM coverage c WHERE c.scope NOT IN ('current'::bytea,'retained_history'::bytea) OR c.incomplete<0 OR c.incomplete<>(SELECT count(*) FROM documents d WHERE d.scope=c.scope AND NOT d.complete) OR NOT EXISTS(SELECT 1 FROM publications p WHERE p.scope=c.scope AND p.version=$3 AND p.search_generation=$2 AND p.backfill_complete AND p.incomplete=c.incomplete)) AND NOT EXISTS(SELECT 1 FROM owners o WHERE NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=o.key_digest AND d.session_key=o.session_key AND d.scope='retained_history'::bytea) OR (o.current AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=o.key_digest AND d.session_key=o.session_key AND d.scope='current'::bytea))) AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.scope NOT IN ('current'::bytea,'retained_history'::bytea) OR NOT EXISTS(SELECT 1 FROM owners o WHERE o.key_digest=d.key_digest AND o.session_key=d.session_key AND (o.current OR d.scope='retained_history'::bytea))) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners o WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_headers h WHERE h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key AND h.last_ms=o.last_ms)) AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_search_memberships m WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND (octet_length(m.gram)>12 OR NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=m.key_digest AND d.session_key=m.session_key AND d.scope='retained_history'::bytea AND d.complete) OR NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key AND c.last_ms=m.last_ms UNION ALL SELECT 1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key WHERE o.namespace_digest=m.namespace_digest AND o.namespace=m.namespace AND o.generation=m.generation AND o.key_digest=m.key_digest AND o.session_key=m.session_key AND o.last_ms=m.last_ms AND h.last_ms=m.last_ms AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key))))", &[&ns,&generation.as_bytes(),&crate::catalog_search::VERSION.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if !valid {
         eprintln!("477-withdrawal search owner/publication refusal generation={generation}");
+        if let Err(error) = withdrawal_diagnostics(tx, generation) {
+            eprintln!("477-withdrawal search diagnostics error={error:?}");
+        }
         return Err(StorageError::ScopeChanged);
     }
     let mismatch: bool = tx.driver.query_one("WITH physical AS (SELECT d.scope,m.gram,count(*) AS members FROM semon_pg_native_catalog_search_memberships m JOIN semon_pg_native_catalog_search_documents d ON d.namespace_digest=m.namespace_digest AND d.namespace=m.namespace AND d.generation=m.generation AND d.key_digest=m.key_digest AND d.session_key=m.session_key WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 GROUP BY d.scope,m.gram), stored AS (SELECT scope,gram,members FROM semon_pg_native_catalog_search_counts WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2) SELECT EXISTS(SELECT * FROM physical EXCEPT SELECT * FROM stored) OR EXISTS(SELECT * FROM stored EXCEPT SELECT * FROM physical)", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?.get(0);
@@ -142,4 +145,68 @@ pub(in crate::storage::postgres) fn verify_state(
         return Err(StorageError::ScopeChanged);
     }
     tx.check()
+}
+
+// Diagnostic branch only: bounded, sanitized evidence for each publication predicate.
+fn withdrawal_diagnostics(tx: &mut PgTxn<'_>, generation: &str) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes();
+    let rows = tx.driver.query(
+        r#"WITH documents AS MATERIALIZED (
+            SELECT scope,key_digest,session_key,complete FROM semon_pg_native_catalog_search_documents
+            WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+        ), owners AS MATERIALIZED (
+            SELECT key_digest,session_key,last_ms,true AS current FROM semon_pg_native_catalog_rows
+            WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+            UNION ALL
+            SELECT o.key_digest,o.session_key,o.last_ms,false FROM semon_pg_native_catalog_history_owners o
+            WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+            AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key)
+        ), coverage AS MATERIALIZED (
+            SELECT * FROM semon_pg_native_catalog_search_coverage WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+        ), publications AS MATERIALIZED (
+            SELECT * FROM semon_pg_native_catalog_search_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2
+        ), issues AS (
+            SELECT 'coverage_count' AS check_name,'' AS key,'2' AS expected,count(*)::text AS actual FROM coverage HAVING count(*)<>2
+            UNION ALL SELECT 'publication_count','','2',count(*)::text FROM publications HAVING count(*)<>2
+            UNION ALL SELECT 'coverage_evidence',encode(c.scope,'hex'),'valid scope/count/publication',c.incomplete::text FROM coverage c
+            WHERE c.scope NOT IN ('current'::bytea,'retained_history'::bytea) OR c.incomplete<0 OR c.incomplete<>(SELECT count(*) FROM documents d WHERE d.scope=c.scope AND NOT d.complete)
+            OR NOT EXISTS(SELECT 1 FROM publications p WHERE p.scope=c.scope AND p.version=$3 AND p.search_generation=$2 AND p.backfill_complete AND p.incomplete=c.incomplete)
+            UNION ALL SELECT 'owner_retained_document',encode(o.key_digest,'hex'),'present','absent' FROM owners o
+            WHERE NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=o.key_digest AND d.session_key=o.session_key AND d.scope='retained_history'::bytea)
+            UNION ALL SELECT 'owner_current_document',encode(o.key_digest,'hex'),'present','absent' FROM owners o
+            WHERE o.current AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=o.key_digest AND d.session_key=o.session_key AND d.scope='current'::bytea)
+            UNION ALL SELECT 'document_owner',encode(d.key_digest,'hex'),'matching owner',encode(d.scope,'hex') FROM documents d
+            WHERE d.scope NOT IN ('current'::bytea,'retained_history'::bytea) OR NOT EXISTS(SELECT 1 FROM owners o WHERE o.key_digest=d.key_digest AND o.session_key=d.session_key AND (o.current OR d.scope='retained_history'::bytea))
+            UNION ALL SELECT 'history_header',encode(o.key_digest,'hex'),o.last_ms::text,'missing exact owner/header/time' FROM semon_pg_native_catalog_history_owners o
+            WHERE o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+            AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=o.namespace_digest AND c.namespace=o.namespace AND c.generation=o.generation AND c.key_digest=o.key_digest AND c.session_key=o.session_key)
+            AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_headers h WHERE h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key AND h.last_ms=o.last_ms)
+            UNION ALL SELECT 'membership_gram',encode(m.key_digest,'hex'),'<=12',octet_length(m.gram)::text FROM semon_pg_native_catalog_search_memberships m
+            WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2 AND octet_length(m.gram)>12
+            UNION ALL SELECT 'membership_document',encode(m.key_digest,'hex'),'complete retained document','absent' FROM semon_pg_native_catalog_search_memberships m
+            WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2
+            AND NOT EXISTS(SELECT 1 FROM documents d WHERE d.key_digest=m.key_digest AND d.session_key=m.session_key AND d.scope='retained_history'::bytea AND d.complete)
+            UNION ALL SELECT 'membership_owner_time',encode(m.key_digest,'hex'),coalesce((SELECT o.last_ms::text FROM owners o WHERE o.key_digest=m.key_digest AND o.session_key=m.session_key),'no owner'),m.last_ms::text FROM semon_pg_native_catalog_search_memberships m
+            WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.generation=$2
+            AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key AND c.last_ms=m.last_ms
+                UNION ALL SELECT 1 FROM semon_pg_native_catalog_history_owners o JOIN semon_pg_native_catalog_history_headers h ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace AND h.generation=o.owner_generation AND h.key_digest=o.key_digest AND h.session_key=o.session_key
+                WHERE o.namespace_digest=m.namespace_digest AND o.namespace=m.namespace AND o.generation=m.generation AND o.key_digest=m.key_digest AND o.session_key=m.session_key AND o.last_ms=m.last_ms AND h.last_ms=m.last_ms
+                AND NOT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=m.namespace_digest AND c.namespace=m.namespace AND c.generation=m.generation AND c.key_digest=m.key_digest AND c.session_key=m.session_key))
+        ) SELECT DISTINCT check_name,key,expected,actual FROM issues ORDER BY check_name,key LIMIT 64"#,
+        &[
+            &ns,
+            &generation.as_bytes(),
+            &crate::catalog_search::VERSION.as_bytes(),
+        ],
+    ).map_err(sqlstate::error)?;
+    for row in rows {
+        let check: String = row.get(0);
+        let key: String = row.get(1);
+        let expected: Option<String> = row.get(2);
+        let actual: Option<String> = row.get(3);
+        eprintln!(
+            "477-withdrawal predicate={check} generation={generation} key={key} expected={expected:?} actual={actual:?}"
+        );
+    }
+    Ok(())
 }
