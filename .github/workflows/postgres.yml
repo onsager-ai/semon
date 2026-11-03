@@ -72,8 +72,8 @@ jobs:
           start = s.index('    fn trace_value_for_source(')
           lock = s.index('        let tx = self', start)
           receipt_probe = '''
-                  if let Some(history) = self.catalog(key, true).map_err(io::Error::other)? {
-                      if let Some((_, _, super::super::observations::Origin::Native(receipt))) = self.row_observation(&history, Some(crate::storage::catalog::CatalogObservationOwner::History))? {
+                  if let Ok(Some(history)) = self.catalog(key, true) {
+                      if let Ok(Some((_, _, super::super::observations::Origin::Native(receipt)))) = self.row_observation(&history, Some(crate::storage::catalog::CatalogObservationOwner::History)) {
                           eprintln!("PG_HISTORY_TRACE_RECEIPT requested_source={} history_source={} publication={}", source_generation, crate::retention::source_generation(&history.sources).map_err(io::Error::other)?, receipt.2);
                       }
                   }
