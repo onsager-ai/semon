@@ -196,30 +196,10 @@ Path-keyed live proofs alone are not sufficient. Current and retained references
 qualification must prove the same lifecycle before backend acceptance.
 
 Each selected-presentation manifest binds the actual Catalog generation together
-with its presentation entries, shared observations and the exact set of context
-entry digests under the joined digest. Each distinct typed lookup (family, exact
-key and saved value, including null) is encoded as one canonical JSON tuple and
-stored once in a separate immutable record keyed by publication and SHA-256
-entry digest. Row witnesses reference those records by digest; the manifest does
-not contain the tuple values. Readers authenticate the receipt root and row entry,
-require exactly the manifest's digest set, and verify every tuple's digest, lookup
-family and exact key. Missing, extra, damaged or retargeted records refuse.
-Replay uses saved context without observing live context again. Both adapters
-preserve these records through retention and transfer; transfer admission verifies
-the complete store before granting the imported publication. Native PostgreSQL
-selected reads continue to use authenticated catalog proof pages.
-The aggregate captured row/store limit remains 8 MiB and the manifest remains
-bounded at 1 MiB. Each canonical context tuple is bounded at 522,105 bytes:
-`(MAX_PAGE_BYTES - 4096 - 273 - 1 + 4) / 2`. This reserves the initial page
-allowance, the context record envelope and separator, and worst-case JSON string
-escaping (at most twice the tuple bytes minus its four structural punctuation
-bytes). Digest-set authentication runs once per publication at final transfer
-admission, without loading a full manifest for every record. Entries are never split.
-This is the single current contract; old inline context stores are unsupported.
-
-Ordinary publication receipt IDs may differ from the Catalog generation: leases
-and proof roots retain the receipt ID, while selected opening matches the captured
-witness generation to the authenticated manifest field.
+with its presentation entries and shared observations under the existing joined
+digest. Ordinary publication receipt IDs may differ from that Catalog generation:
+leases and proof roots retain the receipt ID, while selected opening matches the
+captured witness generation to the authenticated manifest field.
 
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,

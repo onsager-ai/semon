@@ -157,7 +157,6 @@ pub(crate) fn admit_catalog(
     }
     transaction(config, pool, control, |tx| {
         import.require_applied(tx)?;
-        catalog::verify_context_stores(tx)?;
         let generation = super::catalog_effects::publication::import(tx.0, import)?;
         let admission = model_cache::binding(tx.0)?.admission;
         transfer::catalog_rows::admit_imported_publications(

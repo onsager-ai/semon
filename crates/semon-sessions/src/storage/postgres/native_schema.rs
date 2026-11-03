@@ -24,11 +24,6 @@ const TABLES: &[Table] = &[
         key: "digest",
     },
     Table {
-        name: "selected_contexts",
-        columns: "publication bytea,digest bytea,entry bytea",
-        key: "publication,digest",
-    },
-    Table {
         name: "selected_generations",
         columns: "id bytea,key_digest bytea,session_key bytea,publication bytea,proof bytea,admission bigint,stream bytea,metadata bytea,query_recipe bytea?,slots bytea,prefix bytea",
         key: "id,key_digest",
@@ -624,10 +619,7 @@ fn contract_hash() -> Vec<u8> {
     }
     hash.update(native_keys::MATCH_BODY);
     hash.update(native_keys::DIGEST_BODY);
-    for body in super::super::native_usage_identity::contract()
-        .into_iter()
-        .chain(super::super::presentation_contexts::contract())
-    {
+    for body in super::super::native_usage_identity::contract() {
         hash.update((body.len() as u64).to_be_bytes());
         hash.update(body.as_bytes());
     }
@@ -682,8 +674,7 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ddl.push_str(&format!("CREATE {unique} INDEX semon_pg_{name} ON semon_pg_source_invalidations(namespace_digest,{columns});"));
     }
     tx.driver.batch_execute(&ddl).map_err(sqlstate::error)?;
-    super::super::native_usage_identity::install(tx)?;
-    super::super::presentation_contexts::install(tx)
+    super::super::native_usage_identity::install(tx)
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
@@ -826,55 +817,13 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             return Err(StorageError::ScopeChanged);
         }
     }
-    super::super::native_usage_identity::verify(tx)?;
-    super::super::presentation_contexts::verify(tx)
+    super::super::native_usage_identity::verify(tx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::storage::postgres::tests::{count, fixture, identity, limits, ns};
-
-    #[test]
-    fn pg_context_record_bound_and_immutability_are_enforced() {
-        let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
-        drop(PgPool::open(factory, limits()).unwrap());
-        let namespace = ns("context-boundary");
-        let control = PgCancellation::default();
-        let entry = vec![b'x'; crate::storage::proof_codec::PRESENTATION_CONTEXT_MAX];
-        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            tx.driver.execute("INSERT INTO semon_pg_native_selected_contexts(namespace,publication,digest,entry) VALUES($1,$2,$3,$4)", &[&namespace.as_str().as_bytes(), &b"publication".as_slice(), &b"digest".as_slice(), &entry]).map_err(sqlstate::error)?;
-            Ok(())
-        }).unwrap();
-        let mut oversized = entry.clone();
-        oversized.push(b'x');
-        assert!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            tx.driver.execute("INSERT INTO semon_pg_native_selected_contexts(namespace,publication,digest,entry) VALUES($1,$2,$3,$4)", &[&namespace.as_str().as_bytes(), &b"publication".as_slice(), &b"over".as_slice(), &oversized]).map_err(sqlstate::error)?;
-            Ok(())
-        }).is_err());
-        assert!(
-            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-                tx.driver
-                    .execute(
-                        "UPDATE semon_pg_native_selected_contexts SET entry=$1",
-                        &[&entry],
-                    )
-                    .map_err(sqlstate::error)?;
-                Ok(())
-            })
-            .is_err()
-        );
-        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            let rows = tx
-                .driver
-                .query("SELECT entry FROM semon_pg_native_selected_contexts", &[])
-                .map_err(sqlstate::error)?;
-            assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].get::<_, Vec<u8>>(0), entry);
-            Ok(())
-        })
-        .unwrap();
-    }
 
     #[test]
     fn pg_native_shared_parser_tree_values_roundtrip_without_sqlite() {
@@ -1015,22 +964,6 @@ mod tests {
             ),
             (
                 "ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION",
-                true,
-            ),
-            (
-                "ALTER TABLE semon_pg_native_selected_contexts DROP CONSTRAINT selected_context_record_bound",
-                true,
-            ),
-            (
-                "ALTER TABLE semon_pg_native_selected_contexts DROP CONSTRAINT selected_context_record_bound; ALTER TABLE semon_pg_native_selected_contexts ADD CONSTRAINT selected_context_record_bound CHECK (octet_length(entry)<=2097152)",
-                true,
-            ),
-            (
-                "ALTER TABLE semon_pg_native_selected_contexts DISABLE TRIGGER selected_context_immutable",
-                true,
-            ),
-            (
-                "CREATE OR REPLACE FUNCTION semon_pg_native_context_immutable() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS 'BEGIN RETURN NEW; END;'",
                 true,
             ),
             (

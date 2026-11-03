@@ -9,23 +9,11 @@ pub(crate) const TTL_MAX: u32 = 60_000;
 pub(crate) const LEASE_CAP: i64 = 64;
 pub(crate) const METADATA_MAX: usize = 1_048_576;
 
-// A context CatalogRow has 273 bytes excluding the entry string contents:
-// three 64-byte identities, the kind, and the serde envelope. Canonical JSON
-// expands at most twice when quoted; the tuple's two brackets and two commas
-// never expand, so its escaped length is at most 2*n-4. Reserve the existing
-// 4096-byte page allowance (larger than the worst TransferPage envelope), plus
-// the per-record separator. Context membership is authenticated once at final
-// publication verification and adds no per-record authority bytes. Therefore
-// 4096 + 273 + (2*n-4) + 1 <= MAX_PAGE_BYTES. The next byte can exceed it.
-pub(crate) const PRESENTATION_CONTEXT_MAX: usize =
-    (crate::storage::transfer::MAX_PAGE_BYTES - 4096 - 273 - 1 + 4) / 2;
-
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationManifest {
     pub(crate) catalog_generation: String,
     pub(crate) entries: Vec<(String, String)>,
-    pub(crate) contexts: std::collections::BTreeSet<String>,
     pub(crate) observations: Option<crate::storage::selected::PresentationObservations>,
 }
 
@@ -50,9 +38,9 @@ pub(crate) fn verify_presentation_entry(
     metadata: &str,
     slots: &str,
     text: &str,
-    saved: (&str, &PresentationContexts),
+    manifest: &str,
 ) -> Result<(), StorageError> {
-    verify_presentation_manifest_entry(key, metadata, slots, text, saved).map(|_| ())
+    verify_presentation_manifest_entry(key, metadata, slots, text, manifest).map(|_| ())
 }
 
 pub(crate) fn verify_presentation_observations(
@@ -61,11 +49,11 @@ pub(crate) fn verify_presentation_observations(
     slots: &str,
     text: &str,
     base: &str,
-    saved: (&str, &PresentationContexts),
+    manifest: &str,
     expected_digest: &str,
 ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
-    verify_presentation_digest(base, saved.0, expected_digest)?;
-    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, saved)?.observations)
+    verify_presentation_digest(base, manifest, expected_digest)?;
+    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, manifest)?.observations)
 }
 
 fn verify_presentation_manifest_entry(
@@ -73,32 +61,8 @@ fn verify_presentation_manifest_entry(
     metadata: &str,
     slots: &str,
     text: &str,
-    saved: (&str, &PresentationContexts),
-) -> Result<PresentationManifest, StorageError> {
-    let manifest = decode_presentation_manifest(saved.0)?;
-    verify_presentation_contexts(&manifest, saved.1)?;
-    let entry = presentation_entry(metadata, slots, text)?;
-    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest
-            .entries
-            .iter()
-            .any(|(k, digest)| k == key && *digest == entry)
-    {
-        return Err(StorageError::ScopeChanged);
-    }
-    resolve_presentation(text, saved.1)?;
-    Ok(manifest)
-}
-
-/// Page admission checks the row binding and reference membership without
-/// materializing a publication-sized store. Final admission resolves every row.
-pub(crate) fn verify_presentation_references(
-    key: &str,
-    metadata: &str,
-    slots: &str,
-    text: &str,
     manifest: &str,
-) -> Result<(), StorageError> {
+) -> Result<PresentationManifest, StorageError> {
     let manifest = decode_presentation_manifest(manifest)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
@@ -109,164 +73,7 @@ pub(crate) fn verify_presentation_references(
     {
         return Err(StorageError::ScopeChanged);
     }
-    let witness: Option<serde_json::Value> =
-        serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
-    if let Some(witness) = witness {
-        let context = witness["context"]
-            .as_object()
-            .ok_or(StorageError::ScopeChanged)?;
-        for values in context.values() {
-            for reference in values
-                .as_object()
-                .ok_or(StorageError::ScopeChanged)?
-                .values()
-            {
-                if !manifest
-                    .contexts
-                    .contains(reference.as_str().ok_or(StorageError::ScopeChanged)?)
-                {
-                    return Err(StorageError::ScopeChanged);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn decode_presentation_context(
-    reference: &str,
-    text: &str,
-) -> Result<(String, String, serde_json::Value), StorageError> {
-    if text.len() > PRESENTATION_CONTEXT_MAX {
-        return Err(StorageError::HistoryRetentionBounds);
-    }
-    if digest(text.as_bytes()) != reference {
-        return Err(StorageError::ScopeChanged);
-    }
-    let entry = serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
-    // One canonical encoding binds the exact family, lookup key and saved value.
-    if serde_json::to_string(&entry).map_err(|_| StorageError::Unavailable)? != text {
-        return Err(StorageError::ScopeChanged);
-    }
-    Ok(entry)
-}
-
-pub(crate) fn verify_presentation_contexts(
-    manifest: &PresentationManifest,
-    contexts: &PresentationContexts,
-) -> Result<(), StorageError> {
-    if manifest.contexts.len() != contexts.len() || !manifest.contexts.iter().eq(contexts.keys()) {
-        return Err(StorageError::ScopeChanged);
-    }
-    let mut bytes = if contexts.is_empty() { 2 } else { 1 };
-    for (reference, entry) in contexts {
-        let text = serde_json::to_string(entry).map_err(|_| StorageError::Unavailable)?;
-        decode_presentation_context(reference, &text)?;
-        bytes += reference.len() + 4 + text.len();
-        if bytes > 8 * METADATA_MAX {
-            return Err(StorageError::HistoryRetentionBounds);
-        }
-    }
-    Ok(())
-}
-
-/// Typed lookup identity includes the exact saved key and value, including null.
-pub(crate) type PresentationContexts =
-    std::collections::BTreeMap<String, (String, String, serde_json::Value)>;
-
-#[derive(serde::Serialize)]
-pub(crate) struct CapturedPresentations {
-    pub(crate) rows: Vec<(String, String)>,
-    pub(crate) contexts: PresentationContexts,
-}
-
-#[derive(Default)]
-pub(crate) struct PresentationCapture {
-    contexts: PresentationContexts,
-    rows: Vec<(String, String)>,
-    row_bytes: usize,
-    context_bytes: usize,
-}
-
-impl PresentationCapture {
-    pub(crate) fn push(
-        &mut self,
-        key: String,
-        witness: crate::storage::selected::PresentationWitness,
-    ) -> Result<(), StorageError> {
-        let mut witness = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
-        let context = witness["context"]
-            .as_object_mut()
-            .ok_or(StorageError::Unavailable)?;
-        for (kind, values) in context {
-            let values = values.as_object_mut().ok_or(StorageError::Unavailable)?;
-            for (key, value) in values {
-                let entry = (kind.clone(), key.clone(), value.clone());
-                let encoded = serde_json::to_vec(&entry).map_err(|_| StorageError::Unavailable)?;
-                if encoded.len() > PRESENTATION_CONTEXT_MAX {
-                    return Err(StorageError::HistoryRetentionBounds);
-                }
-                let digest = digest(&encoded);
-                if let std::collections::btree_map::Entry::Vacant(slot) =
-                    self.contexts.entry(digest.clone())
-                {
-                    // Quoted digest, colon and comma. Closing brace replaces
-                    // the final comma; include the opening brace below.
-                    self.context_bytes += digest.len() + 4 + encoded.len();
-                    slot.insert(entry);
-                }
-                *value = serde_json::Value::String(digest);
-            }
-        }
-        let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
-        self.row_bytes += text.len();
-        self.rows.push((key, text));
-        let store_bytes = if self.contexts.is_empty() {
-            2
-        } else {
-            self.context_bytes + 1
-        };
-        if self.row_bytes + store_bytes > 8 * 1048576 {
-            return Err(StorageError::HistoryRetentionBounds);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn finish(self) -> CapturedPresentations {
-        CapturedPresentations {
-            rows: self.rows,
-            contexts: self.contexts,
-        }
-    }
-}
-
-/// Callers authenticate the original publication root and row entry before
-/// resolving saved lookups. Resolution never consults live context.
-pub(crate) fn resolve_presentation(
-    text: &str,
-    contexts: &PresentationContexts,
-) -> Result<Option<crate::storage::selected::PresentationWitness>, StorageError> {
-    let mut witness: Option<serde_json::Value> =
-        serde_json::from_str(text).map_err(|_| StorageError::Unavailable)?;
-    if let Some(witness) = witness.as_mut() {
-        let context = witness["context"]
-            .as_object_mut()
-            .ok_or(StorageError::ScopeChanged)?;
-        for (kind, values) in context {
-            let values = values.as_object_mut().ok_or(StorageError::ScopeChanged)?;
-            for (key, value) in values {
-                let reference = value.as_str().ok_or(StorageError::ScopeChanged)?;
-                let entry = contexts.get(reference).ok_or(StorageError::ScopeChanged)?;
-                let encoded = serde_json::to_vec(entry).map_err(|_| StorageError::Unavailable)?;
-                if entry.0 != *kind || entry.1 != *key || digest(&encoded) != reference {
-                    return Err(StorageError::ScopeChanged);
-                }
-                *value = entry.2.clone();
-            }
-        }
-    }
-    serde_json::from_value(witness.unwrap_or(serde_json::Value::Null))
-        .map_err(|_| StorageError::Unavailable)
+    Ok(manifest)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -300,7 +107,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 
 pub(crate) fn presentation_digest(base: &str, manifest: &str) -> Result<String, StorageError> {
     Ok(digest(
-        &serde_json::to_vec(&("selected-presentation-v4", base, manifest))
+        &serde_json::to_vec(&("selected-presentation-v3", base, manifest))
             .map_err(|_| StorageError::Unavailable)?,
     ))
 }
@@ -619,7 +426,6 @@ mod tests {
             "catalog_generation": "a".repeat(64),
             "entries": [],
             "observations": null,
-            "contexts": [],
         })
         .to_string();
         let proof = presentation_digest("base", &manifest).unwrap();
@@ -631,251 +437,17 @@ mod tests {
     #[test]
     fn presentation_manifest_requires_a_valid_catalog_generation() {
         for manifest in [
-            serde_json::json!({"entries": [], "observations": null, "contexts": []}).to_string(),
+            serde_json::json!({"entries": [], "observations": null}).to_string(),
             serde_json::json!({
                 "catalog_generation": "not-a-generation",
                 "entries": [],
                 "observations": null,
-            "contexts": [],
             })
             .to_string(),
         ] {
             let proof = presentation_digest("base", &manifest).unwrap();
             assert!(verify_presentation_digest("base", &manifest, &proof).is_err());
         }
-    }
-
-    fn presentation_fixture() -> crate::storage::selected::PresentationWitness {
-        use serde_json::json;
-        let key = serde_json::to_string(&("session",)).unwrap();
-        let pair = serde_json::to_string(&("session", "turn")).unwrap();
-        let mut context =
-            serde_json::to_value(crate::storage::selected::CapturedContext::default()).unwrap();
-        for (kind, lookup, value) in [
-            ("details", pair.as_str(), json!([null, true])),
-            ("relative", key.as_str(), json!(null)),
-            ("descendants", key.as_str(), json!(["child"])),
-            ("header", key.as_str(), json!(["generation", false])),
-            ("turn", pair.as_str(), json!("saved turn")),
-            ("edge", pair.as_str(), json!("saved edge")),
-            ("target_turns", pair.as_str(), json!(["target"])),
-            ("participant", key.as_str(), json!("saved participant")),
-            ("preview_header", key.as_str(), json!(["generation", null])),
-            ("preview_catalog", key.as_str(), json!("saved catalog")),
-        ] {
-            context[kind][lookup] = value;
-        }
-        crate::storage::selected::PresentationWitness {
-            header_generation: "header".into(),
-            version: crate::slot_projection::VERSION,
-            total: 0,
-            has_history: true,
-            catalog: Default::default(),
-            context: serde_json::from_value(context).unwrap(),
-            relative_statuses: Default::default(),
-            observations: Default::default(),
-        }
-    }
-
-    fn presentation_capture() -> CapturedPresentations {
-        let mut capture = PresentationCapture::default();
-        capture
-            .push("first".into(), presentation_fixture())
-            .unwrap();
-        capture
-            .push("second".into(), presentation_fixture())
-            .unwrap();
-        capture.finish()
-    }
-
-    fn presentation_manifest(captured: &CapturedPresentations) -> String {
-        serde_json::to_string(&PresentationManifest {
-            catalog_generation: "a".repeat(64),
-            entries: captured
-                .rows
-                .iter()
-                .map(|(key, text)| {
-                    (
-                        key.clone(),
-                        presentation_entry("metadata", "[]", text).unwrap(),
-                    )
-                })
-                .collect(),
-            contexts: captured.contexts.keys().cloned().collect(),
-            observations: None,
-        })
-        .unwrap()
-    }
-
-    #[test]
-    fn shared_context_round_trip_preserves_all_lookup_families_and_saved_null() {
-        use crate::storage::selected::ContextLookup;
-        let captured = presentation_capture();
-        assert_eq!(captured.contexts.len(), 10);
-        let expected = serde_json::to_value(presentation_fixture()).unwrap();
-        for (_, text) in &captured.rows {
-            let restored = resolve_presentation(text, &captured.contexts)
-                .unwrap()
-                .unwrap();
-            assert_eq!(serde_json::to_value(&restored).unwrap(), expected);
-            assert!(restored.context.relative("session").unwrap().is_none());
-            assert!(restored.context.relative("uncaptured").is_err());
-        }
-        let context_bytes = serde_json::to_vec(&captured.contexts).unwrap().len();
-        let mut capture = PresentationCapture::default();
-        capture
-            .push("first".into(), presentation_fixture())
-            .unwrap();
-        assert_eq!(capture.context_bytes + 1, context_bytes);
-        assert!(
-            resolve_presentation("null", &captured.contexts)
-                .unwrap()
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn shared_context_rejects_missing_changed_and_retargeted_entries() {
-        let captured = presentation_capture();
-        let text = &captured.rows[0].1;
-        let reference = captured.contexts.keys().next().unwrap().clone();
-        let mut missing = captured.contexts.clone();
-        missing.remove(&reference);
-        assert!(resolve_presentation(text, &missing).is_err());
-        for field in 0..3 {
-            let mut changed = captured.contexts.clone();
-            let entry = changed.get_mut(&reference).unwrap();
-            match field {
-                0 => entry.0 = "different-family".into(),
-                1 => entry.1 = "different-key".into(),
-                _ => entry.2 = serde_json::json!("different-value"),
-            }
-            assert!(resolve_presentation(text, &changed).is_err());
-            // Even a self-consistent digest cannot retarget a saved lookup.
-            let entry = changed.remove(&reference).unwrap();
-            let replacement = digest(&serde_json::to_vec(&entry).unwrap());
-            changed.insert(replacement.clone(), entry);
-            let retargeted = text.replace(&reference, &replacement);
-            if field < 2 {
-                assert!(resolve_presentation(&retargeted, &changed).is_err());
-            }
-        }
-    }
-
-    #[test]
-    fn shared_context_authentication_binds_store_and_rejects_incomplete_rows() {
-        let mut captured = presentation_capture();
-        let manifest = presentation_manifest(&captured);
-        let proof = presentation_digest("original receipt", &manifest).unwrap();
-        let (key, text) = &captured.rows[0];
-        assert!(
-            verify_presentation_observations(
-                key,
-                "metadata",
-                "[]",
-                text,
-                "original receipt",
-                (&manifest, &captured.contexts),
-                &proof,
-            )
-            .is_ok()
-        );
-        let mut changed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
-        let reference = captured.contexts.keys().next().unwrap().clone();
-        changed["contexts"][0] = serde_json::json!("changed");
-        assert!(
-            verify_presentation_observations(
-                key,
-                "metadata",
-                "[]",
-                text,
-                "original receipt",
-                (&changed.to_string(), &captured.contexts),
-                &proof,
-            )
-            .is_err()
-        );
-        captured.contexts.remove(&reference);
-        // A matching row entry alone does not make an incomplete store valid.
-        let incomplete = presentation_manifest(&captured);
-        assert!(
-            verify_presentation_entry(
-                key,
-                "metadata",
-                "[]",
-                text,
-                (&incomplete, &captured.contexts)
-            )
-            .is_err()
-        );
-        let mut inline: serde_json::Value = serde_json::from_str(text).unwrap();
-        inline["context"]["relative"]
-            .as_object_mut()
-            .unwrap()
-            .values_mut()
-            .for_each(|value| *value = serde_json::Value::Null);
-        assert!(resolve_presentation(&inline.to_string(), &captured.contexts).is_err());
-    }
-
-    #[test]
-    fn shared_context_records_require_canonical_bytes_and_exact_membership() {
-        let captured = presentation_capture();
-        let manifest = decode_presentation_manifest(&presentation_manifest(&captured)).unwrap();
-        assert!(verify_presentation_contexts(&manifest, &captured.contexts).is_ok());
-        let (reference, entry) = captured.contexts.first_key_value().unwrap();
-        let canonical = serde_json::to_string(entry).unwrap();
-        assert_eq!(
-            decode_presentation_context(reference, &canonical).unwrap(),
-            *entry
-        );
-        // Hashing noncanonical bytes must not make them an admissible record.
-        let noncanonical = format!(" {canonical}");
-        assert!(
-            decode_presentation_context(&digest(noncanonical.as_bytes()), &noncanonical).is_err()
-        );
-        assert!(decode_presentation_context(reference, &format!("{canonical} ")).is_err());
-        let mut missing = captured.contexts.clone();
-        missing.remove(reference);
-        assert!(verify_presentation_contexts(&manifest, &missing).is_err());
-        let mut extra = captured.contexts.clone();
-        let entry = (
-            "relative".into(),
-            "uncaptured".into(),
-            serde_json::Value::Null,
-        );
-        let reference = digest(&serde_json::to_vec(&entry).unwrap());
-        extra.insert(reference, entry);
-        assert!(verify_presentation_contexts(&manifest, &extra).is_err());
-    }
-
-    #[test]
-    fn shared_context_record_bound_is_inclusive_and_never_splits_entries() {
-        let mut entry = ("turn", "key", String::new());
-        let overhead = serde_json::to_string(&entry).unwrap().len();
-        entry.2 = "x".repeat(PRESENTATION_CONTEXT_MAX - overhead);
-        let text = serde_json::to_string(&entry).unwrap();
-        assert_eq!(text.len(), PRESENTATION_CONTEXT_MAX);
-        assert!(decode_presentation_context(&digest(text.as_bytes()), &text).is_ok());
-        entry.2.push('x');
-        let text = serde_json::to_string(&entry).unwrap();
-        assert_eq!(
-            decode_presentation_context(&digest(text.as_bytes()), &text),
-            Err(StorageError::HistoryRetentionBounds)
-        );
-    }
-
-    #[test]
-    fn shared_context_producer_refuses_an_oversized_tuple_before_publication() {
-        let mut witness = presentation_fixture();
-        let mut context = serde_json::to_value(&witness.context).unwrap();
-        context["turn"]["oversized"] = serde_json::json!("x".repeat(PRESENTATION_CONTEXT_MAX));
-        witness.context = serde_json::from_value(context).unwrap();
-        let mut capture = PresentationCapture::default();
-        assert_eq!(
-            capture.push("key".into(), witness),
-            Err(StorageError::HistoryRetentionBounds)
-        );
-        assert!(capture.finish().rows.is_empty());
     }
 
     #[test]

@@ -14569,49 +14569,6 @@ mod tests {
             }
 
             #[test]
-            fn oversized_saved_context_tuple_keeps_its_receipt_and_stays_pending() {
-                let (f, _, options, _) = model_sources();
-                let options = &options[0];
-                let inputs = inputs(1);
-                let mut cache = open(&f.config);
-                admit_independent_inputs(&mut cache, options, &inputs);
-                let (batch, mut model) =
-                    ready_without_publication_receipt(&mut cache, &f, options, &inputs);
-                // This fits the existing catalog metadata allowance, but the
-                // saved relative lookup includes the full catalog metadata and
-                // exceeds the distinct canonical context tuple allowance.
-                oversized_query(
-                    model.prepared_mut_for_test(),
-                    crate::storage::proof_codec::PRESENTATION_CONTEXT_MAX,
-                );
-                assert_eq!(
-                    cache
-                        .record_semantic_batch(&batch, model.prepared())
-                        .unwrap(),
-                    Outcome::Written
-                );
-                let before = shared_state(&f);
-                for _ in 0..2 {
-                    assert!(
-                        cache
-                            .publish_semantic_catalog(&batch, model.prepared())
-                            .is_err()
-                    );
-                    assert_eq!(
-                        shared_state(&f),
-                        state_with_refusal_hint(&f, before.clone(), "source-a")
-                    );
-                    let blocker = typed_refusal(&f, "source-a").unwrap();
-                    assert_eq!(
-                        blocker,
-                        crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge
-                    );
-                    assert!(!blocker.retryable());
-                    assert_eq!(hint(&f, "source-a"), Some((batch.epoch, 1)));
-                }
-            }
-
-            #[test]
             fn one_oversized_physical_group_keeps_its_receipt_and_stays_pending() {
                 let (f, _, options, _) = model_sources();
                 let options = &options[0];

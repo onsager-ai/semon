@@ -70,7 +70,6 @@ pub enum CatalogRowKind {
     HistoryProgress,
     PublicationReceipt,
     PresentationRoot,
-    PresentationContext,
     ProofGeneration,
     Presentation,
     ProofSource,
@@ -100,7 +99,6 @@ impl CatalogRowKind {
         Self::HistoryProgress,
         Self::PublicationReceipt,
         Self::PresentationRoot,
-        Self::PresentationContext,
         Self::ProofGeneration,
         Self::Presentation,
         Self::ProofSource,
@@ -111,7 +109,7 @@ impl CatalogRowKind {
             Self::PublicationReceipt => Category::Operations,
             Self::PresentationRoot | Self::ProofRef => Category::ProofReferences,
             Self::ProofGeneration | Self::ProofSource => Category::Proofs,
-            Self::Presentation | Self::PresentationContext => Category::Metadata,
+            Self::Presentation => Category::Metadata,
             Self::Dependency | Self::Description => Category::Metadata,
             Self::HistoryProgress => Category::CatalogHistory,
             Self::Current => Category::CatalogCurrent,
@@ -132,7 +130,6 @@ impl CatalogRowKind {
             Self::ProofSource | Self::ProofRef => &[0, 1, 2],
             Self::PublicationReceipt => &[0],
             Self::PresentationRoot => &[3],
-            Self::PresentationContext => &[0, 1],
             Self::Slot
             | Self::HistorySlot
             | Self::TraceTurn
@@ -152,7 +149,6 @@ impl CatalogRowKind {
             Self::Description
                 | Self::PublicationReceipt
                 | Self::PresentationRoot
-                | Self::PresentationContext
                 | Self::ProofGeneration
                 | Self::Presentation
                 | Self::ProofSource
@@ -207,14 +203,6 @@ pub(crate) fn validate(record: &TransferRecord) -> Result<(), StorageError> {
                 return Err(StorageError::ScopeChanged);
             }
             super::super::proof_codec::verify_presentation_digest(&base, &manifest, &digest)?;
-        }
-        PresentationContext => {
-            let (publication, reference, entry): (String, String, String) =
-                serde_json::from_value(v).map_err(bad)?;
-            if !hex_digest(&publication) {
-                return Err(StorageError::ScopeChanged);
-            }
-            super::super::proof_codec::decode_presentation_context(&reference, &entry)?;
         }
         ProofGeneration => {
             let (_, _, publication, proof, admission, _, metadata, query_recipe, slots, _): (
