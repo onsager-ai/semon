@@ -546,7 +546,7 @@ fn build_oracle_with_binding(
             &crate::slot_projection::Publication {
                 rows: &missing,
                 transcripts: Some(&missing_recipes),
-                observations: None,
+                observations: prepared.presentation_observations(),
             },
             generation.as_deref(),
         )

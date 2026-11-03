@@ -10,6 +10,92 @@ impl crate::SessionSourceReader for ProviderCounter {
 }
 
 #[test]
+fn configured_semantic_selected89_direct_owner_coexists_with_predecessor_receipt() {
+    use crate::storage::catalog::CatalogObservationOwner;
+    use crate::storage::sqlite::proof_generations;
+
+    selected75_native(&[], |_, options, _, key, _, fixture, cache, input| {
+        let prepared = crate::model::prepare_sources(
+            options,
+            cache,
+            std::slice::from_ref(input),
+            1_790_000_000_000,
+        )
+        .unwrap();
+        let mut row = prepared.rows.iter().find(|row| row.key == key).unwrap().clone();
+        row.name.push_str(" updated owner");
+        let metadata = serde_json::to_string(&row).unwrap();
+        let capability =
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&fixture.config).unwrap();
+        let reader = capability.reader_binding().unwrap();
+        let db = crate::storage::sqlite::semantic::Stage::open(capability)
+            .unwrap()
+            .into_test_connection();
+        let current = reader.runtime_binding_at(&db).unwrap();
+        db.execute(
+            "UPDATE session_catalog SET metadata=?1 WHERE namespace=?2 AND session_key=?3",
+            params![metadata, current.namespace.as_str(), key],
+        )
+        .unwrap();
+        proof_generations::native_catalog_observation_grant(
+            &db,
+            current.namespace.as_str(),
+            key,
+            current.admission,
+            &current.stream_epoch,
+            &metadata,
+            prepared.presentation_observations(),
+        )
+        .unwrap();
+        // The newer direct owner has no grant for the predecessor's receipt.
+        db.execute(
+            "DELETE FROM meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
+            [current.namespace.as_str()],
+        )
+        .unwrap();
+        let owner = CatalogObservationOwner::Catalog;
+        let binding = || {
+            proof_generations::observation_binding_for_physical_owner(&db, &current, &row, owner)
+        };
+        let observations = || {
+            proof_generations::observation_binding_with_observations(&db, &current, &row, owner)
+        };
+        assert_eq!(binding().unwrap(), current);
+        let (captured_binding, capture) = observations().unwrap();
+        assert_eq!(captured_binding, current);
+        assert!(capture.is_runtime_capture_for(&row));
+        let token =
+            proof_generations::query_recipe_observation(&db, &current, owner, &row).unwrap();
+        assert!(proof_generations::load_query_recipe(&db, &reader, &token).is_ok());
+
+        db.execute_batch("SAVEPOINT missing_owner_grant").unwrap();
+        db.execute(
+            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+            params![current.namespace.as_str(), key],
+        )
+        .unwrap();
+        assert!(binding().is_err());
+        assert!(observations().is_err());
+        assert!(proof_generations::load_query_recipe(&db, &reader, &token).is_err());
+        db.execute_batch("ROLLBACK TO missing_owner_grant; RELEASE missing_owner_grant")
+            .unwrap();
+
+        // The retained receipt still authenticates before direct authority:
+        // changing its valid JSON must refuse every selected read path.
+        db.execute_batch("DROP TRIGGER storage_proof_generation_immutable")
+            .unwrap();
+        db.execute(
+            "UPDATE storage_proof_generations SET metadata=json_set(metadata,'$.name','tampered predecessor') WHERE namespace=?1 AND session_key=?2",
+            params![current.namespace.as_str(), key],
+        )
+        .unwrap();
+        assert!(binding().is_err());
+        assert!(observations().is_err());
+        assert!(proof_generations::load_query_recipe(&db, &reader, &token).is_err());
+    });
+}
+
+#[test]
 fn configured_semantic_selected89_real_codec_roundtrip_and_one_byte_tamper_before_raw() {
     use crate::storage::proof_codec::{self, ExpectedGeneration, GenerationRecord};
     use crate::storage::selected::SelectedSnapshotStore;

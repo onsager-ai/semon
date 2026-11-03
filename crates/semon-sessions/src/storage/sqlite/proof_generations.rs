@@ -1895,15 +1895,14 @@ fn diagnose_immutable_candidate_probe(
     }
 }
 
-/// A relevant immutable owner must authenticate before a mutable grant can
-/// authorize its row. Runtime observations remain optional for row authority.
-fn verify_immutable_observation(
+/// A same-prefix receipt may supply predecessor custody without owning the
+/// selected metadata. Authenticate it before deciding which authority to use.
+fn authenticate_immutable_observation(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     reference_kind: &str,
     prefix: &str,
-    local_only: bool,
 ) -> Result<VerifiedObservation, ObservationPreparationError> {
     let mut statement = db
         .prepare(
@@ -1986,6 +1985,24 @@ fn verify_immutable_observation(
         diagnose_observation_refusal("immutable_original_lifecycle_or_prefix");
         return Err(StorageError::ScopeChanged.into());
     }
+    Ok(VerifiedObservation {
+        binding: original_binding,
+        row: original,
+        observations,
+        record: record.clone(),
+        presentation: presentation.clone(),
+    })
+}
+
+fn authorize_immutable_observation(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    reference_kind: &str,
+    local_only: bool,
+    verified: &VerifiedObservation,
+) -> Result<(), ObservationPreparationError> {
+    let record = &verified.record;
     let grant = format!("{}:{}", current.admission, current.stream_epoch);
     let transfer_grant = if local_only {
         false
@@ -2055,13 +2072,22 @@ fn verify_immutable_observation(
         diagnose_observation_refusal("immutable_destination_or_local_grant");
         return Err(StorageError::ScopeChanged.into());
     }
-    Ok(VerifiedObservation {
-        binding: original_binding,
-        row: original,
-        observations,
-        record: record.clone(),
-        presentation: presentation.clone(),
-    })
+    Ok(())
+}
+
+/// Reading a receipt's observations requires its own destination grant.
+fn verify_immutable_observation(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    reference_kind: &str,
+    prefix: &str,
+    local_only: bool,
+) -> Result<VerifiedObservation, ObservationPreparationError> {
+    let verified =
+        authenticate_immutable_observation(db, current, selected, reference_kind, prefix)?;
+    authorize_immutable_observation(db, current, selected, reference_kind, local_only, &verified)?;
+    Ok(verified)
 }
 
 /// Reuse preserves each selected owner's original receipt and grants. Absence
@@ -2314,8 +2340,20 @@ pub(crate) fn observation_binding_with_observations(
         return Ok((current.clone(), observations));
     }
     let verified =
-        verify_immutable_observation(db, current, selected, reference_kind, &prefix, false)
+        authenticate_immutable_observation(db, current, selected, reference_kind, &prefix)
             .map_err(ObservationPreparationError::into_storage)?;
+    // A composed or receipt-less owner can retain an older same-prefix receipt
+    // for custody. Its exact grant and capture authorize only the selected row;
+    // do not borrow that grant to read the predecessor's observations.
+    if verified.record.metadata != selected_metadata
+        && let Some(direct) =
+            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
+                .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
+    {
+        return Ok((current.clone(), direct));
+    }
+    authorize_immutable_observation(db, current, selected, reference_kind, false, &verified)
+        .map_err(ObservationPreparationError::into_storage)?;
     let original = verified.row;
     let original_binding = verified.binding;
     let observations = verified
@@ -2459,14 +2497,18 @@ fn observation_authority_for_owner(
                 &current.stream_epoch,
                 &current_metadata,
             )? {
-                verify_immutable_observation(
+                let verified = authenticate_immutable_observation(
                     db,
                     current,
                     selected,
                     reference_kind,
                     &prefix,
-                    local_only,
                 )?;
+                if verified.record.metadata == *original {
+                    authorize_immutable_observation(
+                        db, current, selected, reference_kind, local_only, &verified,
+                    )?;
+                }
             }
             let metadata_digest = proof_codec::digest(original.as_bytes());
             let residence = match native.as_str() {
@@ -2825,8 +2867,13 @@ fn load_query_recipe_with_bytes(
             )
             .map_err(ObservationPreparationError::into_storage)?
             {
-                verify_immutable_observation(db, &current, selected, kind, &prefix, false)
-                    .map_err(ObservationPreparationError::into_storage)?;
+                let verified =
+                    authenticate_immutable_observation(db, &current, selected, kind, &prefix)
+                        .map_err(ObservationPreparationError::into_storage)?;
+                if verified.record.metadata == normalized {
+                    authorize_immutable_observation(db, &current, selected, kind, false, &verified)
+                        .map_err(ObservationPreparationError::into_storage)?;
+                }
             }
             let granted: bool = db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
