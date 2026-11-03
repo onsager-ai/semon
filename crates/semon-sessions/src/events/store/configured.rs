@@ -5342,6 +5342,18 @@ mod tests {
         assert_ne!(repriced.cost.usd, original.cost.usd);
         assert_eq!(repriced.cost.pricing_fingerprint, table.fingerprint);
         assert!(observation_binding(&db, &binding, &repriced).is_ok());
+        let (_, observations) =
+            crate::storage::sqlite::proof_generations::observation_binding_with_observations(
+                &db,
+                &binding,
+                &repriced,
+                CatalogObservationOwner::Catalog,
+            )
+            .expect("repriced postimage keeps independently authenticated runtime evidence");
+        assert_eq!(
+            observations.runtime_for(&repriced).as_deref(),
+            repriced.query.as_ref().unwrap()["runtime"].as_str()
+        );
         let history_after: String = db.query_row(
             "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
             params![b.namespace.as_str(), retained.key], |r| r.get(0),
@@ -6426,6 +6438,7 @@ mod tests {
 
     #[test]
     fn configured_semantic_noop_refuses_dangling_proof_source_and_grant() {
+        use crate::storage::native_events::NativeEventStore;
         for corruption in [
             "DELETE FROM storage_proof_presentations WHERE namespace='source-a'",
             "DELETE FROM storage_proof_sources WHERE namespace='source-a'",
@@ -6436,18 +6449,26 @@ mod tests {
              INSERT INTO storage_proof_presentations SELECT namespace,'wrong-prefix',session_key,metadata FROM storage_proof_presentations WHERE namespace='source-a';
              INSERT INTO storage_proof_refs SELECT namespace,session_key,kind,'wrong-prefix' FROM storage_proof_refs WHERE namespace='source-a' AND kind='current';",
         ] {
-            let (a, _, _) = same_db_sources();
-            let mut store = owned_semantic(&a.config);
-            let (batch, prepared) = publication_ready(&mut *store, &a.raw, "original");
+            let (a, _, options, inputs) = model_sources();
+            let mut store = a.native_cache();
+            store
+                .ingest(&"a".repeat(64), &inputs[0].full_path(&options[0]), "codex")
+                .unwrap();
+            let (batch, prepared) =
+                model_ready(&a, &mut store, &options[0], &inputs[0], "original");
             assert_eq!(
-                store.publish_semantic_catalog(&batch, &prepared).unwrap().0,
+                store
+                    .publish_semantic_catalog(&batch, prepared.prepared())
+                    .unwrap()
+                    .0,
                 Outcome::Written
             );
             assert_eq!(
                 store.finish_semantic_stage(batch.epoch).unwrap(),
                 Outcome::Written
             );
-            let (next, prepared) = publication_ready(&mut *store, &a.raw, "unchanged");
+            let (next, prepared) =
+                model_ready(&a, &mut store, &options[0], &inputs[0], "unchanged");
             let db = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(&a.config).unwrap(),
             )
@@ -6456,7 +6477,9 @@ mod tests {
             db.execute_batch(corruption).unwrap();
             let before = shared_state(&a);
             assert!(
-                store.publish_semantic_catalog(&next, &prepared).is_err(),
+                store
+                    .publish_semantic_catalog(&next, prepared.prepared())
+                    .is_err(),
                 "{corruption}"
             );
             assert_eq!(shared_state(&a), before, "{corruption}");

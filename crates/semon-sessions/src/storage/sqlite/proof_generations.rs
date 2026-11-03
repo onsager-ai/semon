@@ -3453,15 +3453,6 @@ fn prepare_observation_update(
         CatalogObservationOwner::Catalog => "current",
         CatalogObservationOwner::History => "history",
     };
-    let exact_semantic_owner = exact_immutable_observation_owner(
-        db,
-        namespace,
-        &selected.key,
-        proof_kind,
-        admission,
-        &current.stream_epoch,
-        &before_metadata,
-    )?;
     let owner_slot: Option<(String, i64, String, Option<String>, bool)> = db
         .query_row(
             "SELECT metadata_digest,admission,stream,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
@@ -3486,23 +3477,6 @@ fn prepare_observation_update(
     {
         return Err(StorageError::HistoryRetentionBounds.into());
     }
-    let direct_capture = if exact_semantic_owner {
-        None
-    } else {
-        owner_slot
-            .as_ref()
-            .and_then(|(_, _, _, capture, _)| capture.as_ref())
-            .and_then(|capture| {
-                serde_json::from_str::<crate::storage::selected::PresentationObservations>(capture)
-                    .ok()
-                    .filter(|observations| {
-                        observations.is_runtime_capture_for(repaired)
-                            && observations.runtime_for(repaired).is_some()
-                    })
-                    .map(|_| capture.clone())
-            })
-    };
-
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
     let mut normalized = repaired.clone();
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
@@ -3510,6 +3484,35 @@ fn prepare_observation_update(
     if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
         return Err(StorageError::HistoryRetentionBounds.into());
     }
+    // An immutable preimage authenticates the update, but only an exact
+    // postimage receipt can replace the new owner's independent capture.
+    let exact_postimage = exact_immutable_observation_owner(
+        db,
+        namespace,
+        &selected.key,
+        proof_kind,
+        admission,
+        &current.stream_epoch,
+        &normalized,
+    )?;
+    let direct_capture = if exact_postimage {
+        None
+    } else {
+        let (binding, observations) =
+            observation_binding_with_observations(db, current, selected, owner)?;
+        if binding != proven {
+            return Err(StorageError::ScopeChanged.into());
+        }
+        let capture = observations
+            .runtime_capture_for(repaired)
+            .filter(|capture| capture.is_runtime_capture_for(repaired))
+            .ok_or(StorageError::ScopeChanged)?;
+        let capture = serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
+        if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
+            return Err(StorageError::HistoryRetentionBounds.into());
+        }
+        Some(capture)
+    };
     Ok(PreparedObservationUpdate {
         namespace: namespace.to_owned(),
         key: selected.key.clone(),
