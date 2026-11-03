@@ -383,6 +383,8 @@ fn build_oracle_with_binding(
     history: bool,
     bind: impl FnOnce(&Options, &[CatalogRow], &[crate::slot_projection::Projection]),
 ) -> Input {
+    use crate::storage::native_events::NativeEventStore;
+
     let root = std::env::temp_dir().join(format!(
         "pg124-{}-{}",
         std::process::id(),
@@ -529,7 +531,9 @@ fn build_oracle_with_binding(
     let mut original_cache =
         crate::events::EventCache::open_scoped(&original_options.cache, &original_options.source)
             .unwrap();
-    let receipt = original_cache.ingest(&"1".repeat(64), &source, "claude").unwrap();
+    let receipt = original_cache
+        .ingest(&"1".repeat(64), &source, "claude")
+        .unwrap();
     assert_eq!(receipt.consumed_bytes, fs::metadata(&source).unwrap().len());
     let original_prepared = crate::model::prepare_sources(
         &original_options,
