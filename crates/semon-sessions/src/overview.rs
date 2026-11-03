@@ -67,7 +67,10 @@ impl SummaryPublicationBudget {
     }
 
     /// Share one byte allowance across retained inputs and emitted summaries.
+    #[track_caller]
     pub(crate) fn charge(&mut self, bytes: usize) -> rusqlite::Result<()> {
+        #[cfg(test)]
+        eprintln!("CONTEXT_BUDGET caller={} bytes={bytes} available={}", std::panic::Location::caller(), self.available());
         if bytes > self.available() {
             return Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
                 SummaryPublicationBudgetOverflow,

@@ -102,6 +102,8 @@ pub(crate) fn frozen_catalog_generation(
         transfer::reported::require_ready_capture(tx, config, manifest)?;
         let admission = super::namespace::require_semantic_admitted(tx.0, &config.namespace)?;
         if admission.generation != manifest.binding_epoch {
+            #[cfg(test)]
+            eprintln!("CONTEXT_FROZEN refusal=binding_epoch");
             return Err(StorageError::ScopeChanged);
         }
         let revision: i64 =
@@ -112,6 +114,8 @@ pub(crate) fn frozen_catalog_generation(
             )
             .map_err(failed)?;
         if u64::try_from(revision).ok() != Some(manifest.revision) {
+            #[cfg(test)]
+            eprintln!("CONTEXT_FROZEN refusal=revision actual={revision} expected={}", manifest.revision);
             return Err(StorageError::ScopeChanged);
         }
         let generation: String = tx
@@ -137,8 +141,12 @@ pub(crate) fn frozen_catalog_generation(
             )
             .map_err(failed)?;
         if !acknowledged {
+            #[cfg(test)]
+            eprintln!("CONTEXT_FROZEN refusal=semantic_receipt");
             return Err(StorageError::ScopeChanged);
         }
+        #[cfg(test)]
+        eprintln!("CONTEXT_FROZEN accepted");
         Ok(generation)
     })
 }
