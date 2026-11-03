@@ -5026,7 +5026,7 @@ impl Stage {
                         }
                         break;
                     }
-                    let candidate_paths = candidate_paths.into_iter().collect::<Vec<_>>();
+                    let mut candidate_paths = candidate_paths.into_iter().collect::<Vec<_>>();
                     let mut candidate_context =
                         match crate::events::store::semantic_stage::context_with(
                             &physical,
@@ -5071,6 +5071,35 @@ impl Stage {
                         context.matching_header_paths.clone().unwrap_or_default();
                     selected_headers.push(selected);
                     candidate_context.matching_header_paths = Some(selected_headers);
+                    // A cross-harness sender can itself be a Claude Agent.
+                    // Its incoming Agent call defines the sender's first turn,
+                    // even though only the non-Claude child's header is selected.
+                    let spawn_context = match relation_spawn_call_context(RelationSpawnCallInput {
+                        db: &tx,
+                        namespace: ns,
+                        physical: &physical,
+                        epoch,
+                        used: &mut relation_context_bytes,
+                        budget: &mut relation_read_budget,
+                        loaded_paths: candidate_paths.iter().cloned().collect(),
+                        preloaded: &candidate_context.endpoints,
+                    }) {
+                        Ok(spawn_context) => spawn_context,
+                        Err(source_error) if relation_context_budget_error(&source_error) => {
+                            if relation_cursors.is_empty() {
+                                return Err(refuse("semantic_source_budget"));
+                            }
+                            break;
+                        }
+                        Err(source_error) => return Err(error(source_error)),
+                    };
+                    candidate_paths.extend(spawn_context.paths);
+                    candidate_paths.sort();
+                    candidate_paths.dedup();
+                    candidate_context.endpoints.extend(spawn_context.endpoints);
+                    candidate_context
+                        .claude_call_locations
+                        .extend(spawn_context.claude_call_locations);
                     if serde_json::to_vec(&candidate_context)
                         .map_err(|e| StoreError::Data(e.to_string()))?
                         .len()
