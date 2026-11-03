@@ -33,7 +33,7 @@ fn configured_semantic_selected89_direct_owner_coexists_with_predecessor_receipt
             .into_test_connection();
         let current = reader.runtime_binding_at(&db).unwrap();
         db.execute(
-            "UPDATE session_catalog SET metadata=?1 WHERE namespace=?2 AND session_key=?3",
+            "UPDATE main.session_catalog SET metadata=?1 WHERE namespace=?2 AND session_key=?3",
             params![metadata, current.namespace.as_str(), key],
         )
         .unwrap();
@@ -49,7 +49,7 @@ fn configured_semantic_selected89_direct_owner_coexists_with_predecessor_receipt
         .unwrap();
         // The newer direct owner has no grant for the predecessor's receipt.
         db.execute(
-            "DELETE FROM meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
+            "DELETE FROM main.meta WHERE namespace=?1 AND key LIKE 'catalog_native_observation:%'",
             [current.namespace.as_str()],
         )
         .unwrap();
@@ -70,7 +70,7 @@ fn configured_semantic_selected89_direct_owner_coexists_with_predecessor_receipt
 
         db.execute_batch("SAVEPOINT missing_owner_grant").unwrap();
         db.execute(
-            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+            "DELETE FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
             params![current.namespace.as_str(), key],
         )
         .unwrap();
@@ -85,7 +85,7 @@ fn configured_semantic_selected89_direct_owner_coexists_with_predecessor_receipt
         db.execute_batch("DROP TRIGGER storage_proof_generation_immutable")
             .unwrap();
         db.execute(
-            "UPDATE storage_proof_generations SET metadata=json_set(metadata,'$.name','tampered predecessor') WHERE namespace=?1 AND session_key=?2",
+            "UPDATE main.storage_proof_generations SET metadata=json_set(metadata,'$.name','tampered predecessor') WHERE namespace=?1 AND session_key=?2",
             params![current.namespace.as_str(), key],
         )
         .unwrap();

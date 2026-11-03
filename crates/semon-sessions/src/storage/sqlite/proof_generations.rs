@@ -798,6 +798,7 @@ pub(crate) fn retain_outgoing_history_refs(
     // references copied from an exact local Current grant. They never grant
     // History origin.
     for row in outgoing_owners {
+        retain_stage_history_origin(tx, namespace, admission, stream, row, overview_budget)?;
         retain_current_refs_for_unowned_history(
             tx,
             namespace,
@@ -812,6 +813,80 @@ pub(crate) fn retain_outgoing_history_refs(
         )
         .map_err(failed)?;
     }
+    Ok(())
+}
+
+/// Retirement can transfer an exact local Stage owner into original History.
+/// A transported receipt or an unrelated Current owner cannot issue this grant.
+fn retain_stage_history_origin(
+    db: &Connection,
+    namespace: &str,
+    admission: u64,
+    stream: &str,
+    outgoing: &CatalogRow,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<(), PublicationError> {
+    let mut row = outgoing.clone();
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let history = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    let digest = proof_codec::digest(metadata.as_bytes());
+    let grant = format!("{admission}:{stream}");
+    let stage_origin: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog h JOIN main.meta m ON m.namespace=h.namespace WHERE h.namespace=?1 AND h.session_key=?2 AND h.metadata=?3 AND m.key='catalog_native_observation:'||?4 AND m.value=?5)",
+        params![namespace, row.key, history, digest, grant],
+        |row| row.get(0),
+    ).map_err(failed)?;
+    let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+    let prefix = crate::retention::source_generation(&row.sources)
+        .map_err(|_| StorageError::Unavailable)?;
+    if !stage_origin
+        || has_local_history_origin(
+            db, namespace, &row.key, &history, &metadata, admission, stream,
+        )?
+        || !immutable_observation_candidate(
+            db, namespace, &row.key, "current", &prefix, stream, &metadata,
+        )
+        .map_err(ObservationPreparationError::into_storage)?
+    {
+        return Ok(());
+    }
+    // Charge the bounded immutable cells before the verifier materializes them.
+    let bytes: i64 = db.query_row(
+        "SELECT coalesce(sum(bytes),0) FROM (SELECT octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.manifest)+octet_length(v.metadata) AS bytes FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND (g.prefix=?3 OR g.metadata=?4) AND g.stream=?5 LIMIT 2)",
+        params![namespace, row.key, prefix, metadata, stream],
+        |row| row.get(0),
+    ).map_err(failed)?;
+    let bytes = usize::try_from(bytes).map_err(|_| StorageError::ScopeChanged)?;
+    if budget
+        .charge(
+            bytes
+                .saturating_add(history.len())
+                .saturating_add(metadata.len()),
+        )
+        .is_err()
+    {
+        return Err(PublicationError::BudgetOverflow);
+    }
+    let current = crate::storage::QueryRuntimeBinding {
+        namespace: crate::storage::LogicalSourceNamespace::new(namespace)?,
+        admission,
+        stream_epoch: stream.to_owned(),
+    };
+    let verified = verify_immutable_observation(db, &current, &row, "current", &prefix, true)
+        .map_err(ObservationPreparationError::into_storage)?;
+    if verified.record.metadata != metadata || verified.record.admission != admission {
+        return Err(StorageError::ScopeChanged.into());
+    }
+    db.execute(
+        "INSERT INTO storage_proof_refs(namespace,session_key,kind,id) VALUES(?1,?2,'history',?3) ON CONFLICT DO NOTHING",
+        params![namespace, row.key, verified.record.id.0],
+    ).map_err(failed)?;
+    db.execute(
+        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,NULL) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=NULL",
+        params![namespace, row.key, digest, sql_admission, stream],
+    ).map_err(failed)?;
     Ok(())
 }
 
@@ -2466,9 +2541,9 @@ fn observation_authority_for_owner(
         {
             continue;
         }
-        let native: Option<String> = db
+        let native: Option<(String, Option<String>, bool)> = db
             .query_row(
-                "SELECT owner_kind FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1",
+                "SELECT owner_kind,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1",
                 params![
                     ns,
                     selected.key,
@@ -2477,11 +2552,11 @@ fn observation_authority_for_owner(
                     current.stream_epoch,
                     owner_kind
                 ],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(ObservationPreparationError::Sql)?;
-        if let Some(native) = native {
+        if let Some((native, capture, oversized)) = native {
             let reference_kind = proof_kind.unwrap_or(match selected.lifecycle {
                 crate::model::summary::CatalogLifecycle::Current => "current",
                 crate::model::summary::CatalogLifecycle::Retained => "history",
@@ -2504,10 +2579,17 @@ fn observation_authority_for_owner(
                     reference_kind,
                     &prefix,
                 )?;
-                // The exact native grant above owns this row. A retained
-                // predecessor is authenticated custody, not its observation.
-                if verified.record.metadata == *original
-                    && verified.record.admission == current.admission
+                // A different owner needs its own authenticated capture. A
+                // metadata digest alone cannot lend authority to a receipt.
+                if (verified.record.metadata == *original
+                    && verified.record.admission == current.admission)
+                    || direct_capture_for_row(
+                        current,
+                        selected,
+                        imported_catalog(db, current)?,
+                        Some(&(capture, oversized)),
+                    )?
+                    .is_none()
                 {
                     authorize_immutable_observation(
                         db,

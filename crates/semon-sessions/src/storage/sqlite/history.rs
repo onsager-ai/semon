@@ -487,11 +487,17 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                 }
             }
         }
-        snapshot.current_cwds =
+        // An empty Current cohort contributes a known empty CWD set. The
+        // planner still requires authenticated receipts for every missing
+        // predecessor before it can capture the composed History owner.
+        snapshot.current_cwds = if current.sources.is_empty() {
+            Some(Default::default())
+        } else {
             super::catalog::runtime_source_cwds_by_path_if_current(self.db, &current.sources)
                 .ok()
                 .flatten()
-                .map(|by_path| by_path.into_values().flatten().collect());
+                .map(|by_path| by_path.into_values().flatten().collect())
+        };
         Ok(snapshot)
     }
 
