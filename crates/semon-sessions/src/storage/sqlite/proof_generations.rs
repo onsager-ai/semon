@@ -798,7 +798,6 @@ pub(crate) fn retain_outgoing_history_refs(
     // references copied from an exact local Current grant. They never grant
     // History origin.
     for row in outgoing_owners {
-        retain_stage_history_origin(tx, namespace, admission, stream, row, overview_budget)?;
         retain_current_refs_for_unowned_history(
             tx,
             namespace,
@@ -823,11 +822,10 @@ fn retain_stage_history_origin(
     namespace: &str,
     admission: u64,
     stream: &str,
-    outgoing: &CatalogRow,
+    history_owner: &CatalogRow,
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<(), PublicationError> {
-    let mut row = outgoing.clone();
-    row.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+    let mut row = history_owner.clone();
     let history = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
     row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
@@ -839,8 +837,8 @@ fn retain_stage_history_origin(
         |row| row.get(0),
     ).map_err(failed)?;
     let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-    let prefix = crate::retention::source_generation(&row.sources)
-        .map_err(|_| StorageError::Unavailable)?;
+    let prefix =
+        crate::retention::source_generation(&row.sources).map_err(|_| StorageError::Unavailable)?;
     if !stage_origin
         || has_local_history_origin(
             db, namespace, &row.key, &history, &metadata, admission, stream,
@@ -998,6 +996,11 @@ pub(super) fn retain_current_refs_for_unowned_history(
         )
         .map_err(|error| PublicationError::Storage(failed(error)))?;
     let normalized = normalized_owner_metadata(&metadata, session_key)?;
+    // Both same-key replacement and withdrawal retire Current receipts. Copy
+    // exact local Stage provenance before either path releases those refs.
+    let history_owner: CatalogRow =
+        serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
+    retain_stage_history_origin(db, namespace, admission, stream, &history_owner, budget)?;
     if has_local_history_origin(
         db,
         namespace,

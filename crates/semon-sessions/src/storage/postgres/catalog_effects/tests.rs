@@ -433,6 +433,8 @@ fn build_oracle_with_binding(
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut cache =
         crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    let receipt = cache.ingest(&"1".repeat(64), &source, "claude").unwrap();
+    assert_eq!(receipt.consumed_bytes, fs::metadata(&source).unwrap().len());
     let prepared =
         crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
     assert!(!prepared.rows.is_empty());
@@ -518,9 +520,17 @@ fn build_oracle_with_binding(
     // lifecycles. Seed both with the same real producer before Raw moves.
     let mut original_options = options.clone();
     original_options.cache = root.join("original-index.json");
+    original_options
+        .source
+        .config(&original_options.cache)
+        .unwrap()
+        .create_native_store()
+        .unwrap();
     let mut original_cache =
         crate::events::EventCache::open_scoped(&original_options.cache, &original_options.source)
             .unwrap();
+    let receipt = original_cache.ingest(&"1".repeat(64), &source, "claude").unwrap();
+    assert_eq!(receipt.consumed_bytes, fs::metadata(&source).unwrap().len());
     let original_prepared = crate::model::prepare_sources(
         &original_options,
         &mut original_cache,
