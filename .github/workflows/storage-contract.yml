@@ -138,7 +138,7 @@ jobs:
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
-          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::businessflow::pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite -- --exact --nocapture --test-threads=1 > "$RUNNER_TEMP/477-model-forensic.log" 2>&1 || true
+          SEMON_BUILD_TIMING=1 cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::businessflow::pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite -- --exact --nocapture --test-threads=1 > "$RUNNER_TEMP/477-model-forensic.log" 2>&1 || true
           python3 - <<'PY' | tee "$RUNNER_TEMP/477-model-digests.log"
           import glob, hashlib, json, os, sqlite3
           def sha(value): return hashlib.sha256(value.encode()).hexdigest()
@@ -167,7 +167,9 @@ jobs:
                           for label,stored in [('current',current),('history',history)]:
                               if not stored: continue
                               text=stored[0]; row=json.loads(text); normalized=dict(row,lifecycle='current')
-                              if 'oracle-withdraw201' in path and key=='related154' and kind=='catalog' and label=='current': saved.append({'metadata':text,'grant':grant})
+                              if 'oracle-withdraw201' in path and kind=='catalog' and label=='current': saved.append({'metadata':text,'grant':grant})
+                              stage=db.execute('SELECT value FROM meta WHERE namespace=? AND key=?',(ns,'catalog_native_observation:'+sha(json.dumps(normalized,separators=(',',':'),ensure_ascii=False)))).fetchone()
+                              print('STAGE_GRANT',key,label,stage)
                               print('ROW',label,'raw_hash',sha(text),'lifecycle',row['lifecycle'],'normalized_hash',sha(json.dumps(normalized,separators=(',',':'),ensure_ascii=False)))
                               for rid,reference,metadata in db.execute("SELECT g.id,f.kind,g.metadata FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=? AND f.session_key=? ORDER BY f.kind,g.id LIMIT 8",(ns,key)):
                                   original=json.loads(metadata)
