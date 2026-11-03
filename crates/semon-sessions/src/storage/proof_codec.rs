@@ -9,6 +9,17 @@ pub(crate) const TTL_MAX: u32 = 60_000;
 pub(crate) const LEASE_CAP: i64 = 64;
 pub(crate) const METADATA_MAX: usize = 1_048_576;
 
+// A context CatalogRow has 273 bytes excluding the entry string contents:
+// three 64-byte identities, the kind, and the serde envelope. Canonical JSON
+// expands at most twice when quoted; the tuple's two brackets and two commas
+// never expand, so its escaped length is at most 2*n-4. Reserve the existing
+// 4096-byte page allowance (larger than the worst TransferPage envelope), plus
+// the per-record separator. Context membership is authenticated once at final
+// publication verification and adds no per-record authority bytes. Therefore
+// 4096 + 273 + (2*n-4) + 1 <= MAX_PAGE_BYTES. The next byte can exceed it.
+pub(crate) const PRESENTATION_CONTEXT_MAX: usize =
+    (crate::storage::transfer::MAX_PAGE_BYTES - 4096 - 273 - 1 + 4) / 2;
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PresentationManifest {
@@ -114,7 +125,7 @@ pub(crate) fn decode_presentation_context(
     reference: &str,
     text: &str,
 ) -> Result<(String, String, serde_json::Value), StorageError> {
-    if text.len() > METADATA_MAX {
+    if text.len() > PRESENTATION_CONTEXT_MAX {
         return Err(StorageError::HistoryRetentionBounds);
     }
     if digest(text.as_bytes()) != reference {
@@ -182,7 +193,7 @@ impl PresentationCapture {
             for (key, value) in values {
                 let entry = (kind.clone(), key.clone(), value.clone());
                 let encoded = serde_json::to_vec(&entry).map_err(|_| StorageError::Unavailable)?;
-                if encoded.len() > METADATA_MAX {
+                if encoded.len() > PRESENTATION_CONTEXT_MAX {
                     return Err(StorageError::HistoryRetentionBounds);
                 }
                 let digest = digest(&encoded);
@@ -813,13 +824,24 @@ mod tests {
     fn shared_context_record_bound_is_inclusive_and_never_splits_entries() {
         let mut entry = ("turn", "key", String::new());
         let overhead = serde_json::to_string(&entry).unwrap().len();
-        entry.2 = "x".repeat(METADATA_MAX - overhead);
+        entry.2 = "x".repeat(PRESENTATION_CONTEXT_MAX - overhead);
         let text = serde_json::to_string(&entry).unwrap();
-        assert_eq!(text.len(), METADATA_MAX);
+        assert_eq!(text.len(), PRESENTATION_CONTEXT_MAX);
         assert!(decode_presentation_context(&digest(text.as_bytes()), &text).is_ok());
         entry.2.push('x');
         let text = serde_json::to_string(&entry).unwrap();
         assert_eq!(decode_presentation_context(&digest(text.as_bytes()), &text), Err(StorageError::HistoryRetentionBounds));
+    }
+
+    #[test]
+    fn shared_context_producer_refuses_an_oversized_tuple_before_publication() {
+        let mut witness = presentation_fixture();
+        let mut context = serde_json::to_value(&witness.context).unwrap();
+        context["turn"]["oversized"] = serde_json::json!("x".repeat(PRESENTATION_CONTEXT_MAX));
+        witness.context = serde_json::from_value(context).unwrap();
+        let mut capture = PresentationCapture::default();
+        assert_eq!(capture.push("key".into(), witness), Err(StorageError::HistoryRetentionBounds));
+        assert!(capture.finish().rows.is_empty());
     }
 
     #[test]

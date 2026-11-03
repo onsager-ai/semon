@@ -208,8 +208,13 @@ Replay uses saved context without observing live context again. Both adapters
 preserve these records through retention and transfer; transfer admission verifies
 the complete store before granting the imported publication. Native PostgreSQL
 selected reads continue to use authenticated catalog proof pages.
-The aggregate captured row/store limit remains 8 MiB; the manifest and each
-individual context record remain bounded at 1 MiB. Entries are never split.
+The aggregate captured row/store limit remains 8 MiB and the manifest remains
+bounded at 1 MiB. Each canonical context tuple is bounded at 522,105 bytes:
+`(MAX_PAGE_BYTES - 4096 - 273 - 1 + 4) / 2`. This reserves the initial page
+allowance, the context record envelope and separator, and worst-case JSON string
+escaping (at most twice the tuple bytes minus its four structural punctuation
+bytes). Digest-set authentication runs once per publication at final transfer
+admission, without loading a full manifest for every record. Entries are never split.
 This is the single current contract; old inline context stores are unsupported.
 
 Ordinary publication receipt IDs may differ from the Catalog generation: leases

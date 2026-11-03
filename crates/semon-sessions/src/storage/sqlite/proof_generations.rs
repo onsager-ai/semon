@@ -28,7 +28,7 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentation_roots(namespace TEXT NOT NULL,publication TEXT NOT NULL,base TEXT NOT NULL,manifest TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(namespace,digest)) STRICT, WITHOUT ROWID;
-CREATE TABLE IF NOT EXISTS storage_proof_presentation_contexts(namespace TEXT NOT NULL,publication TEXT NOT NULL,digest TEXT NOT NULL,entry TEXT NOT NULL CHECK(octet_length(entry)<=1048576),PRIMARY KEY(namespace,publication,digest)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_presentation_contexts(namespace TEXT NOT NULL,publication TEXT NOT NULL,digest TEXT NOT NULL,entry TEXT NOT NULL CHECK(octet_length(entry)<=522105),PRIMARY KEY(namespace,publication,digest)) STRICT, WITHOUT ROWID;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_context_immutable BEFORE UPDATE ON storage_proof_presentation_contexts BEGIN SELECT RAISE(ABORT,'immutable presentation context'); END;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;
@@ -4028,7 +4028,7 @@ pub(crate) fn presentation_contexts(
     }
     let bytes = usize::try_from(bytes).map_err(|_| StorageError::HistoryRetentionBounds)?;
     let bytes = bytes.max(1).checked_add(1).ok_or(StorageError::HistoryRetentionBounds)?;
-    if bytes > 8 * proof_codec::METADATA_MAX || largest > proof_codec::METADATA_MAX as i64 {
+    if bytes > 8 * proof_codec::METADATA_MAX || largest > proof_codec::PRESENTATION_CONTEXT_MAX as i64 {
         return Err(StorageError::HistoryRetentionBounds);
     }
     charge(bytes)?;

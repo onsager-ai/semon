@@ -373,14 +373,10 @@ fn verify_authority(
                 return Err(StorageError::ScopeChanged);
             }
         }
-        PresentationContext => {
-            let manifest: String = tx.0.query_row("SELECT CASE WHEN octet_length(manifest)<=?3 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2", params![tx.1,text(0)?,*verification_bytes as i64], |r| r.get::<_,Option<String>>(0)).map_err(failed)?.ok_or(StorageError::Busy)?;
-            *verification_bytes = verification_bytes.checked_sub(manifest.len()).ok_or(StorageError::Busy)?;
-            let manifest = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
-            if !manifest.contexts.contains(text(1)?) {
-                return Err(StorageError::ScopeChanged);
-            }
-        }
+        // Canonical bytes and digest are checked by catalog_rows::validate.
+        // Exact digest-set membership is authenticated once per publication by
+        // verify_context_stores before the imported catalog can be admitted.
+        PresentationContext => {}
         ProofGeneration => {
             let record = catalog_rows::proof_generation(tx.1, values)?;
             let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications p JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace=?1 AND p.generation=?2 AND p.proof_digest=?3 AND p.admission=?4 AND EXISTS(SELECT 1 FROM json_each(p.metadata) WHERE value=?5))", params![tx.1,record.publication,record.proof,record.admission as i64,record.metadata], |r| r.get(0)).map_err(failed)?;
@@ -452,8 +448,9 @@ pub(super) fn verify_context_stores(tx: &Inbox<'_>) -> Result<(), StorageError> 
     if orphan { return Err(StorageError::ScopeChanged); }
     let mut after = String::new();
     loop {
-        let root: Option<(String,String)> = tx.0.query_row("SELECT digest,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest>?2 ORDER BY digest LIMIT 1", params![tx.1,after], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(failed)?;
+        let root: Option<(String,Option<String>)> = tx.0.query_row("SELECT digest,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest>?2 ORDER BY digest LIMIT 1", params![tx.1,after], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(failed)?;
         let Some((digest, manifest)) = root else { break; };
+        let manifest = manifest.ok_or(StorageError::HistoryRetentionBounds)?;
         let publication: String = tx.0.query_row("SELECT publication FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2", params![tx.1,digest], |r| r.get(0)).map_err(failed)?;
         let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
         let (row_bytes, largest): (i64,i64) = tx.0.query_row("SELECT COALESCE(sum(octet_length(p.metadata)),0),COALESCE(max(max(octet_length(g.metadata),octet_length(g.slots))),0) FROM storage_proof_presentations p JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.publication=?2", params![tx.1,publication], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
@@ -467,8 +464,11 @@ pub(super) fn verify_context_stores(tx: &Inbox<'_>) -> Result<(), StorageError> 
         let mut seen = std::collections::BTreeSet::new();
         while let Some(row) = rows.next().map_err(failed)? {
             if !seen.insert(row.get::<_,String>(0).map_err(failed)?) { return Err(StorageError::ScopeChanged); }
-            crate::storage::proof_codec::verify_presentation_references(&row.get::<_,String>(0).map_err(failed)?, &row.get::<_,String>(1).map_err(failed)?, &row.get::<_,String>(2).map_err(failed)?, &row.get::<_,String>(3).map_err(failed)?, &manifest)?;
-            crate::storage::proof_codec::resolve_presentation(&row.get::<_,String>(3).map_err(failed)?, &contexts)?;
+            let metadata = row.get::<_,Option<String>>(1).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
+            let slots = row.get::<_,Option<String>>(2).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
+            let presentation = row.get::<_,Option<String>>(3).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
+            crate::storage::proof_codec::verify_presentation_references(&row.get::<_,String>(0).map_err(failed)?, &metadata, &slots, &presentation, &manifest)?;
+            crate::storage::proof_codec::resolve_presentation(&presentation, &contexts)?;
         }
         after = digest;
     }

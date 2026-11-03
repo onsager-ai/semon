@@ -833,6 +833,35 @@ mod tests {
     use crate::storage::postgres::tests::{count, fixture, identity, limits, ns};
 
     #[test]
+    fn pg_context_record_bound_and_immutability_are_enforced() {
+        let (pool, factory) = fixture(|bounds| bounds.max_connections = 1);
+        drop(PgPool::open(factory, limits()).unwrap());
+        let namespace = ns("context-boundary");
+        let control = PgCancellation::default();
+        let entry = vec![b'x'; crate::storage::proof_codec::PRESENTATION_CONTEXT_MAX];
+        pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("INSERT INTO semon_pg_native_selected_contexts(namespace,publication,digest,entry) VALUES($1,$2,$3,$4)", &[&namespace.as_str().as_bytes(), &b"publication".as_slice(), &b"digest".as_slice(), &entry]).map_err(sqlstate::error)?;
+            Ok(())
+        }).unwrap();
+        let mut oversized = entry.clone();
+        oversized.push(b'x');
+        assert!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("INSERT INTO semon_pg_native_selected_contexts(namespace,publication,digest,entry) VALUES($1,$2,$3,$4)", &[&namespace.as_str().as_bytes(), &b"publication".as_slice(), &b"over".as_slice(), &oversized]).map_err(sqlstate::error)?;
+            Ok(())
+        }).is_err());
+        assert!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+            tx.driver.execute("UPDATE semon_pg_native_selected_contexts SET entry=$1", &[&entry]).map_err(sqlstate::error)?;
+            Ok(())
+        }).is_err());
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let rows = tx.driver.query("SELECT entry FROM semon_pg_native_selected_contexts", &[]).map_err(sqlstate::error)?;
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get::<_,Vec<u8>>(0), entry);
+            Ok(())
+        }).unwrap();
+    }
+
+    #[test]
     fn pg_native_shared_parser_tree_values_roundtrip_without_sqlite() {
         use crate::events::{EventCache, scan_file, tree_rows::TreeRows};
         let (pool, _) = fixture(|_| {});

@@ -4,7 +4,7 @@ use crate::storage::{StorageError, proof_codec};
 
 // The persisted record is immutable even when application code has UPDATE rights.
 const IMMUTABLE: &str = "BEGIN RAISE EXCEPTION 'immutable presentation context' USING ERRCODE='55000'; END;";
-const RECORD_BOUND: &str = "(octet_length(entry) <= 1048576)";
+const RECORD_BOUND: &str = "(octet_length(entry) <= 522105)";
 
 pub(super) fn contract() -> [&'static str; 2] {
     [IMMUTABLE, RECORD_BOUND]
@@ -52,7 +52,7 @@ pub(super) fn load(
         return Err(StorageError::ScopeChanged);
     }
     let bytes = bytes.max(1).checked_add(1).ok_or(StorageError::HistoryRetentionBounds)?;
-    if bytes > 8 * proof_codec::METADATA_MAX || row.get::<_, i32>(2) > proof_codec::METADATA_MAX as i32 {
+    if bytes > 8 * proof_codec::METADATA_MAX || row.get::<_, i32>(2) > proof_codec::PRESENTATION_CONTEXT_MAX as i32 {
         return Err(StorageError::HistoryRetentionBounds);
     }
     charge(bytes)?;
