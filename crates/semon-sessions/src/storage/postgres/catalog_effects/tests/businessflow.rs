@@ -1472,8 +1472,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let sqlite_parent_exact: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
     assert_eq!(
-        sqlite_parent_exact["items"][0]["lifecycle"], "retained",
-        "exact parent History selects the original retained owner"
+        sqlite_parent_exact["items"][0]["lifecycle"], "current",
+        "verified parent continuation keeps its Current display lifecycle in History"
     );
     let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
         &withdraw_options,
@@ -1506,7 +1506,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .filter(|item| !sqlite_current.contains(item["key"].as_str().unwrap()))
         .map(stable)
         .collect::<Vec<_>>();
-    // Retained-history can select an original composite projection for a key
+    // Retained-history can select a continued composite projection for a key
     // that also remains Current (the connected parent). Keep that full oracle
     // separately from the exact keys whose Current membership disappeared.
     let oracle_history_projection = sqlite_retained.iter().map(stable).collect::<Vec<_>>();
@@ -5536,7 +5536,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     crate::model::summary::CatalogLifecycle::Current
                 );
                 let history = snapshot.owner(&pid_owner.key)?.is_some();
-                assert!(history, "the PID owner keeps its original History source");
+                assert!(history, "the PID owner keeps its composite History source");
                 let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
@@ -5547,25 +5547,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
                 assert!(
-                    history_source == &pid_original_source,
-                    "History keeps the exact original source ledger"
+                    history_source != &pid_original_source,
+                    "History advances the verified parent source ledger"
                 );
                 let current_source = current
                     .sources
                     .iter()
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
+                assert_eq!(history_source, current_source);
                 let history_proof =
                     native_proof_tuple(&mut tx, &moved_store.generation, history_source)?;
                 let current_proof =
                     native_proof_tuple(&mut tx, &moved_store.generation, current_source)?;
                 assert!(
-                    history_proof == pid_original_proof,
-                    "History keeps the complete original Native proof tuple"
+                    history_proof != pid_original_proof,
+                    "the old parent Native proof cannot substitute for its continuation"
                 );
                 assert!(
-                    history_proof != current_proof,
-                    "a different Current proof cannot substitute for History"
+                    history_proof == current_proof,
+                    "History and Current bind the exact verified parent continuation"
                 );
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(
@@ -7006,9 +7007,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .cloned()
             .collect::<Vec<_>>()
     );
-    // The parent was appended after its retained owner was captured. Retained
-    // list and search pages must use the latest Catalog index fields on both
-    // engines, while exact History selection keeps the older stored row.
+    // Verified parent appends advance both the retained list/search fields and
+    // exact History selection on both engines.
     let sqlite_parent = sqlite_retained
         .iter()
         .find(|item| item["key"] == "one")
@@ -7022,7 +7022,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         &caught,
         |snapshot| {
             let owner = snapshot.owner("one")?.ok_or(StorageError::ScopeChanged)?;
-            assert!(owner.original, "reused key selects original History");
+            assert!(!owner.original, "verified append selects composite History");
             assert!(owner.has_current, "reused key also has Current");
             crate::catalog::read_page_snapshot(
                 &options,
@@ -7043,9 +7043,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         pg_parent_exact["items"], sqlite_parent_exact["items"],
         "exact retained History selection preserves the SQLite item"
     );
-    assert_ne!(
+    assert_eq!(
         sqlite_parent["last"], sqlite_parent_exact["items"][0]["last"],
-        "parent append must move the retained list position"
+        "parent append advances the exact History and retained list together"
     );
     let current_only_key = super::super::snapshot::with_admitted_snapshot(
         &pool,
@@ -7125,7 +7125,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &sqlite_host,
             None,
         )
-        .expect("PG retained parent transcript through its original source generation");
+        .expect("PG retained parent transcript through its continued source generation");
     let transcript_entries = |value: &serde_json::Value| {
         value["entries"]
             .as_array()
