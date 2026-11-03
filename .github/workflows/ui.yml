@@ -590,6 +590,7 @@ jobs:
             2>&1 | tee "$MEASUREMENT_OUT/selected-upgrade-priority-regression.log"
 
       - name: Set up Node
+        if: ${{ !cancelled() }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.x
@@ -597,13 +598,14 @@ jobs:
           cache-dependency-path: tests/ui/package-lock.json
 
       - name: Install Playwright and Chromium
+        if: ${{ !cancelled() }}
         working-directory: tests/ui
         run: |
           npm ci --no-audit --no-fund
           npx playwright install --with-deps chromium
 
       - name: Compare selected transcript tail reads on copied native fixtures
-        if: ${{ !inputs.selected_readiness_measurement }}
+        if: ${{ !cancelled() && !inputs.selected_readiness_measurement }}
         env:
           SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
           SOURCE_CANDIDATE: ${{ github.sha }}
@@ -618,7 +620,7 @@ jobs:
             --output "$MEASUREMENT_OUT"
 
       - name: Run the candidate browser journey
-        if: ${{ !inputs.selected_readiness_measurement }}
+        if: ${{ !cancelled() && !inputs.selected_readiness_measurement }}
         env:
           SOURCE_CANDIDATE: ${{ github.sha }}
           BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
