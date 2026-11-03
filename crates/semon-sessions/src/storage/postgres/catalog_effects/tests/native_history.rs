@@ -858,3 +858,121 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
     .unwrap();
     fs::remove_dir_all(data.root).unwrap();
 }
+
+#[test]
+fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fallback() {
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("history-older-trace-owner");
+    let control = PgCancellation::default();
+    let mut bound = None;
+    let data = build_oracle_with_binding(true, true, |options, rows, projections| {
+        let (generation, rows) = bind_custody_fixture(&pool, &namespace, options, rows, projections);
+        bound = Some((options.clone(), generation, rows));
+    });
+    let (mut sqlite_options, original_generation, rows) = bound.unwrap();
+    sqlite_options.cache = data.root.join("original-index.json");
+    let mut options = sqlite_options.clone();
+    let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    options.source = source.with_store(config.clone()).unwrap();
+    let original = &rows[0];
+    let key = &original.key;
+    let path = &original.sources[0].path;
+    let mut index = config.native_event_store().unwrap();
+    let removal = index.file_ledgers().unwrap();
+    let archived = data.root.join("older-owner-retained.jsonl");
+    fs::rename(path, &archived).unwrap();
+    assert_eq!(
+        index.remove_files(&removal).unwrap().outcome,
+        Outcome::Written
+    );
+    drop(index);
+    fs::rename(&archived, path).unwrap();
+    let generation = advance(&options, original, "newer-current-after-history");
+    assert_ne!(generation, original_generation);
+    let request = format!(
+        "sid={}&scope=retained_history&limit=50",
+        crate::viewer::percent_encode(key)
+    );
+    let sqlite = crate::catalog::session_catalog_page(&sqlite_options, "history-owner", &request);
+    assert_eq!(sqlite.status, 200);
+    let sqlite: serde_json::Value = serde_json::from_slice(&sqlite.body).unwrap();
+    assert!(sqlite["items"][0]["details"].is_object());
+    assert!(sqlite["items"][0]["transcript"].is_object());
+    let owner = snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &generation,
+        |snapshot| {
+            let owner = snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?;
+            assert!(owner.original && owner.has_current);
+            assert_ne!(owner.generation, generation);
+            let retained = snapshot
+                .catalog(key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            assert_eq!(retained.sources, original.sources);
+            assert!(snapshot.history_qualified(&retained).unwrap());
+            let pg = crate::catalog::read_page_snapshot(
+                &options,
+                "history-owner",
+                &crate::catalog::Request::parse(&request).unwrap(),
+                snapshot,
+            )
+            .unwrap();
+            assert_eq!(pg.status, 200);
+            let pg: serde_json::Value = serde_json::from_slice(&pg.body).unwrap();
+            assert_eq!(pg["items"][0]["details"], sqlite["items"][0]["details"]);
+            assert_eq!(pg["items"][0]["transcript"], sqlite["items"][0]["transcript"]);
+            let mut mismatched = retained.sources.clone();
+            mismatched[0].prefix_sha256[0] ^= 1;
+            assert!(
+                snapshot
+                    .selected_details(key, &mismatched, &mut |_, _| serde_json::Value::Null)
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(
+                snapshot
+                    .transcript_observation(key, &"f".repeat(64), true)
+                    .unwrap()
+                    .is_none()
+            );
+            Ok(owner.generation)
+        },
+    )
+    .unwrap();
+    let source = crate::retention::source_generation(&original.sources).unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        let ns = namespace.as_str().as_bytes();
+        for (bound_generation, source) in [(&owner, "f".repeat(64)), (&generation, source)] {
+            let changed = tx
+                .driver
+                .execute(
+                    "UPDATE semon_pg_native_catalog_trace_headers SET source_generation=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
+                    &[&ns, &bound_generation.as_bytes(), &key.as_bytes(), &source.as_bytes()],
+                )
+                .map_err(sqlstate::error)?;
+            assert_eq!(changed, 1);
+        }
+        Ok(())
+    })
+    .unwrap();
+    snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |snapshot| {
+        assert!(
+            snapshot
+                .selected_details(key, &original.sources, &mut |_, _| serde_json::Value::Null)
+                .unwrap()
+                .is_none(),
+            "a mismatched History source generation cannot borrow the Current trace"
+        );
+        Ok(())
+    })
+    .unwrap();
+    fs::remove_dir_all(data.root).unwrap();
+}
