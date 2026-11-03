@@ -973,10 +973,9 @@ fn read_inner(
                 }
                 continue;
             }
-            let header = crate::storage::sqlite::query::current_query_context_header(
-                &tx, &binding, owner,
-            )
-            .map_err(unavailable)?;
+            let header =
+                crate::storage::sqlite::query::current_query_context_header(&tx, &binding, owner)
+                    .map_err(unavailable)?;
             current_recipes.push((owner.clone(), header));
         }
     }
@@ -1083,8 +1082,10 @@ fn read_inner(
             ));
         }
         for (owner, expected) in &current_recipes {
-            if crate::storage::sqlite::query::current_query_context_header(&snapshot, &binding, owner)
-                .map_err(unavailable)?
+            if crate::storage::sqlite::query::current_query_context_header(
+                &snapshot, &binding, owner,
+            )
+            .map_err(unavailable)?
                 != *expected
             {
                 return Err(unavailable("Native query recipes changed"));
@@ -1210,8 +1211,10 @@ fn read_inner(
             &slot_generation,
         )?;
         for (owner, expected) in &current_recipes {
-            if crate::storage::sqlite::query::current_query_context_header(&snapshot, &binding, owner)
-                .map_err(unavailable)?
+            if crate::storage::sqlite::query::current_query_context_header(
+                &snapshot, &binding, owner,
+            )
+            .map_err(unavailable)?
                 != *expected
             {
                 return Err(unavailable("Native query recipes changed"));

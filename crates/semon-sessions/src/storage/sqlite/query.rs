@@ -120,11 +120,12 @@ pub(crate) fn current_query_context_header(
     )?;
     match &observation.residence {
         QueryRecipeResidence::Immutable { .. } => {
-            super::proof_generations::load_query_recipe(db, binding, &observation)
-                .map_err(|error| match error {
+            super::proof_generations::load_query_recipe(db, binding, &observation).map_err(
+                |error| match error {
                     QueryRecipeLoadError::Storage(error) => error,
                     _ => StorageError::ScopeChanged,
-                })?;
+                },
+            )?;
             Ok(None)
         }
         QueryRecipeResidence::NativeCatalog { .. } => {

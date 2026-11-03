@@ -208,6 +208,7 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         );
         crate::storage::sqlite::query::qualify_context_candidate(
             &tx,
+            &binding,
             &current,
             &home.options,
             candidate,
@@ -248,6 +249,7 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
         assert!(matches!(
             crate::storage::sqlite::query::qualify_context_candidate(
                 &tx,
+                &binding,
                 &current,
                 &home.options,
                 candidate,
