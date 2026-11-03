@@ -110,7 +110,7 @@ pub(crate) struct PresentationInputs<'a> {
 
 pub(crate) struct PreparedPresentations<'a> {
     pub(crate) inputs: PresentationInputs<'a>,
-    pub(crate) presentations: &'a [(String, String)],
+    pub(crate) presentations: &'a proof_codec::CapturedPresentations,
     pub(crate) overview_budget: &'a mut crate::overview::SummaryPublicationBudget,
 }
 
@@ -279,7 +279,7 @@ pub(crate) fn publish(
     presentations: PreparedPresentations<'_>,
 ) -> Result<(), PublicationError> {
     validate_receipt_inputs(&presentations.inputs)?;
-    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
+    validate_receipt_presentations(presentations.inputs.rows, &presentations.presentations.rows)?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -292,7 +292,7 @@ pub(crate) fn publish(
         publication,
         proof,
         &inputs,
-        captured_presentations,
+        &captured_presentations.rows,
     )?;
     for row in &prepared.rows {
         insert_proof_row(tx, namespace, &prepared, row)?;
@@ -328,7 +328,7 @@ pub(crate) fn publish_ordinary(
         metadata,
     } = *receipt;
     validate_receipt_inputs(&presentations.inputs)?;
-    validate_receipt_presentations(presentations.inputs.rows, presentations.presentations)?;
+    validate_receipt_presentations(presentations.inputs.rows, &presentations.presentations.rows)?;
     let PreparedPresentations {
         inputs,
         presentations: captured_presentations,
@@ -344,7 +344,7 @@ pub(crate) fn publish_ordinary(
         &publication,
         &proof,
         &inputs,
-        captured_presentations,
+        &captured_presentations.rows,
     )?;
     let sql_admission = prepared.admission;
     let existing = classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)?;
@@ -433,6 +433,7 @@ pub(crate) fn replay_ordinary(
             .ok_or(StorageError::ScopeChanged)?;
         captured.push((row.key.clone(), text));
     }
+    let captured = proof_codec::CapturedPresentations { rows: captured, contexts: manifest.contexts };
     let projection_witness = inputs
         .projections
         .unwrap_or_default()
@@ -440,7 +441,7 @@ pub(crate) fn replay_ordinary(
         .map(|projection| (&projection.key, &projection.slots, projection.repair))
         .collect::<Vec<_>>();
     let base_bytes = serde_json::to_vec(&(
-        "ordinary-catalog-presentation-v1",
+        "ordinary-catalog-presentation-v2",
         inputs.catalog_generation,
         metadata,
         &projection_witness,
@@ -463,7 +464,7 @@ pub(crate) fn replay_ordinary(
         &publication,
         &root.digest,
         &inputs,
-        &captured,
+        &captured.rows,
     )?;
     if prepared.id != id
         || classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)?
@@ -1818,6 +1819,7 @@ struct VerifiedObservation {
     observations: Option<crate::storage::selected::PresentationObservations>,
     record: proof_codec::GenerationRecord,
     presentation: String,
+    contexts: proof_codec::PresentationContexts,
 }
 
 fn diagnose_observation_refusal(stage: &'static str) {
@@ -2061,6 +2063,7 @@ fn verify_immutable_observation(
         observations,
         record: record.clone(),
         presentation: presentation.clone(),
+        contexts: proof_codec::decode_presentation_manifest(manifest)?.contexts,
     })
 }
 
@@ -2108,7 +2111,7 @@ pub(super) fn reusable_presentations(
         // these producer inputs. Authenticate its old proof below, then issue.
         reusable = false;
     }
-    for (row, (_, presentation)) in prepared.rows.iter().zip(&requested) {
+    for (row, (_, presentation)) in prepared.rows.iter().zip(&requested.rows) {
         let prefix = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         let metadata = serde_json::to_string(row).map_err(|_| StorageError::Unavailable)?;
@@ -2175,9 +2178,8 @@ pub(super) fn reusable_presentations(
             (None, None) => true,
             _ => false,
         };
-        let normalize = |text: &str| -> Result<serde_json::Value, StorageError> {
-            let witness: Option<crate::storage::selected::PresentationWitness> =
-                serde_json::from_str(text).map_err(|_| StorageError::Unavailable)?;
+        let normalize = |text: &str, contexts: &proof_codec::PresentationContexts| -> Result<serde_json::Value, StorageError> {
+            let witness = proof_codec::resolve_presentation(text, contexts)?;
             let mut value = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
             if let Some(catalog) = value
                 .get_mut("catalog")
@@ -2199,7 +2201,7 @@ pub(super) fn reusable_presentations(
             == serde_json::to_value(row).map_err(|_| StorageError::Unavailable)?
             && verified.record.slots == slots
             && observations_match
-            && normalize(&verified.presentation)? == normalize(presentation)?;
+            && normalize(&verified.presentation, &verified.contexts)? == normalize(presentation, &requested.contexts)?;
     }
     Ok(reusable)
 }
@@ -3780,7 +3782,7 @@ pub(crate) fn capture_presentations(
     ns: &str,
     inputs: PresentationInputs<'_>,
     observed_at: i64,
-) -> Result<Vec<(String, String)>, StorageError> {
+) -> Result<proof_codec::CapturedPresentations, StorageError> {
     validate_receipt_inputs(&inputs)?;
     #[cfg(test)]
     if FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.replace(false)) {
@@ -3795,8 +3797,7 @@ pub(crate) fn capture_presentations(
     } = inputs;
     proof_codec::validate_catalog_generation(catalog_generation)?;
     let lookup = super::selected::Context::owned(tx);
-    let mut result = Vec::new();
-    let mut bytes = 0usize;
+    let mut result = proof_codec::PresentationCapture::default();
     for row in rows {
         let projection = projections
             .unwrap_or_default()
@@ -3854,7 +3855,7 @@ pub(crate) fn capture_presentations(
                 })
             })
             .map_err(|_| StorageError::Unavailable)?;
-        let witness = Some(PresentationWitness {
+        let witness = PresentationWitness {
             header_generation,
             version: header.1,
             total: texts.len(),
@@ -3863,15 +3864,10 @@ pub(crate) fn capture_presentations(
             context,
             relative_statuses: std::mem::take(&mut observations.relative_statuses),
             observations,
-        });
-        let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
-        bytes = bytes.saturating_add(text.len());
-        if bytes > 8 * 1048576 {
-            return Err(StorageError::HistoryRetentionBounds);
-        }
-        result.push((row.key.clone(), text));
+        };
+        result.push(row.key.clone(), witness)?;
     }
-    Ok(result)
+    Ok(result.finish())
 }
 
 pub(crate) fn bind_presentations(
@@ -3879,19 +3875,19 @@ pub(crate) fn bind_presentations(
     ns: &str,
     publication: &str,
     base: &str,
-    rows: &[(String, String)],
+    captured: &proof_codec::CapturedPresentations,
     inputs: PresentationInputs<'_>,
 ) -> Result<String, StorageError> {
     validate_receipt_inputs(&inputs)?;
-    validate_receipt_presentations(inputs.rows, rows)?;
-    let root = prepare_presentation_root(base, rows, &inputs)?;
+    validate_receipt_presentations(inputs.rows, &captured.rows)?;
+    let root = prepare_presentation_root(base, captured, &inputs)?;
     insert_presentation_root(tx, ns, publication, &root)?;
     Ok(root.digest)
 }
 
 fn prepare_presentation_root(
     base: &str,
-    rows: &[(String, String)],
+    captured: &proof_codec::CapturedPresentations,
     inputs: &PresentationInputs<'_>,
 ) -> Result<PreparedPresentationRoot, StorageError> {
     let catalog_generation = inputs.catalog_generation;
@@ -3899,8 +3895,13 @@ fn prepare_presentation_root(
     let projections = inputs.projections;
     let observations = inputs.observations;
     proof_codec::validate_catalog_generation(catalog_generation)?;
+    let context_bytes = serde_json::to_vec(&captured.contexts)
+        .map_err(|_| StorageError::Unavailable)?.len();
+    if captured.rows.iter().map(|(_, text)| text.len()).sum::<usize>() + context_bytes > 8 * 1048576 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
     let mut entries = Vec::new();
-    for (key, text) in rows {
+    for (key, text) in &captured.rows {
         let row = catalog_rows
             .iter()
             .find(|row| &row.key == key)
@@ -3921,6 +3922,7 @@ fn prepare_presentation_root(
     let manifest = serde_json::to_string(&PresentationManifest {
         catalog_generation: (*catalog_generation).to_owned(),
         entries,
+        contexts: captured.contexts.clone(),
         observations: observations.cloned(),
     })
     .map_err(|_| StorageError::Unavailable)?;
@@ -4017,12 +4019,11 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
         self.validate(&db).map_err(io::Error::other)?;
         // validate() authenticated both blobs in this same read transaction.
         let (text,manifest): (String,String) = db.query_row("SELECT p.metadata,r.manifest FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(io::Error::other)?;
-        let witness: Option<crate::storage::selected::PresentationWitness> =
-            serde_json::from_str(&text).map_err(io::Error::other)?;
-        let mut witness =
-            witness.ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
         let manifest =
             proof_codec::decode_presentation_manifest(&manifest).map_err(io::Error::other)?;
+        let mut witness = proof_codec::resolve_presentation(&text, &manifest.contexts)
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
         let witness_catalog_generation = witness
             .catalog
             .get("catalog_generation")

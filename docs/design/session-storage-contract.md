@@ -196,10 +196,19 @@ Path-keyed live proofs alone are not sufficient. Current and retained references
 qualification must prove the same lifecycle before backend acceptance.
 
 Each selected-presentation manifest binds the actual Catalog generation together
-with its presentation entries and shared observations under the existing joined
-digest. Ordinary publication receipt IDs may differ from that Catalog generation:
-leases and proof roots retain the receipt ID, while selected opening matches the
-captured witness generation to the authenticated manifest field.
+with its presentation entries, shared observations and shared context lookup store
+under the joined digest. Each distinct typed lookup (family, exact key and saved
+value, including null) is stored once per publication under its SHA-256 digest;
+row witnesses reference those entries by digest. Readers authenticate the original
+receipt root and exact row entry before resolving references, verify the lookup
+family, key and digest, and refuse missing or damaged entries. Replay uses this
+saved store without observing live context again. The store follows its publication
+root through retention and transfer. The aggregate captured row/store limit remains
+8 MiB and the complete manifest limit remains 1 MiB.
+
+Ordinary publication receipt IDs may differ from the Catalog generation: leases
+and proof roots retain the receipt ID, while selected opening matches the captured
+witness generation to the authenticated manifest field.
 
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,

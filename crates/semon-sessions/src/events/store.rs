@@ -3899,7 +3899,7 @@ impl SqliteStore {
                     .map(|projection| (&projection.key, &projection.slots, projection.repair))
                     .collect::<Vec<_>>();
                 let base_bytes = serde_json::to_vec(&(
-                    "ordinary-catalog-presentation-v1",
+                    "ordinary-catalog-presentation-v2",
                     &generation,
                     &metadata,
                     &projection_witness,
