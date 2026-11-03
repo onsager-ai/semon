@@ -5281,7 +5281,7 @@ mod tests {
                 .is_none()
         );
         let history_before: String = db.query_row(
-            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
             params![b.namespace.as_str(), retained.key], |r| r.get(0),
         ).unwrap();
         assert_eq!(history_before, serde_json::to_string(&retained).unwrap());
@@ -5349,7 +5349,7 @@ mod tests {
         crate::events::store::reprice::drain_for_store_test(&owner, table.clone()).unwrap();
         let encoded: String = db
             .query_row(
-                "SELECT metadata FROM session_catalog WHERE namespace=?1 AND session_key=?2",
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
                 params![b.namespace.as_str(), original.key],
                 |r| r.get(0),
             )
@@ -5371,7 +5371,7 @@ mod tests {
             repriced.query.as_ref().unwrap()["runtime"].as_str()
         );
         let history_after: String = db.query_row(
-            "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
+            "SELECT metadata FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
             params![b.namespace.as_str(), retained.key], |r| r.get(0),
         ).unwrap();
         assert_eq!(

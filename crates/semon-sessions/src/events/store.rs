@@ -3906,7 +3906,14 @@ impl SqliteStore {
                             receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
                             None
                         }
-                        Err(error) => return Err(StoreError::Configured(error)),
+                        Err(error) => {
+                            if crate::native_timing::enabled() {
+                                eprintln!(
+                                    "semon sessions native: publication_refused stage=presentation_capture error={error:?}"
+                                );
+                            }
+                            return Err(StoreError::Configured(error));
+                        }
                     };
                 if let Some(captured) = captured {
                     let projection_witness = projections
@@ -3979,10 +3986,24 @@ impl SqliteStore {
                             Ok(()) => {}
                             Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
                                 error,
-                            )) => return Err(StoreError::Configured(error)),
+                            )) => {
+                                if crate::native_timing::enabled() {
+                                    eprintln!(
+                                        "semon sessions native: publication_refused stage=ordinary_receipt error={error:?}"
+                                    );
+                                }
+                                return Err(StoreError::Configured(error));
+                            }
                             Err(
                                 crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
-                            ) => return Ok(Outcome::Deferred),
+                            ) => {
+                                if crate::native_timing::enabled() {
+                                    eprintln!(
+                                        "semon sessions native: publication_deferred stage=ordinary_receipt reason=history_budget"
+                                    );
+                                }
+                                return Ok(Outcome::Deferred);
+                            }
                     }
                     }
                 }

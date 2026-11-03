@@ -533,6 +533,11 @@ impl CompositeHistoryStore for History<'_, '_> {
         let ns = tx.namespace.as_str().as_bytes();
         let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END FROM (SELECT slot,session_key,metadata FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p ORDER BY slot"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
         if rows.len() > 64 {
+            #[cfg(test)]
+            eprintln!(
+                "pg_history_recipe_refused reason=slot_count rows={}",
+                rows.len()
+            );
             return Err(StorageError::Busy);
         }
         rows.iter()
