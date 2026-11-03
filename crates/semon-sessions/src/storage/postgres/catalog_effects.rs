@@ -21,6 +21,8 @@ use tokio_postgres::types::ToSql;
 pub(super) mod admission;
 pub(super) mod carry;
 mod observations;
+#[cfg(test)]
+pub(super) use observations::take_publication_reads;
 pub(super) mod publication;
 pub(super) mod selected_reader;
 pub(super) mod snapshot;
