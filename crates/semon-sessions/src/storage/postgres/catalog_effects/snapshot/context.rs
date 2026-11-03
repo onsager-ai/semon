@@ -67,7 +67,8 @@ impl Snapshot<'_, '_> {
                 let Some((_, _, origin)) = self.row_observation(
                     &history,
                     Some(crate::storage::catalog::CatalogObservationOwner::History),
-                )? else {
+                )?
+                else {
                     return Ok(None);
                 };
                 match origin {
