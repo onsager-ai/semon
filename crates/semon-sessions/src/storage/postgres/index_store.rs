@@ -565,7 +565,6 @@ impl IndexStore for NativeIndex {
                 return Ok(result);
             }
         }
-
     }
     fn session_descriptions(
         &self,

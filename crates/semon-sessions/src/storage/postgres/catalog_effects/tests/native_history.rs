@@ -102,12 +102,12 @@ fn pg_withdrawal_preserves_current_and_older_original_custody() {
                     .unwrap();
             sqlite_generation = sqlite
                 .publish_catalog_projection_fenced(
-                &crate::slot_projection::Publication {
-                    rows: &prepared.rows,
-                    transcripts: Some(&prepared.transcripts),
-                    observations: None,
-                },
-                sqlite_generation.as_deref(),
+                    &crate::slot_projection::Publication {
+                        rows: &prepared.rows,
+                        transcripts: Some(&prepared.transcripts),
+                        observations: None,
+                    },
+                    sqlite_generation.as_deref(),
                 )
                 .unwrap();
         }
