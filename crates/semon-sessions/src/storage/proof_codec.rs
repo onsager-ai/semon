@@ -193,6 +193,8 @@ impl PresentationCapture {
             for (key, value) in values {
                 let entry = (kind.clone(), key.clone(), value.clone());
                 let encoded = serde_json::to_vec(&entry).map_err(|_| StorageError::Unavailable)?;
+                #[cfg(test)]
+                eprintln!("CONTEXT_TUPLE_BYTES={}", encoded.len());
                 if encoded.len() > PRESENTATION_CONTEXT_MAX {
                     return Err(StorageError::HistoryRetentionBounds);
                 }
