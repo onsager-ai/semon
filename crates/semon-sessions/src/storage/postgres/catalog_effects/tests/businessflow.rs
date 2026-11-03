@@ -5939,7 +5939,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         assert_eq!(repeated.compacted_through, compacted.compacted_through);
     }
     let mut facts_host = body_host(&facts_options, &facts_rows);
-    facts_host.0.extend(retained_host.0.iter().cloned());
+    // Facts publication can retain the exact continued owner from before the
+    // Facts write, alongside the original and relocated source captures.
+    facts_host.0.extend(moved_host.0.iter().cloned());
     let factory_host = facts_host.clone();
     let factory_rows = facts_rows.clone();
     let factory_namespace = namespace.clone();
