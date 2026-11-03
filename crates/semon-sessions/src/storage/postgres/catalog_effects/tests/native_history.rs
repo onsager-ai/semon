@@ -865,12 +865,19 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     let namespace = ns("history-older-trace-owner");
     let control = PgCancellation::default();
     let mut bound = None;
-    let data = build_oracle_with_binding(true, true, |options, rows, projections| {
-        let (generation, rows) =
-            bind_custody_fixture(&pool, &namespace, options, rows, projections);
-        bound = Some((options.clone(), generation, rows));
+    let data = build_oracle_with_binding(true, true, |options, _, _| {
+        bound = Some(options.clone());
     });
-    let (mut sqlite_options, original_generation, rows) = bound.unwrap();
+    let mut sqlite_options = bound.unwrap();
+    // The oracle moves and restores Raw while constructing SQLite History.
+    // Bind PG only afterwards, with the final physical source witness.
+    let (original_generation, rows) = bind_custody_fixture(
+        &pool,
+        &namespace,
+        &sqlite_options,
+        &data.rows,
+        &data.projections,
+    );
     sqlite_options.cache = data.root.join("original-index.json");
     let mut options = sqlite_options.clone();
     let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
@@ -883,22 +890,10 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     options.source = source.with_store(config).unwrap();
     let original = &rows[0];
     let key = &original.key;
-    let path = &original.sources[0].path;
-    let mut index =
-        super::super::super::index_store::open(pool.clone(), namespace.clone(), control.clone())
-            .unwrap()
-            .0;
-    let removal = index.file_ledgers().unwrap();
-    let archived = data.root.join("older-owner-retained.jsonl");
-    fs::rename(path, &archived).unwrap();
-    assert_eq!(
-        index.remove_files(&removal).unwrap().outcome,
-        Outcome::Written
-    );
-    drop(index);
-    fs::rename(&archived, path).unwrap();
+    let history_generation = advance(&options, original, "capture-original-history");
     let generation = advance(&options, original, "newer-current-after-history");
     assert_ne!(generation, original_generation);
+    assert_ne!(generation, history_generation);
     let request = format!(
         "sid={}&scope=retained_history&limit=50",
         crate::viewer::percent_encode(key)
@@ -908,7 +903,7 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     let sqlite: serde_json::Value = serde_json::from_slice(&sqlite.body).unwrap();
     assert!(sqlite["items"][0]["details"].is_object());
     assert!(sqlite["items"][0]["transcript"].is_object());
-    let owner =
+    let publication =
         snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |snapshot| {
             let owner = snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?;
             assert!(owner.original && owner.has_current);
@@ -946,13 +941,24 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
                     .unwrap()
                     .is_none()
             );
-            Ok(owner.generation)
+            let (_, _, origin) = snapshot
+                .row_observation(
+                    &retained,
+                    Some(crate::storage::catalog::CatalogObservationOwner::History),
+                )
+                .unwrap()
+                .unwrap();
+            let observations::Origin::Native(receipt) = origin else {
+                panic!("ordinary native History must retain its own receipt");
+            };
+            assert_eq!(receipt.2, original_generation);
+            Ok(receipt.2)
         })
         .unwrap();
     let source = crate::retention::source_generation(&original.sources).unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
-        for (bound_generation, source) in [(&owner, "f".repeat(64)), (&generation, source)] {
+        for (bound_generation, source) in [(&publication, "f".repeat(64)), (&generation, source)] {
             let changed = tx
                 .driver
                 .execute(

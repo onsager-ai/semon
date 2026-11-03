@@ -1,6 +1,6 @@
 //! Immutable selected metadata through the ordinary shared presentation port.
 use super::*;
-use crate::storage::selected::ContextLookup;
+use crate::storage::{catalog::CatalogSnapshot, selected::ContextLookup};
 use serde_json::{Value, json};
 use std::io;
 
@@ -48,19 +48,59 @@ impl Snapshot<'_, '_> {
         key: &str,
         source_generation: &str,
     ) -> io::Result<Option<Value>> {
+        let history = self.catalog(key, true).map_err(io::Error::other)?;
+        let generation = if let Some(history) = history
+            && crate::retention::source_generation(&history.sources).map_err(io::Error::other)?
+                == source_generation
+        {
+            if !self.history_qualified(&history)? {
+                return Ok(None);
+            }
+            let owner = self
+                .owner(key)
+                .map_err(io::Error::other)?
+                .ok_or_else(|| io::Error::other(StorageError::ScopeChanged))?;
+            // History's physical owner can contain a newer Current trace.
+            // Authenticate its own receipt/proof before choosing the immutable
+            // metadata residence; an absent bound trace never borrows Current.
+            if history.query.is_some() {
+                let Some((_, _, origin)) = self.row_observation(
+                    &history,
+                    Some(crate::storage::catalog::CatalogObservationOwner::History),
+                )? else {
+                    return Ok(None);
+                };
+                match origin {
+                    super::super::observations::Origin::Native(receipt) => receipt.2,
+                    super::super::observations::Origin::Imported(_) => owner.generation,
+                }
+            } else {
+                owner.generation
+            }
+        } else {
+            let Some(current) = self.catalog(key, false).map_err(io::Error::other)? else {
+                return Ok(None);
+            };
+            if crate::retention::source_generation(&current.sources).map_err(io::Error::other)?
+                != source_generation
+            {
+                return Ok(None);
+            }
+            self.generation.clone()
+        };
         let tx = self
             .tx
             .lock()
             .map_err(|_| io::Error::other(StorageError::Unavailable))?;
         tx.check().map_err(io::Error::other)?;
         let ns = tx.namespace.as_str().as_bytes();
-        let generation = self.generation.as_bytes();
+        let generation = generation.as_bytes();
         let key_bytes = key.as_bytes();
         let source_bytes = source_generation.as_bytes();
         let rows = tx
             .driver
             .query(
-                "SELECT session_key=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND source_generation=$5",
+                "SELECT session_key=$4,CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM semon_pg_native_catalog_trace_headers WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND source_generation=$5 LIMIT 2",
                 &[
                     &ns,
                     &generation,
@@ -85,6 +125,7 @@ impl Snapshot<'_, '_> {
             .get::<_, Option<Vec<u8>>>(1)
             .ok_or(StorageError::Busy)
             .map_err(io::Error::other)?;
+        crate::selected_read::charge(64, metadata.len())?;
         serde_json::from_slice(&metadata)
             .map(Some)
             .map_err(io::Error::other)
