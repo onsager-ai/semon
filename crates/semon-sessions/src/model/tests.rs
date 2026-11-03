@@ -4282,59 +4282,184 @@ fn staged_codex_native_spawn_and_relay_replay_matches_shared_builder() {
 #[test]
 fn staged_cross_harness_child_header_keeps_claude_sender_spawn_turn() {
     let home = Home::new();
-    home.top("root", &[
-        human("root", ts(5, 0), "Coordinate"),
-        assistant("root", ts(5, 1), vec![tool("spawn-review", "Agent", json!({"prompt":"Review"}))]),
-        result("root", ts(5, 1), "spawn-review", "launched", false, json!({"status":"async_launched","agentId":"review"})),
-    ]);
-    home.agent("root", "review", "spawn-review", &[
-        user("root", ts(5, 2), "Review"),
-        assistant("root", ts(5, 3), vec![tool("spawn-codex", "Agent", json!({"prompt":"Inspect"}))]),
-        result("root", ts(5, 3), "spawn-codex", "launched", false, json!({"status":"async_launched","agentId":"codex-child"})),
-    ]);
-    home.codex("codex-child", json!({}), &[
-        codex_user(ts(5, 4), "Semon-Parent: claude:review:spawn-codex\nInspect"),
-        codex_reply(ts(5, 5), "Done"),
-    ]);
-    let inputs = crate::inputs(&home.options).unwrap().into_iter()
-        .filter(|input| input.path.ends_with(".jsonl")).collect::<Vec<_>>();
+    home.top(
+        "root",
+        &[
+            human("root", ts(5, 0), "Coordinate"),
+            assistant(
+                "root",
+                ts(5, 1),
+                vec![tool("spawn-review", "Agent", json!({"prompt":"Review"}))],
+            ),
+            result(
+                "root",
+                ts(5, 1),
+                "spawn-review",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"review"}),
+            ),
+        ],
+    );
+    home.agent(
+        "root",
+        "review",
+        "spawn-review",
+        &[
+            user("root", ts(5, 2), "Review"),
+            assistant(
+                "root",
+                ts(5, 3),
+                vec![tool("spawn-codex", "Agent", json!({"prompt":"Inspect"}))],
+            ),
+            result(
+                "root",
+                ts(5, 3),
+                "spawn-codex",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"codex-child"}),
+            ),
+        ],
+    );
+    home.codex(
+        "codex-child",
+        json!({}),
+        &[
+            codex_user(ts(5, 4), "Semon-Parent: claude:review:spawn-codex\nInspect"),
+            codex_reply(ts(5, 5), "Done"),
+        ],
+    );
+    let inputs = crate::inputs(&home.options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| input.path.ends_with(".jsonl"))
+        .collect::<Vec<_>>();
     assert_eq!(inputs.len(), 3);
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let (outcome, generation) = cache.publish_partial_catalog_fenced(&full).unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    assert!(generation.is_some());
+    // An unverified append forces Original custody during semantic replay.
+    // Its direct publication grant must follow the outgoing owner to History.
+    let root_path = home.options.claude_home.join("projects/-work-proj/root.jsonl");
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&root_path).unwrap(),
+        "{}",
+        human("root", ts(5, 6), "Unverified continuation")
+    )
+    .unwrap();
     let edge = stable_id("s", "spawn:codex:codex-child");
     let expected = &full.relationships.relations[&edge];
     assert_eq!(expected.from, "review");
-    assert_eq!(expected.source_turn, relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:review")));
-    let paths = inputs.iter().map(|input| input.full_path(&home.options).to_string_lossy().into_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        expected.source_turn,
+        relation_stage::OriginTurn::Known(stable_id("s", "spawn:claude:review"))
+    );
+    let paths = inputs
+        .iter()
+        .map(|input| {
+            input
+                .full_path(&home.options)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
-    assert_eq!(cache.begin_semantic_stage(&paths, &runtime).unwrap(), crate::events::Outcome::Written);
+    assert_eq!(
+        cache.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
     let mut checked_child_header = false;
     let mut checked_publication = false;
     for _ in 0..64 {
         let batch = cache.semantic_batch(64).unwrap().expect("active stage");
         if batch.paths.is_empty() {
-            assert!(matches!(batch.phase, relation_stage::Phase::Indexing | relation_stage::Phase::Identity));
+            assert!(matches!(
+                batch.phase,
+                relation_stage::Phase::Indexing | relation_stage::Phase::Identity
+            ));
             continue;
         }
-        let batch_inputs = inputs.iter().filter(|input| batch.paths.contains(&input.full_path(&home.options).to_string_lossy().into_owned())).cloned().collect::<Vec<_>>();
+        let batch_inputs = inputs
+            .iter()
+            .filter(|input| {
+                batch.paths.contains(
+                    &input
+                        .full_path(&home.options)
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         assert_eq!(batch_inputs.len(), batch.paths.len());
-        let prepared = prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
-        if batch.phase == relation_stage::Phase::Relations && batch.context.matching_header_paths.as_ref().is_some_and(|headers| headers.iter().any(|path| path.ends_with("rollout-codex-child.jsonl"))) {
-            assert!(batch.context.claude_call_locations.get("spawn-review").and_then(Option::as_ref).is_some(), "non-Claude header carries the sender's exact incoming Agent call");
-            assert_eq!(prepared.prepared().relationships.relations[&edge].source_turn, expected.source_turn);
+        let prepared =
+            prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &batch, NOW).unwrap();
+        if batch.phase == relation_stage::Phase::Relations
+            && batch
+                .context
+                .matching_header_paths
+                .as_ref()
+                .is_some_and(|headers| {
+                    headers
+                        .iter()
+                        .any(|path| path.ends_with("rollout-codex-child.jsonl"))
+                })
+        {
+            assert!(
+                batch
+                    .context
+                    .claude_call_locations
+                    .get("spawn-review")
+                    .and_then(Option::as_ref)
+                    .is_some(),
+                "non-Claude header carries the sender's exact incoming Agent call"
+            );
+            assert_eq!(
+                prepared.prepared().relationships.relations[&edge].source_turn,
+                expected.source_turn
+            );
             checked_child_header = true;
         }
         if batch.phase == relation_stage::Phase::Publication {
             assert!(checked_child_header);
-            assert_eq!(prepared.prepared().relationships.relations[&edge].source_turn, expected.source_turn);
+            assert_eq!(
+                prepared.prepared().relationships.relations[&edge].source_turn,
+                expected.source_turn
+            );
+            let (outcome, generation) = cache
+                .publish_semantic_catalog(&batch, prepared.prepared())
+                .unwrap();
+            assert_eq!(outcome, crate::events::Outcome::Written);
+            assert!(generation.is_some());
+            assert_eq!(
+                cache.finish_semantic_stage(batch.epoch).unwrap(),
+                crate::events::Outcome::Written
+            );
             checked_publication = true;
             break;
         }
-        assert_eq!(cache.record_semantic_batch(&batch, prepared.prepared()).unwrap(), crate::events::Outcome::Written);
+        assert_eq!(
+            cache
+                .record_semantic_batch(&batch, prepared.prepared())
+                .unwrap(),
+            crate::events::Outcome::Written
+        );
         cache.end_scan();
         cache.release_published_indexes();
     }
-    assert!(checked_publication, "the recorded parent turn must survive publication's strict staged-origin check");
+    assert!(
+        checked_publication,
+        "the recorded parent turn must survive publication's strict staged-origin check"
+    );
+    let retained = crate::session_catalog_page(
+        &home.options,
+        "fixture",
+        "sid=root&scope=retained_history&limit=1",
+    );
+    assert_eq!(retained.status, 200, "{}", String::from_utf8_lossy(&retained.body));
 }
 
 #[test]
