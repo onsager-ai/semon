@@ -4,6 +4,7 @@ use super::*;
 use crate::events::{EventCache, Outcome};
 use crate::storage::{catalog::CatalogSnapshot, native_events::NativeEventStore};
 use sha2::Digest;
+use std::collections::BTreeSet;
 use std::io::Write;
 
 pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> String {
@@ -30,6 +31,221 @@ pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> S
         assert_eq!(outcome, Outcome::Deferred);
     }
     panic!("bounded original custody did not finish");
+}
+
+#[test]
+fn pg_withdrawal_preserves_current_and_older_original_custody() {
+    for case in ["current-only", "older-original"] {
+        let data = build_oracle(true, false);
+        let (pool, _) = fixture(|_| {});
+        let namespace = ns(&format!("withdrawal-{case}"));
+        let control = PgCancellation::default();
+        let mut options = Options {
+            source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
+            claude_home: data.root.join("claude"),
+            claude_json: data.root.join("claude.json"),
+            codex_home: data.root.join("codex"),
+            copilot_home: data.root.join("copilot"),
+            proc_root: data.root.join("proc"),
+            cache: data.root.join("index.json"),
+            all: true,
+            ..Default::default()
+        };
+        let mut sqlite_options = options.clone();
+        sqlite_options.cache = data.root.join("withdrawal-sqlite-index.json");
+        let mut sqlite =
+            EventCache::open_scoped(&sqlite_options.cache, &sqlite_options.source).unwrap();
+        let inputs = crate::inputs::inputs(&sqlite_options).unwrap();
+        let prepared =
+            crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
+                .unwrap();
+        let (_, mut sqlite_generation) = sqlite.publish_partial_catalog_fenced(&prepared).unwrap();
+        let (mut generation, rows) =
+            bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
+        let config = options
+            .source
+            .store_config(crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            })
+            .unwrap();
+        options.source = options.source.with_store(config).unwrap();
+        let original = &rows[0];
+        let path = &original.sources[0].path;
+        let key = &original.key;
+        let host = super::businessflow::body_host(&options, &rows);
+        let read_body = |generation: &str, host: &super::businessflow::BodyHost| {
+            let store = snapshot::query::QueryCatalog {
+                captured: false,
+                pool: pool.clone(),
+                namespace: namespace.clone(),
+                control: control.clone(),
+                generation: generation.to_owned(),
+                options: options.clone(),
+            };
+            crate::Query::new(options.clone())
+                .call_bound_selected_at(
+                    "read_transcript",
+                    &serde_json::json!({"id":key,"limit":100}),
+                    1790812860000,
+                    &store,
+                    host,
+                    None,
+                )
+                .unwrap()
+        };
+        let expected_body = read_body(&generation, &host);
+        if case == "older-original" {
+            generation = advance(&options, original, "withdrawal-newer-current");
+            let prepared =
+                crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812860000)
+                    .unwrap();
+            sqlite_generation = sqlite
+                .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                    observations: None,
+                },
+                sqlite_generation.as_deref(),
+                )
+                .unwrap();
+        }
+        let (mut expected, header, slots, old_owner) =
+            snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+                let owner = snapshot.owner(key)?;
+                let history = case == "older-original";
+                let (row, header, slots) = snapshot.selected(key, history, 0, 64)?.unwrap();
+                if history {
+                    let current = snapshot.catalog(key, false)?.unwrap();
+                    assert_ne!(current.sources, row.sources);
+                    assert_ne!(current.last, row.last);
+                    assert!(owner.as_ref().unwrap().original);
+                } else {
+                    assert!(owner.is_none());
+                }
+                Ok((row, header, slots, owner.map(|owner| owner.generation)))
+            })
+            .unwrap();
+        expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let open = || {
+            super::super::super::index_store::open(pool.clone(), namespace.clone(), control.clone())
+                .unwrap()
+                .0
+        };
+        let mut index = open();
+        let path_string = path.to_str().unwrap().to_owned();
+        let ledger = index
+            .file_ledgers()
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == &path_string)
+            .unwrap()
+            .1
+            .unwrap();
+        let removal = vec![(path_string, Some(ledger))];
+        // The captured host independently owns the exact old bytes. Source
+        // withdrawal must not require their continued presence at the live path.
+        fs::rename(path, data.root.join("retained-native.jsonl")).unwrap();
+        sqlite.retain(&BTreeSet::new(), &mut false).unwrap();
+        assert!(
+            sqlite
+                .publish_catalog_projection_fenced(
+                    &crate::slot_projection::Publication {
+                        rows: &[],
+                        transcripts: Some(&[]),
+                        observations: None,
+                    },
+                    sqlite_generation.as_deref(),
+                )
+                .unwrap()
+                .is_some()
+        );
+        let sqlite_config = sqlite_options.source.config(&sqlite_options.cache).unwrap();
+        let sqlite_owner =
+            crate::events::store::configured::NativeOwnership::admit(&sqlite_config).unwrap();
+        let sqlite_db = crate::storage::sqlite::source_journal::SourceJournal::owned(sqlite_owner)
+            .connection()
+            .unwrap();
+        let sqlite_metadata: String = sqlite_db.query_row(
+            "SELECT metadata FROM session_history_catalog WHERE namespace=semon_namespace() AND session_key=?1",
+            [key],
+            |row| row.get(0),
+        ).unwrap();
+        let sqlite_retained: CatalogRow = serde_json::from_str(&sqlite_metadata).unwrap();
+        assert_eq!(
+            serde_json::to_value(&sqlite_retained.sources).unwrap(),
+            serde_json::to_value(&expected.sources).unwrap()
+        );
+        assert_eq!(sqlite_retained.last, expected.last);
+        assert_eq!(sqlite_retained.lifecycle, expected.lifecycle);
+        let result = index.remove_files(&removal).unwrap();
+        assert_eq!(result, Outcome::Written);
+        let successor = pool
+            .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                super::super::super::model_cache::generation(tx)
+            })
+            .unwrap()
+            .unwrap();
+        assert_ne!(successor, generation);
+        drop(index);
+        let mut index = open();
+        let replay = index.remove_files(&removal).unwrap();
+        assert_eq!(replay, Outcome::Written);
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            assert_eq!(super::super::super::model_cache::generation(tx)?.as_deref(), Some(successor.as_str()));
+            super::super::search::verify_state(tx, &successor)?;
+            let ns = namespace.as_str().as_bytes();
+            let documents = tx.driver.query("SELECT scope,fields,complete FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3", &[&ns, &successor.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
+            let (fields, grams, complete) = crate::catalog_search::prepared_fields_port(&expected).unwrap();
+            assert_eq!(documents.len(), 1);
+            assert_eq!(documents[0].get::<_, Vec<u8>>(0), b"retained_history");
+            assert_eq!(documents[0].get::<_, Vec<u8>>(1), fields.as_bytes());
+            assert_eq!(documents[0].get::<_, bool>(2), complete);
+            let postings = tx.driver.query("SELECT gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 ORDER BY gram", &[&ns, &successor.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
+            let actual = postings.iter().map(|posting| {
+                assert_eq!(posting.get::<_, i64>(1), expected.last.unwrap_or(0));
+                String::from_utf8(posting.get(0)).unwrap()
+            }).collect::<BTreeSet<_>>();
+            assert_eq!(actual, grams);
+            Ok(())
+        }).unwrap();
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |snapshot| {
+            assert!(snapshot.catalog(key, false)?.is_none());
+            let owner = snapshot.owner(key)?.unwrap();
+            assert!(owner.original);
+            assert!(!owner.has_current);
+            if let Some(old_owner) = &old_owner {
+                assert_eq!(
+                    &owner.generation, old_owner,
+                    "reuse immutable older original"
+                );
+            }
+            let (retained, retained_header, retained_slots) =
+                snapshot.selected(key, true, 0, 64)?.unwrap();
+            assert_eq!(
+                serde_json::to_value(&retained).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+            assert_eq!(retained_header, header);
+            assert_eq!(retained_slots, slots);
+            snapshot::query::qualify_context_candidate(snapshot, &options, &retained, true)?;
+            pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                for source in &retained.sources {
+                    super::super::selected_reader::native_proof(tx, &successor, source)?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            read_body(&successor, &host),
+            expected_body,
+            "{case} retained body after restart"
+        );
+        fs::remove_dir_all(&data.root).unwrap();
+    }
 }
 
 #[test]

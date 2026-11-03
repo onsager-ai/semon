@@ -551,11 +551,21 @@ impl IndexStore for NativeIndex {
             .map_err(err)
     }
     fn remove_files(&mut self, files: &[(String, Option<Ledger>)]) -> Result<Outcome, StoreError> {
-        self.pool
-            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                super::catalog_effects::withdrawal::remove(tx, files)
-            })
-            .map_err(err)
+        let control = self
+            .control
+            .bounded(std::time::Instant::now() + self.pool.inner.limits.txn_deadline);
+        loop {
+            let result = self
+                .pool
+                .transaction(&self.namespace, TxnKind::Write, &control, |tx| {
+                    super::catalog_effects::withdrawal::remove(tx, files)
+                })
+                .map_err(err)?;
+            if result != Outcome::Deferred {
+                return Ok(result);
+            }
+        }
+
     }
     fn session_descriptions(
         &self,

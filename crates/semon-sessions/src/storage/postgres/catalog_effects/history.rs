@@ -13,6 +13,27 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
 }
 
 impl History<'_, '_> {
+    pub(super) fn selected_row(
+        &self,
+        key: &str,
+        remaining: &mut usize,
+    ) -> Result<CatalogRow, StorageError> {
+        let (owner, _) = self
+            .owner_at(self.effects.generation, key)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let metadata = self
+            .metadata("semon_pg_native_catalog_history_headers", &owner, key)?
+            .ok_or(StorageError::ScopeChanged)?;
+        *remaining = remaining
+            .checked_sub(metadata.len())
+            .ok_or(StorageError::Busy)?;
+        let row: CatalogRow =
+            serde_json::from_str(&metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != key {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(row)
+    }
     fn owner(&self, key: &str) -> Result<Option<(String, bool)>, StorageError> {
         self.owner_at(self.previous, key)
     }
