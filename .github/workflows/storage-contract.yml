@@ -148,6 +148,7 @@ jobs:
               if isinstance(a,list) and isinstance(b,list) and len(a)==len(b):
                   return [p for k,(x,y) in enumerate(zip(a,b)) for p in diffs(x,y,path+'/'+str(k))]
               return [] if a==b else [path]
+          saved=[]
           for root in glob.glob('/tmp/pg124-*'):
               for base,dirs,files in os.walk(root):
                   dirs[:] = [d for d in dirs if d not in ['claude','codex','copilot','proc']]
@@ -166,6 +167,7 @@ jobs:
                           for label,stored in [('current',current),('history',history)]:
                               if not stored: continue
                               text=stored[0]; row=json.loads(text); normalized=dict(row,lifecycle='current')
+                              if 'oracle-withdraw201' in path and key=='related154' and kind=='catalog' and label=='current': saved.append({'metadata':text,'grant':grant})
                               print('ROW',label,'raw_hash',sha(text),'lifecycle',row['lifecycle'],'normalized_hash',sha(json.dumps(normalized,separators=(',',':'),ensure_ascii=False)))
                               for rid,reference,metadata in db.execute("SELECT g.id,f.kind,g.metadata FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=? AND f.session_key=? ORDER BY f.kind,g.id LIMIT 8",(ns,key)):
                                   original=json.loads(metadata)
@@ -176,10 +178,60 @@ jobs:
                           proof_rows=db.execute("SELECT metadata FROM storage_proof_generations WHERE namespace=? AND session_key=? ORDER BY id LIMIT 64",(ns,key)).fetchall()
                           print('GRANT_PROOF_MATCHES',sum(sha(p[0])==grant for p in proof_rows),'proof_count',len(proof_rows))
                       db.close()
+          with open(os.environ['RUNNER_TEMP']+'/477-model-rows.json','w') as f: json.dump(saved,f)
           PY
+          mkdir -p "$RUNNER_TEMP/row-probe/src"
+          python3 - <<'PY'
+          import os,re
+          summary=open('crates/semon-sessions/src/model/summary.rs').read()
+          pricing=open('crates/semon-sessions/src/pricing.rs').read()
+          def struct(text,name):
+              start=text.index('pub(crate) struct '+name+' {')
+              end=text.index('\n}',start)+2
+              return '#[derive(serde::Serialize,serde::Deserialize)]\n'+text[start:end]+'\n'
+          row=struct(summary,'CatalogRow').replace('crate::pricing::Cost','Cost')
+          row=re.sub(r'pub\(crate\) (overview|trace|query_recipe):[^\n]+',r'pub(crate) \1: Option<Value>,',row)
+          cost=struct(pricing,'Cost')
+          model=struct(pricing,'ModelCost').replace('    #[serde(deserialize_with = "cost_kinds")]\n','').replace("BTreeMap<&'static str, f64>",'BTreeMap<String, f64>')
+          source=struct(summary,'CatalogSource')
+          prefix='use serde_json::Value; use std::collections::BTreeMap; use std::path::PathBuf; use sha2::{Digest,Sha256}; type CatalogLifecycle=String;\n'
+          code=prefix+row+source+cost+model+struct(pricing,'CostTokens')
+          code+='''
+          fn diff(a:&Value,b:&Value,path:&str) {
+              if let (Some(a),Some(b))=(a.as_object(),b.as_object()) {
+                  for (key,value) in a { diff(value,&b[key],&format!("{path}/{key}")); }
+              } else if let (Some(a),Some(b))=(a.as_array(),b.as_array()) {
+                  for (i,(a,b)) in a.iter().zip(b).enumerate() { diff(a,b,&format!("{path}/{i}")); }
+              } else if a!=b { println!("DIFF {path} input={a} typed={b}"); }
+          }
+          fn main() {
+              let input=std::fs::read_to_string(std::env::args().nth(1).unwrap()).unwrap();
+              let cases:Vec<Value>=serde_json::from_str(&input).unwrap();
+              for case in cases {
+                  let text=case["metadata"].as_str().unwrap();
+                  let mut row:CatalogRow=serde_json::from_str(text).unwrap();
+                  row.lifecycle="current".into();
+                  let typed=serde_json::to_string(&row).unwrap();
+                  let mut value:Value=serde_json::from_str(text).unwrap();
+                  value["lifecycle"]="current".into();
+                  let raw=value.to_string();
+                  println!("TYPED hash={:x} grant={} input_hash={:x}",Sha256::digest(typed.as_bytes()),case["grant"],Sha256::digest(raw.as_bytes()));
+                  diff(&value,&serde_json::to_value(&row).unwrap(),"");
+                  if let Some(i)=typed.bytes().zip(raw.bytes()).position(|(a,b)|a!=b) {
+                      let start=i.saturating_sub(40);
+                      println!("BYTE_DIFF offset={i} typed={:?} input={:?}",typed.get(start..(i+80).min(typed.len())),raw.get(start..(i+80).min(raw.len())));
+                  }
+              }
+          }
+          '''
+          root=os.environ['RUNNER_TEMP']+'/row-probe'
+          open(root+'/src/main.rs','w').write(code)
+          open(root+'/Cargo.toml','w').write('[package]\nname="row-probe"\nversion="0.0.0"\nedition="2024"\n[dependencies]\nserde={version="1",features=["derive"]}\nserde_json={version="=1.0.150",features=["preserve_order","float_roundtrip"]}\nsha2="0.10.9"\n')
+          PY
+          cargo run --quiet --manifest-path "$RUNNER_TEMP/row-probe/Cargo.toml" -- "$RUNNER_TEMP/477-model-rows.json" | tee "$RUNNER_TEMP/477-model-typed.log"
       - name: Retain unchanged-product model forensic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: 477-model-forensic
-          path: ${{ runner.temp }}/477-model-*.log
+          path: ${{ runner.temp }}/477-model-*
