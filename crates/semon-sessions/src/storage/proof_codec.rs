@@ -330,11 +330,11 @@ mod tests {
             for offset in 0..64 {
                 let cost = f64::from_bits(base.to_bits() + offset);
                 let mut original = row.clone();
-                original.cost.usd = cost;
+                original.cost.usd = Some(cost);
                 let mut priced = record.clone();
                 priced.metadata = serde_json::to_string(&original).unwrap();
                 let (_, restored) = decode(priced.clone()).unwrap();
-                assert_eq!(restored.cost.usd.to_bits(), cost.to_bits());
+                assert_eq!(restored.cost.usd.unwrap().to_bits(), cost.to_bits());
                 assert_eq!(
                     digest(serde_json::to_string(&restored).unwrap().as_bytes()),
                     digest(priced.metadata.as_bytes())
