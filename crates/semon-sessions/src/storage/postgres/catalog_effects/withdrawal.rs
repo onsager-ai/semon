@@ -187,7 +187,6 @@ pub(in crate::storage::postgres) fn remove(
             advanced = true;
         }
         after = page.last().map(|(digest, _)| digest.clone());
-        drop(store);
     }
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;

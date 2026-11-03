@@ -1881,17 +1881,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
     fs::remove_file(&oracle_pid).unwrap();
-    // Capture the ordinary Query's post-withdrawal membership independently,
-    // before the process-wide Guard. Query membership includes virtual peers
-    // as well as physical Catalog owners.
-    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
-    fs::rename(&copilot, &copilot_parked).unwrap();
-    let mut withdrawal_options = options.clone();
-    withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
-    let withdrawal_oracle = crate::Query::new(withdrawal_options)
-        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
-        .expect("SQLite ordinary withdrawal cohort");
-    fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
     // PG must match the same observation, including all proof fields.
@@ -2356,6 +2345,65 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             1790812802000,
         )
         .expect("SQLite trusted successor History fields");
+    // Withdrawal must follow the same admitted original and continued Catalogs
+    // as PG. An empty cache with Copilot already absent has no original custody
+    // and cannot qualify the Query cohort, which also includes retained owners.
+    let withdrawal_host = body_host(&trusted_options, &trusted_successor.rows);
+    let withdrawal_copilot = trusted_options
+        .copilot_home
+        .join(format!("session-state/{copilot_id}/events.jsonl"));
+    fs::rename(&withdrawal_copilot, trusted_root.join("retained-copilot.jsonl")).unwrap();
+    let withdrawal_inputs = inputs
+        .iter()
+        .filter(|input| input.full_path(&trusted_options) != withdrawal_copilot)
+        .cloned()
+        .collect::<Vec<_>>();
+    let withdrawal_prepared = crate::model::prepare_sources(
+        &trusted_options,
+        &mut trusted_cache,
+        &withdrawal_inputs,
+        1790812802000,
+    )
+    .unwrap();
+    trusted_cache
+        .publish_catalog_projection_fenced(
+            &crate::slot_projection::Publication {
+                rows: &withdrawal_prepared.rows,
+                transcripts: Some(&withdrawal_prepared.transcripts),
+                observations: withdrawal_prepared.presentation_observations(),
+            },
+            withdrawal_prepared.base_generation.as_deref(),
+        )
+        .unwrap()
+        .expect("SQLite withdrawal successor generation");
+    let withdrawal_oracle = trusted_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .expect("SQLite ordinary withdrawal cohort");
+    let withdrawal_current = page_keys(crate::catalog::session_catalog_page(
+        &trusted_options,
+        recent_machine,
+        "limit=50",
+    ));
+    assert!(!withdrawal_current.iter().any(|key| key == copilot_id));
+    assert!(
+        withdrawal_oracle["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == copilot_id),
+        "SQLite Query retains withdrawn original History"
+    );
+    let withdrawal_body = trusted_query
+        .call_selected_at(
+            recent_machine,
+            copilot_id,
+            "read_transcript",
+            &serde_json::json!({"id":copilot_id,"limit":100}),
+            Some(&withdrawal_host),
+            crate::SessionSourceReadMode::LocalThenProvider,
+            1790812802000,
+        )
+        .expect("SQLite withdrawn original body through authorized Raw custody");
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
@@ -4897,8 +4945,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .key
         .clone();
-    assert!(!current.to_string().contains(&removed_key));
-    assert!(
+    let withdrawn_current = super::super::snapshot::with_admitted_generation(
+        &pool,
+        &namespace,
+        &control,
+        &withdrawn_generation,
+        |snapshot| {
+            crate::catalog::read_page_snapshot(
+                &options,
+                recent_machine,
+                &crate::catalog::Request::parse("limit=50").unwrap(),
+                snapshot,
+            )
+            .map_err(|_| StorageError::ScopeChanged)
+        },
+    )
+    .unwrap();
+    let withdrawn_current = page_keys(withdrawn_current);
+    assert_eq!(withdrawn_current, withdrawal_current);
+    assert!(!withdrawn_current.contains(&removed_key));
+    assert_eq!(
         query
             .call_bound_selected_at(
                 "read_transcript",
@@ -4908,10 +4974,23 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &retained_host,
                 None,
             )
-            .is_err()
+            .expect("PG withdrawn original body through authorized Raw custody"),
+        withdrawal_body
     );
-    // Later old-generation checks use the immutable captured proof route; the
-    // separate live Current refusal is asserted above.
+    assert!(
+        query
+            .call_bound_selected_at(
+                "read_transcript",
+                &serde_json::json!({"id":removed_key,"limit":100}),
+                1790812802000,
+                &withdrawn_store,
+                &BodyHost(Vec::new()),
+                None,
+            )
+            .is_err(),
+        "retained History does not grant Raw source authority"
+    );
+    // Later old-generation checks use the immutable captured proof route.
     assert_eq!(captured_bodies(&pool), expected_bodies);
     drop(cache);
     let (mut cache, _) = crate::storage::postgres::index_store::open(
