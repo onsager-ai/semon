@@ -109,6 +109,13 @@ jobs:
           set -o pipefail
           cargo test --locked -p semon-sessions --lib --features postgres-test-tls pg_deferred_withdrawal_continuation_ -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-deferred-withdrawal.log"
           grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/477-deferred-withdrawal.log"
+      - name: Older History trace owner regression and refusal
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::native_history::pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fallback -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-history-trace-owner.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-history-trace-owner.log"
       - name: Real PG ordinary ingest restart append and relocation
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
