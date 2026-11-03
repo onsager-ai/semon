@@ -1966,11 +1966,8 @@ impl NativeEvidence {
                         return Ok(!work.pending_sources);
                     }
                     Some((crate::events::Outcome::Deferred, _)) => {
-                        cache.end_scan();
-                        cache.release_published_indexes();
-                        work.texts.release_published_derivations();
-                        work.pending_sources = true;
-                        return Ok(false);
+                        // Retrying this same closed component cannot reduce its
+                        // receipt budget. Resume through bounded staging below.
                     }
                     Some(_) => {
                         return Err(io::Error::new(
@@ -2056,11 +2053,8 @@ impl NativeEvidence {
                             return Ok(!work.pending_sources);
                         }
                         Some((crate::events::Outcome::Deferred, _)) => {
-                            cache.end_scan();
-                            cache.release_published_indexes();
-                            work.texts.release_published_derivations();
-                            work.pending_sources = true;
-                            return Ok(false);
+                            // The stage can split publication work while keeping
+                            // the same source claims and receipt bounds.
                         }
                         Some(_) => {
                             return Err(io::Error::new(
