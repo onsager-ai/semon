@@ -83,6 +83,8 @@ their exact source-CWD fingerprint; imported observations cannot mint local
 composition authority. A composed physical History owner stores its own compact
 runtime capture, admission and stream with the selected predecessor receipts.
 Reads reauthenticate those receipts separately from the new owner's capture.
+Exceeding the bounded composition slot or byte allowance preserves existing
+History without composing it or blocking an otherwise qualified Current update.
 Original withdrawal custody retains its original publication reference.
 Ordinary PostgreSQL full, partial and closed publications carry this typed capture
 with a separate raw global runtime fingerprint and its current storage witness.

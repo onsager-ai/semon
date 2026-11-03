@@ -15,6 +15,46 @@ fn text(bytes: Vec<u8>) -> Result<String, StorageError> {
 }
 
 impl History<'_, '_> {
+    fn bounded_recipe_slots(
+        &self,
+        key: &str,
+        history: bool,
+    ) -> Result<Option<Vec<String>>, StorageError> {
+        let owner = self.owner(key)?;
+        let generation = if history {
+            owner
+                .as_ref()
+                .map(|(generation, _)| generation.as_str())
+                .ok_or(StorageError::ScopeChanged)?
+        } else {
+            self.previous
+        };
+        let table = if history {
+            "semon_pg_native_catalog_history_slots"
+        } else {
+            "semon_pg_native_catalog_recipe_rows"
+        };
+        let tx = self.effects.tx.borrow_mut();
+        tx.check()?;
+        let ns = tx.namespace.as_str().as_bytes();
+        let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END FROM (SELECT slot,session_key,metadata FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p ORDER BY slot"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
+        // Capacity is unavailable composition evidence, not a failed Current
+        // publication. SQL, key identity and decoding errors still refuse.
+        if rows.len() > 64 {
+            return Ok(None);
+        }
+        let mut slots = Vec::with_capacity(rows.len());
+        for row in rows {
+            if !row.get::<_, bool>(0) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let Some(bytes) = row.get::<_, Option<Vec<u8>>>(1) else {
+                return Ok(None);
+            };
+            slots.push(text(bytes)?);
+        }
+        Ok(Some(slots))
+    }
     pub(super) fn selected_row(
         &self,
         key: &str,
@@ -514,40 +554,8 @@ impl CompositeHistoryStore for History<'_, '_> {
         ))
     }
     fn recipe_slots(&self, key: &str, history: bool) -> Result<Vec<String>, StorageError> {
-        let owner = self.owner(key)?;
-        let generation = if history {
-            owner
-                .as_ref()
-                .map(|(generation, _)| generation.as_str())
-                .ok_or(StorageError::ScopeChanged)?
-        } else {
-            self.previous
-        };
-        let table = if history {
-            "semon_pg_native_catalog_history_slots"
-        } else {
-            "semon_pg_native_catalog_recipe_rows"
-        };
-        let tx = self.effects.tx.borrow_mut();
-        tx.check()?;
-        let ns = tx.namespace.as_str().as_bytes();
-        let rows = tx.driver.query(&format!("SELECT session_key=$4,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata ELSE NULL END FROM (SELECT slot,session_key,metadata FROM {table} WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 ORDER BY slot LIMIT 65) p ORDER BY slot"), &[&ns, &generation.as_bytes(), &digest(key.as_bytes()), &key.as_bytes()]).map_err(sqlstate::error)?;
-        if rows.len() > 64 {
-            #[cfg(test)]
-            eprintln!(
-                "pg_history_recipe_refused reason=slot_count rows={}",
-                rows.len()
-            );
-            return Err(StorageError::Busy);
-        }
-        rows.iter()
-            .map(|row| {
-                if !row.get::<_, bool>(0) {
-                    return Err(StorageError::ScopeChanged);
-                }
-                text(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)
-            })
-            .collect()
+        self.bounded_recipe_slots(key, history)?
+            .ok_or(StorageError::Busy)
     }
     fn composed(
         &self,

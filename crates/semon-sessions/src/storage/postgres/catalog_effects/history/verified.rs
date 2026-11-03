@@ -91,17 +91,6 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         let history = owner.is_some();
         let previous = CompositeHistoryStore::previous(self, &current.key)?;
         let (_, recipe_header) = self.previous_recipe(&current.key)?;
-        let recipe_slots = if recipe_header.is_some() {
-            self.recipe_slots(&current.key, history)?
-        } else {
-            Vec::new()
-        };
-        budget
-            .charge(
-                previous.as_ref().map_or(0, String::len)
-                    + recipe_slots.iter().map(String::len).sum::<usize>(),
-            )
-            .map_err(|_| StorageError::Busy)?;
         let mut snapshot = HistoryCompositionSnapshot {
             key: current.key.clone(),
             original: self.original(&current.key)?,
@@ -109,13 +98,30 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             history_exists: history,
             recipe_history: history,
             recipe_header,
-            recipe_slots,
+            recipe_slots: Vec::new(),
             relocated: Default::default(),
             receipts: Vec::new(),
             current_cwds: None,
             unavailable: false,
         };
         if snapshot.original {
+            return Ok(snapshot);
+        }
+        if snapshot.recipe_header.is_some() {
+            let Some(slots) = self.bounded_recipe_slots(&current.key, history)? else {
+                snapshot.unavailable = true;
+                return Ok(snapshot);
+            };
+            snapshot.recipe_slots = slots;
+        }
+        if budget
+            .charge(
+                snapshot.previous.as_ref().map_or(0, String::len)
+                    + snapshot.recipe_slots.iter().map(String::len).sum::<usize>(),
+            )
+            .is_err()
+        {
+            snapshot.unavailable = true;
             return Ok(snapshot);
         }
         let mut tx = self.effects.tx.borrow_mut();
