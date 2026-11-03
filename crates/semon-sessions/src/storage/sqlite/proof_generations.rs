@@ -2501,7 +2501,8 @@ pub(crate) fn retained_runtime_source_cwds(
     observations: &crate::storage::selected::PresentationObservations,
 ) -> Result<Option<std::collections::BTreeSet<String>>, StorageError> {
     let metadata = serde_json::to_string(selected).map_err(|_| StorageError::Unavailable)?;
-    let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata.len());
+    let mut budget =
+        crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata.len());
     let receipts = verified_publication_receipts(
         db,
         PublicationReceiptRequest {
@@ -2521,11 +2522,9 @@ pub(crate) fn retained_runtime_source_cwds(
     .ok_or(StorageError::HistoryRetentionBounds)?;
     let mut cwds = std::collections::BTreeSet::new();
     for source in &selected.sources {
-        if let Some(current) = super::catalog::runtime_source_cwds_by_path_if_current(
-            db,
-            std::slice::from_ref(source),
-        )
-        .map_err(|_| StorageError::Unavailable)?
+        if let Some(current) =
+            super::catalog::runtime_source_cwds_by_path_if_current(db, std::slice::from_ref(source))
+                .map_err(|_| StorageError::Unavailable)?
         {
             cwds.extend(current.into_values().flatten());
             continue;

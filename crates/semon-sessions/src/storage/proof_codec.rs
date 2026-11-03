@@ -324,6 +324,23 @@ mod tests {
         let (decoded, row) = decode(record.clone()).unwrap();
         assert_eq!(decoded, record);
         assert_eq!(serde_json::to_string(&row).unwrap(), record.metadata);
+        // Adjacent native pricing values must keep the same exact owner digest
+        // after storage decoding, rather than acquiring a neighbouring float.
+        for base in [0.0001_f64, 0.01, 0.1, 1.0] {
+            for offset in 0..64 {
+                let cost = f64::from_bits(base.to_bits() + offset);
+                let mut original = row.clone();
+                original.cost.usd = cost;
+                let mut priced = record.clone();
+                priced.metadata = serde_json::to_string(&original).unwrap();
+                let (_, restored) = decode(priced.clone()).unwrap();
+                assert_eq!(restored.cost.usd.to_bits(), cost.to_bits());
+                assert_eq!(
+                    digest(serde_json::to_string(&restored).unwrap().as_bytes()),
+                    digest(priced.metadata.as_bytes())
+                );
+            }
+        }
     }
 
     fn oversized(mut json: String) -> String {

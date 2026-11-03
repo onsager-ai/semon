@@ -48,6 +48,8 @@ import grants for carried observations, even when admission counters coincide.
 Cost-only SQLite repricing authenticates the exact stored preimage against its
 own Current or History local grant, or its qualified immutable local Stage proof,
 before replacing metadata and the matching owner grant in one transaction.
+JSON decoding preserves exact floating-point cost values so a stored row keeps
+its authenticated metadata digest across publication, retirement and reads.
 Same-source History qualifies independently; divergent cohorts retain their
 original metadata. Missing or mismatched authority leaves an observation unchanged.
 Imported receipts alone cannot authorize repricing or mint local grants, even
