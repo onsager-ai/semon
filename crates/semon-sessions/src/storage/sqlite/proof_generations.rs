@@ -28,6 +28,8 @@ const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentation_roots(namespace TEXT NOT NULL,publication TEXT NOT NULL,base TEXT NOT NULL,manifest TEXT NOT NULL,digest TEXT NOT NULL,PRIMARY KEY(namespace,digest)) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS storage_proof_presentation_contexts(namespace TEXT NOT NULL,publication TEXT NOT NULL,digest TEXT NOT NULL,entry TEXT NOT NULL CHECK(octet_length(entry)<=1048576),PRIMARY KEY(namespace,publication,digest)) STRICT, WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_context_immutable BEFORE UPDATE ON storage_proof_presentation_contexts BEGIN SELECT RAISE(ABORT,'immutable presentation context'); END;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_immutable BEFORE UPDATE ON storage_proof_presentations BEGIN SELECT RAISE(ABORT,'immutable presentation'); END;
 CREATE TRIGGER IF NOT EXISTS storage_proof_presentation_root_immutable BEFORE UPDATE ON storage_proof_presentation_roots BEGIN SELECT RAISE(ABORT,'immutable presentation root'); END;
 CREATE TABLE IF NOT EXISTS storage_proof_sources(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,path TEXT NOT NULL,ledger TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key,path)) STRICT, WITHOUT ROWID;
@@ -126,6 +128,7 @@ pub(crate) struct OrdinaryReceipt<'a> {
 }
 
 struct PreparedPresentationRoot {
+    contexts: Vec<(String, String)>,
     base: String,
     manifest: String,
     digest: String,
@@ -433,7 +436,10 @@ pub(crate) fn replay_ordinary(
             .ok_or(StorageError::ScopeChanged)?;
         captured.push((row.key.clone(), text));
     }
-    let captured = proof_codec::CapturedPresentations { rows: captured, contexts: manifest.contexts };
+    let captured = proof_codec::CapturedPresentations {
+        rows: captured,
+        contexts: selected_presentation_contexts(tx, receipt.namespace, &publication, &manifest)?,
+    };
     let projection_witness = inputs
         .projections
         .unwrap_or_default()
@@ -699,7 +705,12 @@ fn classify_ordinary_receipt(
             |row| row.get(0),
         )
         .map_err(failed)?;
+    let context_count: i64 = tx.query_row(
+        "SELECT count(*) FROM storage_proof_presentation_contexts WHERE namespace=?1 AND publication=?2",
+        params![namespace, publication], |row| row.get(0),
+    ).map_err(failed)?;
     if semantic_count == 0
+        && context_count == 0
         && root_count == 0
         && generation_count == 0
         && presentation_count == 0
@@ -720,6 +731,7 @@ fn classify_ordinary_receipt(
     if semantic_count != 1
         || !semantic_matches
         || root_count != 1
+        || context_count != root.contexts.len() as i64
         || generation_count != expected_counts.0
         || presentation_count != expected_counts.1
         || source_count != expected_counts.2
@@ -735,6 +747,15 @@ fn classify_ordinary_receipt(
         .map_err(failed)?;
     if !root_matches {
         return Err(StorageError::ScopeChanged);
+    }
+    for (digest, entry) in &root.contexts {
+        let matches: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM storage_proof_presentation_contexts WHERE namespace=?1 AND publication=?2 AND digest=?3 AND entry=?4)",
+            params![namespace, publication, digest, entry], |row| row.get(0),
+        ).map_err(failed)?;
+        if !matches {
+            return Err(StorageError::ScopeChanged);
+        }
     }
     for row in &proof.rows {
         let generation_matches: bool = tx
@@ -1158,13 +1179,21 @@ pub(crate) fn verified_publication_receipts(
         if kind == PublicationReceiptRef::Current && original.sources != previous.sources {
             continue;
         }
+        let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
+        let contexts = match presentation_contexts(db, namespace, &record.publication, &decoded, |bytes| {
+            budget.charge(bytes.saturating_mul(8)).map_err(failed)
+        }) {
+            Ok(contexts) => contexts,
+            Err(StorageError::Unavailable) => return Ok(None),
+            Err(_) => continue,
+        };
         let Ok(Some(observations)) = proof_codec::verify_presentation_observations(
             session_key,
             &record.metadata,
             &record.slots,
             &presentation,
             &base,
-            &manifest,
+            (&manifest, &contexts),
             &record.proof,
         ) else {
             continue;
@@ -1966,13 +1995,15 @@ fn verify_immutable_observation(
         record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
     )
     .map_err(|_| StorageError::Busy)?;
+    let decoded = proof_codec::decode_presentation_manifest(manifest)?;
+    let contexts = selected_presentation_contexts(db, current.namespace.as_str(), &record.publication, &decoded)?;
     let observations = proof_codec::verify_presentation_observations(
         &selected.key,
         &record.metadata,
         &record.slots,
         presentation,
         base,
-        manifest,
+        (manifest, &contexts),
         &record.proof,
     )
     .inspect_err(|_| diagnose_observation_refusal("immutable_presentation"))?;
@@ -2063,7 +2094,7 @@ fn verify_immutable_observation(
         observations,
         record: record.clone(),
         presentation: presentation.clone(),
-        contexts: proof_codec::decode_presentation_manifest(manifest)?.contexts,
+        contexts,
     })
 }
 
@@ -2178,7 +2209,9 @@ pub(super) fn reusable_presentations(
             (None, None) => true,
             _ => false,
         };
-        let normalize = |text: &str, contexts: &proof_codec::PresentationContexts| -> Result<serde_json::Value, StorageError> {
+        let normalize = |text: &str,
+                         contexts: &proof_codec::PresentationContexts|
+         -> Result<serde_json::Value, StorageError> {
             let witness = proof_codec::resolve_presentation(text, contexts)?;
             let mut value = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
             if let Some(catalog) = value
@@ -2201,7 +2234,8 @@ pub(super) fn reusable_presentations(
             == serde_json::to_value(row).map_err(|_| StorageError::Unavailable)?
             && verified.record.slots == slots
             && observations_match
-            && normalize(&verified.presentation, &verified.contexts)? == normalize(presentation, &requested.contexts)?;
+            && normalize(&verified.presentation, &verified.contexts)?
+                == normalize(presentation, &requested.contexts)?;
     }
     Ok(reusable)
 }
@@ -2660,12 +2694,14 @@ fn observation_authority_for_owner(
             );
         }
     })?;
+    let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
+    let contexts = selected_presentation_contexts(db, current.namespace.as_str(), &record.publication, &decoded)?;
     proof_codec::verify_presentation_entry(
         &selected.key,
         &record.metadata,
         &record.slots,
         &presentation,
-        &manifest,
+        (&manifest, &contexts),
     )
     .inspect_err(|_| {
         if crate::native_timing::enabled() {
@@ -2909,12 +2945,14 @@ fn load_query_recipe_with_bytes(
                 return Err(Error::ObservationChanged);
             }
             proof_codec::verify_presentation_digest(&base, &manifest, &proof)?;
+            let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
+            let contexts = selected_presentation_contexts(db, namespace, publication, &decoded)?;
             proof_codec::verify_presentation_entry(
                 &selected.key,
                 &metadata,
                 &slots,
                 &presentation,
-                &manifest,
+                (&manifest, &contexts),
             )?;
             let original: CatalogRow =
                 serde_json::from_str(&metadata).map_err(|_| Error::CorruptPayload)?;
@@ -3896,8 +3934,16 @@ fn prepare_presentation_root(
     let observations = inputs.observations;
     proof_codec::validate_catalog_generation(catalog_generation)?;
     let context_bytes = serde_json::to_vec(&captured.contexts)
-        .map_err(|_| StorageError::Unavailable)?.len();
-    if captured.rows.iter().map(|(_, text)| text.len()).sum::<usize>() + context_bytes > 8 * 1048576 {
+        .map_err(|_| StorageError::Unavailable)?
+        .len();
+    if captured
+        .rows
+        .iter()
+        .map(|(_, text)| text.len())
+        .sum::<usize>()
+        + context_bytes
+        > 8 * 1048576
+    {
         return Err(StorageError::HistoryRetentionBounds);
     }
     let mut entries = Vec::new();
@@ -3922,15 +3968,22 @@ fn prepare_presentation_root(
     let manifest = serde_json::to_string(&PresentationManifest {
         catalog_generation: (*catalog_generation).to_owned(),
         entries,
-        contexts: captured.contexts.clone(),
+        contexts: captured.contexts.keys().cloned().collect(),
         observations: observations.cloned(),
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
         return Err(StorageError::HistoryRetentionBounds);
     }
+    let mut contexts = Vec::with_capacity(captured.contexts.len());
+    for (reference, entry) in &captured.contexts {
+        let text = serde_json::to_string(entry).map_err(|_| StorageError::Unavailable)?;
+        proof_codec::decode_presentation_context(reference, &text)?;
+        contexts.push((reference.clone(), text));
+    }
     let joined = joined_digest(base, &manifest)?;
     Ok(PreparedPresentationRoot {
+        contexts,
         base: base.to_owned(),
         manifest,
         digest: joined,
@@ -3948,7 +4001,60 @@ fn insert_presentation_root(
         params![ns, publication, root.base, root.manifest, root.digest],
     )
     .map_err(failed)?;
+    for (digest, entry) in &root.contexts {
+        tx.execute(
+            "INSERT INTO storage_proof_presentation_contexts VALUES(?1,?2,?3,?4)",
+            params![ns, publication, digest, entry],
+        ).map_err(failed)?;
+    }
     Ok(())
+}
+
+/// Load the complete publication store only after its encoded size and exact
+/// cardinality fit the manifest and the caller's read/verification budget.
+pub(crate) fn presentation_contexts(
+    db: &Connection,
+    ns: &str,
+    publication: &str,
+    manifest: &PresentationManifest,
+    charge: impl FnOnce(usize) -> Result<(), StorageError>,
+) -> Result<proof_codec::PresentationContexts, StorageError> {
+    let (count, bytes, largest): (i64, i64, i64) = db.query_row(
+        "SELECT count(*),COALESCE(sum(octet_length(digest)+4+octet_length(entry)),0),COALESCE(max(octet_length(entry)),0) FROM storage_proof_presentation_contexts WHERE namespace=?1 AND publication=?2",
+        params![ns, publication], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(failed)?;
+    if count != manifest.contexts.len() as i64 {
+        return Err(StorageError::ScopeChanged);
+    }
+    let bytes = usize::try_from(bytes).map_err(|_| StorageError::HistoryRetentionBounds)?;
+    if bytes > 8 * proof_codec::METADATA_MAX || largest > proof_codec::METADATA_MAX as i64 {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    charge(bytes)?;
+    let mut statement = db.prepare(
+        "SELECT digest,entry FROM storage_proof_presentation_contexts WHERE namespace=?1 AND publication=?2 ORDER BY digest",
+    ).map_err(failed)?;
+    let mut rows = statement.query(params![ns, publication]).map_err(failed)?;
+    let mut contexts = proof_codec::PresentationContexts::new();
+    while let Some(row) = rows.next().map_err(failed)? {
+        let reference: String = row.get(0).map_err(failed)?;
+        let text: String = row.get(1).map_err(failed)?;
+        let entry = proof_codec::decode_presentation_context(&reference, &text)?;
+        contexts.insert(reference, entry);
+    }
+    proof_codec::verify_presentation_contexts(manifest, &contexts)?;
+    Ok(contexts)
+}
+
+fn selected_presentation_contexts(
+    db: &Connection,
+    ns: &str,
+    publication: &str,
+    manifest: &PresentationManifest,
+) -> Result<proof_codec::PresentationContexts, StorageError> {
+    presentation_contexts(db, ns, publication, manifest, |bytes| {
+        crate::selected_read::charge(64, bytes).map_err(|_| StorageError::Busy)
+    })
 }
 
 /// Give an ordinary Catalog receipt an identity bound to its exact metadata
@@ -3982,7 +4088,8 @@ pub(super) fn replayed_presentation(
     if saved != base || manifest.len() > 1048576 || joined != expected {
         return Ok(false);
     }
-    proof_codec::decode_presentation_manifest(&manifest)?;
+    let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
+    selected_presentation_contexts(db, ns, publication, &decoded)?;
     Ok(joined_digest(&saved, &manifest)? == joined)
 }
 fn validate_presentation(
@@ -3997,7 +4104,9 @@ fn validate_presentation(
     }
     proof_codec::verify_presentation_digest(&base, &manifest, &joined)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-    proof_codec::verify_presentation_entry(key, &metadata, &slots, &text, &manifest)?;
+    let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
+    let contexts = selected_presentation_contexts(db, snapshot.namespace.as_str(), &snapshot.publication_generation, &decoded)?;
+    proof_codec::verify_presentation_entry(key, &metadata, &slots, &text, (&manifest, &contexts))?;
     Ok(text)
 }
 
@@ -4021,7 +4130,8 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
         let (text,manifest): (String,String) = db.query_row("SELECT p.metadata,r.manifest FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(io::Error::other)?;
         let manifest =
             proof_codec::decode_presentation_manifest(&manifest).map_err(io::Error::other)?;
-        let mut witness = proof_codec::resolve_presentation(&text, &manifest.contexts)
+        let contexts = selected_presentation_contexts(&db, self.snapshot.namespace.as_str(), &self.snapshot.publication_generation, &manifest).map_err(io::Error::other)?;
+        let mut witness = proof_codec::resolve_presentation(&text, &contexts)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("selected presentation unavailable"))?;
         let witness_catalog_generation = witness
