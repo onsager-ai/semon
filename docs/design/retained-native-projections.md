@@ -90,11 +90,12 @@ source prefix therefore keeps Original custody instead of inventing a composite
 owner (the conservative source classification introduced by `d3c19b7e` and
 restricted to ordinary Current preparation by `a928c1f6`).
 Original withdrawal custody retains its original publication reference.
-All-history Query membership includes that previously observed retained owner;
-a cache first opened after removal has no such custody. Withdrawal parity must
-compare the same prior observation on both engines, separately from Current
-Catalog membership, which excludes the withdrawn owner. Authorized retained
-body reads remain available without restoring Current or runtime authority.
+All-history published Catalog Query membership includes that previously observed
+retained owner; the native filesystem Query scan excludes the missing source.
+A cache first opened after removal has no prior custody. Withdrawal parity must
+compare the same reader and prior observation on both engines, separately from
+Current Catalog membership, which excludes the withdrawn owner. Authorized
+retained body reads remain available without restoring Current or runtime authority.
 Ordinary PostgreSQL full, partial and closed publications carry this typed capture
 with a separate raw global runtime fingerprint and its current storage witness.
 The producer reuses its original runtime snapshot and in-memory source CWDs,

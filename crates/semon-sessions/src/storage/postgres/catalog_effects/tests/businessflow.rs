@@ -1801,21 +1801,49 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
     fs::remove_file(&oracle_pid).unwrap();
     // Capture the same custody transition as PG, before the process-wide Guard.
-    // An all-history Query includes retained owners as well as virtual peers;
-    // a fresh cache first opened after removal has never observed that custody.
+    // The bound PG call below reads the published Catalog, not a fresh native
+    // scan. Compare the same public reader and previously observed custody.
     let mut withdrawal_options = options.clone();
     withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
     let mut withdrawal_query = crate::Query::new(withdrawal_options);
     let before_withdrawal = withdrawal_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite ordinary prewithdrawal cohort");
-    assert!(before_withdrawal["sessions"].as_array().unwrap().iter().any(|row| row["id"] == copilot_id));
+    assert!(
+        before_withdrawal["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == copilot_id)
+    );
     let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
     fs::rename(&copilot, &copilot_parked).unwrap();
-    let withdrawal_oracle = withdrawal_query
+    let native_withdrawal = withdrawal_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite ordinary withdrawal cohort");
-    assert!(withdrawal_oracle["sessions"].as_array().unwrap().iter().any(|row| row["id"] == copilot_id));
+    assert!(
+        native_withdrawal["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["id"] != copilot_id)
+    );
+    let withdrawal_oracle = withdrawal_query
+        .call_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            1790812802000,
+        )
+        .expect("SQLite published Catalog withdrawal cohort");
+    assert!(
+        withdrawal_oracle["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == copilot_id)
+    );
     fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
