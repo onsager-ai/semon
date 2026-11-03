@@ -2431,6 +2431,203 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             1790812802000,
         )
         .expect("SQLite withdrawn original body through authorized Raw custody");
+
+    // Independently advance the same native state as PostgreSQL before capturing
+    // the bulk cohorts. Ordinary discovery/publication keeps every advance bounded
+    // even when the complete inventory exceeds prepare_sources' 64-path cap.
+    let sqlite_published = |options: &Options, now| {
+        let mut query = crate::Query::from_sources(std::sync::Arc::new(
+            crate::SessionSources::with_machines(vec![(recent_machine.into(), options.clone())]),
+        ));
+        query
+            .call_at("list_sessions", &serde_json::json!({}), now)
+            .expect("SQLite ordinary native discovery");
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        evidence.request_metadata_audit();
+        let mut work = evidence.work.lock().unwrap();
+        let started = std::time::Instant::now();
+        let mut complete = false;
+        while started.elapsed() < Duration::from_secs(60) {
+            if evidence.refresh_catalog(&mut work, now).unwrap() {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete, "SQLite ordinary bulk Catalog oracle did not finish");
+        drop(work);
+        query
+            .call_catalog_at(
+                "list_sessions",
+                &serde_json::json!({}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                now,
+            )
+            .expect("SQLite published bulk cohort")
+    };
+    let trusted_codex = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: codex
+            .strip_prefix(&options.codex_home)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .into(),
+    };
+    let trusted_archived = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: format!("archived_sessions/rollout-{codex_id}.jsonl"),
+    };
+    let trusted_codex_path = trusted_codex.full_path(&trusted_options);
+    let trusted_archived_path = trusted_archived.full_path(&trusted_options);
+    let trusted_codex_ledger = trusted_cache
+        .stored_ledger_batch(&[trusted_codex_path.to_string_lossy().into_owned()])
+        .unwrap()
+        .pop()
+        .unwrap()
+        .unwrap();
+    drop(trusted_cache);
+    fs::create_dir_all(trusted_archived_path.parent().unwrap()).unwrap();
+    let trusted_relocation = crate::SessionSourceRelocation::begin(
+        &trusted_options,
+        &trusted_codex,
+        &trusted_archived,
+        codex_id,
+        "0123456789abcdef0123456789abcdef",
+        trusted_codex_ledger.offset,
+        &format!(
+            "{:x}",
+            sha2::digest::generic_array::GenericArray::from(trusted_codex_ledger.prefix)
+        ),
+    )
+    .unwrap();
+    fs::copy(&trusted_codex_path, &trusted_archived_path).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&trusted_archived_path)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    trusted_relocation.complete().unwrap();
+    fs::remove_file(&trusted_codex_path).unwrap();
+    sqlite_published(&trusted_options, 1790812803000);
+    writeln!(fs::OpenOptions::new().append(true).open(&trusted_archived_path).unwrap(),"{}",serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized relocation continuation"}]}})).unwrap();
+    sqlite_published(&trusted_options, 1790812804000);
+    let trusted_parent_length = fs::metadata(&trusted_path).unwrap().len();
+    let trusted_facts_writer = crate::SessionSourceWrite::begin(
+        &trusted_options,
+        &inputs[0],
+        None,
+        trusted_parent_length,
+    )
+    .unwrap();
+    let mut trusted_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&trusted_path)
+        .unwrap();
+    trusted_file.write_all(parent_facts_append.as_bytes()).unwrap();
+    trusted_file.sync_all().unwrap();
+    drop(trusted_file);
+    trusted_facts_writer
+        .complete(trusted_parent_length + parent_facts_append.len() as u64)
+        .unwrap();
+    let trusted_pid = trusted_options.claude_home.join("sessions/4242.json");
+    fs::create_dir_all(trusted_pid.parent().unwrap()).unwrap();
+    fs::write(&trusted_pid, &pid_bytes).unwrap();
+    let trusted_facts_path = trusted_root.join("bulk-facts.json");
+    let mut trusted_facts = crate::Facts {
+        version: 2,
+        hostname: "source-write-after158".into(),
+        ..Default::default()
+    };
+    trusted_facts.proc_starts.insert(4242, 1234);
+    crate::write_facts(&trusted_facts_path, &trusted_facts, &trusted_options.source).unwrap();
+    trusted_options.facts = Some(trusted_facts_path);
+    sqlite_published(&trusted_options, 1790812805000);
+    let trusted_bulk = (0..70)
+        .map(|i| {
+            let input = crate::Input {
+                root: crate::InputRoot::Claude,
+                path: format!("projects/project/bulk169-{i:03}.jsonl"),
+            };
+            let body = serde_json::json!({"type":"user","sessionId":format!("bulk169-{i:03}"),"uuid":format!("bulk-{i}"),"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"sanitized bulk input"}});
+            fs::write(input.full_path(&trusted_options), format!("{body}\n")).unwrap();
+            input
+        })
+        .collect::<Vec<_>>();
+    let sqlite_bulk = sqlite_published(&trusted_options, 1790812806000);
+    writeln!(fs::OpenOptions::new().append(true).open(trusted_bulk[5].full_path(&trusted_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-005","uuid":"bulk-5b","parentUuid":"bulk-5","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:01Z","message":{"role":"user","content":"sanitized bulk continuation"}})).unwrap();
+    let sqlite_partial = sqlite_published(&trusted_options, 1790812807000);
+    fs::rename(
+        trusted_bulk[1].full_path(&trusted_options),
+        trusted_root.join("retained-bulk169.jsonl"),
+    )
+    .unwrap();
+    let sqlite_withdrawn = sqlite_published(&trusted_options, 1790812807000);
+    {
+        let binding = crate::storage::local_navigation_binding(&trusted_options, "").unwrap();
+        let mut db = binding.connection().unwrap();
+        let tx = db.transaction().unwrap();
+        let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
+        let retained: crate::model::summary::CatalogRow = serde_json::from_str(
+            &snapshot.history_catalog("bulk169-001").unwrap().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            retained.lifecycle,
+            crate::model::summary::CatalogLifecycle::Retained
+        );
+    }
+    let mut sqlite_current = Vec::new();
+    let mut sqlite_cursor: Option<String> = None;
+    loop {
+        let request = match &sqlite_cursor {
+            Some(cursor) => format!(
+                "limit=20&cursor={}",
+                crate::viewer::percent_encode(cursor)
+            ),
+            None => "limit=20".into(),
+        };
+        let reply =
+            crate::catalog::session_catalog_page(&trusted_options, recent_machine, &request);
+        assert_eq!(reply.status, 200);
+        let page: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        sqlite_current.extend(page["items"].as_array().unwrap().iter().cloned());
+        match page["next_cursor"].as_str() {
+            Some(next) => sqlite_cursor = Some(next.into()),
+            None => break,
+        }
+    }
+    assert!(sqlite_current.len() > 64);
+    assert!(!sqlite_current.iter().any(|row| row["key"] == "bulk169-001"));
+    assert!(
+        sqlite_withdrawn["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "bulk169-001")
+    );
+    writeln!(fs::OpenOptions::new().append(true).open(trusted_bulk[2].full_path(&trusted_options)).unwrap(),"{}",serde_json::json!({"type":"user","sessionId":"bulk169-002","uuid":"bulk-2b","parentUuid":"bulk-2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized successor"}})).unwrap();
+    let sqlite_successor = sqlite_published(&trusted_options, 1790812808000);
+    let assert_bulk_cohort = |actual: &serde_json::Value, expected: &serde_json::Value| {
+        for cohort in [actual, expected] {
+            assert_eq!(
+                cohort["sessions"].as_array().unwrap().len() as u64,
+                cohort["total"].as_u64().unwrap(),
+                "complete bulk Query cohort"
+            );
+        }
+        assert_eq!(actual["total"], expected["total"], "SQLite/PG bulk total");
+        let ids = |cohort: &serde_json::Value| {
+            cohort["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["id"].clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(actual), ids(expected), "SQLite/PG ordered bulk cohort");
+    };
     let _guard = crate::storage::postgres::native_ingest_tests::Guard::new();
     let (pool, factory) = fixture(|limits| limits.max_connections = 1);
     let control = PgCancellation::default();
@@ -6166,6 +6363,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &store_at(&bulk_generation),
         )
         .unwrap();
+    assert_bulk_cohort(&bulk_list, &sqlite_bulk);
     assert_eq!(bulk_list["total"].as_u64(), Some(total));
     assert!(bulk_list.to_string().contains("source-write-after158"));
     let bulk_page = super::super::snapshot::with_admitted_generation(
@@ -6243,7 +6441,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &store_at(&partial_generation),
         )
         .unwrap();
-    assert_eq!(partial_list["total"].as_u64(), Some(total));
+    assert_bulk_cohort(&partial_list, &sqlite_partial);
     assert!(partial_list.to_string().contains("source-write-after158"));
     // (c) An isolated Source withdraws by bounded pages. A mixed or connected
     // owner's Source is withdrawn last, below, through the semantic catch-up.
@@ -6308,7 +6506,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &store_at(&successor),
         )
         .unwrap();
-    assert_eq!(successor_list["total"].as_u64(), Some(total - 1));
+    assert_bulk_cohort(&successor_list, &sqlite_successor);
     // (d) Restart: reopened stores read the newest Current and the old
     // selected bodies exactly as before.
     drop(store);
@@ -6361,11 +6559,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         started.elapsed() < Duration::from_secs(8),
         "cold first page"
     );
-    assert_eq!(first["total"].as_u64(), Some(total - 1));
+    assert_bulk_cohort(&first, &sqlite_successor);
     for (at, expected) in [
-        (&bulk_generation, total),
-        (&partial_generation, total),
-        (&withdrawn, total - 1),
+        (&bulk_generation, &sqlite_bulk),
+        (&partial_generation, &sqlite_partial),
+        (&withdrawn, &sqlite_withdrawn),
     ] {
         let listed = facts_query
             .call_bound_catalog_at(
@@ -6375,7 +6573,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &cold_store(at, &facts_options),
             )
             .unwrap();
-        assert_eq!(listed["total"].as_u64(), Some(expected), "older cohort");
+        assert_bulk_cohort(&listed, expected);
     }
     assert_eq!(
         captured_bodies(&cold),
