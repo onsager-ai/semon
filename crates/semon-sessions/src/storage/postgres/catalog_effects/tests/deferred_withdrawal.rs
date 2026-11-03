@@ -1,7 +1,7 @@
 //! Deferred withdrawal is durable authority only for its exact absent stage claim.
 use super::*;
 use crate::events::{EventCache, Outcome};
-use crate::storage::{catalog::CatalogSnapshot, native_events::NativeEventStore};
+use crate::storage::native_events::NativeEventStore;
 
 #[test]
 fn pg_deferred_withdrawal_continuation_exact_stage_and_full_value_replay() {
@@ -16,7 +16,11 @@ fn pg_deferred_withdrawal_continuation_refuses_stale_mismatched_and_raw_authorit
 fn qualify(refusals: bool) {
     let data = build_oracle(true, false);
     let (pool, _) = fixture(|_| {});
-    let namespace = ns(if refusals { "deferred-refusal" } else { "deferred-exact" });
+    let namespace = ns(if refusals {
+        "deferred-refusal"
+    } else {
+        "deferred-exact"
+    });
     let control = PgCancellation::default();
     let mut options = Options {
         source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
@@ -29,31 +33,54 @@ fn qualify(refusals: bool) {
         all: true,
         ..Default::default()
     };
-    let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
-        pool: pool.clone(),
-        control: control.clone(),
-    }).unwrap();
+    let config = options
+        .source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
     config.create_native_store().unwrap();
-    let (mut store, _) = super::super::super::index_store::open(
-        pool.clone(), namespace.clone(), control.clone(),
-    ).unwrap();
+    let (mut store, _) =
+        super::super::super::index_store::open(pool.clone(), namespace.clone(), control.clone())
+            .unwrap();
     options.source = options.source.with_store(config).unwrap();
     let a = options.claude_home.join("projects/project/one.jsonl");
     let b = options.claude_home.join("projects/project/two.jsonl");
-    fs::write(&b, format!("{}\n", serde_json::json!({
-        "type":"user", "sessionId":"two", "session_id":"one", "uuid":"u2",
-        "cwd":"/synthetic/project", "timestamp":"2026-10-01T00:00:02Z",
-        "message":{"role":"user","content":"sanitized composite continuation"}
-    }))).unwrap();
-    let paths = vec![a.to_str().unwrap().to_owned(), b.to_str().unwrap().to_owned()];
-    let inputs = paths.iter().map(|path| {
-        crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
-    }).collect::<Vec<_>>();
+    fs::write(
+        &b,
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"user", "sessionId":"two", "session_id":"one", "uuid":"u2",
+                "cwd":"/synthetic/project", "timestamp":"2026-10-01T00:00:02Z",
+                "message":{"role":"user","content":"sanitized composite continuation"}
+            })
+        ),
+    )
+    .unwrap();
+    let paths = vec![
+        a.to_str().unwrap().to_owned(),
+        b.to_str().unwrap().to_owned(),
+    ];
+    let inputs = paths
+        .iter()
+        .map(|path| {
+            crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
+        })
+        .collect::<Vec<_>>();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     for (at, path) in paths.iter().enumerate() {
-        cache.ingest(&format!("{:064x}", at + 1), std::path::Path::new(path), "claude").unwrap();
+        cache
+            .ingest(
+                &format!("{:064x}", at + 1),
+                std::path::Path::new(path),
+                "claude",
+            )
+            .unwrap();
     }
-    let prepared = crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812803000).unwrap();
+    let prepared =
+        crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812803000).unwrap();
     assert_eq!(prepared.rows.len(), 1);
     assert_eq!(prepared.rows[0].sources.len(), 2);
     let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
@@ -63,24 +90,43 @@ fn qualify(refusals: bool) {
     let retained = data.root.join("retained-two.jsonl");
     fs::rename(&b, &retained).unwrap();
     assert_eq!(store.remove_files(&removal).unwrap(), Outcome::Written);
-    assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some(generation.as_str()));
+    assert_eq!(
+        store.session_catalog_generation().unwrap().as_deref(),
+        Some(generation.as_str())
+    );
     assert_eq!(store.remove_files(&removal).unwrap(), Outcome::Written);
-    assert!(cache.capture_source_continuations(&options, Some(&paths), false).is_err(),
-        "the pending intent grants no authority without a Publication stage");
+    assert!(
+        cache
+            .capture_source_continuations(&options, Some(&paths), false)
+            .is_err(),
+        "the pending intent grants no authority without a Publication stage"
+    );
     let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
     cache.begin_semantic_stage(&paths, &runtime).unwrap();
     let (batch, model) = loop {
         let batch = cache.semantic_batch(64).unwrap().unwrap();
-        let inputs = batch.paths.iter().map(|path| {
-            crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
-        }).collect::<Vec<_>>();
-        let model = cache.prepare_semantic_model_batch(&options, &inputs, &batch, 1790812803000).unwrap().unwrap();
+        let inputs = batch
+            .paths
+            .iter()
+            .map(|path| {
+                crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
+            })
+            .collect::<Vec<_>>();
+        let model = cache
+            .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812803000)
+            .unwrap()
+            .unwrap();
         if batch.phase == crate::model::relation_stage::Phase::Publication {
             break (batch, model);
         }
     };
-    let captures = cache.capture_source_continuations(&options, Some(&paths), false).unwrap();
-    let removed = captures.iter().find(|capture| capture.path == paths[1]).unwrap();
+    let captures = cache
+        .capture_source_continuations(&options, Some(&paths), false)
+        .unwrap();
+    let removed = captures
+        .iter()
+        .find(|capture| capture.path == paths[1])
+        .unwrap();
     assert!(removed.pending_mutation);
     assert!(removed.physical.is_none());
     assert_eq!(removed.ledger, removal[0].1);
@@ -88,7 +134,15 @@ fn qualify(refusals: bool) {
     assert_eq!(authority.stage_epoch, batch.epoch);
     assert_eq!(authority.source_revision, batch.source_revision);
     if refusals {
-        for fault in ["claim", "stage-revision", "intent", "generic", "retired", "raw", "present"] {
+        for fault in [
+            "claim",
+            "stage-revision",
+            "intent",
+            "generic",
+            "retired",
+            "raw",
+            "present",
+        ] {
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                 let ns = namespace.as_str().as_bytes();
                 let path = paths[1].as_bytes();
@@ -113,12 +167,27 @@ fn qualify(refusals: bool) {
                 }
                 Ok(())
             }).unwrap();
-            if fault == "present" { fs::rename(&retained, &b).unwrap(); }
-            assert!(cache.capture_source_continuations(&options, Some(&paths), false).is_err(), "capture must refuse {fault}");
+            if fault == "present" {
+                fs::rename(&retained, &b).unwrap();
+            }
+            assert!(
+                cache
+                    .capture_source_continuations(&options, Some(&paths), false)
+                    .is_err(),
+                "capture must refuse {fault}"
+            );
             let refused = cache.publish_semantic_catalog(&batch, model.prepared());
-            assert!(refused.is_err() || matches!(refused, Ok((Outcome::Conflict, None))), "publication must refuse {fault}: {refused:?}");
-            assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some(generation.as_str()));
-            if fault == "present" { fs::rename(&b, &retained).unwrap(); }
+            assert!(
+                refused.is_err() || matches!(refused, Ok((Outcome::Conflict, None))),
+                "publication must refuse {fault}: {refused:?}"
+            );
+            assert_eq!(
+                store.session_catalog_generation().unwrap().as_deref(),
+                Some(generation.as_str())
+            );
+            if fault == "present" {
+                fs::rename(&b, &retained).unwrap();
+            }
             pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
                 let ns = namespace.as_str().as_bytes();
                 let path = paths[1].as_bytes();
@@ -132,13 +201,25 @@ fn qualify(refusals: bool) {
         }
     }
     let ack = loop {
-        let ack = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
-        if ack.0 != Outcome::Deferred { break ack; }
-        assert_eq!(store.session_catalog_generation().unwrap().as_deref(), Some(generation.as_str()));
+        let ack = cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap();
+        if ack.0 != Outcome::Deferred {
+            break ack;
+        }
+        assert_eq!(
+            store.session_catalog_generation().unwrap().as_deref(),
+            Some(generation.as_str())
+        );
     };
     assert_eq!(ack.0, Outcome::Written);
     assert_ne!(ack.1.as_ref(), Some(&generation));
-    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap(), ack);
+    assert_eq!(
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
+        ack
+    );
     cache.finish_semantic_stage(batch.epoch).unwrap();
     assert_eq!(store.remove_files(&removal).unwrap(), Outcome::Written);
     let mut changed = removal.clone();
@@ -147,12 +228,27 @@ fn qualify(refusals: bool) {
     // Replay remains independent of the now-published head and live absence.
     fs::rename(&retained, &b).unwrap();
     assert_eq!(store.remove_files(&removal).unwrap(), Outcome::Written);
-    assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap(), ack);
-    super::super::snapshot::with_admitted_snapshot(&pool, &namespace, &control, ack.1.as_deref().unwrap(), |snapshot| {
-        let current = snapshot.catalog("one", false)?.unwrap();
-        assert_eq!(current.sources.len(), 1);
-        assert_eq!(current.sources[0].path, a);
-        assert!(snapshot.owner("one")?.is_some(), "withdrawn source has retained custody");
-        Ok(())
-    }).unwrap();
+    assert_eq!(
+        cache
+            .publish_semantic_catalog(&batch, model.prepared())
+            .unwrap(),
+        ack
+    );
+    super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        ack.1.as_deref().unwrap(),
+        |snapshot| {
+            let current = snapshot.catalog("one", false)?.unwrap();
+            assert_eq!(current.sources.len(), 1);
+            assert_eq!(current.sources[0].path, a);
+            assert!(
+                snapshot.owner("one")?.is_some(),
+                "withdrawn source has retained custody"
+            );
+            Ok(())
+        },
+    )
+    .unwrap();
 }

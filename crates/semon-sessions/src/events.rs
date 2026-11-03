@@ -2680,12 +2680,15 @@ impl EventCache {
             .zip(after)
             .collect::<std::collections::BTreeMap<_, _>>();
         for capture in &mut captures {
-            let absent = after_by_path.get(&capture.path).is_some_and(Option::is_none)
+            let absent = after_by_path
+                .get(&capture.path)
+                .is_some_and(Option::is_none)
                 && crate::native_evidence::catalog_input(Path::new(&capture.path), options)
-                    .is_some_and(|input| input.full_path(options).to_string_lossy() == capture.path);
+                    .is_some_and(|input| {
+                        input.full_path(options).to_string_lossy() == capture.path
+                    });
             if capture.raw_inflight
-                || (capture.pending_mutation
-                    && (capture.deferred_withdrawal.is_none() || !absent))
+                || (capture.pending_mutation && (capture.deferred_withdrawal.is_none() || !absent))
             {
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,

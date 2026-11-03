@@ -114,8 +114,11 @@ pub(super) fn deferred_withdrawal_stage(
         && stage.revision == revision
         && stage.generation == model_cache::generation(tx)?
         && stage.paths.iter().any(|p| p == path)
-        && stage.claims.iter().any(|(p, r)| p == path && *r == Some(claim)))
-        .then_some((stage.epoch, revision)))
+        && stage
+            .claims
+            .iter()
+            .any(|(p, r)| p == path && *r == Some(claim)))
+    .then_some((stage.epoch, revision)))
 }
 
 pub(super) fn begin(

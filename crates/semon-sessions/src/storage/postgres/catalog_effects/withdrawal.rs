@@ -250,7 +250,10 @@ pub(in crate::storage::postgres) fn continuation_capture(
         "SELECT CASE WHEN octet_length(m.evidence)<=1048576 THEN m.evidence END FROM semon_pg_native_source_mutations m JOIN semon_pg_source_invalidations i ON i.namespace_digest=m.namespace_digest AND i.namespace=m.namespace AND i.source_path=m.source_path WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.source_path=$2 AND i.reason='removed' AND i.revision=$3",
         &[&ns, &path.as_bytes(), &claim],
     ).map_err(sqlstate::error)?;
-    let Some(intent) = rows.first().and_then(|row| row.get::<_, Option<Vec<u8>>>(0)) else {
+    let Some(intent) = rows
+        .first()
+        .and_then(|row| row.get::<_, Option<Vec<u8>>>(0))
+    else {
         return Ok(None);
     };
     let Ok((kind, request)) = serde_json::from_slice::<(String, Vec<u8>)>(&intent) else {
@@ -267,16 +270,25 @@ pub(in crate::storage::postgres) fn continuation_capture(
     if kind != "source-withdrawal-v1"
         || files.is_empty()
         || files.len() > 64
-        || files.iter().any(|(p, l)| p.is_empty() || p.len() > 4096 || l.is_none())
+        || files
+            .iter()
+            .any(|(p, l)| p.is_empty() || p.len() > 4096 || l.is_none())
         || files.iter().map(|(p, _)| p).collect::<BTreeSet<_>>().len() != files.len()
-        || files.iter().find(|(p, _)| p == path).and_then(|(_, l)| l.as_ref()) != Some(ledger)
+        || files
+            .iter()
+            .find(|(p, _)| p == path)
+            .and_then(|(_, l)| l.as_ref())
+            != Some(ledger)
         || encoded(&(&kind, &files))? != request
     {
         return Ok(None);
     }
     let Some(retired) = super::super::native_keys::read_meta(
-        tx, format!("source-retired:{path}").as_bytes(), 16384,
-    )? else {
+        tx,
+        format!("source-retired:{path}").as_bytes(),
+        16384,
+    )?
+    else {
         return Ok(None);
     };
     if retired != encoded(&Some(ledger))? {

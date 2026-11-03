@@ -165,10 +165,15 @@ pub(super) fn source_continuation_snapshot(
             return Err(StorageError::ScopeChanged);
         }
         let claim = row.get(3);
-        let pending_mutation = row.get(13);
-        let raw_inflight = row.get(14);
+        let pending_mutation: bool = row.get(13);
+        let raw_inflight: bool = row.get(14);
         let deferred_withdrawal = if !complete && pending_mutation && !raw_inflight {
-            super::catalog_effects::withdrawal::continuation_capture(tx, &path, claim, ledger.as_ref())?
+            super::catalog_effects::withdrawal::continuation_capture(
+                tx,
+                &path,
+                claim,
+                ledger.as_ref(),
+            )?
         } else {
             None
         };
