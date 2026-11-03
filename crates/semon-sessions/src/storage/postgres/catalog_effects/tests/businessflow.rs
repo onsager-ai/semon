@@ -1800,16 +1800,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     }
     fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
     fs::remove_file(&oracle_pid).unwrap();
-    // Capture the ordinary Query's post-withdrawal membership independently,
-    // before the process-wide Guard. Query membership includes virtual peers
-    // as well as physical Catalog owners.
-    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
-    fs::rename(&copilot, &copilot_parked).unwrap();
+    // Capture the same custody transition as PG, before the process-wide Guard.
+    // An all-history Query includes retained owners as well as virtual peers;
+    // a fresh cache first opened after removal has never observed that custody.
     let mut withdrawal_options = options.clone();
     withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
-    let withdrawal_oracle = crate::Query::new(withdrawal_options)
+    let mut withdrawal_query = crate::Query::new(withdrawal_options);
+    let before_withdrawal = withdrawal_query
+        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .expect("SQLite ordinary prewithdrawal cohort");
+    assert!(before_withdrawal["sessions"].as_array().unwrap().iter().any(|row| row["id"] == copilot_id));
+    let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
+    fs::rename(&copilot, &copilot_parked).unwrap();
+    let withdrawal_oracle = withdrawal_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite ordinary withdrawal cohort");
+    assert!(withdrawal_oracle["sessions"].as_array().unwrap().iter().any(|row| row["id"] == copilot_id));
     fs::rename(&copilot_parked, &copilot).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
@@ -4936,8 +4942,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .key
         .clone();
-    assert!(!current.to_string().contains(&removed_key));
-    assert!(
+    super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &withdrawn_generation,
+        |snapshot| {
+            assert!(snapshot.catalog(&removed_key, false)?.is_none());
+            let owner = snapshot.owner(&removed_key)?.unwrap();
+            assert!(owner.original);
+            assert!(!owner.has_current);
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(
         query
             .call_bound_selected_at(
                 "read_transcript",
@@ -4947,7 +4966,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 &retained_host,
                 None,
             )
-            .is_err()
+            .expect("withdrawal keeps the authorized original body"),
+        expected_bodies[&removed_key]["body"]
     );
     // Later old-generation checks use the immutable captured proof route; the
     // separate live Current refusal is asserted above.
