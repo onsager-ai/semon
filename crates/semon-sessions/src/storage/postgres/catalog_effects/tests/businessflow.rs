@@ -2352,12 +2352,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let withdrawal_copilot = trusted_options
         .copilot_home
         .join(format!("session-state/{copilot_id}/events.jsonl"));
-    fs::rename(&withdrawal_copilot, trusted_root.join("retained-copilot.jsonl")).unwrap();
+    fs::rename(
+        &withdrawal_copilot,
+        trusted_root.join("retained-copilot.jsonl"),
+    )
+    .unwrap();
     let withdrawal_inputs = inputs
         .iter()
         .filter(|input| input.full_path(&trusted_options) != withdrawal_copilot)
         .cloned()
         .collect::<Vec<_>>();
+    let withdrawal_seen = withdrawal_inputs
+        .iter()
+        .map(|input| input.full_path(&trusted_options).to_string_lossy().into_owned())
+        .collect();
+    trusted_cache
+        .retire_scoped_sources(
+            &trusted_options,
+            &inputs,
+            &withdrawal_seen,
+            &crate::facts::MachineFacts::Local,
+        )
+        .unwrap();
     let withdrawal_prepared = crate::model::prepare_sources(
         &trusted_options,
         &mut trusted_cache,
