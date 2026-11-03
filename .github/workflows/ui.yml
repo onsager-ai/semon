@@ -70,6 +70,14 @@ jobs:
                       print('STATE', name, 'count', count, 'columns', columns)
                       for row in db.execute(f'SELECT * FROM "{name}" LIMIT 8'):
                           print(tuple(str(value)[:400] for value in row))
+              for query in (
+                  "SELECT 'root_bytes',count(*),min(length(CAST(manifest AS BLOB))),max(length(CAST(manifest AS BLOB))) FROM storage_proof_presentation_roots",
+                  "SELECT 'history_bytes',session_key,length(CAST(metadata AS BLOB)) FROM session_history_catalog ORDER BY session_key LIMIT 64",
+                  "SELECT 'history_slots',session_key,count(*) FROM session_history_slots GROUP BY session_key ORDER BY session_key LIMIT 64",
+                  "SELECT 'direct_grants',owner_kind,count(*),max(length(CAST(direct_capture AS BLOB))) FROM storage_catalog_native_observation_grants GROUP BY owner_kind",
+              ):
+                  for row in db.execute(query):
+                      print(row)
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
