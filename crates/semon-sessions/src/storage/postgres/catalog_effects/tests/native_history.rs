@@ -4,6 +4,7 @@ use super::*;
 use crate::events::{EventCache, Outcome};
 use crate::storage::{catalog::CatalogSnapshot, native_events::NativeEventStore};
 use sha2::Digest;
+use std::collections::BTreeSet;
 use std::io::Write;
 
 pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> String {
@@ -52,10 +53,13 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
         };
         let (mut generation, rows) =
             bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
-        let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
-            pool: pool.clone(),
-            control: control.clone(),
-        }).unwrap();
+        let config = options
+            .source
+            .store_config(crate::storage::StoreBackend::Postgres {
+                pool: pool.clone(),
+                control: control.clone(),
+            })
+            .unwrap();
         options.source = options.source.with_store(config).unwrap();
         let original = &rows[0];
         let path = &original.sources[0].path;
@@ -70,10 +74,16 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
                 generation: generation.to_owned(),
                 options: options.clone(),
             };
-            crate::Query::new(options.clone()).call_bound_selected_at(
-                "read_transcript", &serde_json::json!({"id":key,"limit":100}), 1790812860000,
-                &store, host, None,
-            ).unwrap()
+            crate::Query::new(options.clone())
+                .call_bound_selected_at(
+                    "read_transcript",
+                    &serde_json::json!({"id":key,"limit":100}),
+                    1790812860000,
+                    &store,
+                    host,
+                    None,
+                )
+                .unwrap()
         };
         let mut expected_body = read_body(&generation, &host);
         if case == "older-original" {
@@ -82,8 +92,12 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
             let input = crate::native_evidence::catalog_input(path, &options).unwrap();
             let before = fs::metadata(path).unwrap().len();
             let writer = crate::SessionSourceWrite::begin(
-                &options, &input, Some("0123456789abcdef0123456789abcdef"), before,
-            ).unwrap();
+                &options,
+                &input,
+                Some("0123456789abcdef0123456789abcdef"),
+                before,
+            )
+            .unwrap();
             assert!(writer.intent().continuation.is_some());
             let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
             writeln!(file, "{}", serde_json::json!({
@@ -95,32 +109,49 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
             writer.complete(file.metadata().unwrap().len()).unwrap();
             drop(file);
             let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            cache.ingest(&format!("{:064x}", 477), path, "claude").unwrap();
+            cache
+                .ingest(&format!("{:064x}", 477), path, "claude")
+                .unwrap();
             let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
-            cache.begin_semantic_stage(&[path.to_str().unwrap().to_owned()], &runtime).unwrap();
+            cache
+                .begin_semantic_stage(&[path.to_str().unwrap().to_owned()], &runtime)
+                .unwrap();
             generation = loop {
                 let batch = cache.semantic_batch(64).unwrap().unwrap();
-                let inputs = batch.paths.iter().map(|path| {
-                    crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
-                }).collect::<Vec<_>>();
-                let model = cache.prepare_semantic_model_batch(
-                    &options, &inputs, &batch, 1790812860000,
-                ).unwrap().unwrap();
+                let inputs = batch
+                    .paths
+                    .iter()
+                    .map(|path| {
+                        crate::native_evidence::catalog_input(std::path::Path::new(path), &options)
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let model = cache
+                    .prepare_semantic_model_batch(&options, &inputs, &batch, 1790812860000)
+                    .unwrap()
+                    .unwrap();
                 if batch.phase == crate::model::relation_stage::Phase::Publication {
-                    let ack = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+                    let ack = cache
+                        .publish_semantic_catalog(&batch, model.prepared())
+                        .unwrap();
                     cache.finish_semantic_stage(batch.epoch).unwrap();
                     break ack.1.unwrap();
                 }
             };
-            let current = snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
-                assert!(snapshot.owner(key)?.is_none(), "exact continuation has no original History");
-                Ok(snapshot.catalog(key, false)?.unwrap())
-            }).unwrap();
+            let current =
+                snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+                    assert!(
+                        snapshot.owner(key)?.is_none(),
+                        "exact continuation has no original History"
+                    );
+                    Ok(snapshot.catalog(key, false)?.unwrap())
+                })
+                .unwrap();
             host = super::businessflow::body_host(&options, &[current]);
             expected_body = read_body(&generation, &host);
         }
-        let (mut expected, header, slots, old_owner) = snapshot::with_generation(
-            &pool, &namespace, &control, &generation, |snapshot| {
+        let (mut expected, header, slots, old_owner) =
+            snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
                 let owner = snapshot.owner(key)?;
                 let history = case == "older-original";
                 let (row, header, slots) = snapshot.selected(key, history, 0, 64)?.unwrap();
@@ -133,16 +164,24 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
                     assert!(owner.is_none());
                 }
                 Ok((row, header, slots, owner.map(|owner| owner.generation)))
-            },
-        ).unwrap();
+            })
+            .unwrap();
         expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-        let open = || super::super::super::index_store::open(
-            pool.clone(), namespace.clone(), control.clone(),
-        ).unwrap().0;
+        let open = || {
+            super::super::super::index_store::open(pool.clone(), namespace.clone(), control.clone())
+                .unwrap()
+                .0
+        };
         let mut index = open();
         let path_string = path.to_str().unwrap().to_owned();
-        let ledger = index.file_ledgers().unwrap().into_iter()
-            .find(|(path, _)| path == &path_string).unwrap().1.unwrap();
+        let ledger = index
+            .file_ledgers()
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == &path_string)
+            .unwrap()
+            .1
+            .unwrap();
         let removal = vec![(path_string, Some(ledger))];
         // The captured host independently owns the exact old bytes. Source
         // withdrawal must not require their continued presence at the live path.
@@ -150,9 +189,12 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
         let result = index.remove_files(&removal).unwrap();
         assert_eq!(result.outcome, Outcome::Written);
         assert_eq!(result.source_revision_delta, 1);
-        let successor = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            super::super::super::model_cache::generation(tx)
-        }).unwrap().unwrap();
+        let successor = pool
+            .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                super::super::super::model_cache::generation(tx)
+            })
+            .unwrap()
+            .unwrap();
         assert_ne!(successor, generation);
         drop(index);
         let mut index = open();
@@ -183,10 +225,17 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
             assert!(owner.original);
             assert!(!owner.has_current);
             if let Some(old_owner) = &old_owner {
-                assert_eq!(&owner.generation, old_owner, "reuse immutable older original");
+                assert_eq!(
+                    &owner.generation, old_owner,
+                    "reuse immutable older original"
+                );
             }
-            let (retained, retained_header, retained_slots) = snapshot.selected(key, true, 0, 64)?.unwrap();
-            assert_eq!(serde_json::to_value(&retained).unwrap(), serde_json::to_value(&expected).unwrap());
+            let (retained, retained_header, retained_slots) =
+                snapshot.selected(key, true, 0, 64)?.unwrap();
+            assert_eq!(
+                serde_json::to_value(&retained).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
             assert_eq!(retained_header, header);
             assert_eq!(retained_slots, slots);
             snapshot::query::qualify_context_candidate(snapshot, &options, &retained, true)?;
@@ -197,8 +246,13 @@ fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody(
                 Ok(())
             })?;
             Ok(())
-        }).unwrap();
-        assert_eq!(read_body(&successor, &host), expected_body, "{case} retained body after restart");
+        })
+        .unwrap();
+        assert_eq!(
+            read_body(&successor, &host),
+            expected_body,
+            "{case} retained body after restart"
+        );
         fs::remove_dir_all(&data.root).unwrap();
     }
 }
