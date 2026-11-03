@@ -72,6 +72,13 @@ Query runtime strings. Sorted CWDs are hashed incrementally with length prefixes
 only the fixed-size fingerprint enters the capture, even for a long native CWD.
 Conflicting observations for one identity or CWDs for one source cohort
 refuse capture; the existing 260-observation bound still applies.
+PostgreSQL missing-source History uses the same verified composition planner as
+SQLite. Local native publication receipts authenticate predecessor slots and
+their exact source-CWD fingerprint; imported observations cannot mint local
+composition authority. A composed physical History owner stores its own compact
+runtime capture, admission and stream with the selected predecessor receipts.
+Reads reauthenticate those receipts separately from the new owner's capture.
+Original withdrawal custody retains its original publication reference.
 Ordinary PostgreSQL full, partial and closed publications carry this typed capture
 with a separate raw global runtime fingerprint and its current storage witness.
 The producer reuses its original runtime snapshot and in-memory source CWDs,

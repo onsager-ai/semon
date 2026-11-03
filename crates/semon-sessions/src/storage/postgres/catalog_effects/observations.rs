@@ -6,6 +6,7 @@ pub(super) type NativeReceipt = (u64, String, String);
 
 pub(super) enum Origin {
     Native(NativeReceipt),
+    Composed,
     Imported(crate::storage::proof_lifetime::ProofGenerationId),
 }
 
@@ -72,6 +73,7 @@ pub(in crate::storage::postgres) fn take_publication_reads() -> (usize, usize) {
 
 struct VerifiedPublication {
     rows: Vec<serde_json::Value>,
+    recipes: Option<Vec<(String, Vec<crate::slot_projection::SavedSlot>, bool)>>,
     observations: Option<PresentationObservations>,
 }
 
@@ -142,7 +144,87 @@ fn load_publication(
         .clone();
     let observations =
         serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)?;
-    Ok(VerifiedPublication { rows, observations })
+    let recipes =
+        serde_json::from_value(values[3].clone()).map_err(|_| StorageError::ScopeChanged)?;
+    Ok(VerifiedPublication {
+        rows,
+        recipes,
+        observations,
+    })
+}
+
+/// Authenticate the original publication before allowing any of its slots or
+/// source CWDs into a composed History projection.
+pub(super) fn composition_receipt(
+    tx: &mut PgTxn<'_>,
+    current: &QueryRuntimeBinding,
+    previous: &CatalogRow,
+    receipt: &NativeReceipt,
+    budget: &mut crate::overview::SummaryPublicationBudget,
+) -> Result<Vec<catalog::VerifiedHistoryReceipt>, StorageError> {
+    check_binding(current, receipt)?;
+    let publication = load_publication(tx, current, receipt)?;
+    let mut verified = Vec::new();
+    for value in &publication.rows {
+        let row: CatalogRow =
+            serde_json::from_value(value.clone()).map_err(|_| StorageError::ScopeChanged)?;
+        if row.key != previous.key
+            || row.harness != previous.harness
+            || row.lifecycle != crate::model::summary::CatalogLifecycle::Current
+            || row.sources.iter().any(|source| !previous.sources.contains(source))
+        {
+            continue;
+        }
+        let Some(observations) = publication.observations.as_ref() else {
+            continue;
+        };
+        if observations.runtime_for(&row).is_none() {
+            continue;
+        }
+        let Some((_, slots, _)) = publication
+            .recipes
+            .as_ref()
+            .and_then(|recipes| recipes.iter().find(|(key, _, _)| key == &row.key))
+        else {
+            continue;
+        };
+        if row.sources.len() > 64 || slots.len() > 64 {
+            return Err(StorageError::Busy);
+        }
+        let mut cwds = std::collections::BTreeMap::new();
+        for slot in slots {
+            for (path, cwd) in slot.source_cwds() {
+                let cwd = cwd.map(str::to_owned);
+                if !row.sources.iter().any(|source| &source.path == path)
+                    || cwds.get(path).is_some_and(|saved| saved != &cwd)
+                {
+                    return Err(StorageError::ScopeChanged);
+                }
+                cwds.insert(path.clone(), cwd);
+            }
+        }
+        if cwds.len() != row.sources.len() {
+            continue;
+        }
+        let fingerprint = crate::native_evidence::runtime::cwd_fingerprint(
+            &cwds.values().filter_map(Clone::clone).collect(),
+        );
+        if observations.runtime_cwd_fingerprint_for(&row.sources) != Some(fingerprint.as_str()) {
+            return Err(StorageError::ScopeChanged);
+        }
+        let texts = slots.iter().map(serde_json::to_string).collect::<Result<Vec<_>, _>>()
+            .map_err(|_| StorageError::ScopeChanged)?;
+        budget.charge(texts.iter().map(String::len).sum()).map_err(|_| StorageError::Busy)?;
+        verified.push(catalog::VerifiedHistoryReceipt::verified(
+            receipt.2.clone(),
+            crate::retention::source_generation(&row.sources).map_err(|_| StorageError::ScopeChanged)?,
+            row.sources,
+            texts,
+            fingerprint,
+            cwds,
+        ));
+    }
+    Ok(verified)
 }
 
 pub(super) fn issue_history(

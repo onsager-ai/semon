@@ -3,6 +3,8 @@
 use super::*;
 use crate::storage::catalog::{CompositeHistoryStore, OriginalHeader, OriginalHistoryStore};
 
+pub(super) mod verified;
+
 pub(super) struct History<'a, 'tx> {
     pub(super) effects: Effects<'a, 'tx>,
     pub(super) previous: &'a str,
@@ -379,6 +381,7 @@ impl OriginalHistoryStore for History<'_, '_> {
             Ok(origin)
         })?;
         match origin {
+            observations::Origin::Composed => Err(StorageError::ScopeChanged),
             observations::Origin::Native(receipt) => observations::issue_history(
                 &mut tx,
                 self.effects.generation,
@@ -614,6 +617,14 @@ pub(super) fn preserve(
     if !catalog::preserve_rows(&store, publication.rows, &old, continuations)? {
         return Ok(false);
     }
-    catalog::publish_history_rows(&store, publication.rows, publication.transcripts)?;
+    let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+    let (plan, captures) = catalog::prepare_history_composition(
+        &store,
+        publication.rows,
+        publication.transcripts,
+        publication.observations,
+        &mut budget,
+    )?;
+    catalog::apply_prepared_history_composition(&store, &plan, &captures)?;
     Ok(true)
 }

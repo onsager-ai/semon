@@ -83,6 +83,19 @@ impl Snapshot<'_, '_> {
             let metadata = physical_metadata
                 .as_ref()
                 .ok_or_else(|| failed(StorageError::ScopeChanged))?;
+            let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+            if let Some(grant) = super::super::history::verified::read_grant(
+                &mut tx,
+                &current,
+                &history_owner,
+                metadata,
+                row,
+                &mut budget,
+            )
+            .map_err(failed)?
+            {
+                return Ok(Some((current, Some(grant.into_capture()), Origin::Composed)));
+            }
             let key = observations::history_key(&history_owner, metadata);
             if let Some(reference) =
                 super::super::super::native_keys::read_meta(&mut tx, key.as_bytes(), 512)

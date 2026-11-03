@@ -5254,13 +5254,23 @@ mod tests {
         let mut db = crate::storage::sqlite::semantic::pricing_connection(&owner).unwrap();
         assert_eq!(
             db.query_row(
-                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1",
+                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND owner_kind='catalog'",
                 [b.namespace.as_str()],
                 |r| r.get::<_, i64>(0),
             )
             .unwrap(),
             0,
-            "semantic publication starts with immutable Stage authority only"
+            "Current retains immutable Stage authority; retirement grants belong to History"
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND owner_kind='history'",
+                [b.namespace.as_str()],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "the retired Stage receipt has its exact physical History owner grant"
         );
         assert!(observation_binding(&db, &binding, &original).is_ok());
         assert!(observation_binding(&db, &binding, &retained).is_ok());

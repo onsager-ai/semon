@@ -735,6 +735,14 @@ impl PresentationObservations {
             .get(&dependency)
             .cloned()
     }
+    #[cfg(feature = "postgres")]
+    pub(crate) fn runtime_cwd_fingerprint_for(
+        &self,
+        sources: &[crate::model::summary::CatalogSource],
+    ) -> Option<&str> {
+        let source = crate::retention::source_generation(sources).ok()?;
+        self.runtime_cwd_fingerprints.get(&source).map(String::as_str)
+    }
     /// Keep only this row's typed runtime witness for the direct Catalog owner
     /// slot. The slot already binds the normalized row metadata, admission and
     /// stream, so no publication-wide context or source paths belong here.

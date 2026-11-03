@@ -82,7 +82,8 @@ impl Snapshot<'_, '_> {
                 .ok_or(StorageError::HistoryRetentionBounds)?,
         )?;
         let residence = match origin {
-            super::super::observations::Origin::Native(_) => {
+            super::super::observations::Origin::Native(_)
+            | super::super::observations::Origin::Composed => {
                 let metadata_digest = crate::storage::proof_codec::digest(metadata.as_bytes());
                 if history {
                     QueryRecipeResidence::NativeHistory { metadata_digest }

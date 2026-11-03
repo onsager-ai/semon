@@ -703,7 +703,7 @@ fn bind_custody_fixture(
     options: &Options,
     rows: &[CatalogRow],
     projections: &[crate::slot_projection::Projection],
-) -> (String, Vec<CatalogRow>) {
+) -> (String, Vec<CatalogRow>, crate::storage::selected::PresentationObservations) {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
     let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
@@ -761,9 +761,11 @@ fn bind_custody_fixture(
     }
     let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
+    let capture = prepared.presentation_observations().unwrap().clone();
     (
         generation.expect("ordinary custody fixture publication"),
         prepared.rows,
+        capture,
     )
 }
 
@@ -779,7 +781,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let mut generations = Vec::new();
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections).0);
+            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections));
         }
     });
     let mut missing = data.rows.clone();
@@ -794,7 +796,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             repair: false,
         })
         .collect::<Vec<_>>();
-    for (name, generation) in ["history127-a", "history127-b"]
+    for (name, (generation, native_rows, observations)) in ["history127-a", "history127-b"]
         .into_iter()
         .zip(&generations)
     {
@@ -811,7 +813,7 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
                     &crate::slot_projection::Publication {
                         rows: &missing,
                         transcripts: Some(&recipes),
-                        observations: None,
+                        observations: Some(observations),
                     },
                     &[]
                 )?);
@@ -857,6 +859,24 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
             },
         )
         .unwrap();
+        let refused: Result<(), StorageError> = pool.transaction(
+            &namespace,
+            TxnKind::Write,
+            &PgCancellation::default(),
+            |tx| {
+                let binding = super::super::model_cache::binding(tx)?;
+                tx.driver.execute(
+                    "UPDATE semon_pg_native_catalog_operations SET payload=payload||'x'::bytea WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2",
+                    &[&namespace.as_str().as_bytes(), &generation.as_bytes()],
+                ).map_err(sqlstate::error)?;
+                let receipt = (binding.admission, binding.stream_epoch.clone(), generation.clone());
+                let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+                assert!(observations::composition_receipt(tx, &binding, &native_rows[0], &receipt, &mut budget).is_err(),
+                    "a one-byte publication mutation cannot authorize predecessor slots or CWDs");
+                Err(StorageError::Conflict)
+            },
+        );
+        assert_eq!(refused, Err(StorageError::Conflict));
     }
 }
 
@@ -874,7 +894,7 @@ fn pg_catalog127_original_custody_real_producer_restart_and_atomic_boundaries() 
             projections,
         ));
     });
-    let (generation, native_rows) = generation.expect("ordinary custody fixture publication");
+    let (generation, native_rows, _) = generation.expect("ordinary custody fixture publication");
     let preserve = |tx: &mut PgTxn<'_>| {
         let store = history::History {
             effects: Effects {
