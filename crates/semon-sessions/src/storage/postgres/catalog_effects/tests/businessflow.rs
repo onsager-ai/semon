@@ -4264,9 +4264,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let assert_history_header_refused =
         |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
-            let composite_expected = incomplete
-                && version == history_version
-                && source_generation.as_deref() == Some(history_source_generation.as_slice());
+            // d3c19b7e and a928c1f6 retain Original custody without a
+            // request-local verified continuation. Semantic replay deliberately
+            // discards those proofs; it must not mint a composite owner.
             update_history_header(version, source_generation.clone(), incomplete)
                 .expect("install exact History header corruption");
             let qualification = super::super::snapshot::with_admitted_snapshot(
@@ -4281,7 +4281,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     let owner = snapshot
                         .owner(&appended_key)?
                         .ok_or(StorageError::ScopeChanged)?;
-                    assert!(!owner.original);
+                    assert!(owner.original);
                     assert!(owner.has_current);
                     let current = snapshot
                         .rows(&history_request)
@@ -4317,9 +4317,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let (qualified, composite_qualified) =
                 qualification.expect("History header uses the admitted snapshot");
             assert!(!qualified, "{reason}");
-            assert_eq!(
-                composite_qualified, composite_expected,
-                "{reason}: incomplete composite identity qualification"
+            assert!(
+                !composite_qualified,
+                "{reason}: Original custody cannot use composite identity qualification"
             );
         };
     assert_history_header_refused(
@@ -4354,7 +4354,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     "UPDATE semon_pg_native_catalog_history_owners SET original=$4 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3",
                     &[
                         &namespace.as_str().as_bytes(),
-                        &history_owner_generation.as_bytes(),
+                        &continued_generation.as_bytes(),
                         &appended_key.as_bytes(),
                         &original,
                     ],
@@ -4372,7 +4372,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         true,
     )
     .expect("install otherwise qualifying incomplete composite header");
-    set_history_original(true).expect("install original History owner marker");
+    set_history_original(false).expect("install nonoriginal History marker control");
+    let control_original = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &continued_generation,
+        |snapshot| {
+            Ok(snapshot
+                .owner(&appended_key)?
+                .ok_or(StorageError::ScopeChanged)?
+                .original)
+        },
+    )
+    .expect("marker control changes the selected physical owner");
+    assert!(!control_original);
+    set_history_original(true).expect("restore original History owner marker");
     let original_owner_composite_qualified = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
@@ -4398,7 +4413,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .expect("original History owner is read through admitted snapshot");
-    set_history_original(false).expect("restore composite History owner marker");
+    set_history_original(true).expect("restore original History owner marker");
     update_history_header(
         history_version,
         Some(history_source_generation.clone()),

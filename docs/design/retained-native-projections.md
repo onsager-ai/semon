@@ -85,6 +85,10 @@ runtime capture, admission and stream with the selected predecessor receipts.
 Reads reauthenticate those receipts separately from the new owner's capture.
 Exceeding the bounded composition slot or byte allowance preserves existing
 History without composing it or blocking an otherwise qualified Current update.
+Semantic replay discards request-local scanner continuation proofs. A changed
+source prefix therefore keeps Original custody instead of inventing a composite
+owner (the conservative source classification introduced by `d3c19b7e` and
+restricted to ordinary Current preparation by `a928c1f6`).
 Original withdrawal custody retains its original publication reference.
 Ordinary PostgreSQL full, partial and closed publications carry this typed capture
 with a separate raw global runtime fingerprint and its current storage witness.

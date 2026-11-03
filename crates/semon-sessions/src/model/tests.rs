@@ -5545,15 +5545,11 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
         .position(|path| path == &stale.path)
         .unwrap();
     remaining.paths.swap(0, completed);
-    remaining.source_claims = crate::storage::sqlite::source_journal::claims(
-        &db,
-        namespace.as_str(),
-        &remaining.paths,
-    )
-    .unwrap();
-    let remaining_prepared =
-        prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &remaining, NOW)
+    remaining.source_claims =
+        crate::storage::sqlite::source_journal::claims(&db, namespace.as_str(), &remaining.paths)
             .unwrap();
+    let remaining_prepared =
+        prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &remaining, NOW).unwrap();
     assert_eq!(
         cache
             .record_semantic_batch(&remaining, remaining_prepared.prepared())
