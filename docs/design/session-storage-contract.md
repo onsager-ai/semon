@@ -200,6 +200,10 @@ with its presentation entries and shared observations under the existing joined
 digest. Ordinary publication receipt IDs may differ from that Catalog generation:
 leases and proof roots retain the receipt ID, while selected opening matches the
 captured witness generation to the authenticated manifest field.
+When an ordinary publication exceeds the bounded presentation capture or manifest
+budget, it commits without a receipt and emits a sanitized capture-budget
+diagnostic. Its readers use the existing receipt-less custody path; no exact
+receipt is inferred. Other publication and History retention bounds still apply.
 
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,

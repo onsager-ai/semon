@@ -3889,6 +3889,14 @@ pub(crate) fn bind_presentations(
     Ok(root.digest)
 }
 
+pub(crate) fn check_presentation_budget(
+    base: &str,
+    rows: &[(String, String)],
+    inputs: &PresentationInputs<'_>,
+) -> Result<(), StorageError> {
+    prepare_presentation_root(base, rows, inputs).map(|_| ())
+}
+
 fn prepare_presentation_root(
     base: &str,
     rows: &[(String, String)],

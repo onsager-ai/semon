@@ -131,6 +131,12 @@ impl CatalogPublishLogLimiter {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OrdinaryReceiptStatus {
+    IssuedOrNotRequested,
+    CaptureBudgetExceeded,
+}
+
 fn emit_catalog_publish_diagnostic(line: String) {
     eprintln!("{line}");
     #[cfg(test)]
@@ -3076,6 +3082,7 @@ impl SqliteStore {
         let mut search_observation: Option<crate::native_timing::SearchTraversalProbe> = None;
         let producer =
             crate::native_timing::enabled().then(|| crate::native_timing::id(&self.path));
+        let mut receipt_status = OrdinaryReceiptStatus::IssuedOrNotRequested;
         let mut commit_boundary =
             crate::native_timing::CatalogCommitBoundary::new(producer.is_some(), &self.path);
         let mut write_activity = crate::native_timing::WriteActivity::new(
@@ -3882,7 +3889,7 @@ impl SqliteStore {
                     .map_err(failure)?
                     .parse()
                     .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                let captured = crate::storage::sqlite::proof_generations::capture_presentations(
+                let captured = match crate::storage::sqlite::proof_generations::capture_presentations(
                     &transaction,
                     owner.config().namespace.as_str(),
                     crate::storage::sqlite::proof_generations::PresentationInputs {
@@ -3892,66 +3899,109 @@ impl SqliteStore {
                         observations: Some(observations),
                     },
                     observed_at,
-                )
-                .map_err(StoreError::Configured)?;
-                let projection_witness = projections
-                    .iter()
-                    .map(|projection| (&projection.key, &projection.slots, projection.repair))
-                    .collect::<Vec<_>>();
-                let base_bytes = serde_json::to_vec(&(
-                    "ordinary-catalog-presentation-v1",
-                    &generation,
-                    &metadata,
-                    &projection_witness,
-                    observations,
-                    &captured,
-                    observed_at,
-                ))
-                .map_err(|error| StoreError::Data(error.to_string()))?;
-                let base = crate::storage::proof_codec::digest(&base_bytes);
-                let source_revision: i64 = transaction
-                    .query_row(
-                        "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
-                        [owner.config().namespace.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(failure)?;
-                let claims_text = serde_json::to_string(&claims)
+                ) {
+                    Ok(captured) => Some(captured),
+                    Err(crate::storage::StorageError::HistoryRetentionBounds) => {
+                        receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
+                        None
+                    }
+                    Err(error) => return Err(StoreError::Configured(error)),
+                };
+                if let Some(captured) = captured {
+                    let projection_witness = projections
+                        .iter()
+                        .map(|projection| (&projection.key, &projection.slots, projection.repair))
+                        .collect::<Vec<_>>();
+                    let base_bytes = serde_json::to_vec(&(
+                        "ordinary-catalog-presentation-v1",
+                        &generation,
+                        &metadata,
+                        &projection_witness,
+                        observations,
+                        &captured,
+                        observed_at,
+                    ))
                     .map_err(|error| StoreError::Data(error.to_string()))?;
-                let metadata_text = serde_json::to_string(&metadata)
-                    .map_err(|error| StoreError::Data(error.to_string()))?;
-                let receipt_publication =
-                    crate::storage::sqlite::proof_generations::publish_ordinary(
+                    let base = crate::storage::proof_codec::digest(&base_bytes);
+                    let source_revision: i64 = transaction
+                        .query_row(
+                            "SELECT revision FROM main.storage_source_journal WHERE namespace=?1",
+                            [owner.config().namespace.as_str()],
+                            |row| row.get(0),
+                        )
+                        .map_err(failure)?;
+                    let claims_text = serde_json::to_string(&claims)
+                        .map_err(|error| StoreError::Data(error.to_string()))?;
+                    let metadata_text = serde_json::to_string(&metadata)
+                        .map_err(|error| StoreError::Data(error.to_string()))?;
+                    let inputs = crate::storage::sqlite::proof_generations::PresentationInputs {
+                        catalog_generation: &generation,
+                        rows,
+                        projections: Some(projections),
+                        observations: Some(observations),
+                    };
+                    match crate::storage::sqlite::proof_generations::check_presentation_budget(
+                        &base, &captured, &inputs,
+                    ) {
+                        Ok(()) => {}
+                        Err(crate::storage::StorageError::HistoryRetentionBounds) => {
+                            receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
+                        }
+                        Err(error) => return Err(StoreError::Configured(error)),
+                    }
+                    if receipt_status != OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                        let receipt_publication =
+                            crate::storage::sqlite::proof_generations::publish_ordinary(
+                                &transaction,
+                                &crate::storage::sqlite::proof_generations::OrdinaryReceipt {
+                                    namespace: owner.config().namespace.as_str(),
+                                    admission: owner.admission(),
+                                    stream,
+                                    base_generation: previous.as_deref(),
+                                    source_revision,
+                                    claims: &claims_text,
+                                    metadata: &metadata_text,
+                                },
+                                &base,
+                                crate::storage::sqlite::proof_generations::PreparedPresentations {
+                                    inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
+                                        catalog_generation: &generation,
+                                        rows,
+                                        projections: Some(projections),
+                                        observations: Some(observations),
+                                    },
+                                    presentations: &captured,
+                                    overview_budget: &mut history_budget,
+                                },
+                            );
+                        match receipt_publication {
+                            Ok(()) => {}
+                            Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
+                                error,
+                            )) => return Err(StoreError::Configured(error)),
+                            Err(
+                                crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
+                            ) => return Ok(Outcome::Deferred),
+                    }
+                    }
+                }
+                if receipt_status == OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                    match crate::storage::sqlite::proof_generations::retain_outgoing_history_refs(
                         &transaction,
-                        &crate::storage::sqlite::proof_generations::OrdinaryReceipt {
-                            namespace: owner.config().namespace.as_str(),
-                            admission: owner.admission(),
-                            stream,
-                            base_generation: previous.as_deref(),
-                            source_revision,
-                            claims: &claims_text,
-                            metadata: &metadata_text,
-                        },
-                        &base,
-                        crate::storage::sqlite::proof_generations::PreparedPresentations {
-                            inputs: crate::storage::sqlite::proof_generations::PresentationInputs {
-                                catalog_generation: &generation,
-                                rows,
-                                projections: Some(projections),
-                                observations: Some(observations),
-                            },
-                            presentations: &captured,
-                            overview_budget: &mut history_budget,
-                        },
-                    );
-                match receipt_publication {
-                    Ok(()) => {}
-                    Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
-                        error,
-                    )) => return Err(StoreError::Configured(error)),
-                    Err(
-                        crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow,
-                    ) => return Ok(Outcome::Deferred),
+                        owner.config().namespace.as_str(),
+                        owner.admission(),
+                        stream,
+                        rows,
+                        &mut history_budget,
+                    ) {
+                        Ok(()) => {}
+                        Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(error)) => {
+                            return Err(StoreError::Configured(error));
+                        }
+                        Err(crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow) => {
+                            return Ok(Outcome::Deferred);
+                        }
+                    }
                 }
             }
             match crate::storage::sqlite::proof_generations::retain_outgoing_history_refs(
@@ -4086,6 +4136,11 @@ impl SqliteStore {
             // production publisher has no traversal probes.
             commit_boundary.capture(&transaction);
             transaction.commit().map_err(failure)?;
+            if receipt_status == OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                emit_catalog_publish_diagnostic(
+                    "semon sessions: ordinary_catalog_receipt=absent reason=capture_budget".into(),
+                );
+            }
             crate::pricing::runtime::notify_reprice();
             commit_boundary.capture(&self.connection);
             #[cfg(test)]
@@ -10140,6 +10195,63 @@ mod tests {
         assert!(catalog_batch_bytes(&rows[10..12], &metadata, CatalogWriter::Auto).is_some());
         eprintln!("catalog_publication_probe round=scoped");
         catalog_write_pair(&mut batch, &mut row_wise, &rows[10..12], &projections, true);
+        drop(batch);
+        drop(row_wise);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_capture_budget_falls_back_and_replay_is_receiptless() {
+        let root = scratch("catalog-receipt-budget-fallback");
+        let (options, rows, projections) = catalog_native_fixture(&root, 2, true);
+        let (mut batch, row_wise) = catalog_pair(&options);
+        let generation: String = batch.connection.query_row(
+            "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'",
+            [], |row| row.get(0),
+        ).unwrap();
+        let mut observations = crate::storage::selected::PresentationObservations::default();
+        observations.machine_label = Some("x".repeat(4 * 1024 * 1024 + 1));
+        let publication = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: Some(&projections),
+            observations: Some(&observations),
+        };
+        let claims = rows.iter().flat_map(|row| &row.sources)
+            .map(|source| source.path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>().into_iter().map(|path| {
+                let revision = batch.connection.query_row(
+                    "SELECT revision FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1",
+                    [&path], |row| row.get::<_, i64>(0),
+                ).optional().unwrap();
+                (path, revision)
+            }).collect::<Vec<_>>();
+        CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
+        let first = batch.publish_catalog_with_generation(
+            &publication, Some(&generation), Some(&claims), true, None,
+        ).unwrap();
+        assert_eq!(first.0, Outcome::Written);
+        let refs: i64 = batch.connection.query_row(
+            "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND kind='current'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(refs, 0);
+        assert!(CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().iter().any(
+            |line| line == "semon sessions: ordinary_catalog_receipt=absent reason=capture_budget"
+        )));
+        let state = catalog_state(&batch.connection);
+        assert_eq!(batch.publish_catalog_with_generation(
+            &publication, Some(&generation), Some(&claims), true, None,
+        ).unwrap(), (Outcome::Conflict, None));
+        assert_eq!(catalog_state(&batch.connection), state);
+        let malformed = crate::slot_projection::Publication {
+            rows: &rows,
+            transcripts: None,
+            observations: Some(&observations),
+        };
+        assert!(batch.publish_catalog_with_generation(
+            &malformed, first.1.as_deref(), None, false, None,
+        ).is_err());
+        assert_eq!(catalog_state(&batch.connection), state);
         drop(batch);
         drop(row_wise);
         fs::remove_dir_all(root).unwrap();
