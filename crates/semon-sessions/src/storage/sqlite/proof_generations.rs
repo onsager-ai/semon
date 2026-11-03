@@ -3797,6 +3797,8 @@ pub(crate) fn capture_presentations(
     let lookup = super::selected::Context::owned(tx);
     let mut result = Vec::new();
     let mut bytes = 0usize;
+    #[cfg(test)]
+    let mut measured = Vec::new();
     for row in rows {
         let projection = projections
             .unwrap_or_default()
@@ -3866,12 +3868,92 @@ pub(crate) fn capture_presentations(
         });
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         bytes = bytes.saturating_add(text.len());
+        #[cfg(test)]
+        measured.push(serde_json::from_str::<serde_json::Value>(&text).unwrap());
         if bytes > 8 * 1048576 {
+            #[cfg(test)]
+            measure_publication_contexts(&measured, bytes);
             return Err(StorageError::HistoryRetentionBounds);
         }
         result.push((row.key.clone(), text));
     }
     Ok(result)
+}
+
+// Diagnostic-only: serialize both lossless sharing candidates, including references.
+#[cfg(test)]
+fn measure_publication_contexts(witnesses: &[serde_json::Value], original: usize) {
+    use serde_json::{Value, json};
+    let mut whole_contexts = std::collections::BTreeMap::new();
+    let mut whole_witnesses = Vec::new();
+    let mut entries = std::collections::BTreeMap::new();
+    let mut entry_witnesses = Vec::new();
+    let mut counts = std::collections::BTreeMap::<String, (String, usize, usize)>::new();
+    let mut categories = std::collections::BTreeMap::<String, (usize, usize, usize)>::new();
+    for witness in witnesses {
+        let context = &witness["context"];
+        let encoded = serde_json::to_vec(context).unwrap();
+        let digest = proof_codec::digest(&encoded);
+        whole_contexts.insert(digest.clone(), context.clone());
+        let mut shared = witness.clone();
+        shared["context"] = json!(digest);
+        whole_witnesses.push(shared);
+        let mut references = serde_json::Map::new();
+        for (kind, values) in context.as_object().unwrap() {
+            let mut typed = serde_json::Map::new();
+            for (key, value) in values.as_object().unwrap() {
+                let entry = json!([kind, key, value]);
+                let encoded = serde_json::to_vec(&entry).unwrap();
+                let digest = proof_codec::digest(&encoded);
+                let count = counts.entry(digest.clone()).or_insert_with(|| {
+                    (kind.clone(), encoded.len(), 0)
+                });
+                count.2 += 1;
+                let category = categories.entry(kind.clone()).or_default();
+                category.0 += encoded.len();
+                if entries.insert(digest.clone(), entry).is_none() {
+                    category.1 += encoded.len();
+                    category.2 += 1;
+                }
+                typed.insert(key.clone(), json!(digest));
+            }
+            references.insert(kind.clone(), Value::Object(typed));
+        }
+        let mut shared = witness.clone();
+        shared["context"] = Value::Object(references);
+        entry_witnesses.push(shared);
+    }
+    let whole_bytes = serde_json::to_vec(&json!({
+        "contexts": whole_contexts, "witnesses": whole_witnesses
+    }))
+    .unwrap()
+    .len();
+    let entry_bytes = serde_json::to_vec(&json!({
+        "contexts": entries, "witnesses": entry_witnesses
+    }))
+    .unwrap()
+    .len();
+    for (digest, context) in &whole_contexts {
+        eprintln!(
+            "context_measure whole digest={digest} bytes={}",
+            serde_json::to_vec(context).unwrap().len()
+        );
+    }
+    for (digest, (kind, bytes, references)) in &counts {
+        eprintln!(
+            "context_measure entry digest={digest} kind={kind} bytes={bytes} references={references}"
+        );
+    }
+    for (kind, (original, unique, count)) in categories {
+        eprintln!(
+            "context_measure category kind={kind} original={original} unique={unique} distinct={count} repeated={}",
+            original - unique
+        );
+    }
+    eprintln!(
+        "context_measure complete rows={} original={original} whole_distinct={} whole_projected={whole_bytes} entry_distinct={} entry_projected={entry_bytes} cap=8388608 margin=6291456",
+        witnesses.len(), whole_contexts.len(), entries.len()
+    );
 }
 
 pub(crate) fn bind_presentations(
