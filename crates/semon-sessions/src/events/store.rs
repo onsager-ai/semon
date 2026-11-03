@@ -3889,24 +3889,25 @@ impl SqliteStore {
                     .map_err(failure)?
                     .parse()
                     .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                let captured = match crate::storage::sqlite::proof_generations::capture_presentations(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    crate::storage::sqlite::proof_generations::PresentationInputs {
-                        catalog_generation: &generation,
-                        rows,
-                        projections: Some(projections),
-                        observations: Some(observations),
-                    },
-                    observed_at,
-                ) {
-                    Ok(captured) => Some(captured),
-                    Err(crate::storage::StorageError::HistoryRetentionBounds) => {
-                        receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
-                        None
-                    }
-                    Err(error) => return Err(StoreError::Configured(error)),
-                };
+                let captured =
+                    match crate::storage::sqlite::proof_generations::capture_presentations(
+                        &transaction,
+                        owner.config().namespace.as_str(),
+                        crate::storage::sqlite::proof_generations::PresentationInputs {
+                            catalog_generation: &generation,
+                            rows,
+                            projections: Some(projections),
+                            observations: Some(observations),
+                        },
+                        observed_at,
+                    ) {
+                        Ok(captured) => Some(captured),
+                        Err(crate::storage::StorageError::HistoryRetentionBounds) => {
+                            receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
+                            None
+                        }
+                        Err(error) => return Err(StoreError::Configured(error)),
+                    };
                 if let Some(captured) = captured {
                     let projection_witness = projections
                         .iter()
@@ -10226,31 +10227,50 @@ mod tests {
                 (path, revision)
             }).collect::<Vec<_>>();
         CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().clear());
-        let first = batch.publish_catalog_with_generation(
-            &publication, Some(&generation), Some(&claims), true, None,
-        ).unwrap();
+        let first = batch
+            .publish_catalog_with_generation(
+                &publication,
+                Some(&generation),
+                Some(&claims),
+                true,
+                None,
+            )
+            .unwrap();
         assert_eq!(first.0, Outcome::Written);
         let refs: i64 = batch.connection.query_row(
             "SELECT count(*) FROM main.storage_proof_refs WHERE namespace=semon_namespace() AND kind='current'",
             [], |row| row.get(0),
         ).unwrap();
         assert_eq!(refs, 0);
-        assert!(CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow().iter().any(
-            |line| line == "semon sessions: ordinary_catalog_receipt=absent reason=capture_budget"
-        )));
+        assert!(CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| {
+            lines.borrow().iter().any(|line| {
+                line == "semon sessions: ordinary_catalog_receipt=absent reason=capture_budget"
+            })
+        }));
         let state = catalog_state(&batch.connection);
-        assert_eq!(batch.publish_catalog_with_generation(
-            &publication, Some(&generation), Some(&claims), true, None,
-        ).unwrap(), (Outcome::Conflict, None));
+        assert_eq!(
+            batch
+                .publish_catalog_with_generation(
+                    &publication,
+                    Some(&generation),
+                    Some(&claims),
+                    true,
+                    None,
+                )
+                .unwrap(),
+            (Outcome::Conflict, None)
+        );
         assert_eq!(catalog_state(&batch.connection), state);
         let malformed = crate::slot_projection::Publication {
             rows: &rows,
             transcripts: None,
             observations: Some(&observations),
         };
-        assert!(batch.publish_catalog_with_generation(
-            &malformed, first.1.as_deref(), None, false, None,
-        ).is_err());
+        assert!(
+            batch
+                .publish_catalog_with_generation(&malformed, first.1.as_deref(), None, false, None,)
+                .is_err()
+        );
         assert_eq!(catalog_state(&batch.connection), state);
         drop(batch);
         drop(row_wise);
