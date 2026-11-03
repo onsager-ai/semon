@@ -131,9 +131,21 @@ jobs:
             if ! grep -Fq 'running 1 test' "$case_log"; then case_result=1; fi
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log"; then case_result=1; fi
             echo "CASE number=$case_number name=$test expected=1 status=$case_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
-            maximum=$(awk -F= '/^CONTEXT_TUPLE_BYTES=[0-9]+$/ {if ($2>m) m=$2} END {print m+0}' "$case_log")
-            echo "MAXIMUM case=$case_number bytes=$maximum" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
+            maximum=$(awk '/CONTEXT_TUPLE_BYTES=[0-9]+/ {sub(/^.*CONTEXT_TUPLE_BYTES=/, ""); if ($1>m) m=$1} END {print m+0}' "$case_log")
+            samples=$(grep -c 'CONTEXT_TUPLE_BYTES=[0-9]' "$case_log" || true)
+            echo "MAXIMUM case=$case_number bytes=$maximum samples=$samples" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
             if [ "$maximum" -gt 522105 ]; then tail -n 65 "$case_log"; exit 1; fi
+            if [ "$case_result" -ne 0 ]; then tail -n 65 "$case_log"; result=1; fi
+          done
+          for test in \
+            storage::postgres::transfer::catalog::tests::pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw \
+            storage::postgres::transfer::catalog::tests::pg_current_transfer225_search_incomplete_retained_header_refusals; do
+            case_number=$((case_number+1))
+            case_log="$RUNNER_TEMP/477-integration-debug-$case_number.log"
+            case_result=0
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$case_log" 2>&1 || case_result=$?
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log"; then case_result=1; fi
+            echo "DEBUG number=$case_number name=$test status=$case_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
             if [ "$case_result" -ne 0 ]; then tail -n 65 "$case_log"; result=1; fi
           done
           exit "$result"

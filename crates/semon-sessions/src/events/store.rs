@@ -3893,7 +3893,9 @@ impl SqliteStore {
                     },
                     observed_at,
                 )
+                .inspect_err(|error| eprintln!("CONTEXT_DEBUG capture_error={error:?}"))
                 .map_err(StoreError::Configured)?;
+                eprintln!("CONTEXT_DEBUG capture_complete");
                 let projection_witness = projections
                     .iter()
                     .map(|projection| (&projection.key, &projection.slots, projection.repair))
@@ -3944,6 +3946,7 @@ impl SqliteStore {
                             overview_budget: &mut history_budget,
                         },
                     );
+                eprintln!("CONTEXT_DEBUG receipt_result={receipt_publication:?}");
                 match receipt_publication {
                     Ok(()) => {}
                     Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
@@ -4127,6 +4130,8 @@ impl SqliteStore {
             &result,
             self.semantic_rejection,
         );
+        #[cfg(test)]
+        eprintln!("CONTEXT_DEBUG ordinary_result={result:?}");
         result.map(|outcome| (outcome, published))
     }
 

@@ -337,7 +337,8 @@ pub(crate) fn publish_ordinary(
         presentations: captured_presentations,
         overview_budget,
     } = presentations;
-    let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
+    let root = prepare_presentation_root(base, captured_presentations, &inputs)
+        .inspect_err(|error| eprintln!("CONTEXT_DEBUG root_error={error:?}"))?;
     let publication = catalog_publication_id(namespace, inputs.catalog_generation, base)?;
     let proof = root.digest.clone();
     let prepared = prepare_proof_publication(
@@ -348,9 +349,10 @@ pub(crate) fn publish_ordinary(
         &proof,
         &inputs,
         &captured_presentations.rows,
-    )?;
+    ).inspect_err(|error| eprintln!("CONTEXT_DEBUG proof_prepare_error={error:?}"))?;
     let sql_admission = prepared.admission;
-    let existing = classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)?;
+    let existing = classify_ordinary_receipt(tx, receipt, &publication, &root, &prepared)
+        .inspect_err(|error| eprintln!("CONTEXT_DEBUG receipt_classify_error={error:?}"))?;
     if existing == ExistingReceipt::Fresh {
         insert_presentation_root(tx, namespace, &publication, &root)?;
         tx.execute(
@@ -2752,7 +2754,8 @@ pub(crate) fn query_recipe_observation(
     }
     let (original, residence) =
         observation_authority_for_owner(db, current, &stored, Some(owner), false)
-            .map_err(ObservationPreparationError::into_storage)?;
+            .map_err(ObservationPreparationError::into_storage)
+            .inspect_err(|error| eprintln!("CONTEXT_DEBUG recipe_authority_error={error:?}"))?;
     crate::storage::query::QueryRecipeObservation::qualified(
         residence,
         metadata,
@@ -3892,7 +3895,10 @@ pub(crate) fn capture_presentations(
                     super::catalog::runtime_source_cwds(tx, &relative.sources)
                 })
             })
-            .map_err(|_| StorageError::Unavailable)?;
+            .map_err(|error| {
+                eprintln!("CONTEXT_DEBUG typed_capture_error={error:?}");
+                StorageError::Unavailable
+            })?;
         let witness = PresentationWitness {
             header_generation,
             version: header.1,
@@ -4024,6 +4030,7 @@ pub(crate) fn presentation_contexts(
         params![ns, publication], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(failed)?;
     if count != manifest.contexts.len() as i64 {
+        eprintln!("CONTEXT_DEBUG context_cardinality actual={count} expected={}", manifest.contexts.len());
         return Err(StorageError::ScopeChanged);
     }
     let bytes = usize::try_from(bytes).map_err(|_| StorageError::HistoryRetentionBounds)?;
@@ -4055,7 +4062,7 @@ fn selected_presentation_contexts(
 ) -> Result<proof_codec::PresentationContexts, StorageError> {
     presentation_contexts(db, ns, publication, manifest, |bytes| {
         crate::selected_read::charge(64, bytes).map_err(|_| StorageError::Busy)
-    })
+    }).inspect_err(|error| eprintln!("CONTEXT_DEBUG saved_context_error={error:?} expected={}", manifest.contexts.len()))
 }
 
 /// Give an ordinary Catalog receipt an identity bound to its exact metadata
