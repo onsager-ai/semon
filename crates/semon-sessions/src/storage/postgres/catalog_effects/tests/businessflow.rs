@@ -1806,8 +1806,33 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut withdrawal_options = options.clone();
     withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
     withdrawal_options.scan_window = false;
+    let publish_withdrawal_oracle = || {
+        let mut cache =
+            EventCache::open_scoped(&withdrawal_options.cache, &withdrawal_options.source)
+                .unwrap();
+        let inputs = crate::inputs::inputs(&withdrawal_options).unwrap();
+        let prepared = crate::model::prepare_sources(
+            &withdrawal_options,
+            &mut cache,
+            &inputs,
+            1790812802000,
+        )
+        .unwrap();
+        cache
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                    observations: prepared.presentation_observations(),
+                },
+                prepared.base_generation.as_deref(),
+            )
+            .expect("SQLite withdrawal oracle publication")
+            .expect("SQLite withdrawal oracle generation");
+    };
+    publish_withdrawal_oracle();
     let mut withdrawal_query = crate::Query::from_sources(std::sync::Arc::new(
-        crate::SessionSources::with_machines(vec![(String::new(), withdrawal_options)]),
+        crate::SessionSources::with_machines(vec![(String::new(), withdrawal_options.clone())]),
     ));
     let before_withdrawal = withdrawal_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
@@ -1831,6 +1856,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .all(|row| row["id"] != copilot_id)
     );
+    // Native Query completion does not guarantee Catalog publication. Complete
+    // the real producer before comparing published readers, even under CI load.
+    publish_withdrawal_oracle();
     let withdrawal_oracle = withdrawal_query
         .call_catalog_at(
             "list_sessions",
@@ -6265,11 +6293,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // docs/design/retained-native-projections.md, Original withdrawal custody).
     // Withdrawal removes Current membership, not the previously observed owner.
     assert_eq!(successor_list["total"].as_u64(), Some(total));
-    assert!(successor_list["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|row| row["id"] == "bulk169-001"));
+    assert!(
+        successor_list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == "bulk169-001")
+    );
     super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
