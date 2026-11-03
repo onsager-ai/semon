@@ -520,6 +520,23 @@ impl PresentationObservations {
         ))
     }
 
+    /// Require the typed envelope only when this request carries deferred
+    /// withdrawal authority. Ordinary runtime witnesses retain their separate
+    /// record and publication validation boundaries after serialization.
+    pub(crate) fn deferred_source_withdrawals(
+        &self,
+    ) -> io::Result<Vec<&crate::storage::catalog::SourceContinuationCapture>> {
+        let captures = self
+            .source_continuation_captures
+            .iter()
+            .filter(|capture| capture.deferred_withdrawal.is_some())
+            .collect::<Vec<_>>();
+        if !captures.is_empty() && self.verified_source_continuation_captures().is_none() {
+            return Err(io::Error::other("source continuation witness changed"));
+        }
+        Ok(captures)
+    }
+
     pub(crate) fn has_source_continuation_envelope(&self) -> bool {
         self.source_continuation_digest.is_some()
     }

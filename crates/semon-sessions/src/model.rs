@@ -7829,16 +7829,7 @@ impl PreparedSources {
         let Some(observations) = self.presentation_observations() else {
             return Ok(Vec::new());
         };
-        if !observations.has_source_continuation_envelope() {
-            return Ok(Vec::new());
-        }
-        let (_, captures) = observations
-            .verified_source_continuation_captures()
-            .ok_or_else(|| io::Error::other("source continuation witness changed"))?;
-        Ok(captures
-            .iter()
-            .filter(|capture| capture.deferred_withdrawal.is_some())
-            .collect())
+        observations.deferred_source_withdrawals()
     }
 
     pub(crate) fn retain_withdrawal_fence(&mut self, options: &Options) -> io::Result<()> {
