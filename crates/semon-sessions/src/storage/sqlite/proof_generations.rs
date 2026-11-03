@@ -3897,7 +3897,10 @@ fn prepare_presentation_root(
     proof_codec::validate_catalog_generation(catalog_generation)?;
     let context_bytes = serde_json::to_vec(&captured.contexts)
         .map_err(|_| StorageError::Unavailable)?.len();
-    if captured.rows.iter().map(|(_, text)| text.len()).sum::<usize>() + context_bytes > 8 * 1048576 {
+    let row_bytes = captured.rows.iter().map(|(_, text)| text.len()).sum::<usize>();
+    if row_bytes + context_bytes > 8 * 1048576 {
+        #[cfg(test)]
+        eprintln!("proof_publication_bounds stage=prepared_aggregate rows={} row_bytes={} context_bytes={} bytes={}", captured.rows.len(), row_bytes, context_bytes, row_bytes + context_bytes);
         return Err(StorageError::HistoryRetentionBounds);
     }
     let mut entries = Vec::new();
@@ -3927,6 +3930,8 @@ fn prepare_presentation_root(
     })
     .map_err(|_| StorageError::Unavailable)?;
     if manifest.len() > 1048576 {
+        #[cfg(test)]
+        eprintln!("proof_publication_bounds stage=presentation_manifest rows={} row_bytes={} context_bytes={} aggregate_bytes={} bytes={}", captured.rows.len(), row_bytes, context_bytes, row_bytes + context_bytes, manifest.len());
         return Err(StorageError::HistoryRetentionBounds);
     }
     let joined = joined_digest(base, &manifest)?;

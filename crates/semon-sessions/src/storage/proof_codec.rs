@@ -126,6 +126,8 @@ impl PresentationCapture {
         self.rows.push((key, text));
         let store_bytes = if self.contexts.is_empty() { 2 } else { self.context_bytes + 1 };
         if self.row_bytes + store_bytes > 8 * 1048576 {
+            #[cfg(test)]
+            eprintln!("proof_publication_bounds stage=capture_aggregate rows={} row_bytes={} context_bytes={} bytes={}", self.rows.len(), self.row_bytes, store_bytes, self.row_bytes + store_bytes);
             return Err(StorageError::HistoryRetentionBounds);
         }
         Ok(())
