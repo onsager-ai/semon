@@ -880,11 +880,14 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
             control: control.clone(),
         })
         .unwrap();
-    options.source = source.with_store(config.clone()).unwrap();
+    options.source = source.with_store(config).unwrap();
     let original = &rows[0];
     let key = &original.key;
     let path = &original.sources[0].path;
-    let mut index = config.native_events().unwrap();
+    let mut index =
+        super::super::super::index_store::open(pool.clone(), namespace.clone(), control.clone())
+            .unwrap()
+            .0;
     let removal = index.file_ledgers().unwrap();
     let archived = data.root.join("older-owner-retained.jsonl");
     fs::rename(path, &archived).unwrap();
