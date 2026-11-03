@@ -83,7 +83,11 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         .unwrap();
     options.source = options.source.with_store(config).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-    fs::rename(&old_path, data.root.join("retained-composite-original.jsonl")).unwrap();
+    fs::rename(
+        &old_path,
+        data.root.join("retained-composite-original.jsonl"),
+    )
+    .unwrap();
     cache
         .retain(
             &BTreeSet::from([live_path.to_string_lossy().into_owned()]),
@@ -98,6 +102,9 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         serde_json::json!({"type":"user","sessionId":"resume","session_id":"one","uuid":"continued-user","parentUuid":"resume-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized verified continuation"}})).unwrap();
     writer
         .complete(fs::metadata(&live_path).unwrap().len())
+        .unwrap();
+    cache
+        .ingest(&format!("{:064x}", 128), &live_path, "claude")
         .unwrap();
     let continued =
         crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
@@ -125,16 +132,17 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
     }
     let generation = generation.expect("ordinary verified-continuation publication");
     let key = &continued.rows[0].key;
-    let owner = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
-        let owner = view.owner(key)?.unwrap();
-        assert!(!owner.original);
-        assert!(owner.has_current);
-        let history = view.catalog(key, true)?.unwrap();
-        assert_eq!(history.sources.len(), 2);
-        assert!(history.sources.iter().any(|source| source.path == old_path));
-        Ok(owner.generation)
-    })
-    .unwrap();
+    let owner =
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
+            let owner = view.owner(key)?.unwrap();
+            assert!(!owner.original);
+            assert!(owner.has_current);
+            let history = view.catalog(key, true)?.unwrap();
+            assert_eq!(history.sources.len(), 2);
+            assert!(history.sources.iter().any(|source| source.path == old_path));
+            Ok(owner.generation)
+        })
+        .unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET incomplete=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3", &[&namespace.as_str().as_bytes(), &owner.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?, 1);
         Ok(())
@@ -142,11 +150,9 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
     .unwrap();
     snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
         let history = view.catalog(key, true)?.unwrap();
-        let request = crate::catalog::Request::parse(&format!(
-            "sid={}",
-            crate::viewer::percent_encode(key)
-        ))
-        .unwrap();
+        let request =
+            crate::catalog::Request::parse(&format!("sid={}", crate::viewer::percent_encode(key)))
+                .unwrap();
         let current = view.rows(&request).unwrap().remove(0);
         assert!(
             !view.history_qualified(&history).unwrap(),

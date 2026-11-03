@@ -1805,7 +1805,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // scan. Compare the same public reader and previously observed custody.
     let mut withdrawal_options = options.clone();
     withdrawal_options.cache = oracle.root.join("oracle-withdrawal220");
-    let mut withdrawal_query = crate::Query::new(withdrawal_options);
+    withdrawal_options.scan_window = false;
+    let mut withdrawal_query = crate::Query::from_sources(std::sync::Arc::new(
+        crate::SessionSources::with_machines(vec![(String::new(), withdrawal_options)]),
+    ));
     let before_withdrawal = withdrawal_query
         .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
         .expect("SQLite ordinary prewithdrawal cohort");

@@ -4343,9 +4343,15 @@ fn staged_cross_harness_child_header_keeps_claude_sender_spawn_turn() {
     assert!(generation.is_some());
     // An unverified append forces Original custody during semantic replay.
     // Its direct publication grant must follow the outgoing owner to History.
-    let root_path = home.options.claude_home.join("projects/-work-proj/root.jsonl");
+    let root_path = home
+        .options
+        .claude_home
+        .join("projects/-work-proj/root.jsonl");
     writeln!(
-        fs::OpenOptions::new().append(true).open(&root_path).unwrap(),
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&root_path)
+            .unwrap(),
         "{}",
         human("root", ts(5, 6), "Unverified continuation")
     )
@@ -4429,6 +4435,12 @@ fn staged_cross_harness_child_header_keeps_claude_sender_spawn_turn() {
                 prepared.prepared().relationships.relations[&edge].source_turn,
                 expected.source_turn
             );
+            assert_eq!(
+                cache
+                    .record_semantic_batch(&batch, prepared.prepared())
+                    .unwrap(),
+                crate::events::Outcome::Written
+            );
             let (outcome, generation) = cache
                 .publish_semantic_catalog(&batch, prepared.prepared())
                 .unwrap();
@@ -4459,7 +4471,12 @@ fn staged_cross_harness_child_header_keeps_claude_sender_spawn_turn() {
         "fixture",
         "sid=root&scope=retained_history&limit=1",
     );
-    assert_eq!(retained.status, 200, "{}", String::from_utf8_lossy(&retained.body));
+    assert_eq!(
+        retained.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&retained.body)
+    );
 }
 
 #[test]
