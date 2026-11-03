@@ -812,11 +812,23 @@ impl IndexStore for NativeIndex {
         &mut self,
         files: &[(String, Option<Ledger>)],
     ) -> Result<crate::events::IndexWriteResult, StoreError> {
-        self.pool
-            .transaction(&self.namespace, TxnKind::Write, &self.control, |tx| {
-                super::catalog_effects::withdrawal::remove(tx, files)
-            })
-            .map_err(err)
+        // Each Deferred commits only a bounded private History checkpoint.
+        // Resume under one deadline rather than renewing the transaction budget
+        // or exposing that private staging outcome to the ordinary Index caller.
+        let control = self
+            .control
+            .bounded(std::time::Instant::now() + self.pool.inner.limits.txn_deadline);
+        loop {
+            let result = self
+                .pool
+                .transaction(&self.namespace, TxnKind::Write, &control, |tx| {
+                    super::catalog_effects::withdrawal::remove(tx, files)
+                })
+                .map_err(err)?;
+            if result.outcome != Outcome::Deferred {
+                return Ok(result);
+            }
+        }
     }
     fn session_descriptions(
         &self,

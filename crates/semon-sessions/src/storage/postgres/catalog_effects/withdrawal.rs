@@ -97,6 +97,10 @@ pub(in crate::storage::postgres) fn remove(
             // A mixed-source owner requires ordinary semantic reconstruction.
             // Never drop its surviving sources or return a partial-success receipt.
             connected |= hits.len() != value.sources.len();
+            // Composite custody is rebuilt by the semantic producer, including
+            // withdrawal of its final Current source. Do not replace it with an
+            // original snapshot of the remaining Current projection.
+            connected |= tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=$3 AND session_key=$4 AND NOT original)", &[&ns, &previous.as_bytes(), &digest(value.key.as_bytes()), &value.key.as_bytes()]).map_err(sqlstate::error)?.get::<_, bool>(0);
             for source in hits {
                 let ledger = files
                     .iter()
@@ -159,6 +163,32 @@ pub(in crate::storage::postgres) fn remove(
         .checked_add(1)
         .ok_or(StorageError::ScopeChanged)?;
     let runtime: Vec<u8> = stage.get(1);
+    // Private custody checkpoints precede mutation intent and publication. Each
+    // retry reads the same immutable Current cohort and advances at most one
+    // original owner, even when withdrawal spans several keyset pages.
+    let mut advanced = false;
+    let mut after = None;
+    while let Some(page) = owners(tx, &previous, &after, Some(&withdrawn))? {
+        use crate::storage::catalog::OriginalHistoryStore;
+        let store = super::history::History {
+            effects: Effects {
+                tx: RefCell::new(&mut *tx),
+                generation: &generation,
+            },
+            previous: &previous,
+        };
+        for (_, row) in &page {
+            if store.retained(&row.key)? {
+                continue;
+            }
+            if advanced || !catalog::preserve_original(&store, row)? {
+                return Ok(IndexWriteResult::new(Outcome::Deferred, 0));
+            }
+            advanced = true;
+        }
+        after = page.last().map(|(digest, _)| digest.clone());
+        drop(store);
+    }
     for (path, _) in files {
         let evidence = encoded(&("withdrawal-intent-v1", &request, &previous))?;
         tx.driver.execute("INSERT INTO semon_pg_native_source_mutations(namespace,source_path,evidence) VALUES($1,$2,$3) ON CONFLICT(namespace_digest,source_path) DO UPDATE SET evidence=excluded.evidence WHERE semon_pg_native_source_mutations.namespace=excluded.namespace", &[&ns,&path.as_bytes(),&evidence]).map_err(sqlstate::error)?;
@@ -172,9 +202,7 @@ pub(in crate::storage::postgres) fn remove(
         .map(|k| digest(k.as_bytes()))
         .collect::<Vec<_>>();
     super::carry::unmentioned(tx, &generation, &previous, &removed_digests, &withdrawn)?;
-    tx.driver.execute("INSERT INTO semon_pg_native_catalog_history_owners(namespace,generation,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key) SELECT namespace,$3,key_digest,session_key,owner_generation,original,last_ms,harness,repo,model,query_activity,query_active,parent_key FROM semon_pg_native_catalog_history_owners WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($4::bytea[])", &[&ns,&previous.as_bytes(),&generation.as_bytes(),&removed_digests]).map_err(sqlstate::error)?;
-    tx.driver.execute("INSERT INTO semon_pg_native_catalog_proofs(namespace,generation,path_digest,source_path,page_generation,usage_generation,usage_ready) SELECT namespace,$3,path_digest,source_path,page_generation,usage_generation,usage_ready FROM semon_pg_native_catalog_proofs WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 ON CONFLICT DO NOTHING", &[&ns,&previous.as_bytes(),&generation.as_bytes()]).map_err(sqlstate::error)?;
-    super::carry::retained_search(tx, &generation, &previous, &removed_digests)?;
+    retained_search(tx, &generation, &previous, &withdrawn)?;
     let effects = Effects {
         tx: RefCell::new(tx),
         generation: &generation,
@@ -229,6 +257,52 @@ fn defer(
     tx.driver.execute("UPDATE semon_pg_source_state SET semantic_pending=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1", &[&ns]).map_err(sqlstate::error)?;
     tx.check()?;
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
+}
+
+/// Removed owners have no Current search authority. Publish their selected
+/// immutable History metadata, including its posting timestamp, in bounded
+/// pages. Counts are finalized only after every page and surviving owner.
+fn retained_search(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    previous: &str,
+    withdrawn: &Vec<Vec<u8>>,
+) -> Result<(), StorageError> {
+    let mut after = None;
+    while let Some(page) = owners(tx, previous, &after, Some(withdrawn))? {
+        let store = super::history::History {
+            effects: Effects {
+                tx: RefCell::new(&mut *tx),
+                generation,
+            },
+            previous,
+        };
+        let mut remaining = MAX;
+        let rows = page
+            .iter()
+            .map(|(_, row)| store.selected_row(&row.key, &mut remaining))
+            .collect::<Result<Vec<_>, _>>()?;
+        let keys = rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+        let scoped = rows
+            .iter()
+            .map(|row| crate::catalog_search::ScopedCatalogRow {
+                row,
+                scopes: crate::catalog_search::SearchScopeEligibility {
+                    current: false,
+                    retained_history: true,
+                },
+            })
+            .collect::<Vec<_>>();
+        crate::catalog_search::stage_scoped_rows_port(
+            &store.effects,
+            &keys,
+            &scoped,
+            64,
+            |_, _| {},
+        )?;
+        after = page.last().map(|(digest, _)| digest.clone());
+    }
+    Ok(())
 }
 
 type Page = Vec<(Vec<u8>, CatalogRow)>;

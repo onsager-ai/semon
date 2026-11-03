@@ -33,6 +33,177 @@ pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> S
 }
 
 #[test]
+fn pg_withdrawal_preserves_current_only_continuation_and_older_original_custody() {
+    for case in ["current-only", "exact-continuation", "older-original"] {
+        let data = build_oracle(true, false);
+        let (pool, _) = fixture(|_| {});
+        let namespace = ns(&format!("withdrawal-{case}"));
+        let control = PgCancellation::default();
+        let mut options = Options {
+            source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
+            claude_home: data.root.join("claude"),
+            claude_json: data.root.join("claude.json"),
+            codex_home: data.root.join("codex"),
+            copilot_home: data.root.join("copilot"),
+            proc_root: data.root.join("proc"),
+            cache: data.root.join("index.json"),
+            all: true,
+            ..Default::default()
+        };
+        let (mut generation, rows) =
+            bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
+        let config = options.source.store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        }).unwrap();
+        options.source = options.source.with_store(config).unwrap();
+        let original = &rows[0];
+        let path = &original.sources[0].path;
+        let key = &original.key;
+        let mut host = super::businessflow::body_host(&options, &rows);
+        let read_body = |generation: &str, host: &super::businessflow::BodyHost| {
+            let store = snapshot::query::QueryCatalog {
+                captured: false,
+                pool: pool.clone(),
+                namespace: namespace.clone(),
+                control: control.clone(),
+                generation: generation.to_owned(),
+                options: options.clone(),
+            };
+            crate::Query::new(options.clone()).call_bound_selected_at(
+                "read_transcript", &serde_json::json!({"id":key,"limit":100}), 1790812860000,
+                &store, host, None,
+            ).unwrap()
+        };
+        let mut expected_body = read_body(&generation, &host);
+        if case == "older-original" {
+            generation = advance(&options, original, "withdrawal-newer-current");
+        } else if case == "exact-continuation" {
+            let input = crate::native_evidence::catalog_input(path, &options).unwrap();
+            let before = fs::metadata(path).unwrap().len();
+            let writer = crate::SessionSourceWrite::begin(
+                &options, &input, Some("0123456789abcdef0123456789abcdef"), before,
+            ).unwrap();
+            assert!(writer.intent().continuation.is_some());
+            let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(file, "{}", serde_json::json!({
+                "type":"user", "sessionId":original.native_ids[0],
+                "uuid":"withdrawal-exact-append", "timestamp":"2026-10-01T00:01:00Z",
+                "cwd":"/synthetic/project", "message":{"role":"user","content":"sanitized exact append"}
+            })).unwrap();
+            file.sync_all().unwrap();
+            writer.complete(file.metadata().unwrap().len()).unwrap();
+            drop(file);
+            let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+            cache.ingest(&format!("{:064x}", 477), path, "claude").unwrap();
+            let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+            cache.begin_semantic_stage(&[path.to_str().unwrap().to_owned()], &runtime).unwrap();
+            generation = loop {
+                let batch = cache.semantic_batch(64).unwrap().unwrap();
+                let inputs = batch.paths.iter().map(|path| {
+                    crate::native_evidence::catalog_input(std::path::Path::new(path), &options).unwrap()
+                }).collect::<Vec<_>>();
+                let model = cache.prepare_semantic_model_batch(
+                    &options, &inputs, &batch, 1790812860000,
+                ).unwrap().unwrap();
+                if batch.phase == crate::model::relation_stage::Phase::Publication {
+                    let ack = cache.publish_semantic_catalog(&batch, model.prepared()).unwrap();
+                    cache.finish_semantic_stage(batch.epoch).unwrap();
+                    break ack.1.unwrap();
+                }
+            };
+            let current = snapshot::with_generation(&pool, &namespace, &control, &generation, |snapshot| {
+                assert!(snapshot.owner(key)?.is_none(), "exact continuation has no original History");
+                Ok(snapshot.catalog(key, false)?.unwrap())
+            }).unwrap();
+            host = super::businessflow::body_host(&options, &[current]);
+            expected_body = read_body(&generation, &host);
+        }
+        let (mut expected, header, slots, old_owner) = snapshot::with_generation(
+            &pool, &namespace, &control, &generation, |snapshot| {
+                let owner = snapshot.owner(key)?;
+                let history = case == "older-original";
+                let (row, header, slots) = snapshot.selected(key, history, 0, 64)?.unwrap();
+                if history {
+                    let current = snapshot.catalog(key, false)?.unwrap();
+                    assert_ne!(current.sources, row.sources);
+                    assert_ne!(current.last, row.last);
+                    assert!(owner.as_ref().unwrap().original);
+                } else {
+                    assert!(owner.is_none());
+                }
+                Ok((row, header, slots, owner.map(|owner| owner.generation)))
+            },
+        ).unwrap();
+        expected.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let open = || super::super::super::index_store::open(
+            pool.clone(), namespace.clone(), control.clone(),
+        ).unwrap().0;
+        let mut index = open();
+        let path_string = path.to_str().unwrap().to_owned();
+        let ledger = index.file_ledgers().unwrap().into_iter()
+            .find(|(path, _)| path == &path_string).unwrap().1.unwrap();
+        let removal = vec![(path_string, Some(ledger))];
+        // The captured host independently owns the exact old bytes. Source
+        // withdrawal must not require their continued presence at the live path.
+        fs::rename(path, data.root.join("retained-native.jsonl")).unwrap();
+        let result = index.remove_files(&removal).unwrap();
+        assert_eq!(result.outcome, Outcome::Written);
+        assert_eq!(result.source_revision_delta, 1);
+        let successor = pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            super::super::super::model_cache::generation(tx)
+        }).unwrap().unwrap();
+        assert_ne!(successor, generation);
+        drop(index);
+        let mut index = open();
+        let replay = index.remove_files(&removal).unwrap();
+        assert_eq!(replay.outcome, Outcome::Written);
+        assert_eq!(replay.source_revision_delta, 0);
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            assert_eq!(super::super::super::model_cache::generation(tx)?.as_deref(), Some(successor.as_str()));
+            super::super::search::verify_state(tx, &successor)?;
+            let ns = namespace.as_str().as_bytes();
+            let documents = tx.driver.query("SELECT scope,fields,complete FROM semon_pg_native_catalog_search_documents WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3", &[&ns, &successor.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
+            let (fields, grams, complete) = crate::catalog_search::prepared_fields_port(&expected).unwrap();
+            assert_eq!(documents.len(), 1);
+            assert_eq!(documents[0].get::<_, Vec<u8>>(0), b"retained_history");
+            assert_eq!(documents[0].get::<_, Vec<u8>>(1), fields.as_bytes());
+            assert_eq!(documents[0].get::<_, bool>(2), complete);
+            let postings = tx.driver.query("SELECT gram,last_ms FROM semon_pg_native_catalog_search_memberships WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 ORDER BY gram", &[&ns, &successor.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
+            let actual = postings.iter().map(|posting| {
+                assert_eq!(posting.get::<_, i64>(1), expected.last.unwrap_or(0));
+                String::from_utf8(posting.get(0)).unwrap()
+            }).collect::<BTreeSet<_>>();
+            assert_eq!(actual, grams);
+            Ok(())
+        }).unwrap();
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &successor, |snapshot| {
+            assert!(snapshot.catalog(key, false)?.is_none());
+            let owner = snapshot.owner(key)?.unwrap();
+            assert!(owner.original);
+            assert!(!owner.has_current);
+            if let Some(old_owner) = &old_owner {
+                assert_eq!(&owner.generation, old_owner, "reuse immutable older original");
+            }
+            let (retained, retained_header, retained_slots) = snapshot.selected(key, true, 0, 64)?.unwrap();
+            assert_eq!(serde_json::to_value(&retained).unwrap(), serde_json::to_value(&expected).unwrap());
+            assert_eq!(retained_header, header);
+            assert_eq!(retained_slots, slots);
+            snapshot::query::qualify_context_candidate(snapshot, &options, &retained, true)?;
+            pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+                for source in &retained.sources {
+                    super::super::selected_reader::native_proof(tx, &successor, source)?;
+                }
+                Ok(())
+            })?;
+            Ok(())
+        }).unwrap();
+        assert_eq!(read_body(&successor, &host), expected_body, "{case} retained body after restart");
+        fs::remove_dir_all(&data.root).unwrap();
+    }
+}
+
+#[test]
 fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_only_authority() {
     let data = build_oracle(true, false);
     let (pool, _) = fixture(|_| {});

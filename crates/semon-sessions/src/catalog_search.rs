@@ -355,6 +355,28 @@ pub(crate) fn publish_scoped_rows_port<P: crate::storage::catalog::SearchPublica
     mut phase: impl FnMut(&'static str, usize),
 ) -> Result<(), P::Error> {
     for keys in keys.chunks(MAX_PUBLICATION_KEYS) {
+        stage_scoped_rows_port(store, keys, rows, owners, &mut phase)?;
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            store.counts(scope)?;
+        }
+        phase("counts", 2);
+    }
+    Ok(())
+}
+
+/// Stage bounded owner pages before an adapter finalizes generation-wide counts.
+/// Immutable adapters must finish all pages before writing aggregate evidence.
+pub(crate) fn stage_scoped_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
+    store: &P,
+    keys: &[String],
+    rows: &[ScopedCatalogRow<'_>],
+    owners: usize,
+    mut phase: impl FnMut(&'static str, usize),
+) -> Result<(), P::Error> {
+    for keys in keys.chunks(MAX_PUBLICATION_KEYS) {
         let key_set = keys.iter().map(String::as_str).collect::<BTreeSet<_>>();
         let rows = rows
             .iter()
@@ -401,13 +423,6 @@ pub(crate) fn publish_scoped_rows_port<P: crate::storage::catalog::SearchPublica
         phase("posting_positions", positions);
         store.postings(&postings)?;
         phase("postings", postings.len());
-        for scope in [
-            crate::CatalogReadScope::Current,
-            crate::CatalogReadScope::RetainedHistory,
-        ] {
-            store.counts(scope)?;
-        }
-        phase("counts", 2);
     }
     Ok(())
 }
