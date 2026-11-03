@@ -6781,7 +6781,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             ).map_err(sqlstate::error)?;
             eprintln!("WITHDRAWAL_RUNTIME phase={phase} pending_count={}", rows.len());
             for row in rows {
-                eprintln!("WITHDRAWAL_RUNTIME path_digest={} kind={} reason={:?} revision={:?} semantic_pending={} active_stage={}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, Option<String>>(2), row.get::<_, Option<i64>>(3), row.get::<_, bool>(4), row.get::<_, bool>(5));
+                eprintln!("WITHDRAWAL_RUNTIME path_digest={} kind={} reason={:?} revision={:?} semantic_pending={} active_stage={}", row.get::<_, String>(0), row.get::<_, Option<String>>(1).unwrap_or_else(|| "append-evidence-object".into()), row.get::<_, Option<String>>(2), row.get::<_, Option<i64>>(3), row.get::<_, bool>(4), row.get::<_, bool>(5));
             }
             Ok(())
         }).unwrap();
