@@ -1059,7 +1059,11 @@ export function createOverviewPages(host: OverviewHost) {
       host.chrome();
       return;
     }
-    if (loading) host.root.setAttribute('aria-busy', 'true');
+    // Machine rows are usable once their coherent metadata is accepted.
+    // Generation-qualified detail previews hydrate independently afterwards.
+    const machineReady =
+      host.route() === 'machine' && home && homeSource === host.selectedMachine();
+    if (loading && !machineReady) host.root.setAttribute('aria-busy', 'true');
     else host.root.removeAttribute('aria-busy');
     if (host.route() === 'home') {
       if (home && homeSource === null) drawHome();

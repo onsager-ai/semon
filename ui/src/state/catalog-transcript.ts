@@ -224,11 +224,22 @@ export class CatalogTranscriptStore {
     this.requests.delete(request);
   }
   retainRanges(ranges: readonly CatalogLoadedRange[]): void {
-    this.pages = this.pages.filter((page) =>
-      ranges.some((range) => page.range.first >= range.first && page.range.end <= range.end),
+    this.pages = this.pages.flatMap((page) =>
+      ranges.flatMap((range) => {
+        const first = Math.max(page.range.first, range.first),
+          end = Math.min(page.range.end, range.end);
+        return first < end
+          ? [{
+              ...page,
+              range: { first, end, next: end < page.projection.total ? end : null },
+              entries: page.entries.filter((entry) => entry.slot >= first && entry.slot < end),
+            }]
+          : [];
+      }),
     );
     const keys = new Set(this.pages.map((page) => this.pageKey(page)));
     for (const key of this.access.keys()) if (!keys.has(key)) this.access.delete(key);
+    for (const key of keys) if (!this.access.has(key)) this.access.set(key, ++this.clock);
     ++this.contentVersion;
     this.changed();
   }

@@ -1812,11 +1812,13 @@ export function createCatalogViewer(
     view.errorRestore = undefined;
     for (const node of view.root.querySelectorAll('.err-current'))
       node.classList.remove('err-current');
-    if (restore) view.store.retainRanges(restore.ranges);
-    view.renderedRevision = -1;
-    drawSelected(view);
     const restoreScreen = () => {
       if (disposed || active !== view || view.errorMode || !restore) return;
+      // Keep the accepted projection while reloading an evicted reading range;
+      // clearing it first drops its generation fence and paints an empty reader.
+      view.store.retainRanges(restore.ranges);
+      view.renderedRevision = -1;
+      drawSelected(view);
       for (const button of view.root.querySelectorAll<HTMLButtonElement>(
         '.tgroup > button, .step > button',
       )) {

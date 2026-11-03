@@ -7,8 +7,15 @@ use sha2::Digest;
 use std::collections::BTreeSet;
 use std::io::Write;
 
-pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> String {
+pub(super) fn replace_source(options: &Options, row: &CatalogRow, operation: &str) -> String {
     let path = &row.sources[0].path;
+    // Original-custody cases require a non-prefix replacement. A verified
+    // append now continues History (2026-11-04 retained-native-projections).
+    let prior = fs::read(path).unwrap();
+    let mut replacement = fs::File::create(path).unwrap();
+    writeln!(replacement, "{}", serde_json::json!({"type":"custom-title","customTitle":operation,"sessionId":row.native_ids[0]})).unwrap();
+    replacement.write_all(&prior).unwrap();
+    drop(replacement);
     writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":row.native_ids[0],"uuid":operation,"timestamp":"2026-10-01T00:01:00Z","cwd":"/synthetic/project","message":{"role":"user","content":operation}})).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
@@ -269,7 +276,7 @@ fn pg_withdrawal_preserves_current_and_older_original_custody() {
         };
         let expected_body = read_body(&generation, &host);
         if case == "older-original" {
-            generation = advance(&options, original, "withdrawal-newer-current");
+            generation = replace_source(&options, original, "withdrawal-newer-current");
             let prepared =
                 crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812860000)
                     .unwrap();
@@ -450,7 +457,7 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
     options.source = options.source.with_store(config.clone()).unwrap();
     let original = &rows[0];
     let host = super::businessflow::body_host(&options, &rows);
-    let second = advance(&options, original, "native-history-second");
+    let second = replace_source(&options, original, "native-history-second");
     let (history, owner, continued) =
         snapshot::with_generation(&pool, &namespace, &control, &second, |snapshot| {
             let history = snapshot.catalog(&original.key, true)?.unwrap();
@@ -464,7 +471,7 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         .unwrap();
     assert_eq!(history.sources, original.sources);
     assert_ne!(history.sources, continued.sources);
-    let latest = advance(&options, &continued, "native-history-third");
+    let latest = replace_source(&options, &continued, "native-history-third");
     // Reopen the native store and read the inherited immutable owner.
     drop(EventCache::open_scoped(&options.cache, &options.source).unwrap());
     let key = observations::history_key(&owner, &serde_json::to_vec(&history).unwrap());

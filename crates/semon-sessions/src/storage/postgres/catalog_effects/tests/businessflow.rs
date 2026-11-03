@@ -1319,8 +1319,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .expect("SQLite continued parent retained identity");
     assert_eq!(
         parent_source(&continued_parent_history),
-        original_parent_source,
-        "SQLite History preserves the original parent source prefix"
+        continued_parent_source,
+        "SQLite History follows both verified parent continuations"
     );
     let composite_before_withdrawal =
         crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
@@ -1432,8 +1432,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         parent_source(&parent_history_after_withdrawal),
-        original_parent_source,
-        "SQLite parent History still points to its original precontinuation source"
+        continued_parent_source,
+        "withdrawing other sources preserves the continued parent History"
     );
     let sqlite_scoped = |scope: &str, limit: usize| {
         let mut items = Vec::new();
@@ -4214,8 +4214,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         !selected_parent_sources.is_empty(),
         "selected related-session edge must reference the appended parent source"
     );
-    // The PG continuation is at 00:00:05, while the isolated SQLite oracle
-    // appends at 00:00:02. Their byte lengths match, but their hashes must not.
+    // PG and the isolated SQLite oracle consume the same continuation bytes.
     let current_parent = continued
         .rows
         .iter()

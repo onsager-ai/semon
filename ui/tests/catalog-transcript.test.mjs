@@ -382,6 +382,15 @@ test('visiting distant native ranges evicts old windows while preserving accepte
   store.retainRanges([{ first: 800, end: 860 }]);
   assert.deepEqual(store.loadedRanges(), [{ first: 800, end: 860 }]);
   assert.equal(store.request(700).generation, 'b'.repeat(64));
+  // A restoration fetch is a larger window than the original tail. Retaining
+  // the saved reading range must clip it, rather than throw away its contents.
+  store.accept(store.request(800, 100), window(800, 100));
+  store.retainRanges([{ first: 810, end: 860 }]);
+  assert.deepEqual(store.loadedRanges(), [{ first: 810, end: 860 }]);
+  assert.equal(store.entries().length, 50);
+  assert.equal(store.entries()[0].entry_id, 'native-810');
+  assert.equal(store.entries().at(-1).slot, 859);
+  assert.equal(store.request(700).generation, 'b'.repeat(64));
 });
 
 test('runtime observation fences loaded ranges while preserving their source identity', () => {
