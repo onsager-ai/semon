@@ -4027,6 +4027,7 @@ pub(crate) fn presentation_contexts(
         return Err(StorageError::ScopeChanged);
     }
     let bytes = usize::try_from(bytes).map_err(|_| StorageError::HistoryRetentionBounds)?;
+    let bytes = bytes.max(1).checked_add(1).ok_or(StorageError::HistoryRetentionBounds)?;
     if bytes > 8 * proof_codec::METADATA_MAX || largest > proof_codec::METADATA_MAX as i64 {
         return Err(StorageError::HistoryRetentionBounds);
     }

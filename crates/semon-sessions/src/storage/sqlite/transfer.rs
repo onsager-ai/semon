@@ -157,6 +157,7 @@ pub(crate) fn admit_catalog(
         #[cfg(test)]
         eprintln!("transfer_catalog_admission stage=applied_checkpoint");
         import.require_applied(tx)?;
+        catalog::verify_context_stores(tx)?;
         let payload = import.payload(admission)?;
         let receipt = "native_transfer_v1:catalog-admission";
         let head = super::publication::admitted_head(tx.0, &source)?;

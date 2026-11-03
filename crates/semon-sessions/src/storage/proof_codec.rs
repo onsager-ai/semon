@@ -79,6 +79,37 @@ fn verify_presentation_manifest_entry(
     Ok(manifest)
 }
 
+/// Page admission checks the row binding and reference membership without
+/// materializing a publication-sized store. Final admission resolves every row.
+pub(crate) fn verify_presentation_references(
+    key: &str,
+    metadata: &str,
+    slots: &str,
+    text: &str,
+    manifest: &str,
+) -> Result<(), StorageError> {
+    let manifest = decode_presentation_manifest(manifest)?;
+    let entry = presentation_entry(metadata, slots, text)?;
+    if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
+        || !manifest.entries.iter().any(|(k, digest)| k == key && *digest == entry)
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let witness: Option<serde_json::Value> =
+        serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
+    if let Some(witness) = witness {
+        let context = witness["context"].as_object().ok_or(StorageError::ScopeChanged)?;
+        for values in context.values() {
+            for reference in values.as_object().ok_or(StorageError::ScopeChanged)?.values() {
+                if !manifest.contexts.contains(reference.as_str().ok_or(StorageError::ScopeChanged)?) {
+                    return Err(StorageError::ScopeChanged);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn decode_presentation_context(
     reference: &str,
     text: &str,
@@ -106,7 +137,7 @@ pub(crate) fn verify_presentation_contexts(
     {
         return Err(StorageError::ScopeChanged);
     }
-    let mut bytes = 0;
+    let mut bytes = if contexts.is_empty() { 2 } else { 1 };
     for (reference, entry) in contexts {
         let text = serde_json::to_string(entry).map_err(|_| StorageError::Unavailable)?;
         decode_presentation_context(reference, &text)?;
@@ -567,7 +598,7 @@ mod tests {
             "catalog_generation": "a".repeat(64),
             "entries": [],
             "observations": null,
-            "contexts": {},
+            "contexts": [],
         })
         .to_string();
         let proof = presentation_digest("base", &manifest).unwrap();
@@ -579,12 +610,12 @@ mod tests {
     #[test]
     fn presentation_manifest_requires_a_valid_catalog_generation() {
         for manifest in [
-            serde_json::json!({"entries": [], "observations": null, "contexts": {}}).to_string(),
+            serde_json::json!({"entries": [], "observations": null, "contexts": []}).to_string(),
             serde_json::json!({
                 "catalog_generation": "not-a-generation",
                 "entries": [],
                 "observations": null,
-            "contexts": {},
+            "contexts": [],
             })
             .to_string(),
         ] {
@@ -649,7 +680,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            contexts: captured.contexts.clone(),
+            contexts: captured.contexts.keys().cloned().collect(),
             observations: None,
         })
         .unwrap()
@@ -723,14 +754,14 @@ mod tests {
                 "[]",
                 text,
                 "original receipt",
-                &manifest,
+                (&manifest, &captured.contexts),
                 &proof,
             )
             .is_ok()
         );
         let mut changed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         let reference = captured.contexts.keys().next().unwrap().clone();
-        changed["contexts"][&reference][2] = serde_json::json!("changed");
+        changed["contexts"][0] = serde_json::json!("changed");
         assert!(
             verify_presentation_observations(
                 key,
@@ -738,7 +769,7 @@ mod tests {
                 "[]",
                 text,
                 "original receipt",
-                &changed.to_string(),
+                (&changed.to_string(), &captured.contexts),
                 &proof,
             )
             .is_err()
@@ -746,7 +777,7 @@ mod tests {
         captured.contexts.remove(&reference);
         // A matching row entry alone does not make an incomplete store valid.
         let incomplete = presentation_manifest(&captured);
-        assert!(verify_presentation_entry(key, "metadata", "[]", text, &incomplete).is_err());
+        assert!(verify_presentation_entry(key, "metadata", "[]", text, (&incomplete, &captured.contexts)).is_err());
         let mut inline: serde_json::Value = serde_json::from_str(text).unwrap();
         inline["context"]["relative"]
             .as_object_mut()
@@ -754,6 +785,41 @@ mod tests {
             .values_mut()
             .for_each(|value| *value = serde_json::Value::Null);
         assert!(resolve_presentation(&inline.to_string(), &captured.contexts).is_err());
+    }
+
+    #[test]
+    fn shared_context_records_require_canonical_bytes_and_exact_membership() {
+        let captured = presentation_capture();
+        let manifest = decode_presentation_manifest(&presentation_manifest(&captured)).unwrap();
+        assert!(verify_presentation_contexts(&manifest, &captured.contexts).is_ok());
+        let (reference, entry) = captured.contexts.first_key_value().unwrap();
+        let canonical = serde_json::to_string(entry).unwrap();
+        assert_eq!(decode_presentation_context(reference, &canonical).unwrap(), *entry);
+        // Hashing noncanonical bytes must not make them an admissible record.
+        let noncanonical = format!(" {canonical}");
+        assert!(decode_presentation_context(&digest(noncanonical.as_bytes()), &noncanonical).is_err());
+        assert!(decode_presentation_context(reference, &format!("{canonical} ")).is_err());
+        let mut missing = captured.contexts.clone();
+        missing.remove(reference);
+        assert!(verify_presentation_contexts(&manifest, &missing).is_err());
+        let mut extra = captured.contexts.clone();
+        let entry = ("relative".into(), "uncaptured".into(), serde_json::Value::Null);
+        let reference = digest(&serde_json::to_vec(&entry).unwrap());
+        extra.insert(reference, entry);
+        assert!(verify_presentation_contexts(&manifest, &extra).is_err());
+    }
+
+    #[test]
+    fn shared_context_record_bound_is_inclusive_and_never_splits_entries() {
+        let mut entry = ("turn", "key", String::new());
+        let overhead = serde_json::to_string(&entry).unwrap().len();
+        entry.2 = "x".repeat(METADATA_MAX - overhead);
+        let text = serde_json::to_string(&entry).unwrap();
+        assert_eq!(text.len(), METADATA_MAX);
+        assert!(decode_presentation_context(&digest(text.as_bytes()), &text).is_ok());
+        entry.2.push('x');
+        let text = serde_json::to_string(&entry).unwrap();
+        assert_eq!(decode_presentation_context(&digest(text.as_bytes()), &text), Err(StorageError::HistoryRetentionBounds));
     }
 
     #[test]

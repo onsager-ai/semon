@@ -200,13 +200,17 @@ impl Snapshot<'_, '_> {
             64,
             record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
         )?;
+        let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest).map_err(failed)?;
+        let contexts = super::super::super::presentation_contexts::load(&mut tx, &record.publication, &decoded, |bytes| {
+            crate::selected_read::charge(64, bytes).map_err(|_| StorageError::Busy)
+        }).map_err(failed)?;
         let observations = crate::storage::proof_codec::verify_presentation_observations(
             &row.key,
             &record.metadata,
             &record.slots,
             &presentation,
             &base,
-            &manifest,
+            (&manifest, &contexts),
             &record.proof,
         )
         .map_err(failed)?;

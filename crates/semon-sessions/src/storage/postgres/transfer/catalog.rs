@@ -17,6 +17,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
             "semon_pg_native_selected_roots",
             "publication,base,manifest,digest",
         ),
+        PresentationContext => ("semon_pg_native_selected_contexts", "publication,digest,entry"),
         ProofGeneration => (
             "semon_pg_native_selected_generations",
             "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
@@ -120,6 +121,15 @@ fn verify_authority(
                 return Err(StorageError::ScopeChanged);
             }
         }
+        PresentationContext => {
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(manifest)<=$3::bigint THEN manifest END FROM semon_pg_native_selected_roots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND publication=$2", &[&ns,&text(0)?.as_bytes(),&(*verification_bytes as i64)]).map_err(sqlstate::error)?;
+            let manifest = decode(row.get::<_,Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
+            *verification_bytes = verification_bytes.checked_sub(manifest.len()).ok_or(StorageError::Busy)?;
+            let manifest = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
+            if !manifest.contexts.contains(text(1)?) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
         ProofGeneration => {
             let record = catalog_rows::proof_generation(tx.0.namespace.as_str(), values)?;
             let exists: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_semantic_publications p JOIN semon_pg_native_selected_roots r ON r.namespace_digest=p.namespace_digest AND r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace_digest=sha256($1::bytea) AND p.namespace=$1 AND p.generation=$2 AND p.proof_digest=$3 AND p.admission=$4 AND convert_from(p.metadata,'UTF8')::jsonb ? convert_from($5::bytea,'UTF8'))", &[&ns,&record.publication.as_bytes(),&record.proof.as_bytes(),&(record.admission as i64),&record.metadata.as_bytes()]).map_err(sqlstate::error)?.get(0);
@@ -128,11 +138,12 @@ fn verify_authority(
             }
         }
         Presentation => {
-            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes()]).map_err(sqlstate::error)?;
+            let row = tx.0.driver.query_one("SELECT CASE WHEN octet_length(g.metadata)<=1048576 AND octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.manifest)<=$4::bigint THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_roots r ON r.namespace_digest=g.namespace_digest AND r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.id=$2 AND g.key_digest=sha256($3::bytea) AND g.session_key=$3", &[&ns,&text(0)?.as_bytes(),&text(1)?.as_bytes(),&(*verification_bytes as i64)]).map_err(sqlstate::error)?;
             let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             let slots = decode(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
             let manifest = decode(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
-            crate::storage::proof_codec::verify_presentation_entry(
+            *verification_bytes = verification_bytes.checked_sub(metadata.len() + slots.len() + manifest.len()).ok_or(StorageError::Busy)?;
+            crate::storage::proof_codec::verify_presentation_references(
                 text(1)?,
                 &metadata,
                 &slots,
@@ -220,6 +231,45 @@ pub(super) fn occupied(tx: &mut Inbox<'_, '_>) -> Result<bool, StorageError> {
         .query_one(&format!("SELECT {}", terms.join(" OR ")), &[&ns])
         .map_err(sqlstate::error)?
         .get(0))
+}
+
+pub(super) fn verify_context_stores(tx: &mut Inbox<'_, '_>) -> Result<(), StorageError> {
+    let ns = tx.0.namespace.as_str().as_bytes().to_vec();
+    let orphan: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_selected_contexts c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_roots r WHERE r.namespace_digest=c.namespace_digest AND r.namespace=c.namespace AND r.publication=c.publication))", &[&ns]).map_err(sqlstate::error)?.get(0);
+    if orphan { return Err(StorageError::ScopeChanged); }
+    let mut after = Vec::<u8>::new();
+    loop {
+        let roots = tx.0.driver.query("SELECT digest,publication,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM semon_pg_native_selected_roots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND digest>$2 ORDER BY digest LIMIT 1", &[&ns,&after]).map_err(sqlstate::error)?;
+        let Some(root) = roots.first() else { break; };
+        let publication = String::from_utf8(root.get(1)).map_err(|_| StorageError::ScopeChanged)?;
+        let manifest = String::from_utf8(root.get::<_,Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?).map_err(|_| StorageError::ScopeChanged)?;
+        let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
+        let sizes = tx.0.driver.query_one("SELECT COALESCE(sum(octet_length(p.metadata)),0)::bigint,COALESCE(max(greatest(octet_length(g.metadata),octet_length(g.slots))),0) FROM semon_pg_native_selected_presentations p JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.publication=$2", &[&ns,&publication.as_bytes()]).map_err(sqlstate::error)?;
+        let row_bytes: i64 = sizes.get(0);
+        if sizes.get::<_,i32>(1) > 1048576 { return Err(StorageError::ScopeChanged); }
+        let contexts = super::super::presentation_contexts::load(tx.0, &publication, &decoded, |bytes| {
+            if usize::try_from(row_bytes).ok().and_then(|rows| rows.checked_add(bytes)).is_none_or(|total| total > 8 * 1048576) { return Err(StorageError::HistoryRetentionBounds); }
+            Ok(())
+        })?;
+        let mut row_after = Vec::<u8>::new();
+        let mut id_after = Vec::<u8>::new();
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            tx.0.check()?;
+            let rows = tx.0.driver.query("SELECT g.session_key,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,g.id FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_presentations p USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.publication=$2 AND (g.session_key,g.id)>($3,$4) ORDER BY g.session_key,g.id LIMIT 1", &[&ns,&publication.as_bytes(),&row_after,&id_after]).map_err(sqlstate::error)?;
+            let Some(row) = rows.first() else { break; };
+            let text = |i| String::from_utf8(row.get::<_,Option<Vec<u8>>>(i).ok_or(StorageError::HistoryRetentionBounds)?).map_err(|_| StorageError::ScopeChanged);
+            let key = text(0)?;
+            if !seen.insert(key.clone()) { return Err(StorageError::ScopeChanged); }
+            crate::storage::proof_codec::verify_presentation_references(&key, &text(1)?, &text(2)?, &text(3)?, &manifest)?;
+            crate::storage::proof_codec::resolve_presentation(&text(3)?, &contexts)?;
+            row_after = row.get(0);
+            id_after = row.get(4);
+        }
+
+        after = root.get(0);
+    }
+    Ok(())
 }
 
 pub(super) fn capture(
@@ -516,6 +566,7 @@ pub(super) fn apply(
             "generation,epoch,admission,base_generation,source_revision,proof_digest,claims,metadata",
         ),
         PresentationRoot => ("selected_roots", "publication,base,manifest,digest"),
+        PresentationContext => ("selected_contexts", "publication,digest,entry"),
         ProofGeneration => (
             "selected_generations",
             "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",

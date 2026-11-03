@@ -24,6 +24,11 @@ const TABLES: &[Table] = &[
         key: "digest",
     },
     Table {
+        name: "selected_contexts",
+        columns: "publication bytea,digest bytea,entry bytea",
+        key: "publication,digest",
+    },
+    Table {
         name: "selected_generations",
         columns: "id bytea,key_digest bytea,session_key bytea,publication bytea,proof bytea,admission bigint,stream bytea,metadata bytea,query_recipe bytea?,slots bytea,prefix bytea",
         key: "id,key_digest",
@@ -619,7 +624,7 @@ fn contract_hash() -> Vec<u8> {
     }
     hash.update(native_keys::MATCH_BODY);
     hash.update(native_keys::DIGEST_BODY);
-    for body in super::super::native_usage_identity::contract() {
+    for body in super::super::native_usage_identity::contract().into_iter().chain(super::super::presentation_contexts::contract()) {
         hash.update((body.len() as u64).to_be_bytes());
         hash.update(body.as_bytes());
     }
@@ -674,7 +679,8 @@ pub(super) fn install(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
         ddl.push_str(&format!("CREATE {unique} INDEX semon_pg_{name} ON semon_pg_source_invalidations(namespace_digest,{columns});"));
     }
     tx.driver.batch_execute(&ddl).map_err(sqlstate::error)?;
-    super::super::native_usage_identity::install(tx)
+    super::super::native_usage_identity::install(tx)?;
+    super::super::presentation_contexts::install(tx)
 }
 
 pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
@@ -817,7 +823,8 @@ pub(super) fn verify(tx: &mut PgTxn<'_>) -> Result<(), StorageError> {
             return Err(StorageError::ScopeChanged);
         }
     }
-    super::super::native_usage_identity::verify(tx)
+    super::super::native_usage_identity::verify(tx)?;
+    super::super::presentation_contexts::verify(tx)
 }
 
 #[cfg(test)]
@@ -964,6 +971,22 @@ mod tests {
             ),
             (
                 "ALTER TABLE semon_pg_native_meta ALTER COLUMN namespace_digest DROP EXPRESSION",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_selected_contexts DROP CONSTRAINT selected_context_record_bound",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_selected_contexts DROP CONSTRAINT selected_context_record_bound; ALTER TABLE semon_pg_native_selected_contexts ADD CONSTRAINT selected_context_record_bound CHECK (octet_length(entry)<=2097152)",
+                true,
+            ),
+            (
+                "ALTER TABLE semon_pg_native_selected_contexts DISABLE TRIGGER selected_context_immutable",
+                true,
+            ),
+            (
+                "CREATE OR REPLACE FUNCTION semon_pg_native_context_immutable() RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path=pg_catalog AS 'BEGIN RETURN NEW; END;'",
                 true,
             ),
             (

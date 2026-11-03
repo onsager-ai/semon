@@ -18,6 +18,7 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
             "publication,base,manifest,digest",
             &[],
         ),
+        PresentationContext => ("storage_proof_presentation_contexts", "publication,digest,entry", &[]),
         ProofGeneration => (
             "storage_proof_generations",
             "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
@@ -372,6 +373,14 @@ fn verify_authority(
                 return Err(StorageError::ScopeChanged);
             }
         }
+        PresentationContext => {
+            let manifest: String = tx.0.query_row("SELECT CASE WHEN octet_length(manifest)<=?3 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND publication=?2", params![tx.1,text(0)?,*verification_bytes as i64], |r| r.get::<_,Option<String>>(0)).map_err(failed)?.ok_or(StorageError::Busy)?;
+            *verification_bytes = verification_bytes.checked_sub(manifest.len()).ok_or(StorageError::Busy)?;
+            let manifest = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
+            if !manifest.contexts.contains(text(1)?) {
+                return Err(StorageError::ScopeChanged);
+            }
+        }
         ProofGeneration => {
             let record = catalog_rows::proof_generation(tx.1, values)?;
             let exists: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_semantic_publications p JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest WHERE p.namespace=?1 AND p.generation=?2 AND p.proof_digest=?3 AND p.admission=?4 AND EXISTS(SELECT 1 FROM json_each(p.metadata) WHERE value=?5))", params![tx.1,record.publication,record.proof,record.admission as i64,record.metadata], |r| r.get(0)).map_err(failed)?;
@@ -380,8 +389,12 @@ fn verify_authority(
             }
         }
         Presentation => {
-            let (metadata,slots,manifest): (String,String,String) = tx.0.query_row("SELECT CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM storage_proof_generations g JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![tx.1,text(0)?,text(1)?], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
-            crate::storage::proof_codec::verify_presentation_entry(
+            let (metadata,slots,manifest): (Option<String>,Option<String>,Option<String>) = tx.0.query_row("SELECT CASE WHEN octet_length(g.metadata)<=1048576 AND octet_length(g.metadata)+octet_length(g.slots)+octet_length(r.manifest)<=?4 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END FROM storage_proof_generations g JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE g.namespace=?1 AND g.id=?2 AND g.session_key=?3", params![tx.1,text(0)?,text(1)?,*verification_bytes as i64], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
+            let metadata = metadata.ok_or(StorageError::Busy)?;
+            let slots = slots.ok_or(StorageError::Busy)?;
+            let manifest = manifest.ok_or(StorageError::Busy)?;
+            *verification_bytes = verification_bytes.checked_sub(metadata.len() + slots.len() + manifest.len()).ok_or(StorageError::Busy)?;
+            crate::storage::proof_codec::verify_presentation_references(
                 text(1)?,
                 &metadata,
                 &slots,
@@ -429,6 +442,35 @@ fn verify_authority(
             )?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Final admission authenticates complete stores, including unreferenced entries.
+pub(super) fn verify_context_stores(tx: &Inbox<'_>) -> Result<(), StorageError> {
+    let orphan: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_presentation_contexts c WHERE c.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_presentation_roots r WHERE r.namespace=c.namespace AND r.publication=c.publication))", [tx.1], |r| r.get(0)).map_err(failed)?;
+    if orphan { return Err(StorageError::ScopeChanged); }
+    let mut after = String::new();
+    loop {
+        let root: Option<(String,String)> = tx.0.query_row("SELECT digest,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest>?2 ORDER BY digest LIMIT 1", params![tx.1,after], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(failed)?;
+        let Some((digest, manifest)) = root else { break; };
+        let publication: String = tx.0.query_row("SELECT publication FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2", params![tx.1,digest], |r| r.get(0)).map_err(failed)?;
+        let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
+        let (row_bytes, largest): (i64,i64) = tx.0.query_row("SELECT COALESCE(sum(octet_length(p.metadata)),0),COALESCE(max(max(octet_length(g.metadata),octet_length(g.slots))),0) FROM storage_proof_presentations p JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.publication=?2", params![tx.1,publication], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
+        if largest > 1048576 { return Err(StorageError::ScopeChanged); }
+        let contexts = super::super::proof_generations::presentation_contexts(tx.0, tx.1, &publication, &decoded, |bytes| {
+            if usize::try_from(row_bytes).ok().and_then(|rows| rows.checked_add(bytes)).is_none_or(|total| total > 8 * 1048576) { return Err(StorageError::HistoryRetentionBounds); }
+            Ok(())
+        })?;
+        let mut rows = tx.0.prepare("SELECT g.session_key,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END FROM storage_proof_generations g JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.publication=?2").map_err(failed)?;
+        let mut rows = rows.query(params![tx.1,publication]).map_err(failed)?;
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(row) = rows.next().map_err(failed)? {
+            if !seen.insert(row.get::<_,String>(0).map_err(failed)?) { return Err(StorageError::ScopeChanged); }
+            crate::storage::proof_codec::verify_presentation_references(&row.get::<_,String>(0).map_err(failed)?, &row.get::<_,String>(1).map_err(failed)?, &row.get::<_,String>(2).map_err(failed)?, &row.get::<_,String>(3).map_err(failed)?, &manifest)?;
+            crate::storage::proof_codec::resolve_presentation(&row.get::<_,String>(3).map_err(failed)?, &contexts)?;
+        }
+        after = digest;
     }
     Ok(())
 }

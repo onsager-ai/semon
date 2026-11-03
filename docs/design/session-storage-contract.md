@@ -196,15 +196,21 @@ Path-keyed live proofs alone are not sufficient. Current and retained references
 qualification must prove the same lifecycle before backend acceptance.
 
 Each selected-presentation manifest binds the actual Catalog generation together
-with its presentation entries, shared observations and shared context lookup store
-under the joined digest. Each distinct typed lookup (family, exact key and saved
-value, including null) is stored once per publication under its SHA-256 digest;
-row witnesses reference those entries by digest. Readers authenticate the original
-receipt root and exact row entry before resolving references, verify the lookup
-family, key and digest, and refuse missing or damaged entries. Replay uses this
-saved store without observing live context again. The store follows its publication
-root through retention and transfer. The aggregate captured row/store limit remains
-8 MiB and the complete manifest limit remains 1 MiB.
+with its presentation entries, shared observations and the exact set of context
+entry digests under the joined digest. Each distinct typed lookup (family, exact
+key and saved value, including null) is encoded as one canonical JSON tuple and
+stored once in a separate immutable record keyed by publication and SHA-256
+entry digest. Row witnesses reference those records by digest; the manifest does
+not contain the tuple values. Readers authenticate the receipt root and row entry,
+require exactly the manifest's digest set, and verify every tuple's digest, lookup
+family and exact key. Missing, extra, damaged or retargeted records refuse.
+Replay uses saved context without observing live context again. Both adapters
+preserve these records through retention and transfer; transfer admission verifies
+the complete store before granting the imported publication. Native PostgreSQL
+selected reads continue to use authenticated catalog proof pages.
+The aggregate captured row/store limit remains 8 MiB; the manifest and each
+individual context record remain bounded at 1 MiB. Entries are never split.
+This is the single current contract; old inline context stores are unsupported.
 
 Ordinary publication receipt IDs may differ from the Catalog generation: leases
 and proof roots retain the receipt ID, while selected opening matches the captured
