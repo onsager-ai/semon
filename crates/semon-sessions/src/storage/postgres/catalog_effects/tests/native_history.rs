@@ -95,6 +95,12 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         )
         .unwrap();
     let input = crate::native_evidence::catalog_input(&live_path, &options).unwrap();
+    let path = live_path.to_string_lossy().into_owned();
+    let prior = cache
+        .stored_ledger_batch(std::slice::from_ref(&path))
+        .unwrap()
+        .remove(0)
+        .unwrap();
     let from = fs::metadata(&live_path).unwrap().len();
     let writer =
         crate::SessionSourceWrite::begin(&options, &input, Some(&"a".repeat(32)), from).unwrap();
@@ -103,13 +109,38 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
     writer
         .complete(fs::metadata(&live_path).unwrap().len())
         .unwrap();
-    cache
+    let accepted = crate::events::store::source_write_store(&options)
+        .unwrap()
+        .append_evidence(&path)
+        .unwrap()
+        .expect("the completed native writer owns exact append evidence");
+    let receipt = cache
         .ingest(&format!("{:064x}", 128), &live_path, "claude")
         .unwrap();
-    let continued =
+    assert!(!receipt.replayed);
+    let current = cache.stored_ledger_batch(&[path]).unwrap().remove(0).unwrap();
+    let continuation = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
+        &live_path,
+        &prior,
+        &current,
+        &accepted,
+        &crate::events::Stat::of(&live_path).unwrap(),
+    )
+    .expect("this request scanned the exact accepted continuation");
+    let mut continued =
         crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
     assert_eq!(continued.rows.len(), 1);
     assert_eq!(continued.rows[0].sources.len(), 1);
+    // Configured model preparation is a committed Index reader. Its explicit
+    // producer carries the scanner proof in this request's typed publication
+    // envelope; it cannot recover continuation authority from persisted rows.
+    continued
+        .relationships
+        .presentation
+        .as_mut()
+        .unwrap()
+        .set_source_continuations(vec![continuation])
+        .unwrap();
     assert_eq!(
         continued
             .presentation_observations()
@@ -118,7 +149,7 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
             .unwrap()
             .len(),
         1,
-        "the ordinary preparation must carry a real request-local scanner continuation"
+        "the ordinary publication must carry the real request-local scanner continuation"
     );
     let mut generation = None;
     for _ in 0..4 {

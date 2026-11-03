@@ -2172,6 +2172,9 @@ export function createCatalogViewer(
   }
   function drawList() {
     if (disposed || navigation.route.v !== 'sessions' || active || sourcesOpen) return;
+    const anchor = root.querySelector<HTMLElement>('.session-list .nrow');
+    const anchorId = anchor?.dataset.id;
+    const anchorTop = anchor?.getBoundingClientRect().top;
     chrome();
     const focused = document.activeElement;
     const draft =
@@ -2200,11 +2203,12 @@ export function createCatalogViewer(
           : null;
       }
     }
+    const listOrder = orderScope(
+      'sessions',
+      JSON.stringify([capabilities.source_key, harness, repo, model, query, showApprovalReviews]),
+    );
     const ordered = orderRows(
-      orderScope(
-        'sessions',
-        JSON.stringify([capabilities.source_key, harness, repo, model, query, showApprovalReviews]),
-      ),
+      listOrder,
       'sessions',
       items
         .filter((item) => showApprovalReviews || item.presentation_kind !== 'Approval review')
@@ -2362,6 +2366,18 @@ export function createCatalogViewer(
         },
       },
     );
+    // Holding row order also holds the reader's position when publication
+    // adds or removes discovery and refresh notices above the list.
+    if (listOrder.keep && !listOrder.calm && anchorId && anchorTop !== undefined) {
+      const retained = [...root.querySelectorAll<HTMLElement>('.session-list .nrow')].find(
+        (row) => row.dataset.id === anchorId,
+      );
+      if (retained) {
+        const shift = retained.getBoundingClientRect().top - anchorTop;
+        if (matchMedia('(max-width: 760px)').matches) window.scrollBy(0, shift);
+        else document.querySelector<HTMLElement>('#main')!.scrollTop += shift;
+      }
+    }
     if (draft?.node.isConnected && document.activeElement === draft.node) {
       draft.node.value = draft.value;
       if (draft.start !== null && draft.end !== null)
