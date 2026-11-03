@@ -1,0 +1,78 @@
+name: Grant live publication diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SEMON_PRICING_REFRESH: "off"
+      SEMON_BUILD_TIMING: "1"
+      SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
+      SEMON_BIN: ${{ github.workspace }}/target/debug/semon
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: viewer-test-binaries
+          run-id: 41696742345
+          github-token: ${{ github.token }}
+          path: target/debug
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22.x
+      - name: Browser prerequisites
+        run: |
+          chmod +x target/debug/semon
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors-security.txt >/dev/null
+          npm --prefix tests/ui ci --no-audit --no-fund
+          cd tests/ui
+          npx playwright install --with-deps chromium
+      - name: Retain synthetic fixture state without changing the live oracle
+        run: |
+          mkdir -p tests/ui/out
+          python3 - <<'PY'
+          from pathlib import Path
+          file = Path('tests/ui/native-fixture.mjs')
+          text = file.read_text()
+          old = "const capture = (value) => (output = (output + value).slice(-16384));"
+          new = "const capture = (value) => { fs.appendFileSync(path.join(process.env.SEMON_UI_OUT, 'native-live.log'), value); output = (output + value).slice(-16384); };"
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = "fs.rmSync(root, { recursive: true, force: true });"
+          new = "fs.cpSync(root, path.join(process.env.SEMON_UI_OUT, 'native-root'), { recursive: true }); " + old
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, new))
+          PY
+      - name: Unchanged native live publication check
+        run: node tests/ui/checks/live.mjs
+      - name: Bounded durable publication state
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import sqlite3
+          from pathlib import Path
+          for file in Path('tests/ui/out/native-root').glob('*'):
+              if not file.is_file() or file.open('rb').read(16) != b'SQLite format 3\x00':
+                  continue
+              print('DATABASE', file.name)
+              db = sqlite3.connect(file)
+              names = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
+              print('TABLES', ','.join(names))
+              for name in names:
+                  if name in ('meta', 'storage_source_journal', 'session_catalog_invalidations') or 'stage' in name:
+                      columns = [row[1] for row in db.execute(f'PRAGMA table_info("{name}")')]
+                      count = db.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
+                      print('STATE', name, 'count', count, 'columns', columns)
+                      for row in db.execute(f'SELECT * FROM "{name}" LIMIT 8'):
+                          print(tuple(str(value)[:400] for value in row))
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: grant-live-diagnostic
+          path: tests/ui/out
