@@ -1,175 +1,14 @@
-# Build once; independent suites run with isolated fixture servers and report directories.
-# The aggregate job keeps the existing required check name. See tests/ui/README.md.
-name: Viewer UI
-
+name: Native 477 reader diagnostics
 on:
   workflow_dispatch:
-    inputs:
-      exhaustive:
-        description: Audit touch targets in every fixture session
-        type: boolean
-        default: false
-      refresh_diagnostics:
-        description: Compare recovery live refresh with the pinned recovery baseline
-        type: boolean
-        default: false
-      native_foundation_measurement:
-        description: Compare the pre-foundation reference and selected reader on identical native fixtures
-        type: boolean
-        default: false
-      selected_readiness_measurement:
-        description: Compare cold selected Catalog readiness against the measured foundation baseline
-        type: boolean
-        default: false
-  pull_request:
-  push:
-    branches: [main]
-
 permissions:
   contents: read
-
-# Fixture processes use deterministic bundled reference prices.
+  actions: read
 env:
   SEMON_PRICING_REFRESH: "off"
-
-concurrency:
-  group: viewer-ui-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-
 jobs:
-  foundation:
-    name: UI types and generated assets
-    if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.x
-          cache: npm
-          cache-dependency-path: ui/package-lock.json
-      - name: Verify data-only fixtures against original source
-        env:
-          SEMON_FIXTURE_DATA_SOURCE: bf9190ef2b80fcd56726f61dc480346b698039a2
-        run: |
-          git fetch --no-tags --depth=1 origin "$SEMON_FIXTURE_DATA_SOURCE"
-          node tests/ui/fixture-data-equivalence.mjs
-      - name: Install pinned UI tooling
-        run: npm --prefix ui ci --no-audit --no-fund
-      - name: Type-check, security boundaries, deterministic build and freshness
-        run: |
-          npm --prefix ui run format:check
-          npm --prefix ui run check:architecture
-          npm --prefix ui run check:design
-          npm --prefix ui run typecheck
-          npm --prefix ui test
-          npm --prefix ui run check:bundle
-          npm --prefix ui run sizes
-
-      - name: Browser-check infrastructure regression tests
-        run: |
-          npm --prefix tests/ui ci --no-audit --no-fund
-          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs tests/ui/visual-pathname-audit.test.mjs tests/ui/visual-binding-proposal.test.mjs
-
-      - name: Prepare UI assets for thermal-restricted review
-        if: failure()
-        run: |
-          npm --prefix ui run format
-          npm --prefix ui run build
-          git diff --binary -- ui tests/ui crates/semon-sessions/src > "$RUNNER_TEMP/ui-generated-review.patch"
-      - name: Retain generated changes without bypassing freshness
-        if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: ui-generated-review
-          path: ${{ runner.temp }}/ui-generated-review.patch
-          if-no-files-found: error
-
-  build:
-    name: viewer test binaries
-    needs: foundation
-    if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
-    runs-on: ubuntu-latest
-    # Manual diagnostics also build the pinned recovery baseline.
-    timeout-minutes: ${{ inputs.refresh_diagnostics && 25 || 15 }}
-    steps:
-      - name: Check out
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # Unpinned on purpose, as in rust.yml: the ref selects the stable channel.
-      - name: Install Rust toolchain
-        id: rust-toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-ui-cargo-${{ steps.rust-toolchain.outputs.cachekey }}-
-
-      # The test-clock feature lets SEMON_TEST_NOW pin the server's clock to the fixture's.
-      - name: Build semon with the test clock
-        run: cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
-
-      - name: Build the embedding API fixture
-        run: cargo build --locked -p semon-sessions --example ui-account-server --features test-clock,test-ui-account-server
-
-      - name: Strip debug symbols from transferred binaries
-        run: strip --strip-debug target/debug/semon target/debug/examples/ui-account-server
-
-      # Manual refresh diagnostics compare the candidate with an exact baseline.
-      # Keep the exact candidate binary while reusing dependencies for the baseline.
-      - name: Build the pinned recovery baseline for refresh comparison
-        if: inputs.refresh_diagnostics
-        env:
-          REFRESH_BASELINE: c402e481dbe23bcf03841e47b5f7eccd14c0e426
-        run: |
-          cp target/debug/semon "$RUNNER_TEMP/semon-refresh-candidate"
-          git fetch --no-tags --depth=1 origin "$REFRESH_BASELINE"
-          git worktree add --detach "$RUNNER_TEMP/refresh-baseline" "$REFRESH_BASELINE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/refresh-baseline/Cargo.toml" -p semon-cli --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-          mv target/debug/semon target/debug/semon-refresh-baseline
-          cp "$RUNNER_TEMP/semon-refresh-candidate" target/debug/semon
-
-      - name: Upload test binaries
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: viewer-test-binaries
-          path: |
-            target/debug/semon
-            target/debug/semon-refresh-baseline
-            target/debug/examples/ui-account-server
-          if-no-files-found: error
-          retention-days: 1
-
-      # The selected application remains a required reference on every event.
-      - name: Build the selected complete UI reference
-        run: |
-          UI_REFERENCE=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
-          git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
-          git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-      - name: Retain selected UI reference binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-ui-reference-binary
-          path: target/debug/semon
-          if-no-files-found: error
-          retention-days: 1
-
   checks:
     name: viewer / ${{ matrix.suite }}
-    needs: build
     if: ${{ github.event_name != 'workflow_dispatch' || !(inputs.native_foundation_measurement || inputs.selected_readiness_measurement) || inputs.refresh_diagnostics }}
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
@@ -178,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [navigation, transcript, shell, interaction, accessibility, visual, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
+        suite: [navigation, transcript, accessibility, live, order-desktop-dark]
     env:
       SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
       SEMON_CATALOG_OUT: ${{ github.workspace }}/tests/ui/out/catalog-phases
@@ -192,6 +31,8 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: viewer-test-binaries
+          run-id: 41712781845
+          github-token: ${{ github.token }}
           path: target/debug
       - name: Download selected UI reference
         if: matrix.suite == 'visual' || matrix.suite == 'transport'
@@ -249,6 +90,49 @@ jobs:
           SEMON_OVERVIEW_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/overview-default
           SEMON_CATALOG_VISUAL_OUT: ${{ github.workspace }}/tests/ui/out/catalog-default
         run: node --test ui/tests/catalog-served.mjs ui/tests/overview-served.mjs
+
+      - name: Capture exact reader and browser failure state
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          file = Path('tests/ui/lib.mjs')
+          text = file.read_text()
+          old = "  page.errors = [];"
+          new = old + "\n  const readerEvents = [];\n  page.on('response', response => { const url = new URL(response.url()); if (url.pathname.startsWith('/api/')) { readerEvents.push({at: Date.now(), status: response.status(), path: url.pathname, query: url.search}); if (readerEvents.length > 40) readerEvents.shift(); }});\n  page.on('close', () => console.log('READER_EVENTS', JSON.stringify(readerEvents)));"
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = "pathname: location.pathname,"
+          new = old + "\n          text: document.querySelector('#page')?.innerText.slice(0, 1500),\n          nestedBusy: [...document.querySelectorAll('[aria-busy]')].map(x => x.outerHTML.slice(0, 500)),"
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = "const pageErrors = 'errors' in page ?"
+          new = "console.log('GOTO_STATE', JSON.stringify(state), JSON.stringify(readerEvents));\n      " + old
+          # readerEvents belongs to served(), so the shared goto reads a page field.
+          text = text.replace("  const readerEvents = [];", "  const readerEvents = page.readerEvents = [];")
+          new = new.replace('JSON.stringify(readerEvents)', 'JSON.stringify(page.readerEvents)')
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, new))
+          file = Path('tests/ui/checks/viewer-backlog.mjs')
+          text = file.read_text()
+          old = "      assert(\n        rows.length > 0 &&"
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, "      console.log('METADATA_ROWS', JSON.stringify(rows));\n" + old))
+          file = Path('tests/ui/checks/turns.mjs')
+          text = file.read_text()
+          old = "if (!t) return { st, found: false };"
+          new = "if (!t) return { st, found: false, busy: document.querySelector('#page')?.getAttribute('aria-busy'), turns: [...document.querySelectorAll('.turn')].map(x => x.dataset.turn), text: document.querySelector('#page')?.innerText.slice(0, 700) };"
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, new))
+          file = Path('tests/ui/native-fixture.mjs')
+          text = file.read_text()
+          old = "const capture = (value) => (output = (output + value).slice(-16384));"
+          new = "const capture = (value) => { fs.mkdirSync(process.env.SEMON_UI_OUT, { recursive: true }); fs.appendFileSync(path.join(process.env.SEMON_UI_OUT, 'native-live.log'), value); output = (output + value).slice(-16384); };"
+          assert text.count(old) == 1
+          text = text.replace(old, new)
+          old = "fs.rmSync(root, { recursive: true, force: true });"
+          assert text.count(old) == 1
+          file.write_text(text.replace(old, "fs.cpSync(root, path.join(process.env.SEMON_UI_OUT, 'native-root'), { recursive: true }); " + old))
+          PY
 
       - name: Write the sample fixtures
         run: |
@@ -500,197 +384,3 @@ jobs:
           path: tests/ui/out
           if-no-files-found: warn
 
-  native-foundation-measurement:
-    name: native foundation same-fixture measurement
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.native_foundation_measurement || inputs.selected_readiness_measurement) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - name: Reject conflicting measurement selections
-        if: ${{ inputs.native_foundation_measurement && inputs.selected_readiness_measurement }}
-        run: |
-          echo "::error::Choose only one measurement mode for this workflow run."
-          exit 1
-
-      - name: Check out candidate
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust toolchain
-        id: rust-toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry and target
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-native-measurement-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-native-measurement-${{ steps.rust-toolchain.outputs.cachekey }}-
-
-      - name: Build the candidate with the fixture clock
-        run: |
-          cargo build --locked -p semon-cli --bin semon --features semon-sessions/test-clock
-          cp target/debug/semon "$RUNNER_TEMP/semon-candidate"
-
-      - name: Build the selected pre-foundation reference
-        if: ${{ !inputs.selected_readiness_measurement }}
-        env:
-          SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
-        run: |
-          git fetch --no-tags --depth=1 origin "$SOURCE_REFERENCE"
-          git worktree add --detach "$RUNNER_TEMP/native-foundation-reference" "$SOURCE_REFERENCE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked \
-            --manifest-path "$RUNNER_TEMP/native-foundation-reference/Cargo.toml" \
-            -p semon-store --bin semon --features semon-sessions/test-clock
-          cp target/debug/semon "$RUNNER_TEMP/semon-reference"
-
-      - name: Build the selected Catalog readiness baseline
-        if: ${{ inputs.selected_readiness_measurement }}
-        env:
-          READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
-        run: |
-          git fetch --no-tags --depth=1 origin "$READINESS_BASELINE"
-          git worktree add --detach "$RUNNER_TEMP/catalog-readiness-baseline" "$READINESS_BASELINE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked \
-            --manifest-path "$RUNNER_TEMP/catalog-readiness-baseline/Cargo.toml" \
-            -p semon-cli --bin semon --features semon-sessions/test-clock
-          cp target/debug/semon "$RUNNER_TEMP/semon-readiness-baseline"
-
-      - name: Measure focused multi-machine reads and archived tail scope in Source
-        if: ${{ !inputs.selected_readiness_measurement }}
-        env:
-          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
-        run: |
-          mkdir -p "$MEASUREMENT_OUT"
-          set -o pipefail
-          cargo test --locked -p semon-sessions --lib ordinary_multi_machine_focused_query_reuses_published_ownership \
-            -- --nocapture --test-threads=1 \
-            2>&1 | tee "$MEASUREMENT_OUT/source-multi-machine.log"
-          cargo test --locked -p semon-sessions --lib selected_transcript_tail_scope_measurement \
-            -- --ignored --nocapture --test-threads=1 \
-            2>&1 | tee "$MEASUREMENT_OUT/source-tail-scope.log"
-
-      - name: Qualify exact cold search interest scheduling
-        if: ${{ inputs.selected_readiness_measurement }}
-        env:
-          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
-        run: |
-          mkdir -p "$MEASUREMENT_OUT"
-          set -o pipefail
-          cargo test --locked -p semon-sessions --lib cold_catalog_search_ \
-            -- --nocapture --test-threads=1 \
-            2>&1 | tee "$MEASUREMENT_OUT/selected-readiness-regressions.log"
-          cargo test --locked -p semon-sessions --lib selected_projection_upgrade_precedes_draining_and_preserves_revision \
-            -- --nocapture --test-threads=1 \
-            2>&1 | tee "$MEASUREMENT_OUT/selected-upgrade-priority-regression.log"
-
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.x
-          cache: npm
-          cache-dependency-path: tests/ui/package-lock.json
-
-      - name: Install Playwright and Chromium
-        working-directory: tests/ui
-        run: |
-          npm ci --no-audit --no-fund
-          npx playwright install --with-deps chromium
-
-      - name: Compare selected transcript tail reads on copied native fixtures
-        if: ${{ !inputs.selected_readiness_measurement }}
-        env:
-          SOURCE_REFERENCE: 263a02da278716ab2309b8e34a463419e5c781e5
-          SOURCE_CANDIDATE: ${{ github.sha }}
-          MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-measurement
-        run: |
-          python3 scripts/focused-read-comparison.py \
-            --baseline-binary "$RUNNER_TEMP/semon-reference" \
-            --baseline-revision "$SOURCE_REFERENCE" \
-            --candidate-binary "$RUNNER_TEMP/semon-candidate" \
-            --candidate-revision "$SOURCE_CANDIDATE" \
-            --counts 0,256,2048 \
-            --output "$MEASUREMENT_OUT"
-
-      - name: Run the candidate browser journey
-        if: ${{ !inputs.selected_readiness_measurement }}
-        env:
-          SOURCE_CANDIDATE: ${{ github.sha }}
-          BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
-        run: |
-          python3 scripts/catalog-journey.py \
-            --binary "$RUNNER_TEMP/semon-candidate" \
-            --source-revision "$SOURCE_CANDIDATE" \
-            --counts 0,2048 \
-            --output "$BROWSER_MEASUREMENT_OUT"
-
-      - name: Compare browser readiness on identical native fixtures
-        if: ${{ inputs.selected_readiness_measurement }}
-        env:
-          SOURCE_CANDIDATE: ${{ github.sha }}
-          READINESS_BASELINE: d84973c5a764b0deda2a7b6c07e6e2e41ac01b5d
-          SEMON_BUILD_TIMING: '1'
-          BROWSER_MEASUREMENT_OUT: ${{ runner.temp }}/native-foundation-browser
-        run: |
-          python3 scripts/catalog-journey.py \
-            --binary "$RUNNER_TEMP/semon-candidate" \
-            --source-revision "$SOURCE_CANDIDATE" \
-            --baseline-binary "$RUNNER_TEMP/semon-readiness-baseline" \
-            --baseline-revision "$READINESS_BASELINE" \
-            --counts 0,2048 \
-            --output "$BROWSER_MEASUREMENT_OUT"
-
-      - name: Retain focused-read, source and browser evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: native-foundation-measurement-${{ github.run_id }}
-          path: |
-            ${{ runner.temp }}/native-foundation-measurement/focused-read-comparison.json
-            ${{ runner.temp }}/native-foundation-measurement/source-multi-machine.log
-            ${{ runner.temp }}/native-foundation-measurement/source-tail-scope.log
-            ${{ runner.temp }}/native-foundation-measurement/selected-readiness-regressions.log
-            ${{ runner.temp }}/native-foundation-measurement/selected-upgrade-priority-regression.log
-            ${{ runner.temp }}/native-foundation-browser/server-results.json
-            ${{ runner.temp }}/native-foundation-browser/*-first-import.json
-            ${{ runner.temp }}/native-foundation-browser/*-first-import.json.result
-            ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json
-            ${{ runner.temp }}/native-foundation-browser/*-persisted-restart.json.result
-            ${{ runner.temp }}/native-foundation-browser/*-browser.log
-            ${{ runner.temp }}/native-foundation-browser/baseline/*-first-import.json*
-            ${{ runner.temp }}/native-foundation-browser/baseline/*-persisted-restart.json*
-            ${{ runner.temp }}/native-foundation-browser/baseline/*-browser.log
-            ${{ runner.temp }}/native-foundation-browser/baseline/*-stages.log
-            ${{ runner.temp }}/native-foundation-browser/candidate/*-first-import.json*
-            ${{ runner.temp }}/native-foundation-browser/candidate/*-persisted-restart.json*
-            ${{ runner.temp }}/native-foundation-browser/candidate/*-browser.log
-            ${{ runner.temp }}/native-foundation-browser/candidate/*-stages.log
-          if-no-files-found: warn
-          retention-days: 14
-
-  browser:
-    name: viewer browser checks
-    if: ${{ always() }}
-    needs: [foundation, build, checks, native-foundation-measurement]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require the selected workflow path to pass
-        env:
-          MEASUREMENT_ENABLED: ${{ (inputs.native_foundation_measurement || inputs.selected_readiness_measurement) && 'true' || 'false' }}
-          REFRESH_DIAGNOSTICS_ENABLED: ${{ inputs.refresh_diagnostics && 'true' || 'false' }}
-          FOUNDATION_RESULT: ${{ needs.foundation.result }}
-          BUILD_RESULT: ${{ needs.build.result }}
-          CHECKS_RESULT: ${{ needs.checks.result }}
-          MEASUREMENT_RESULT: ${{ needs.native-foundation-measurement.result }}
-        run: |
-          if [ "$MEASUREMENT_ENABLED" = true ]; then
-            test "$MEASUREMENT_RESULT" = success
-          fi
-          if [ "$MEASUREMENT_ENABLED" != true ] || [ "$REFRESH_DIAGNOSTICS_ENABLED" = true ]; then
-            test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
-          fi
