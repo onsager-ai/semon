@@ -1180,13 +1180,14 @@ pub(crate) fn verified_publication_receipts(
             continue;
         }
         let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
-        let contexts = match presentation_contexts(db, namespace, &record.publication, &decoded, |bytes| {
-            budget.charge(bytes.saturating_mul(8)).map_err(failed)
-        }) {
-            Ok(contexts) => contexts,
-            Err(StorageError::Unavailable) => return Ok(None),
-            Err(_) => continue,
-        };
+        let contexts =
+            match presentation_contexts(db, namespace, &record.publication, &decoded, |bytes| {
+                budget.charge(bytes.saturating_mul(8)).map_err(failed)
+            }) {
+                Ok(contexts) => contexts,
+                Err(StorageError::Unavailable) => return Ok(None),
+                Err(_) => continue,
+            };
         let Ok(Some(observations)) = proof_codec::verify_presentation_observations(
             session_key,
             &record.metadata,
@@ -1996,7 +1997,12 @@ fn verify_immutable_observation(
     )
     .map_err(|_| StorageError::Busy)?;
     let decoded = proof_codec::decode_presentation_manifest(manifest)?;
-    let contexts = selected_presentation_contexts(db, current.namespace.as_str(), &record.publication, &decoded)?;
+    let contexts = selected_presentation_contexts(
+        db,
+        current.namespace.as_str(),
+        &record.publication,
+        &decoded,
+    )?;
     let observations = proof_codec::verify_presentation_observations(
         &selected.key,
         &record.metadata,
@@ -2695,7 +2701,12 @@ fn observation_authority_for_owner(
         }
     })?;
     let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
-    let contexts = selected_presentation_contexts(db, current.namespace.as_str(), &record.publication, &decoded)?;
+    let contexts = selected_presentation_contexts(
+        db,
+        current.namespace.as_str(),
+        &record.publication,
+        &decoded,
+    )?;
     proof_codec::verify_presentation_entry(
         &selected.key,
         &record.metadata,
@@ -4005,7 +4016,8 @@ fn insert_presentation_root(
         tx.execute(
             "INSERT INTO storage_proof_presentation_contexts VALUES(?1,?2,?3,?4)",
             params![ns, publication, digest, entry],
-        ).map_err(failed)?;
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
@@ -4027,8 +4039,13 @@ pub(crate) fn presentation_contexts(
         return Err(StorageError::ScopeChanged);
     }
     let bytes = usize::try_from(bytes).map_err(|_| StorageError::HistoryRetentionBounds)?;
-    let bytes = bytes.max(1).checked_add(1).ok_or(StorageError::HistoryRetentionBounds)?;
-    if bytes > 8 * proof_codec::METADATA_MAX || largest > proof_codec::PRESENTATION_CONTEXT_MAX as i64 {
+    let bytes = bytes
+        .max(1)
+        .checked_add(1)
+        .ok_or(StorageError::HistoryRetentionBounds)?;
+    if bytes > 8 * proof_codec::METADATA_MAX
+        || largest > proof_codec::PRESENTATION_CONTEXT_MAX as i64
+    {
         return Err(StorageError::HistoryRetentionBounds);
     }
     charge(bytes)?;
@@ -4106,7 +4123,12 @@ fn validate_presentation(
     proof_codec::verify_presentation_digest(&base, &manifest, &joined)?;
     let (text,metadata,slots): (String,String,String) = db.query_row("SELECT CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![snapshot.namespace.as_str(),snapshot.proof_generation.0,key],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).map_err(failed)?;
     let decoded = proof_codec::decode_presentation_manifest(&manifest)?;
-    let contexts = selected_presentation_contexts(db, snapshot.namespace.as_str(), &snapshot.publication_generation, &decoded)?;
+    let contexts = selected_presentation_contexts(
+        db,
+        snapshot.namespace.as_str(),
+        &snapshot.publication_generation,
+        &decoded,
+    )?;
     proof_codec::verify_presentation_entry(key, &metadata, &slots, &text, (&manifest, &contexts))?;
     Ok(text)
 }
@@ -4131,7 +4153,13 @@ impl crate::storage::selected::SelectedSnapshotStore for Lease {
         let (text,manifest): (String,String) = db.query_row("SELECT p.metadata,r.manifest FROM storage_proof_presentations p JOIN storage_proof_generations g ON g.namespace=p.namespace AND g.id=p.id AND g.session_key=p.session_key JOIN storage_proof_presentation_roots r ON r.namespace=g.namespace AND r.publication=g.publication AND r.digest=g.proof WHERE p.namespace=?1 AND p.id=?2 AND p.session_key=?3",params![self.snapshot.namespace.as_str(),self.snapshot.proof_generation.0,self.row.key],|r|Ok((r.get(0)?,r.get(1)?))).map_err(io::Error::other)?;
         let manifest =
             proof_codec::decode_presentation_manifest(&manifest).map_err(io::Error::other)?;
-        let contexts = selected_presentation_contexts(&db, self.snapshot.namespace.as_str(), &self.snapshot.publication_generation, &manifest).map_err(io::Error::other)?;
+        let contexts = selected_presentation_contexts(
+            &db,
+            self.snapshot.namespace.as_str(),
+            &self.snapshot.publication_generation,
+            &manifest,
+        )
+        .map_err(io::Error::other)?;
         let mut witness = proof_codec::resolve_presentation(&text, &contexts)
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("selected presentation unavailable"))?;

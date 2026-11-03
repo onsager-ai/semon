@@ -18,7 +18,11 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str, &'static [usize]) 
             "publication,base,manifest,digest",
             &[],
         ),
-        PresentationContext => ("storage_proof_presentation_contexts", "publication,digest,entry", &[]),
+        PresentationContext => (
+            "storage_proof_presentation_contexts",
+            "publication,digest,entry",
+            &[],
+        ),
         ProofGeneration => (
             "storage_proof_generations",
             "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
@@ -389,7 +393,9 @@ fn verify_authority(
             let metadata = metadata.ok_or(StorageError::Busy)?;
             let slots = slots.ok_or(StorageError::Busy)?;
             let manifest = manifest.ok_or(StorageError::Busy)?;
-            *verification_bytes = verification_bytes.checked_sub(metadata.len() + slots.len() + manifest.len()).ok_or(StorageError::Busy)?;
+            *verification_bytes = verification_bytes
+                .checked_sub(metadata.len() + slots.len() + manifest.len())
+                .ok_or(StorageError::Busy)?;
             crate::storage::proof_codec::verify_presentation_references(
                 text(1)?,
                 &metadata,
@@ -445,29 +451,64 @@ fn verify_authority(
 /// Final admission authenticates complete stores, including unreferenced entries.
 pub(super) fn verify_context_stores(tx: &Inbox<'_>) -> Result<(), StorageError> {
     let orphan: bool = tx.0.query_row("SELECT EXISTS(SELECT 1 FROM storage_proof_presentation_contexts c WHERE c.namespace=?1 AND NOT EXISTS(SELECT 1 FROM storage_proof_presentation_roots r WHERE r.namespace=c.namespace AND r.publication=c.publication))", [tx.1], |r| r.get(0)).map_err(failed)?;
-    if orphan { return Err(StorageError::ScopeChanged); }
+    if orphan {
+        return Err(StorageError::ScopeChanged);
+    }
     let mut after = String::new();
     loop {
         let root: Option<(String,Option<String>)> = tx.0.query_row("SELECT digest,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest>?2 ORDER BY digest LIMIT 1", params![tx.1,after], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(failed)?;
-        let Some((digest, manifest)) = root else { break; };
+        let Some((digest, manifest)) = root else {
+            break;
+        };
         let manifest = manifest.ok_or(StorageError::HistoryRetentionBounds)?;
         let publication: String = tx.0.query_row("SELECT publication FROM storage_proof_presentation_roots WHERE namespace=?1 AND digest=?2", params![tx.1,digest], |r| r.get(0)).map_err(failed)?;
         let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
         let (row_bytes, largest): (i64,i64) = tx.0.query_row("SELECT COALESCE(sum(octet_length(p.metadata)),0),COALESCE(max(max(octet_length(g.metadata),octet_length(g.slots))),0) FROM storage_proof_presentations p JOIN storage_proof_generations g USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.publication=?2", params![tx.1,publication], |r| Ok((r.get(0)?,r.get(1)?))).map_err(failed)?;
-        if largest > 1048576 { return Err(StorageError::ScopeChanged); }
-        let contexts = super::super::proof_generations::presentation_contexts(tx.0, tx.1, &publication, &decoded, |bytes| {
-            if usize::try_from(row_bytes).ok().and_then(|rows| rows.checked_add(bytes)).is_none_or(|total| total > 8 * 1048576) { return Err(StorageError::HistoryRetentionBounds); }
-            Ok(())
-        })?;
+        if largest > 1048576 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let contexts = super::super::proof_generations::presentation_contexts(
+            tx.0,
+            tx.1,
+            &publication,
+            &decoded,
+            |bytes| {
+                if usize::try_from(row_bytes)
+                    .ok()
+                    .and_then(|rows| rows.checked_add(bytes))
+                    .is_none_or(|total| total > 8 * 1048576)
+                {
+                    return Err(StorageError::HistoryRetentionBounds);
+                }
+                Ok(())
+            },
+        )?;
         let mut rows = tx.0.prepare("SELECT g.session_key,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END FROM storage_proof_generations g JOIN storage_proof_presentations p USING(namespace,id,session_key) WHERE g.namespace=?1 AND g.publication=?2").map_err(failed)?;
-        let mut rows = rows.query(params![tx.1,publication]).map_err(failed)?;
+        let mut rows = rows.query(params![tx.1, publication]).map_err(failed)?;
         let mut seen = std::collections::BTreeSet::new();
         while let Some(row) = rows.next().map_err(failed)? {
-            if !seen.insert(row.get::<_,String>(0).map_err(failed)?) { return Err(StorageError::ScopeChanged); }
-            let metadata = row.get::<_,Option<String>>(1).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
-            let slots = row.get::<_,Option<String>>(2).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
-            let presentation = row.get::<_,Option<String>>(3).map_err(failed)?.ok_or(StorageError::HistoryRetentionBounds)?;
-            crate::storage::proof_codec::verify_presentation_references(&row.get::<_,String>(0).map_err(failed)?, &metadata, &slots, &presentation, &manifest)?;
+            if !seen.insert(row.get::<_, String>(0).map_err(failed)?) {
+                return Err(StorageError::ScopeChanged);
+            }
+            let metadata = row
+                .get::<_, Option<String>>(1)
+                .map_err(failed)?
+                .ok_or(StorageError::HistoryRetentionBounds)?;
+            let slots = row
+                .get::<_, Option<String>>(2)
+                .map_err(failed)?
+                .ok_or(StorageError::HistoryRetentionBounds)?;
+            let presentation = row
+                .get::<_, Option<String>>(3)
+                .map_err(failed)?
+                .ok_or(StorageError::HistoryRetentionBounds)?;
+            crate::storage::proof_codec::verify_presentation_references(
+                &row.get::<_, String>(0).map_err(failed)?,
+                &metadata,
+                &slots,
+                &presentation,
+                &manifest,
+            )?;
             crate::storage::proof_codec::resolve_presentation(&presentation, &contexts)?;
         }
         after = digest;

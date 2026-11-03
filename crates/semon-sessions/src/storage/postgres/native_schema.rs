@@ -624,7 +624,10 @@ fn contract_hash() -> Vec<u8> {
     }
     hash.update(native_keys::MATCH_BODY);
     hash.update(native_keys::DIGEST_BODY);
-    for body in super::super::native_usage_identity::contract().into_iter().chain(super::super::presentation_contexts::contract()) {
+    for body in super::super::native_usage_identity::contract()
+        .into_iter()
+        .chain(super::super::presentation_contexts::contract())
+    {
         hash.update((body.len() as u64).to_be_bytes());
         hash.update(body.as_bytes());
     }
@@ -849,16 +852,28 @@ mod tests {
             tx.driver.execute("INSERT INTO semon_pg_native_selected_contexts(namespace,publication,digest,entry) VALUES($1,$2,$3,$4)", &[&namespace.as_str().as_bytes(), &b"publication".as_slice(), &b"over".as_slice(), &oversized]).map_err(sqlstate::error)?;
             Ok(())
         }).is_err());
-        assert!(pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
-            tx.driver.execute("UPDATE semon_pg_native_selected_contexts SET entry=$1", &[&entry]).map_err(sqlstate::error)?;
-            Ok(())
-        }).is_err());
+        assert!(
+            pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+                tx.driver
+                    .execute(
+                        "UPDATE semon_pg_native_selected_contexts SET entry=$1",
+                        &[&entry],
+                    )
+                    .map_err(sqlstate::error)?;
+                Ok(())
+            })
+            .is_err()
+        );
         pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            let rows = tx.driver.query("SELECT entry FROM semon_pg_native_selected_contexts", &[]).map_err(sqlstate::error)?;
+            let rows = tx
+                .driver
+                .query("SELECT entry FROM semon_pg_native_selected_contexts", &[])
+                .map_err(sqlstate::error)?;
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].get::<_,Vec<u8>>(0), entry);
+            assert_eq!(rows[0].get::<_, Vec<u8>>(0), entry);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
     }
 
     #[test]

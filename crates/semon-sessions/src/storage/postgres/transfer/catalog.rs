@@ -17,7 +17,10 @@ fn spec(kind: CatalogRowKind) -> (&'static str, &'static str) {
             "semon_pg_native_selected_roots",
             "publication,base,manifest,digest",
         ),
-        PresentationContext => ("semon_pg_native_selected_contexts", "publication,digest,entry"),
+        PresentationContext => (
+            "semon_pg_native_selected_contexts",
+            "publication,digest,entry",
+        ),
         ProofGeneration => (
             "semon_pg_native_selected_generations",
             "id,session_key,publication,proof,admission,stream,metadata,query_recipe,slots,prefix",
@@ -137,7 +140,9 @@ fn verify_authority(
             let metadata = decode(row.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)?;
             let slots = decode(row.get::<_, Option<Vec<u8>>>(1).ok_or(StorageError::Busy)?)?;
             let manifest = decode(row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?)?;
-            *verification_bytes = verification_bytes.checked_sub(metadata.len() + slots.len() + manifest.len()).ok_or(StorageError::Busy)?;
+            *verification_bytes = verification_bytes
+                .checked_sub(metadata.len() + slots.len() + manifest.len())
+                .ok_or(StorageError::Busy)?;
             crate::storage::proof_codec::verify_presentation_references(
                 text(1)?,
                 &metadata,
@@ -231,32 +236,65 @@ pub(super) fn occupied(tx: &mut Inbox<'_, '_>) -> Result<bool, StorageError> {
 pub(super) fn verify_context_stores(tx: &mut Inbox<'_, '_>) -> Result<(), StorageError> {
     let ns = tx.0.namespace.as_str().as_bytes().to_vec();
     let orphan: bool = tx.0.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_selected_contexts c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_roots r WHERE r.namespace_digest=c.namespace_digest AND r.namespace=c.namespace AND r.publication=c.publication))", &[&ns]).map_err(sqlstate::error)?.get(0);
-    if orphan { return Err(StorageError::ScopeChanged); }
+    if orphan {
+        return Err(StorageError::ScopeChanged);
+    }
     let mut after = Vec::<u8>::new();
     loop {
         let roots = tx.0.driver.query("SELECT digest,publication,CASE WHEN octet_length(manifest)<=1048576 THEN manifest END FROM semon_pg_native_selected_roots WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND digest>$2 ORDER BY digest LIMIT 1", &[&ns,&after]).map_err(sqlstate::error)?;
-        let Some(root) = roots.first() else { break; };
+        let Some(root) = roots.first() else {
+            break;
+        };
         let publication = String::from_utf8(root.get(1)).map_err(|_| StorageError::ScopeChanged)?;
-        let manifest = String::from_utf8(root.get::<_,Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?).map_err(|_| StorageError::ScopeChanged)?;
+        let manifest = String::from_utf8(
+            root.get::<_, Option<Vec<u8>>>(2)
+                .ok_or(StorageError::Busy)?,
+        )
+        .map_err(|_| StorageError::ScopeChanged)?;
         let decoded = crate::storage::proof_codec::decode_presentation_manifest(&manifest)?;
         let sizes = tx.0.driver.query_one("SELECT COALESCE(sum(octet_length(p.metadata)),0)::bigint,COALESCE(max(greatest(octet_length(g.metadata),octet_length(g.slots))),0) FROM semon_pg_native_selected_presentations p JOIN semon_pg_native_selected_generations g USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.publication=$2", &[&ns,&publication.as_bytes()]).map_err(sqlstate::error)?;
         let row_bytes: i64 = sizes.get(0);
-        if sizes.get::<_,i32>(1) > 1048576 { return Err(StorageError::ScopeChanged); }
-        let contexts = super::super::presentation_contexts::load(tx.0, &publication, &decoded, |bytes| {
-            if usize::try_from(row_bytes).ok().and_then(|rows| rows.checked_add(bytes)).is_none_or(|total| total > 8 * 1048576) { return Err(StorageError::HistoryRetentionBounds); }
-            Ok(())
-        })?;
+        if sizes.get::<_, i32>(1) > 1048576 {
+            return Err(StorageError::ScopeChanged);
+        }
+        let contexts =
+            super::super::presentation_contexts::load(tx.0, &publication, &decoded, |bytes| {
+                if usize::try_from(row_bytes)
+                    .ok()
+                    .and_then(|rows| rows.checked_add(bytes))
+                    .is_none_or(|total| total > 8 * 1048576)
+                {
+                    return Err(StorageError::HistoryRetentionBounds);
+                }
+                Ok(())
+            })?;
         let mut row_after = Vec::<u8>::new();
         let mut id_after = Vec::<u8>::new();
         let mut seen = std::collections::BTreeSet::new();
         loop {
             tx.0.check()?;
             let rows = tx.0.driver.query("SELECT g.session_key,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,CASE WHEN octet_length(p.metadata)<=8388608 THEN p.metadata END,g.id FROM semon_pg_native_selected_generations g JOIN semon_pg_native_selected_presentations p USING(namespace_digest,namespace,id,key_digest,session_key) WHERE g.namespace_digest=sha256($1::bytea) AND g.namespace=$1 AND g.publication=$2 AND (g.session_key,g.id)>($3,$4) ORDER BY g.session_key,g.id LIMIT 1", &[&ns,&publication.as_bytes(),&row_after,&id_after]).map_err(sqlstate::error)?;
-            let Some(row) = rows.first() else { break; };
-            let text = |i| String::from_utf8(row.get::<_,Option<Vec<u8>>>(i).ok_or(StorageError::HistoryRetentionBounds)?).map_err(|_| StorageError::ScopeChanged);
+            let Some(row) = rows.first() else {
+                break;
+            };
+            let text = |i| {
+                String::from_utf8(
+                    row.get::<_, Option<Vec<u8>>>(i)
+                        .ok_or(StorageError::HistoryRetentionBounds)?,
+                )
+                .map_err(|_| StorageError::ScopeChanged)
+            };
             let key = text(0)?;
-            if !seen.insert(key.clone()) { return Err(StorageError::ScopeChanged); }
-            crate::storage::proof_codec::verify_presentation_references(&key, &text(1)?, &text(2)?, &text(3)?, &manifest)?;
+            if !seen.insert(key.clone()) {
+                return Err(StorageError::ScopeChanged);
+            }
+            crate::storage::proof_codec::verify_presentation_references(
+                &key,
+                &text(1)?,
+                &text(2)?,
+                &text(3)?,
+                &manifest,
+            )?;
             crate::storage::proof_codec::resolve_presentation(&text(3)?, &contexts)?;
             row_after = row.get(0);
             id_after = row.get(4);
@@ -1069,7 +1107,8 @@ mod tests {
             Ok((row.get::<_, Vec<u8>>(0), row.get::<_, Vec<u8>>(1), row.get::<_, Vec<u8>>(2)))
         }).unwrap();
         for case in ["missing", "extra", "changed", "noncanonical", "retargeted"] {
-            let mut entry: (String, String, serde_json::Value) = serde_json::from_slice(&original.2).unwrap();
+            let mut entry: (String, String, serde_json::Value) =
+                serde_json::from_slice(&original.2).unwrap();
             entry.1.push_str("-corrupt");
             let mut changed = serde_json::to_vec(&entry).unwrap();
             if case == "noncanonical" {
@@ -1091,7 +1130,11 @@ mod tests {
                 }
                 Ok(())
             }).unwrap();
-            let result = config.transfer_inbox().admit_catalog_from(&source.transfer_inbox(), manifest, options);
+            let result = config.transfer_inbox().admit_catalog_from(
+                &source.transfer_inbox(),
+                manifest,
+                options,
+            );
             let published = pool.transaction(&config.namespace, TxnKind::Transfer, control, |tx| {
                 let ns = config.namespace.as_str().as_bytes();
                 if case != "missing" {
@@ -1105,8 +1148,15 @@ mod tests {
                 let grants: i64 = tx.driver.query_one("SELECT count(*) FROM semon_pg_native_meta WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND key>='native_transfer_v1:catalog-owner:'::bytea AND key<'native_transfer_v1:catalog-owner;'::bytea", &[&ns]).map_err(sqlstate::error)?.get(0);
                 Ok((head, operations, grants))
             }).unwrap();
-            assert!(matches!(result, Err(StorageError::ScopeChanged)), "{case}: {result:?}");
-            assert_eq!(published, (None, 0, 0), "{case} must not publish a head, operation or import grant");
+            assert!(
+                matches!(result, Err(StorageError::ScopeChanged)),
+                "{case}: {result:?}"
+            );
+            assert_eq!(
+                published,
+                (None, 0, 0),
+                "{case} must not publish a head, operation or import grant"
+            );
         }
     }
 
@@ -1461,7 +1511,15 @@ mod tests {
             let reader = crate::storage::NativeReaderBinding::Admitted(config.clone());
             let db = reader.connection().unwrap();
             let mut statement = db.prepare("SELECT publication,digest,entry FROM storage_proof_presentation_contexts WHERE namespace=semon_namespace() ORDER BY publication,digest").unwrap();
-            let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))).unwrap();
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap();
             rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
         };
         let original_contexts = sqlite_contexts(&source);
@@ -1651,12 +1709,7 @@ mod tests {
             Ok(())
         }).unwrap();
         context_admission_corruption_refusals(
-            &config,
-            &pool,
-            &control,
-            &source,
-            &manifest,
-            &options,
+            &config, &pool, &control, &source, &manifest, &options,
         );
         search_admission_corruption_refusals(
             &config,

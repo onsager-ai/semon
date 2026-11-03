@@ -515,10 +515,13 @@ mod tests {
     #[test]
     fn shared_context_boundary_page_is_atomic_and_transfers_whole() {
         use crate::storage::{proof_codec, transfer::CatalogRowKind};
-        let root = std::env::temp_dir().join(format!("semon-context-boundary-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("semon-context-boundary-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let config = StoreConfig {
-            backend: StoreBackend::Sqlite { database: root.join("current.sqlite3") },
+            backend: StoreBackend::Sqlite {
+                database: root.join("current.sqlite3"),
+            },
             namespace: LogicalSourceNamespace::new("transfer225").unwrap(),
             expected_stream_epoch: Some("a".repeat(64)),
         };
@@ -535,12 +538,22 @@ mod tests {
         let text = serde_json::to_string(&tuple).unwrap();
         assert_eq!(text.len(), proof_codec::PRESENTATION_CONTEXT_MAX);
         let record = |text: String| transfer::TransferRecord::CatalogRow {
-            generation: "f".repeat(64), kind: CatalogRowKind::PresentationContext,
-            values: vec![serde_json::json!("f".repeat(64)), serde_json::json!(proof_codec::digest(text.as_bytes())), serde_json::json!(text)],
+            generation: "f".repeat(64),
+            kind: CatalogRowKind::PresentationContext,
+            values: vec![
+                serde_json::json!("f".repeat(64)),
+                serde_json::json!(proof_codec::digest(text.as_bytes())),
+                serde_json::json!(text),
+            ],
         };
-        assert_eq!(serde_json::to_vec(&record(String::new())).unwrap().len(), 273);
+        assert_eq!(
+            serde_json::to_vec(&record(String::new())).unwrap().len(),
+            273
+        );
         let source = StoreConfig {
-            backend: StoreBackend::Sqlite { database: root.join("source.sqlite3") },
+            backend: StoreBackend::Sqlite {
+                database: root.join("source.sqlite3"),
+            },
             ..config.clone()
         };
         source.create_native_store().unwrap();
@@ -549,24 +562,32 @@ mod tests {
             let mut state = transfer::reported::start_capture(tx, &source, &[71; 32], 1, 7, None)?;
             transfer::catalog_rows::append(tx, &mut state, vec![record(text.clone())])?;
             assert_eq!(state.checkpoint.sequence, 1);
-            assert_eq!(state.native_key, Some(serde_json::to_string(&vec![
-                serde_json::json!("f".repeat(64)),
-                serde_json::json!(proof_codec::digest(text.as_bytes())),
-            ]).unwrap()));
+            assert_eq!(
+                state.native_key,
+                Some(
+                    serde_json::to_string(&vec![
+                        serde_json::json!("f".repeat(64)),
+                        serde_json::json!(proof_codec::digest(text.as_bytes())),
+                    ])
+                    .unwrap()
+                )
+            );
             transfer::reported::save_capture(tx, &state)?;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         transaction(&source, |tx| {
             let state = transfer::reported::capture_state(tx, &source, &[71; 32])?.unwrap();
             assert_eq!(state.checkpoint.sequence, 1);
             assert!(state.native_key.is_some());
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         let mut page = transfer::tests::page(&manifest, 1, [0; 32]);
         page.records = vec![record(text.clone())];
         page.seal().unwrap();
         let record_bytes = serde_json::to_vec(&page.records[0]).unwrap().len();
-        assert!(4096 + record_bytes + 1 <= transfer::MAX_PAGE_BYTES);
+        assert!(4096 + record_bytes < transfer::MAX_PAGE_BYTES);
         assert!(page.encoded().unwrap().len() - record_bytes < 4096);
         tuple.2.push('x');
         let oversized = serde_json::to_string(&tuple).unwrap();
@@ -574,11 +595,17 @@ mod tests {
         let mut refused = page.clone();
         refused.records = vec![record(oversized)];
         refused.seal().unwrap();
-        assert_eq!(inbox.stage_page(&manifest, &refused), Err(StorageError::HistoryRetentionBounds));
+        assert_eq!(
+            inbox.stage_page(&manifest, &refused),
+            Err(StorageError::HistoryRetentionBounds)
+        );
         assert_eq!(inbox.checkpoint(&manifest).unwrap(), initial);
         let accepted = inbox.stage_page(&manifest, &page).unwrap();
         assert_eq!(accepted.sequence, 1);
-        assert_eq!(inbox.staged_page(&manifest, 1).unwrap().encoded().unwrap(), page.encoded().unwrap());
+        assert_eq!(
+            inbox.staged_page(&manifest, 1).unwrap().encoded().unwrap(),
+            page.encoded().unwrap()
+        );
         transaction(&config, |tx| {
             let mut remaining = transfer::MAX_PAGE_BYTES - 4096 - record_bytes - 1;
             catalog::apply(tx, &page.records[0], &mut remaining)?;

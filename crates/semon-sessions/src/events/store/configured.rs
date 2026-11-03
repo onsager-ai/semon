@@ -14585,7 +14585,9 @@ mod tests {
                     crate::storage::proof_codec::PRESENTATION_CONTEXT_MAX,
                 );
                 assert_eq!(
-                    cache.record_semantic_batch(&batch, model.prepared()).unwrap(),
+                    cache
+                        .record_semantic_batch(&batch, model.prepared())
+                        .unwrap(),
                     Outcome::Written
                 );
                 let before = shared_state(&f);

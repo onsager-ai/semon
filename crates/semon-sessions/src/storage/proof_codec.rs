@@ -102,17 +102,29 @@ pub(crate) fn verify_presentation_references(
     let manifest = decode_presentation_manifest(manifest)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
-        || !manifest.entries.iter().any(|(k, digest)| k == key && *digest == entry)
+        || !manifest
+            .entries
+            .iter()
+            .any(|(k, digest)| k == key && *digest == entry)
     {
         return Err(StorageError::ScopeChanged);
     }
     let witness: Option<serde_json::Value> =
         serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
     if let Some(witness) = witness {
-        let context = witness["context"].as_object().ok_or(StorageError::ScopeChanged)?;
+        let context = witness["context"]
+            .as_object()
+            .ok_or(StorageError::ScopeChanged)?;
         for values in context.values() {
-            for reference in values.as_object().ok_or(StorageError::ScopeChanged)?.values() {
-                if !manifest.contexts.contains(reference.as_str().ok_or(StorageError::ScopeChanged)?) {
+            for reference in values
+                .as_object()
+                .ok_or(StorageError::ScopeChanged)?
+                .values()
+            {
+                if !manifest
+                    .contexts
+                    .contains(reference.as_str().ok_or(StorageError::ScopeChanged)?)
+                {
                     return Err(StorageError::ScopeChanged);
                 }
             }
@@ -143,9 +155,7 @@ pub(crate) fn verify_presentation_contexts(
     manifest: &PresentationManifest,
     contexts: &PresentationContexts,
 ) -> Result<(), StorageError> {
-    if manifest.contexts.len() != contexts.len()
-        || !manifest.contexts.iter().eq(contexts.keys())
-    {
+    if manifest.contexts.len() != contexts.len() || !manifest.contexts.iter().eq(contexts.keys()) {
         return Err(StorageError::ScopeChanged);
     }
     let mut bytes = if contexts.is_empty() { 2 } else { 1 };
@@ -788,7 +798,16 @@ mod tests {
         captured.contexts.remove(&reference);
         // A matching row entry alone does not make an incomplete store valid.
         let incomplete = presentation_manifest(&captured);
-        assert!(verify_presentation_entry(key, "metadata", "[]", text, (&incomplete, &captured.contexts)).is_err());
+        assert!(
+            verify_presentation_entry(
+                key,
+                "metadata",
+                "[]",
+                text,
+                (&incomplete, &captured.contexts)
+            )
+            .is_err()
+        );
         let mut inline: serde_json::Value = serde_json::from_str(text).unwrap();
         inline["context"]["relative"]
             .as_object_mut()
@@ -805,16 +824,25 @@ mod tests {
         assert!(verify_presentation_contexts(&manifest, &captured.contexts).is_ok());
         let (reference, entry) = captured.contexts.first_key_value().unwrap();
         let canonical = serde_json::to_string(entry).unwrap();
-        assert_eq!(decode_presentation_context(reference, &canonical).unwrap(), *entry);
+        assert_eq!(
+            decode_presentation_context(reference, &canonical).unwrap(),
+            *entry
+        );
         // Hashing noncanonical bytes must not make them an admissible record.
         let noncanonical = format!(" {canonical}");
-        assert!(decode_presentation_context(&digest(noncanonical.as_bytes()), &noncanonical).is_err());
+        assert!(
+            decode_presentation_context(&digest(noncanonical.as_bytes()), &noncanonical).is_err()
+        );
         assert!(decode_presentation_context(reference, &format!("{canonical} ")).is_err());
         let mut missing = captured.contexts.clone();
         missing.remove(reference);
         assert!(verify_presentation_contexts(&manifest, &missing).is_err());
         let mut extra = captured.contexts.clone();
-        let entry = ("relative".into(), "uncaptured".into(), serde_json::Value::Null);
+        let entry = (
+            "relative".into(),
+            "uncaptured".into(),
+            serde_json::Value::Null,
+        );
         let reference = digest(&serde_json::to_vec(&entry).unwrap());
         extra.insert(reference, entry);
         assert!(verify_presentation_contexts(&manifest, &extra).is_err());
@@ -830,7 +858,10 @@ mod tests {
         assert!(decode_presentation_context(&digest(text.as_bytes()), &text).is_ok());
         entry.2.push('x');
         let text = serde_json::to_string(&entry).unwrap();
-        assert_eq!(decode_presentation_context(&digest(text.as_bytes()), &text), Err(StorageError::HistoryRetentionBounds));
+        assert_eq!(
+            decode_presentation_context(&digest(text.as_bytes()), &text),
+            Err(StorageError::HistoryRetentionBounds)
+        );
     }
 
     #[test]
@@ -840,7 +871,10 @@ mod tests {
         context["turn"]["oversized"] = serde_json::json!("x".repeat(PRESENTATION_CONTEXT_MAX));
         witness.context = serde_json::from_value(context).unwrap();
         let mut capture = PresentationCapture::default();
-        assert_eq!(capture.push("key".into(), witness), Err(StorageError::HistoryRetentionBounds));
+        assert_eq!(
+            capture.push("key".into(), witness),
+            Err(StorageError::HistoryRetentionBounds)
+        );
         assert!(capture.finish().rows.is_empty());
     }
 
