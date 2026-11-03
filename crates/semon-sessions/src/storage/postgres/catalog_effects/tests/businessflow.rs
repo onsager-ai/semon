@@ -6261,7 +6261,30 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &store_at(&successor),
         )
         .unwrap();
-    assert_eq!(successor_list["total"].as_u64(), Some(total - 1));
+    // Published all-history Query includes withdrawal custody (d3c19b7e;
+    // docs/design/retained-native-projections.md, Original withdrawal custody).
+    // Withdrawal removes Current membership, not the previously observed owner.
+    assert_eq!(successor_list["total"].as_u64(), Some(total));
+    assert!(successor_list["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["id"] == "bulk169-001"));
+    super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &successor,
+        |snapshot| {
+            assert!(snapshot.catalog("bulk169-001", false)?.is_none());
+            assert!(snapshot.catalog("bulk169-001", true)?.is_some());
+            let owner = snapshot.owner("bulk169-001")?.unwrap();
+            assert!(owner.original);
+            assert!(!owner.has_current);
+            Ok(())
+        },
+    )
+    .unwrap();
     // (d) Restart: reopened stores read the newest Current and the old
     // selected bodies exactly as before.
     drop(store);
@@ -6314,11 +6337,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         started.elapsed() < Duration::from_secs(8),
         "cold first page"
     );
-    assert_eq!(first["total"].as_u64(), Some(total - 1));
+    assert_eq!(first["total"].as_u64(), Some(total));
     for (at, expected) in [
         (&bulk_generation, total),
         (&partial_generation, total),
-        (&withdrawn, total - 1),
+        (&withdrawn, total),
     ] {
         let listed = facts_query
             .call_bound_catalog_at(

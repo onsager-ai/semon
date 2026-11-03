@@ -50,9 +50,9 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         all: true,
         ..Default::default()
     };
-    let old_path = data.rows[0].sources[0].path.clone();
-    let live_path = options.claude_home.join("projects/project/resume.jsonl");
-    writeln!(fs::File::create(&live_path).unwrap(), "{}",
+    let live_path = data.rows[0].sources[0].path.clone();
+    let old_path = options.claude_home.join("projects/project/resume.jsonl");
+    writeln!(fs::File::create(&old_path).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":"resume","session_id":"one","uuid":"resume-user","timestamp":"2026-10-01T00:00:02Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized resumed source"}})).unwrap();
     options
         .source
@@ -105,7 +105,7 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
     let writer =
         crate::SessionSourceWrite::begin(&options, &input, Some(&"a".repeat(32)), from).unwrap();
     writeln!(fs::OpenOptions::new().append(true).open(&live_path).unwrap(), "{}",
-        serde_json::json!({"type":"user","sessionId":"resume","session_id":"one","uuid":"continued-user","parentUuid":"resume-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized verified continuation"}})).unwrap();
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"continued-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized verified continuation"}})).unwrap();
     writer
         .complete(fs::metadata(&live_path).unwrap().len())
         .unwrap();
@@ -118,7 +118,11 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         .ingest(&format!("{:064x}", 128), &live_path, "claude")
         .unwrap();
     assert!(!receipt.replayed);
-    let current = cache.stored_ledger_batch(&[path]).unwrap().remove(0).unwrap();
+    let current = cache
+        .stored_ledger_batch(&[path])
+        .unwrap()
+        .remove(0)
+        .unwrap();
     let continuation = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
         &live_path,
         &prior,
