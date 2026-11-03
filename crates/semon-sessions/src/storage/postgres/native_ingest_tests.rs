@@ -163,7 +163,12 @@ fn pg_native126_real_event_cache_sqlite_oracle_restart_and_exact_replay() {
         let probe = tests::ns("native133-probe");
         let mut pg = EventCache::open_pg_native(pool.clone(), probe, control.clone()).unwrap();
         native_bundle::inject_failure(None);
+        let started = std::time::Instant::now();
         let receipts = pg.ingest_initial_batch(&requests).unwrap();
+        eprintln!(
+            "PG_INGEST_TIMING fixture=initial_batch_3 elapsed_us={}",
+            started.elapsed().as_micros()
+        );
         let boundaries = native_bundle::measured_boundaries();
         assert!(boundaries > 3, "must measure real native family effects");
         assert_eq!(
@@ -496,7 +501,12 @@ fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
             .unwrap();
     native_core::reset_usage_batch_statements();
     tree_writer::reset_usage_model_batch_counts();
+    let started = std::time::Instant::now();
     let actual = pg.ingest(&operation, &path, "claude").unwrap();
+    eprintln!(
+        "PG_INGEST_TIMING fixture=usage_batch_130 elapsed_us={}",
+        started.elapsed().as_micros()
+    );
     assert_eq!(actual.consumed_bytes, receipt.consumed_bytes);
     assert_eq!(native_core::usage_batch_statements(), [3, 3, 3]);
     assert_eq!(tree_writer::usage_model_batch_counts(), [130, 3]);
