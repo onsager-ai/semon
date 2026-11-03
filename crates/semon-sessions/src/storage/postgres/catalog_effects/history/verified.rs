@@ -2,7 +2,9 @@
 use super::*;
 use crate::storage::{
     QueryRuntimeBinding,
-    catalog::{HistoryCompositionSnapshot, VerifiedHistoryComposition, VerifiedHistoryCompositionStore},
+    catalog::{
+        HistoryCompositionSnapshot, VerifiedHistoryComposition, VerifiedHistoryCompositionStore,
+    },
     selected::PresentationObservations,
 };
 
@@ -15,7 +17,10 @@ pub(in crate::storage::postgres::catalog_effects) struct ComposedGrant {
 }
 
 fn grant_key(owner: &str, metadata: &[u8]) -> String {
-    format!("catalog-history-composed-observation:{owner}:{:x}", Sha256::digest(metadata))
+    format!(
+        "catalog-history-composed-observation:{owner}:{:x}",
+        Sha256::digest(metadata)
+    )
 }
 
 /// The physical owner and exact metadata select this grant. Every predecessor
@@ -33,7 +38,8 @@ pub(in crate::storage::postgres::catalog_effects) fn read_grant(
         return Ok(None);
     };
     budget.charge(bytes.len()).map_err(|_| StorageError::Busy)?;
-    let grant: ComposedGrant = serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
+    let grant: ComposedGrant =
+        serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
     let acknowledged: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(), &owner.as_bytes()]).map_err(sqlstate::error)?.get(0);
     if !acknowledged
         || grant.admission != binding.admission
@@ -44,9 +50,18 @@ pub(in crate::storage::postgres::catalog_effects) fn read_grant(
     {
         return Err(StorageError::ScopeChanged);
     }
-    let source_runtime = grant.capture.source_runtime.as_deref().ok_or(StorageError::ScopeChanged)?;
+    let source_runtime = grant
+        .capture
+        .source_runtime
+        .as_deref()
+        .ok_or(StorageError::ScopeChanged)?;
     if grant.capture.runtime.as_deref()
-        != Some(binding.witness(source_runtime).map_err(|_| StorageError::ScopeChanged)?.as_str())
+        != Some(
+            binding
+                .witness(source_runtime)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .as_str(),
+        )
     {
         return Err(StorageError::ScopeChanged);
     }
@@ -59,7 +74,9 @@ pub(in crate::storage::postgres::catalog_effects) fn read_grant(
 }
 
 impl ComposedGrant {
-    pub(in crate::storage::postgres::catalog_effects) fn into_capture(self) -> PresentationObservations {
+    pub(in crate::storage::postgres::catalog_effects) fn into_capture(
+        self,
+    ) -> PresentationObservations {
         self.capture
     }
 }
@@ -79,8 +96,12 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         } else {
             Vec::new()
         };
-        budget.charge(previous.as_ref().map_or(0, String::len)
-            + recipe_slots.iter().map(String::len).sum::<usize>()).map_err(|_| StorageError::Busy)?;
+        budget
+            .charge(
+                previous.as_ref().map_or(0, String::len)
+                    + recipe_slots.iter().map(String::len).sum::<usize>(),
+            )
+            .map_err(|_| StorageError::Busy)?;
         let mut snapshot = HistoryCompositionSnapshot {
             key: current.key.clone(),
             original: self.original(&current.key)?,
@@ -101,18 +122,24 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         snapshot.current_cwds = if current.sources.is_empty() {
             Some(Default::default())
         } else {
-            super::super::super::native_reader::runtime_source_cwds_if_current(&mut tx, &current.sources)?
+            super::super::super::native_reader::runtime_source_cwds_if_current(
+                &mut tx,
+                &current.sources,
+            )?
         };
         let binding = super::super::super::model_cache::binding(&mut tx)?;
         let Some(metadata) = snapshot.previous.as_ref() else {
             return Ok(snapshot);
         };
-        let row: CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        let row: CatalogRow =
+            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         if row.sources.len() > 64 {
             return Err(StorageError::Busy);
         }
         let receipts = if let Some((owner, _)) = owner {
-            if let Some(grant) = read_grant(&mut tx, &binding, &owner, metadata.as_bytes(), &row, budget)? {
+            if let Some(grant) =
+                read_grant(&mut tx, &binding, &owner, metadata.as_bytes(), &row, budget)?
+            {
                 grant.receipts
             } else {
                 Vec::new()
@@ -130,22 +157,30 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             }
         };
         for receipt in &receipts {
-            snapshot.receipts.extend(observations::composition_receipt(&mut tx, &binding, &row, receipt, budget)?);
+            snapshot.receipts.extend(observations::composition_receipt(
+                &mut tx, &binding, &row, receipt, budget,
+            )?);
         }
         drop(tx);
         for source in &row.sources {
             if !current.sources.iter().any(|now| now.path == source.path)
                 && self.relocated(source, &current.sources)?
             {
-                snapshot.relocated.insert(source.path.to_string_lossy().into_owned());
+                snapshot
+                    .relocated
+                    .insert(source.path.to_string_lossy().into_owned());
             }
         }
         Ok(snapshot)
     }
 
-    fn composed_verified(&self, composition: VerifiedHistoryComposition<'_>) -> Result<(), StorageError> {
+    fn composed_verified(
+        &self,
+        composition: VerifiedHistoryComposition<'_>,
+    ) -> Result<(), StorageError> {
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
-        let row: CatalogRow = serde_json::from_str(composition.metadata).map_err(|_| StorageError::ScopeChanged)?;
+        let row: CatalogRow =
+            serde_json::from_str(composition.metadata).map_err(|_| StorageError::ScopeChanged)?;
         let snapshot = self.composition_snapshot(&row, &mut budget)?;
         let mut tx = self.effects.tx.borrow_mut();
         let binding = super::super::super::model_cache::binding(&mut tx)?;
@@ -156,11 +191,17 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             }
             receipts.push((binding.admission, binding.stream_epoch.clone(), id.clone()));
         }
-        let capture: PresentationObservations = serde_json::from_str(composition.capture).map_err(|_| StorageError::ScopeChanged)?;
+        let capture: PresentationObservations =
+            serde_json::from_str(composition.capture).map_err(|_| StorageError::ScopeChanged)?;
         if !capture.is_runtime_capture_for(&row) || receipts.is_empty() || receipts.len() > 64 {
             return Err(StorageError::ScopeChanged);
         }
-        let grant = ComposedGrant { admission: binding.admission, stream: binding.stream_epoch, capture, receipts };
+        let grant = ComposedGrant {
+            admission: binding.admission,
+            stream: binding.stream_epoch,
+            capture,
+            receipts,
+        };
         let key = grant_key(self.effects.generation, composition.metadata.as_bytes());
         let value = encoded(&grant)?;
         if value.len() > MAX {
@@ -171,6 +212,13 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         drop(tx);
-        self.composed(composition.key, composition.generation, composition.sources, composition.metadata, composition.texts, composition.incomplete)
+        self.composed(
+            composition.key,
+            composition.generation,
+            composition.sources,
+            composition.metadata,
+            composition.texts,
+            composition.incomplete,
+        )
     }
 }

@@ -94,7 +94,11 @@ impl Snapshot<'_, '_> {
             )
             .map_err(failed)?
             {
-                return Ok(Some((current, Some(grant.into_capture()), Origin::Composed)));
+                return Ok(Some((
+                    current,
+                    Some(grant.into_capture()),
+                    Origin::Composed,
+                )));
             }
             let key = observations::history_key(&history_owner, metadata);
             if let Some(reference) =

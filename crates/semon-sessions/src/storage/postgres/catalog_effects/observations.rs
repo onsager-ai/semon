@@ -171,7 +171,10 @@ pub(super) fn composition_receipt(
         if row.key != previous.key
             || row.harness != previous.harness
             || row.lifecycle != crate::model::summary::CatalogLifecycle::Current
-            || row.sources.iter().any(|source| !previous.sources.contains(source))
+            || row
+                .sources
+                .iter()
+                .any(|source| !previous.sources.contains(source))
         {
             continue;
         }
@@ -212,12 +215,18 @@ pub(super) fn composition_receipt(
         if observations.runtime_cwd_fingerprint_for(&row.sources) != Some(fingerprint.as_str()) {
             return Err(StorageError::ScopeChanged);
         }
-        let texts = slots.iter().map(serde_json::to_string).collect::<Result<Vec<_>, _>>()
+        let texts = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()
             .map_err(|_| StorageError::ScopeChanged)?;
-        budget.charge(texts.iter().map(String::len).sum()).map_err(|_| StorageError::Busy)?;
+        budget
+            .charge(texts.iter().map(String::len).sum())
+            .map_err(|_| StorageError::Busy)?;
         verified.push(catalog::VerifiedHistoryReceipt::verified(
             receipt.2.clone(),
-            crate::retention::source_generation(&row.sources).map_err(|_| StorageError::ScopeChanged)?,
+            crate::retention::source_generation(&row.sources)
+                .map_err(|_| StorageError::ScopeChanged)?,
             row.sources,
             texts,
             fingerprint,

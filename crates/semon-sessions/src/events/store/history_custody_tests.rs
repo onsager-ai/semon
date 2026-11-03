@@ -8,7 +8,17 @@ mod current_history_custody {
         crate::storage::catalog::preserve_original(&crate::storage::sqlite::history::OriginalHistory::admitted(tx, source).map_err(|_| rusqlite::Error::InvalidQuery)?, old)
     }
     fn publish(tx: &Transaction<'_>, publication: &Publication<'_>, source: &AdmittedSource) -> rusqlite::Result<()> {
-        crate::storage::catalog::publish_history_rows(&crate::storage::sqlite::history::OriginalHistory::admitted(tx, source).map_err(|_| rusqlite::Error::InvalidQuery)?, publication.rows, publication.transcripts)
+        let store = crate::storage::sqlite::history::OriginalHistory::admitted(tx, source)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let (plan, captures) = crate::storage::catalog::prepare_history_composition(
+            &store,
+            publication.rows,
+            publication.transcripts,
+            publication.observations,
+            &mut budget,
+        )?;
+        crate::storage::catalog::apply_prepared_history_composition(&store, &plan, &captures)
     }
     fn encode(value: &impl serde::Serialize) -> rusqlite::Result<String> { serde_json::to_string(value).map_err(|_| rusqlite::Error::InvalidQuery) }
     fn decode<T: serde::de::DeserializeOwned>(value: &str) -> rusqlite::Result<T> { serde_json::from_str(value).map_err(|_| rusqlite::Error::InvalidQuery) }

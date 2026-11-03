@@ -60,7 +60,7 @@ fn pg_withdrawal_preserves_current_and_older_original_custody() {
             crate::model::prepare_sources(&sqlite_options, &mut sqlite, &inputs, 1790812802000)
                 .unwrap();
         let (_, mut sqlite_generation) = sqlite.publish_partial_catalog_fenced(&prepared).unwrap();
-        let (mut generation, rows) =
+        let (mut generation, rows, _) =
             bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
         let config = options
             .source
@@ -265,7 +265,7 @@ fn pg_native_history_observation_follows_original_custody_and_refuses_catalog_on
         all: true,
         ..Default::default()
     };
-    let (original_generation, rows) =
+    let (original_generation, rows, _) =
         bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
     let config = options
         .source
@@ -607,7 +607,7 @@ fn pg_catalog127_retained_details_follow_the_original_trace_family_and_later_car
         all: true,
         ..Default::default()
     };
-    let (original_generation, rows) =
+    let (original_generation, rows, _) =
         bind_custody_fixture(&pool, &namespace, &options, &data.rows, &data.projections);
     let original = &rows[0];
     let original_details = snapshot::with_generation(

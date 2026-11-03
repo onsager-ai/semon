@@ -703,7 +703,11 @@ fn bind_custody_fixture(
     options: &Options,
     rows: &[CatalogRow],
     projections: &[crate::slot_projection::Projection],
-) -> (String, Vec<CatalogRow>, crate::storage::selected::PresentationObservations) {
+) -> (
+    String,
+    Vec<CatalogRow>,
+    crate::storage::selected::PresentationObservations,
+) {
     use crate::storage::native_events::NativeEventStore;
     let control = PgCancellation::default();
     let source = crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap();
@@ -781,7 +785,13 @@ fn pg_catalog127_missing_raw_composite_shared_oracle_and_namespace_owners() {
     let mut generations = Vec::new();
     let data = build_oracle_with_binding(false, true, |options, rows, projections| {
         for name in ["history127-a", "history127-b"] {
-            generations.push(bind_custody_fixture(&pool, &ns(name), options, rows, projections));
+            generations.push(bind_custody_fixture(
+                &pool,
+                &ns(name),
+                options,
+                rows,
+                projections,
+            ));
         }
     });
     let mut missing = data.rows.clone();

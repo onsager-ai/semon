@@ -469,6 +469,21 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
                     )
                     .map_err(io::Error::other)
                     .inspect_err(|error| diagnose("captured_observation_binding", error))?;
+                if let Some(cwds) = super::proof_generations::retained_runtime_source_cwds(
+                    self.0,
+                    &binding,
+                    row,
+                    owner,
+                    &observations,
+                )
+                .map_err(io::Error::other)?
+                {
+                    let scoped = self
+                        .3
+                        .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                        .scope(row, &cwds)?;
+                    return binding.witness(&scoped).map(Some);
+                }
                 let captured = observations
                     .runtime_for(row)
                     .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))

@@ -2491,6 +2491,69 @@ pub(crate) fn observation_binding_with_observations(
     Ok((original_binding, observations))
 }
 
+/// Recover retained CWD inputs only from exact live ledgers or authenticated
+/// local receipts. The resulting set must match the selected owner's capture.
+pub(crate) fn retained_runtime_source_cwds(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    owner: CatalogObservationOwner,
+    observations: &crate::storage::selected::PresentationObservations,
+) -> Result<Option<std::collections::BTreeSet<String>>, StorageError> {
+    let metadata = serde_json::to_string(selected).map_err(|_| StorageError::Unavailable)?;
+    let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata.len());
+    let receipts = verified_publication_receipts(
+        db,
+        PublicationReceiptRequest {
+            namespace: current.namespace.as_str(),
+            session_key: &selected.key,
+            stream: &current.stream_epoch,
+            publication_admission: current.admission,
+            previous: selected,
+            exact_owner_metadata: &metadata,
+            kind: match owner {
+                CatalogObservationOwner::Catalog => PublicationReceiptRef::Current,
+                CatalogObservationOwner::History => PublicationReceiptRef::History,
+            },
+        },
+        &mut budget,
+    )?
+    .ok_or(StorageError::HistoryRetentionBounds)?;
+    let mut cwds = std::collections::BTreeSet::new();
+    for source in &selected.sources {
+        if let Some(current) = super::catalog::runtime_source_cwds_by_path_if_current(
+            db,
+            std::slice::from_ref(source),
+        )
+        .map_err(|_| StorageError::Unavailable)?
+        {
+            cwds.extend(current.into_values().flatten());
+            continue;
+        }
+        let mut saved = None;
+        for receipt in &receipts {
+            if receipt.sources.contains(source)
+                && let Some(cwd) = receipt.cwds.get(&source.path)
+            {
+                if saved.as_ref().is_some_and(|prior| prior != cwd) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                saved = Some(cwd.clone());
+            }
+        }
+        let Some(saved) = saved else {
+            return Ok(None);
+        };
+        cwds.extend(saved);
+    }
+    if observations.runtime_cwd_fingerprint_for(&selected.sources)
+        != Some(crate::native_evidence::runtime::cwd_fingerprint(&cwds).as_str())
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(Some(cwds))
+}
+
 fn observation_binding_for_owner(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
@@ -3478,7 +3541,10 @@ fn prepare_observation_update(
         return Err(StorageError::HistoryRetentionBounds.into());
     }
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
-    let mut normalized = repaired.clone();
+    // Match the reader's decoding of the exact persisted postimage, including
+    // JSON floating-point values produced by repricing.
+    let mut normalized: CatalogRow =
+        serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
     normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
     let normalized = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
     if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
