@@ -14,7 +14,7 @@ pub(crate) const METADATA_MAX: usize = 1_048_576;
 pub(crate) struct PresentationManifest {
     pub(crate) catalog_generation: String,
     pub(crate) entries: Vec<(String, String)>,
-    pub(crate) contexts: PresentationContexts,
+    pub(crate) contexts: std::collections::BTreeSet<String>,
     pub(crate) observations: Option<crate::storage::selected::PresentationObservations>,
 }
 
@@ -39,9 +39,9 @@ pub(crate) fn verify_presentation_entry(
     metadata: &str,
     slots: &str,
     text: &str,
-    manifest: &str,
+    saved: (&str, &PresentationContexts),
 ) -> Result<(), StorageError> {
-    verify_presentation_manifest_entry(key, metadata, slots, text, manifest).map(|_| ())
+    verify_presentation_manifest_entry(key, metadata, slots, text, saved).map(|_| ())
 }
 
 pub(crate) fn verify_presentation_observations(
@@ -50,11 +50,11 @@ pub(crate) fn verify_presentation_observations(
     slots: &str,
     text: &str,
     base: &str,
-    manifest: &str,
+    saved: (&str, &PresentationContexts),
     expected_digest: &str,
 ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
-    verify_presentation_digest(base, manifest, expected_digest)?;
-    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, manifest)?.observations)
+    verify_presentation_digest(base, saved.0, expected_digest)?;
+    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, saved)?.observations)
 }
 
 fn verify_presentation_manifest_entry(
@@ -62,9 +62,10 @@ fn verify_presentation_manifest_entry(
     metadata: &str,
     slots: &str,
     text: &str,
-    manifest: &str,
+    saved: (&str, &PresentationContexts),
 ) -> Result<PresentationManifest, StorageError> {
-    let manifest = decode_presentation_manifest(manifest)?;
+    let manifest = decode_presentation_manifest(saved.0)?;
+    verify_presentation_contexts(&manifest, saved.1)?;
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
         || !manifest
@@ -74,8 +75,47 @@ fn verify_presentation_manifest_entry(
     {
         return Err(StorageError::ScopeChanged);
     }
-    resolve_presentation(text, &manifest.contexts)?;
+    resolve_presentation(text, saved.1)?;
     Ok(manifest)
+}
+
+pub(crate) fn decode_presentation_context(
+    reference: &str,
+    text: &str,
+) -> Result<(String, String, serde_json::Value), StorageError> {
+    if text.len() > METADATA_MAX {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    if digest(text.as_bytes()) != reference {
+        return Err(StorageError::ScopeChanged);
+    }
+    let entry = serde_json::from_str(text).map_err(|_| StorageError::ScopeChanged)?;
+    // One canonical encoding binds the exact family, lookup key and saved value.
+    if serde_json::to_string(&entry).map_err(|_| StorageError::Unavailable)? != text {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(entry)
+}
+
+pub(crate) fn verify_presentation_contexts(
+    manifest: &PresentationManifest,
+    contexts: &PresentationContexts,
+) -> Result<(), StorageError> {
+    if manifest.contexts.len() != contexts.len()
+        || !manifest.contexts.iter().eq(contexts.keys())
+    {
+        return Err(StorageError::ScopeChanged);
+    }
+    let mut bytes = 0;
+    for (reference, entry) in contexts {
+        let text = serde_json::to_string(entry).map_err(|_| StorageError::Unavailable)?;
+        decode_presentation_context(reference, &text)?;
+        bytes += reference.len() + 4 + text.len();
+        if bytes > 8 * METADATA_MAX {
+            return Err(StorageError::HistoryRetentionBounds);
+        }
+    }
+    Ok(())
 }
 
 /// Typed lookup identity includes the exact saved key and value, including null.
@@ -103,12 +143,17 @@ impl PresentationCapture {
         witness: crate::storage::selected::PresentationWitness,
     ) -> Result<(), StorageError> {
         let mut witness = serde_json::to_value(witness).map_err(|_| StorageError::Unavailable)?;
-        let context = witness["context"].as_object_mut().ok_or(StorageError::Unavailable)?;
+        let context = witness["context"]
+            .as_object_mut()
+            .ok_or(StorageError::Unavailable)?;
         for (kind, values) in context {
             let values = values.as_object_mut().ok_or(StorageError::Unavailable)?;
             for (key, value) in values {
                 let entry = (kind.clone(), key.clone(), value.clone());
                 let encoded = serde_json::to_vec(&entry).map_err(|_| StorageError::Unavailable)?;
+                if encoded.len() > METADATA_MAX {
+                    return Err(StorageError::HistoryRetentionBounds);
+                }
                 let digest = digest(&encoded);
                 if let std::collections::btree_map::Entry::Vacant(slot) =
                     self.contexts.entry(digest.clone())
@@ -124,7 +169,11 @@ impl PresentationCapture {
         let text = serde_json::to_string(&witness).map_err(|_| StorageError::Unavailable)?;
         self.row_bytes += text.len();
         self.rows.push((key, text));
-        let store_bytes = if self.contexts.is_empty() { 2 } else { self.context_bytes + 1 };
+        let store_bytes = if self.contexts.is_empty() {
+            2
+        } else {
+            self.context_bytes + 1
+        };
         if self.row_bytes + store_bytes > 8 * 1048576 {
             return Err(StorageError::HistoryRetentionBounds);
         }
@@ -132,7 +181,10 @@ impl PresentationCapture {
     }
 
     pub(crate) fn finish(self) -> CapturedPresentations {
-        CapturedPresentations { rows: self.rows, contexts: self.contexts }
+        CapturedPresentations {
+            rows: self.rows,
+            contexts: self.contexts,
+        }
     }
 }
 
@@ -145,7 +197,9 @@ pub(crate) fn resolve_presentation(
     let mut witness: Option<serde_json::Value> =
         serde_json::from_str(text).map_err(|_| StorageError::Unavailable)?;
     if let Some(witness) = witness.as_mut() {
-        let context = witness["context"].as_object_mut().ok_or(StorageError::ScopeChanged)?;
+        let context = witness["context"]
+            .as_object_mut()
+            .ok_or(StorageError::ScopeChanged)?;
         for (kind, values) in context {
             let values = values.as_object_mut().ok_or(StorageError::ScopeChanged)?;
             for (key, value) in values {
@@ -543,10 +597,8 @@ mod tests {
         use serde_json::json;
         let key = serde_json::to_string(&("session",)).unwrap();
         let pair = serde_json::to_string(&("session", "turn")).unwrap();
-        let mut context = serde_json::to_value(
-            crate::storage::selected::CapturedContext::default(),
-        )
-        .unwrap();
+        let mut context =
+            serde_json::to_value(crate::storage::selected::CapturedContext::default()).unwrap();
         for (kind, lookup, value) in [
             ("details", pair.as_str(), json!([null, true])),
             ("relative", key.as_str(), json!(null)),
@@ -575,8 +627,12 @@ mod tests {
 
     fn presentation_capture() -> CapturedPresentations {
         let mut capture = PresentationCapture::default();
-        capture.push("first".into(), presentation_fixture()).unwrap();
-        capture.push("second".into(), presentation_fixture()).unwrap();
+        capture
+            .push("first".into(), presentation_fixture())
+            .unwrap();
+        capture
+            .push("second".into(), presentation_fixture())
+            .unwrap();
         capture.finish()
     }
 
@@ -587,7 +643,10 @@ mod tests {
                 .rows
                 .iter()
                 .map(|(key, text)| {
-                    (key.clone(), presentation_entry("metadata", "[]", text).unwrap())
+                    (
+                        key.clone(),
+                        presentation_entry("metadata", "[]", text).unwrap(),
+                    )
                 })
                 .collect(),
             contexts: captured.contexts.clone(),
@@ -612,9 +671,15 @@ mod tests {
         }
         let context_bytes = serde_json::to_vec(&captured.contexts).unwrap().len();
         let mut capture = PresentationCapture::default();
-        capture.push("first".into(), presentation_fixture()).unwrap();
+        capture
+            .push("first".into(), presentation_fixture())
+            .unwrap();
         assert_eq!(capture.context_bytes + 1, context_bytes);
-        assert!(resolve_presentation("null", &captured.contexts).unwrap().is_none());
+        assert!(
+            resolve_presentation("null", &captured.contexts)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -651,21 +716,42 @@ mod tests {
         let manifest = presentation_manifest(&captured);
         let proof = presentation_digest("original receipt", &manifest).unwrap();
         let (key, text) = &captured.rows[0];
-        assert!(verify_presentation_observations(
-            key, "metadata", "[]", text, "original receipt", &manifest, &proof,
-        ).is_ok());
+        assert!(
+            verify_presentation_observations(
+                key,
+                "metadata",
+                "[]",
+                text,
+                "original receipt",
+                &manifest,
+                &proof,
+            )
+            .is_ok()
+        );
         let mut changed: serde_json::Value = serde_json::from_str(&manifest).unwrap();
         let reference = captured.contexts.keys().next().unwrap().clone();
         changed["contexts"][&reference][2] = serde_json::json!("changed");
-        assert!(verify_presentation_observations(
-            key, "metadata", "[]", text, "original receipt", &changed.to_string(), &proof,
-        ).is_err());
+        assert!(
+            verify_presentation_observations(
+                key,
+                "metadata",
+                "[]",
+                text,
+                "original receipt",
+                &changed.to_string(),
+                &proof,
+            )
+            .is_err()
+        );
         captured.contexts.remove(&reference);
         // A matching row entry alone does not make an incomplete store valid.
         let incomplete = presentation_manifest(&captured);
         assert!(verify_presentation_entry(key, "metadata", "[]", text, &incomplete).is_err());
         let mut inline: serde_json::Value = serde_json::from_str(text).unwrap();
-        inline["context"]["relative"].as_object_mut().unwrap().values_mut()
+        inline["context"]["relative"]
+            .as_object_mut()
+            .unwrap()
+            .values_mut()
             .for_each(|value| *value = serde_json::Value::Null);
         assert!(resolve_presentation(&inline.to_string(), &captured.contexts).is_err());
     }
