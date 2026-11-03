@@ -96,6 +96,28 @@ fn save(tx: &mut PgTxn<'_>, stage: &Stage, insert: bool) -> Result<(), StorageEr
     tx.check()
 }
 
+/// Only an exact removed claim of the current Publication stage can qualify
+/// a deferred withdrawal. Stale stages and ordinary publishers gain no authority.
+pub(super) fn deferred_withdrawal_stage(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    claim: i64,
+) -> Result<Option<(i64, i64)>, StorageError> {
+    let Some(stage) = load(tx, true)? else {
+        return Ok(None);
+    };
+    let revision: i64 = tx.driver.query_one(
+        "SELECT revision FROM semon_pg_source_state WHERE namespace_digest=sha256($1::bytea) AND namespace=$1",
+        &[&tx.namespace.as_str().as_bytes()],
+    ).map_err(sqlstate::error)?.get(0);
+    Ok((stage.phase == Phase::Publication
+        && stage.revision == revision
+        && stage.generation == model_cache::generation(tx)?
+        && stage.paths.iter().any(|p| p == path)
+        && stage.claims.iter().any(|(p, r)| p == path && *r == Some(claim)))
+        .then_some((stage.epoch, revision)))
+}
+
 pub(super) fn begin(
     tx: &mut PgTxn<'_>,
     paths: &[String],

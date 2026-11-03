@@ -2242,6 +2242,7 @@ fn source_continuation_snapshot_tx(
             claim,
             ledger: None,
             pending_mutation,
+            deferred_withdrawal: None,
             raw_inflight: false,
             catalog_session_key: None,
             catalog_source: None,

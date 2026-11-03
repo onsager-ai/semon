@@ -345,7 +345,22 @@ pub(in crate::storage::postgres) fn publish(
         if current != observed
             || current
                 .iter()
-                .any(|capture| capture.pending_mutation || capture.raw_inflight)
+                .any(|capture| {
+                    capture.raw_inflight
+                        || (capture.pending_mutation && capture.deferred_withdrawal.is_none())
+                })
+            || captures.iter().any(|capture| {
+                capture.deferred_withdrawal.is_some()
+                    && (complete
+                        || semantic.is_none()
+                        || capture.physical.is_some()
+                        || !claims.iter().any(|(path, claim)| {
+                            path == &capture.path && *claim == capture.claim
+                        })
+                        || publication.rows.iter().flat_map(|row| &row.sources).any(|source| {
+                            source.path == std::path::Path::new(&capture.path)
+                        }))
+            })
         {
             return Ok((Outcome::Conflict, None));
         }

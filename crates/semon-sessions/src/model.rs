@@ -7823,6 +7823,21 @@ pub(crate) struct WithdrawalGuard {
 }
 
 impl PreparedSources {
+    fn deferred_source_withdrawals(
+        &self,
+    ) -> io::Result<Vec<&crate::storage::catalog::SourceContinuationCapture>> {
+        let Some(observations) = self.presentation_observations() else {
+            return Ok(Vec::new());
+        };
+        if !observations.has_source_continuation_envelope() {
+            return Ok(Vec::new());
+        }
+        let (_, captures) = observations
+            .verified_source_continuation_captures()
+            .ok_or_else(|| io::Error::other("source continuation witness changed"))?;
+        Ok(captures.iter().filter(|capture| capture.deferred_withdrawal.is_some()).collect())
+    }
+
     pub(crate) fn retain_withdrawal_fence(&mut self, options: &Options) -> io::Result<()> {
         let foreign_sources = self
             .withdrawal_fence
@@ -7846,7 +7861,10 @@ impl PreparedSources {
             return Err(io::Error::other("semantic foreign preview metadata budget"));
         }
         foreign_sources.sort_by(|left, right| left.path.cmp(&right.path));
-        if self.withdrawals.is_empty() && foreign_sources.is_empty() {
+        if self.withdrawals.is_empty()
+            && foreign_sources.is_empty()
+            && self.deferred_source_withdrawals()?.is_empty()
+        {
             return Ok(());
         }
         let mut paths = BTreeSet::new();
@@ -7891,7 +7909,12 @@ impl PreparedSources {
         &self,
         foreign_sources: &[summary::CatalogSource],
     ) -> io::Result<String> {
-        serde_json::to_string(&(&self.withdrawals, foreign_sources)).map_err(io::Error::other)
+        serde_json::to_string(&(
+            &self.withdrawals,
+            foreign_sources,
+            self.deferred_source_withdrawals()?,
+        ))
+        .map_err(io::Error::other)
     }
 
     /// Qualify physical witnesses before SQL admission while retaining the
@@ -7903,7 +7926,8 @@ impl PreparedSources {
                 "semantic withdrawal source budget exceeded",
             ));
         }
-        if self.withdrawals.is_empty() {
+        let deferred = self.deferred_source_withdrawals()?;
+        if self.withdrawals.is_empty() && deferred.is_empty() {
             return Ok(None);
         }
         let fence = self
@@ -7923,6 +7947,7 @@ impl PreparedSources {
             .withdrawals
             .iter()
             .map(|w| &w.path)
+            .chain(deferred.iter().map(|capture| &capture.path))
             .collect::<BTreeSet<_>>();
         let sources = paths
             .into_iter()
@@ -7937,6 +7962,14 @@ impl PreparedSources {
                 return Err(io::Error::other(
                     "native source admission withdrawal changed",
                 ));
+            }
+        }
+        for capture in deferred {
+            if capture.physical.is_some()
+                || !fs::symlink_metadata(&capture.path)
+                    .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+            {
+                return Err(io::Error::other("deferred withdrawal source is present"));
             }
         }
         Ok(Some(guard))

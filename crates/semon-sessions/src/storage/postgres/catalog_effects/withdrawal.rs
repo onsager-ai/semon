@@ -234,6 +234,67 @@ pub(in crate::storage::postgres) fn remove(
     Ok(IndexWriteResult::new(Outcome::Written, files.len() as u64))
 }
 
+/// Qualify the full stored request and retired ledger, never just its tag.
+/// Physical absence is checked by the producer and again before the SQL writer.
+pub(in crate::storage::postgres) fn continuation_capture(
+    tx: &mut PgTxn<'_>,
+    path: &str,
+    claim: Option<i64>,
+    ledger: Option<&Ledger>,
+) -> Result<Option<catalog::DeferredSourceWithdrawal>, StorageError> {
+    let (Some(claim), Some(ledger)) = (claim, ledger) else {
+        return Ok(None);
+    };
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    let rows = tx.driver.query(
+        "SELECT CASE WHEN octet_length(m.evidence)<=1048576 THEN m.evidence END FROM semon_pg_native_source_mutations m JOIN semon_pg_source_invalidations i ON i.namespace_digest=m.namespace_digest AND i.namespace=m.namespace AND i.source_path=m.source_path WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 AND m.source_path=$2 AND i.reason='removed' AND i.revision=$3",
+        &[&ns, &path.as_bytes(), &claim],
+    ).map_err(sqlstate::error)?;
+    let Some(intent) = rows.first().and_then(|row| row.get::<_, Option<Vec<u8>>>(0)) else {
+        return Ok(None);
+    };
+    let Ok((kind, request)) = serde_json::from_slice::<(String, Vec<u8>)>(&intent) else {
+        return Ok(None);
+    };
+    if kind != "withdrawal-deferred-v1" || encoded(&(&kind, &request))? != intent {
+        return Ok(None);
+    }
+    let Ok((kind, files)) =
+        serde_json::from_slice::<(String, Vec<(String, Option<Ledger>)>)>(&request)
+    else {
+        return Ok(None);
+    };
+    if kind != "source-withdrawal-v1"
+        || files.is_empty()
+        || files.len() > 64
+        || files.iter().any(|(p, l)| p.is_empty() || p.len() > 4096 || l.is_none())
+        || files.iter().map(|(p, _)| p).collect::<BTreeSet<_>>().len() != files.len()
+        || files.iter().find(|(p, _)| p == path).and_then(|(_, l)| l.as_ref()) != Some(ledger)
+        || encoded(&(&kind, &files))? != request
+    {
+        return Ok(None);
+    }
+    let Some(retired) = super::super::native_keys::read_meta(
+        tx, format!("source-retired:{path}").as_bytes(), 16384,
+    )? else {
+        return Ok(None);
+    };
+    if retired != encoded(&Some(ledger))? {
+        return Ok(None);
+    }
+    let Some((stage_epoch, source_revision)) =
+        super::super::semantic_stage::deferred_withdrawal_stage(tx, path, claim)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(catalog::DeferredSourceWithdrawal {
+        intent,
+        retired,
+        stage_epoch,
+        source_revision,
+    }))
+}
+
 /// Mixed or connected owners are rebuilt by the ordinary semantic producer.
 /// This commit records only the Index intent and the `removed` invalidation;
 /// the qualified Current generation stays until the catch-up publication CAS.

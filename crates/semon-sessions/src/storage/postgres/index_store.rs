@@ -164,13 +164,22 @@ pub(super) fn source_continuation_snapshot(
         if has_cell && ledger.is_none() {
             return Err(StorageError::ScopeChanged);
         }
+        let claim = row.get(3);
+        let pending_mutation = row.get(13);
+        let raw_inflight = row.get(14);
+        let deferred_withdrawal = if !complete && pending_mutation && !raw_inflight {
+            super::catalog_effects::withdrawal::continuation_capture(tx, &path, claim, ledger.as_ref())?
+        } else {
+            None
+        };
         captures.push(crate::storage::catalog::SourceContinuationCapture {
             path,
             cell,
-            claim: row.get(3),
+            claim,
             ledger,
-            pending_mutation: row.get(13),
-            raw_inflight: row.get(14),
+            pending_mutation,
+            deferred_withdrawal,
+            raw_inflight,
             catalog_session_key: None,
             catalog_source: None,
             physical: None,

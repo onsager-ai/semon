@@ -2453,7 +2453,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 break;
             }
         }
-        assert!(complete, "SQLite ordinary bulk Catalog oracle did not finish");
+        assert!(
+            complete,
+            "SQLite ordinary bulk Catalog oracle did not finish"
+        );
         drop(work);
         query
             .call_catalog_at(
@@ -2514,18 +2517,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     writeln!(fs::OpenOptions::new().append(true).open(&trusted_archived_path).unwrap(),"{}",serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:00:03Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"sanitized relocation continuation"}]}})).unwrap();
     sqlite_published(&trusted_options, 1790812804000);
     let trusted_parent_length = fs::metadata(&trusted_path).unwrap().len();
-    let trusted_facts_writer = crate::SessionSourceWrite::begin(
-        &trusted_options,
-        &inputs[0],
-        None,
-        trusted_parent_length,
-    )
-    .unwrap();
+    let trusted_facts_writer =
+        crate::SessionSourceWrite::begin(&trusted_options, &inputs[0], None, trusted_parent_length)
+            .unwrap();
     let mut trusted_file = fs::OpenOptions::new()
         .append(true)
         .open(&trusted_path)
         .unwrap();
-    trusted_file.write_all(parent_facts_append.as_bytes()).unwrap();
+    trusted_file
+        .write_all(parent_facts_append.as_bytes())
+        .unwrap();
     trusted_file.sync_all().unwrap();
     drop(trusted_file);
     trusted_facts_writer
@@ -2569,10 +2570,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let mut db = binding.connection().unwrap();
         let tx = db.transaction().unwrap();
         let snapshot = crate::storage::sqlite::catalog::admitted_snapshot(&binding, &tx).unwrap();
-        let retained: crate::model::summary::CatalogRow = serde_json::from_str(
-            &snapshot.history_catalog("bulk169-001").unwrap().unwrap(),
-        )
-        .unwrap();
+        let retained: crate::model::summary::CatalogRow =
+            serde_json::from_str(&snapshot.history_catalog("bulk169-001").unwrap().unwrap())
+                .unwrap();
         assert_eq!(
             retained.lifecycle,
             crate::model::summary::CatalogLifecycle::Retained
@@ -2582,10 +2582,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let mut sqlite_cursor: Option<String> = None;
     loop {
         let request = match &sqlite_cursor {
-            Some(cursor) => format!(
-                "limit=20&cursor={}",
-                crate::viewer::percent_encode(cursor)
-            ),
+            Some(cursor) => format!("limit=20&cursor={}", crate::viewer::percent_encode(cursor)),
             None => "limit=20".into(),
         };
         let reply =

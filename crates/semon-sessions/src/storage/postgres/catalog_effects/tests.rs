@@ -10,6 +10,7 @@ use crate::{
 use std::{fs, time::Duration};
 
 mod businessflow;
+mod deferred_withdrawal;
 mod endpoint_owners;
 mod native_history;
 mod query_recipe;

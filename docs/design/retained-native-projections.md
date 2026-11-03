@@ -122,6 +122,17 @@ through the existing removal writer after its physical observations, retaining
 its Source locks and read snapshot through the ledger comparison and write.
 PostgreSQL staging likewise consumes prepared physical absence with durable
 removal evidence; an unledgered missing path alone cannot authorize retirement.
+A connected PostgreSQL withdrawal retains its full deferred mutation intent for
+exact replay. Continuation capture qualifies that intent separately from ordinary
+pending mutations: the full request and retired ledger must match the committed
+ledger and `removed` revision in the active Publication stage. Captures bind the
+stage epoch and source revision into the model witness. The producer observes
+physical absence under Source locks, then the publication adapter reacquires
+those locks and checks absence through commit. Publication compares the exact
+capture again under its source-state lock, requires the same stage claims and
+omits the withdrawn path from Current. Generic mutations and Raw writes still
+refuse. The intent survives publication so full-value withdrawal replay remains
+valid. SQLite ordinary removal does not create this deferred mutation state.
 PostgreSQL Facts-admission withdrawals retain exact process-local Facts/path
 fence provenance with the prepared model. Before each record or publication,
 the adapter acquires the existing shared Facts and sorted negative Source locks

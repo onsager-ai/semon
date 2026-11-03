@@ -46,6 +46,17 @@ pub(crate) struct SourceContinuationCell {
     pub(crate) accepted: crate::source_change::AppendEvidence,
 }
 
+/// Exact durable withdrawal authority, qualified against an active semantic
+/// Publication stage. The intent remains stored for full-value removal replay.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct DeferredSourceWithdrawal {
+    pub(crate) intent: Vec<u8>,
+    pub(crate) retired: Vec<u8>,
+    pub(crate) stage_epoch: i64,
+    pub(crate) source_revision: i64,
+}
+
 /// Raw bounded backend observation. `cell` remains byte exact for both the
 /// request digest and publication's value-qualified ACK.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -56,6 +67,7 @@ pub(crate) struct SourceContinuationCapture {
     pub(crate) claim: Option<i64>,
     pub(crate) ledger: Option<crate::events::Ledger>,
     pub(crate) pending_mutation: bool,
+    pub(crate) deferred_withdrawal: Option<DeferredSourceWithdrawal>,
     pub(crate) raw_inflight: bool,
     pub(crate) catalog_session_key: Option<String>,
     pub(crate) catalog_source: Option<CatalogSource>,
