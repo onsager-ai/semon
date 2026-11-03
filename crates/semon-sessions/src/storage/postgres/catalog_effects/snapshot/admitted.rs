@@ -99,13 +99,16 @@ impl Snapshot<'_, '_> {
                     .ok_or_else(|| failed(StorageError::ScopeChanged))?
                     .clone();
                 original.lifecycle = reference.lifecycle;
-                let observations = observations::publication(
-                    &mut tx,
-                    &current,
-                    &encoded(&original).map_err(failed)?,
-                    &reference.receipt,
-                )
-                .map_err(failed)?;
+                let observations = self
+                    .publications
+                    .borrow_mut()
+                    .observation(
+                        &mut tx,
+                        &current,
+                        &encoded(&original).map_err(failed)?,
+                        &reference.receipt,
+                    )
+                    .map_err(failed)?;
                 return Ok(Some((
                     current,
                     observations,
@@ -145,8 +148,11 @@ impl Snapshot<'_, '_> {
             };
             let receipt: observations::NativeReceipt =
                 serde_json::from_slice(&native).map_err(io::Error::other)?;
-            let observations =
-                observations::publication(&mut tx, &current, original, &receipt).map_err(failed)?;
+            let observations = self
+                .publications
+                .borrow_mut()
+                .observation(&mut tx, &current, original, &receipt)
+                .map_err(failed)?;
             return Ok(Some((current, observations, Origin::Native(receipt))));
         }
         let reference_kind = owner.map(|owner| match owner {

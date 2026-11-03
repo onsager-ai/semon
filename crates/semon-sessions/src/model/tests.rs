@@ -6396,14 +6396,26 @@ fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
             .map(|item| item["key"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
     };
+    crate::storage::postgres::take_catalog_publication_reads();
     let first = read(&request);
     assert_eq!(keys(&first), expected[..100]);
+    assert_eq!(
+        crate::storage::postgres::take_catalog_publication_reads(),
+        (100, 2),
+        "each of the two publication payloads is fetched once for 100 row observations"
+    );
     let cursor: crate::catalog::Cursor =
         serde_json::from_str(first["next_cursor"].as_str().unwrap()).unwrap();
     request.cursor = Some(cursor.clone());
     let second = read(&request);
     assert_eq!(keys(&second), expected[100..]);
     assert!(second["next_cursor"].is_null());
+    let (calls, fetches) = crate::storage::postgres::take_catalog_publication_reads();
+    assert_eq!(calls, 10);
+    assert!(
+        (1..=2).contains(&fetches),
+        "a new snapshot authenticates its publication payloads again"
+    );
 
     let mut inclusive = cursor;
     inclusive.last = at(5, 1);

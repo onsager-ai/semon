@@ -81,6 +81,11 @@ fn namespace_context(namespace: &super::LogicalSourceNamespace) -> String {
 mod tests;
 
 #[cfg(test)]
+pub(crate) fn take_catalog_publication_reads() -> (usize, usize) {
+    catalog_effects::take_publication_reads()
+}
+
+#[cfg(test)]
 pub(crate) fn test_fixture_pool() -> PgPool {
     tests::fixture(|_| {}).0
 }

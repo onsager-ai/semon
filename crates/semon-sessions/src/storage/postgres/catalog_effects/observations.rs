@@ -23,16 +23,92 @@ pub(super) fn history_key(owner: &str, metadata: &[u8]) -> String {
     )
 }
 
+/// Owned by one Snapshot; authenticated payloads never cross transactions.
+#[derive(Default)]
+pub(super) struct Publications {
+    verified: std::collections::BTreeMap<(String, NativeReceipt), VerifiedPublication>,
+}
+
+impl Publications {
+    pub(super) fn observation(
+        &mut self,
+        tx: &mut PgTxn<'_>,
+        current: &QueryRuntimeBinding,
+        original: &[u8],
+        receipt: &NativeReceipt,
+    ) -> Result<Option<PresentationObservations>, StorageError> {
+        check_binding(current, receipt)?;
+        #[cfg(test)]
+        PUBLICATION_READS.with(|counts| {
+            let (calls, fetches) = counts.get();
+            counts.set((calls + 1, fetches));
+        });
+        let key = (current.namespace.as_str().to_owned(), receipt.clone());
+        let publication = match self.verified.entry(key) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let publication = load_publication(tx, current, receipt)?;
+                #[cfg(test)]
+                PUBLICATION_READS.with(|counts| {
+                    let (calls, fetches) = counts.get();
+                    counts.set((calls, fetches + 1));
+                });
+                entry.insert(publication)
+            }
+        };
+        publication.observation(original)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_READS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[cfg(test)]
+pub(in crate::storage::postgres) fn take_publication_reads() -> (usize, usize) {
+    PUBLICATION_READS.with(|counts| counts.replace((0, 0)))
+}
+
+struct VerifiedPublication {
+    rows: Vec<serde_json::Value>,
+    observations: Option<PresentationObservations>,
+}
+
+impl VerifiedPublication {
+    fn observation(&self, original: &[u8]) -> Result<Option<PresentationObservations>, StorageError> {
+        let original: serde_json::Value =
+            serde_json::from_slice(original).map_err(|_| StorageError::ScopeChanged)?;
+        if !self.rows.contains(&original) {
+            return Err(StorageError::ScopeChanged);
+        }
+        Ok(self.observations.clone())
+    }
+}
+
+fn check_binding(current: &QueryRuntimeBinding, receipt: &NativeReceipt) -> Result<(), StorageError> {
+    if receipt.0 != current.admission || receipt.1 != current.stream_epoch {
+        return Err(StorageError::ScopeChanged);
+    }
+    Ok(())
+}
+
 pub(super) fn publication(
     tx: &mut PgTxn<'_>,
     current: &QueryRuntimeBinding,
     original: &[u8],
     receipt: &NativeReceipt,
 ) -> Result<Option<PresentationObservations>, StorageError> {
-    let (admission, stream, generation) = receipt;
-    if *admission != current.admission || stream != &current.stream_epoch {
-        return Err(StorageError::ScopeChanged);
-    }
+    check_binding(current, receipt)?;
+    load_publication(tx, current, receipt)?.observation(original)
+}
+
+fn load_publication(
+    tx: &mut PgTxn<'_>,
+    current: &QueryRuntimeBinding,
+    receipt: &NativeReceipt,
+) -> Result<VerifiedPublication, StorageError> {
+    let generation = &receipt.2;
     let ns = current.namespace.as_str().as_bytes();
     let operations = tx.driver.query("SELECT operation_id,CASE WHEN octet_length(payload)<=1048576 THEN payload END FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&generation.as_bytes()]).map_err(sqlstate::error)?;
     if operations.len() != 1 {
@@ -50,18 +126,14 @@ pub(super) fn publication(
     crate::selected_read::charge(64, payload.len()).map_err(|_| StorageError::Busy)?;
     let payload: serde_json::Value =
         serde_json::from_slice(&payload).map_err(|_| StorageError::ScopeChanged)?;
-    let original: serde_json::Value =
-        serde_json::from_slice(original).map_err(|_| StorageError::ScopeChanged)?;
     let values = payload.as_array().ok_or(StorageError::ScopeChanged)?;
-    if values.len() != 9
-        || payload[0] != "catalog-publication-v1"
-        || !payload[1]
-            .as_array()
-            .is_some_and(|rows| rows.contains(&original))
-    {
+    if values.len() != 9 || values[0] != "catalog-publication-v1" {
         return Err(StorageError::ScopeChanged);
     }
-    serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)
+    let rows = values[1].as_array().ok_or(StorageError::ScopeChanged)?.clone();
+    let observations =
+        serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)?;
+    Ok(VerifiedPublication { rows, observations })
 }
 
 pub(super) fn issue_history(
