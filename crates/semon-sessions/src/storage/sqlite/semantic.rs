@@ -5383,10 +5383,16 @@ impl Stage {
                 eprintln!("semantic_record_conflict: reduction_witness");
                 return Ok(Outcome::Conflict);
             }
-            for (index, path) in batch.paths.iter().enumerate() {
+            for path in &batch.paths {
                 let sql = if batch.phase == Phase::Identity {
                     "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND index_done=1 AND identity_done=0)"
-                } else if index == 0 {
+                } else if batch
+                    .relation_cursors
+                    .iter()
+                    .any(|cursor| cursor.path == *path)
+                {
+                    // Sorted owner closures can begin with a completed companion.
+                    // Only the exact cursor sources must still be pending.
                     "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND identity_done=1 AND relation_done=0)"
                 } else {
                     "SELECT EXISTS(SELECT 1 FROM main.catalog_semantic_sources WHERE namespace=?1 AND source_path=?2 AND identity_done=1)"

@@ -5532,6 +5532,37 @@ fn semantic_relation_batch_rejects_stale_nonleading_cursor_atomically() {
     assert_eq!(source_claims(&db), claims_before);
     cache.end_scan();
     cache.release_published_indexes();
+
+    // A completed context source can precede every still-active cursor in the
+    // loaded owner closure. Its position must not grant or block cursor work.
+    let mut remaining = batch.clone();
+    remaining
+        .relation_cursors
+        .retain(|cursor| cursor.path != stale.path);
+    let completed = remaining
+        .paths
+        .iter()
+        .position(|path| path == &stale.path)
+        .unwrap();
+    remaining.paths.swap(0, completed);
+    remaining.source_claims = crate::storage::sqlite::source_journal::claims(
+        &db,
+        namespace.as_str(),
+        &remaining.paths,
+    )
+    .unwrap();
+    let remaining_prepared =
+        prepare_semantic_batch(&home.options, &mut cache, &batch_inputs, &remaining, NOW)
+            .unwrap();
+    assert_eq!(
+        cache
+            .record_semantic_batch(&remaining, remaining_prepared.prepared())
+            .unwrap(),
+        crate::events::Outcome::Written,
+        "completed leading companions do not replace the active cursor fence"
+    );
+    cache.end_scan();
+    cache.release_published_indexes();
 }
 
 #[test]
