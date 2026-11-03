@@ -145,6 +145,8 @@ pub(in crate::storage::postgres) fn import(
     tx: &mut PgTxn<'_>,
     import: &crate::storage::transfer::reported::CatalogImport,
 ) -> Result<String, StorageError> {
+    #[cfg(test)]
+    eprintln!("transfer_catalog_admission stage=destination_publication");
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
     let admission = super::super::model_cache::binding(tx)?.admission;
@@ -166,14 +168,24 @@ pub(in crate::storage::postgres) fn import(
     // comparing those counters across physical backends would reject reverse.
     let receipt = tx.driver.query("SELECT epoch FROM semon_pg_native_semantic_publications WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 LIMIT 2", &[&ns,&import.generation().as_bytes()]).map_err(sqlstate::error)?;
     if receipt.len() != 1 {
+        #[cfg(test)]
+        eprintln!(
+            "transfer_catalog_admission_refused stage=publication_receipt count={}",
+            receipt.len()
+        );
         return Err(StorageError::ScopeChanged);
     }
     let epoch: i64 = receipt[0].get(0);
     let missing: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_rows c WHERE c.namespace_digest=sha256($1::bytea) AND c.namespace=$1 AND c.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=c.namespace_digest AND r.namespace=c.namespace AND r.key_digest=c.key_digest AND r.session_key=c.session_key AND r.kind='current'::bytea)) OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_history_owners h WHERE h.namespace_digest=sha256($1::bytea) AND h.namespace=$1 AND h.generation=$2 AND NOT EXISTS(SELECT 1 FROM semon_pg_native_selected_refs r WHERE r.namespace_digest=h.namespace_digest AND r.namespace=h.namespace AND r.key_digest=h.key_digest AND r.session_key=h.session_key AND r.kind='history'::bytea))", &[&ns,&import.generation().as_bytes()]).map_err(sqlstate::error)?.get(0);
     if missing {
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission_refused stage=selected_owner_reference");
         return Err(StorageError::ScopeChanged);
     }
-    super::search::verify_state(tx, import.generation())?;
+    super::search::verify_state(tx, import.generation()).inspect_err(|_error| {
+        #[cfg(test)]
+        eprintln!("transfer_catalog_admission_refused stage=search_state error={_error:?}");
+    })?;
     let changed = tx.driver.execute("UPDATE semon_pg_source_state SET catalog_generation=$2 WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND catalog_generation IS NULL", &[&ns,&import.generation()]).map_err(sqlstate::error)?;
     if changed != 1 {
         return Err(StorageError::Conflict);

@@ -2345,7 +2345,7 @@ pub(crate) fn observation_binding_with_observations(
     // A composed or receipt-less owner can retain an older same-prefix receipt
     // for custody. Its exact grant and capture authorize only the selected row;
     // do not borrow that grant to read the predecessor's observations.
-    if verified.record.metadata != selected_metadata
+    if !exact_semantic_owner
         && let Some(direct) =
             direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
                 .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
@@ -2504,9 +2504,18 @@ fn observation_authority_for_owner(
                     reference_kind,
                     &prefix,
                 )?;
-                if verified.record.metadata == *original {
+                // The exact native grant above owns this row. A retained
+                // predecessor is authenticated custody, not its observation.
+                if verified.record.metadata == *original
+                    && verified.record.admission == current.admission
+                {
                     authorize_immutable_observation(
-                        db, current, selected, reference_kind, local_only, &verified,
+                        db,
+                        current,
+                        selected,
+                        reference_kind,
+                        local_only,
+                        &verified,
                     )?;
                 }
             }
@@ -2525,7 +2534,7 @@ fn observation_authority_for_owner(
     }
     let current_digest = proof_codec::digest(current_metadata.as_bytes());
     let retained_digest = proof_codec::digest(retained_metadata.as_bytes());
-    if crate::native_timing::enabled() {
+    if cfg!(test) || crate::native_timing::enabled() {
         // Observe at most the two owner slots after ordinary authority missed.
         // This diagnostic never supplies authority or changes its outcome.
         let slots = db
@@ -2870,7 +2879,11 @@ fn load_query_recipe_with_bytes(
                 let verified =
                     authenticate_immutable_observation(db, &current, selected, kind, &prefix)
                         .map_err(ObservationPreparationError::into_storage)?;
-                if verified.record.metadata == normalized {
+                // This token reads the native row's recipe, never the
+                // predecessor receipt's payload or original coordinates.
+                if verified.record.metadata == normalized
+                    && verified.record.admission == current.admission
+                {
                     authorize_immutable_observation(db, &current, selected, kind, false, &verified)
                         .map_err(ObservationPreparationError::into_storage)?;
                 }

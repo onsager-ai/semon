@@ -44,7 +44,12 @@ impl TransferInbox {
         eprintln!("transfer_catalog_admission stage=source_catalog_head");
         let import = CatalogImport {
             manifest: manifest.clone(),
-            generation: source.frozen_catalog_generation(manifest)?,
+            generation: source
+                .frozen_catalog_generation(manifest)
+                .inspect_err(|_error| {
+                    #[cfg(test)]
+                    eprintln!("transfer_catalog_admission_refused stage=source_catalog_head error={_error:?}");
+                })?,
         };
         match &self.0.backend {
             StoreBackend::Sqlite { .. } => {

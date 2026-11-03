@@ -422,6 +422,14 @@ fn build_oracle_with_binding(
             .collect::<String>(),
     )
     .unwrap();
+    // Admit the SQLite producer before model capture, as the PG fixture does.
+    // A model prepared before enrollment cannot authenticate retained custody.
+    options
+        .source
+        .config(&options.cache)
+        .unwrap()
+        .create_native_store()
+        .unwrap();
     let inputs = crate::inputs::inputs(&options).unwrap();
     let mut cache =
         crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
@@ -429,6 +437,13 @@ fn build_oracle_with_binding(
         crate::model::prepare_sources(&options, &mut cache, &inputs, 1790812802000).unwrap();
     assert!(!prepared.rows.is_empty());
     assert!(!prepared.transcripts.is_empty());
+    assert!(
+        prepared
+            .presentation_observations()
+            .unwrap()
+            .runtime_for(&prepared.rows[0])
+            .is_some()
+    );
     // Exercise the production publisher role, namespace and source/claim CAS.
     let (outcome, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
