@@ -2364,7 +2364,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .collect::<Vec<_>>();
     let withdrawal_seen = withdrawal_inputs
         .iter()
-        .map(|input| input.full_path(&trusted_options).to_string_lossy().into_owned())
+        .map(|input| {
+            input
+                .full_path(&trusted_options)
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect();
     trusted_cache
         .retire_scoped_sources(
@@ -2393,7 +2398,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .unwrap()
         .expect("SQLite withdrawal successor generation");
     let withdrawal_oracle = trusted_query
-        .call_at("list_sessions", &serde_json::json!({}), 1790812802000)
+        .call_catalog_at(
+            "list_sessions",
+            &serde_json::json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            1790812802000,
+        )
         .expect("SQLite ordinary withdrawal cohort");
     let withdrawal_current = page_keys(crate::catalog::session_catalog_page(
         &trusted_options,
