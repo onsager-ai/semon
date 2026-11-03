@@ -9274,7 +9274,6 @@ fn build_sources_inner(
         &selection,
         BuildSelection::Identity { .. } | BuildSelection::Matching { .. }
     );
-    let ordinary_current_sources = matches!(&selection, BuildSelection::Current(_));
     let (selected, history_records, mut files, skipped, index_clone) = match selection {
         BuildSelection::Current(selected) => {
             let (files, skipped, duration) = timed!(
@@ -10014,7 +10013,7 @@ fn build_sources_inner(
                     &relationships.relations,
                 )?;
             }
-            if ordinary_current_sources {
+            if history_records.is_none() {
                 let rows = catalog.as_deref().unwrap_or_default();
                 let continuations = builder.cache.take_source_continuations(rows);
                 if let Some(observations) = presentation.as_mut() {
@@ -10100,7 +10099,7 @@ fn build_sources_inner(
         }
         BuildTarget::Catalog => {
             let rows = catalog.as_deref().unwrap_or_default();
-            if ordinary_current_sources {
+            if history_records.is_none() {
                 let continuations = cache.take_source_continuations(rows);
                 if let Some(observations) = presentation.as_mut() {
                     observations.set_source_continuations(continuations)?;

@@ -3887,6 +3887,14 @@ fn scan_file_with_mode(
                 CommittedSourceChanged { path: key },
             ));
         }
+        if let Some(proof) = index
+            .source_chunks
+            .as_ref()
+            .and_then(|chunks| chunks.continuation.as_ref())
+            .filter(|proof| proof.valid_for(path, &ledger, &current_stat))
+        {
+            cache.source_continuations.insert(key.clone(), proof.clone());
+        }
         let index = Arc::new(index);
         cache.files.insert(
             key,
@@ -4089,6 +4097,14 @@ fn scan_file_with_mode(
             }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
+            if let Some(proof) = index
+                .source_chunks
+                .as_ref()
+                .and_then(|chunks| chunks.continuation.as_ref())
+                .filter(|proof| proof.valid_for(path, ledger, &stat))
+            {
+                cache.source_continuations.insert(key.clone(), proof.clone());
+            }
             cache.files.insert(
                 key,
                 CachedFile {
@@ -4281,7 +4297,8 @@ fn scan_file_with_mode(
             continue;
         }
         let (prefix, tail) = (captured.prefix, captured.tail);
-        writable.source_chunks = Some(Arc::new(captured.chunks));
+        let verified_prefix = captured.before;
+        let mut chunks = captured.chunks;
         writable.native_path = path.to_str().is_none().then(|| path.to_owned());
         if let Some(header) = header_bytes {
             let started = cache.scan_measurements.start();
@@ -4327,8 +4344,31 @@ fn scan_file_with_mode(
             prefix,
             tail,
         };
+        if append && let Some(prior) = recorded.as_ref() {
+            let mut continuation = if trusted_append {
+                accepted_evidence.as_ref().and_then(|accepted| {
+                    crate::storage::catalog::VerifiedSourceContinuation::from_scan(
+                        path, prior, &ledger, accepted, &stat,
+                    )
+                })
+            } else {
+                crate::storage::catalog::VerifiedSourceContinuation::from_verified_prefix(
+                    path, prior, &ledger, verified_prefix, &stat,
+                )
+            };
+            if let Some(proof) = continuation.as_mut() {
+                proof.extend(
+                    writable
+                        .source_chunks
+                        .as_ref()
+                        .and_then(|chunks| chunks.continuation.as_ref()),
+                );
+            }
+            chunks.continuation = continuation;
+        }
+        writable.source_chunks = Some(Arc::new(chunks));
         // A byte slice must retain one exact physical generation across its
-        // checkpoint. Untrusted changes never qualify the continuation proof.
+        // checkpoint. Only verified same-file prefixes qualify continuations.
         if bounded && Stat::of(path).ok().as_ref() != Some(&stat) {
             if last {
                 return Err(io::Error::new(
@@ -4436,13 +4476,12 @@ fn scan_file_with_mode(
                 Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
             }
         }
-        if trusted_append
-            && let (Some(prior), Some(accepted)) = (recorded.as_ref(), accepted_evidence.as_ref())
-            && let Some(proof) = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
-                path, prior, &ledger, accepted, &stat,
-            )
+        if let Some(proof) = index
+            .source_chunks
+            .as_ref()
+            .and_then(|chunks| chunks.continuation.as_ref())
         {
-            cache.source_continuations.insert(key.clone(), proof);
+            cache.source_continuations.insert(key.clone(), proof.clone());
         }
         cache.files.insert(
             key,

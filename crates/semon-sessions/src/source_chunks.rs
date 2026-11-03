@@ -19,6 +19,7 @@ pub(crate) struct Chunks {
     pub(crate) offset: u64,
     pub(crate) hashes: Vec<[u8; 32]>,
     pub(crate) resume: Option<PrefixState>,
+    pub(crate) continuation: Option<crate::storage::catalog::VerifiedSourceContinuation>,
 }
 
 impl Chunks {
@@ -107,6 +108,7 @@ pub(crate) fn capture(
         offset,
         hashes: Vec::new(),
         resume: None,
+        continuation: None,
     };
     let mut state = PrefixState::default();
     let mut tail = Vec::new();
@@ -184,6 +186,7 @@ pub(crate) fn capture_append(
         offset,
         hashes: old.hashes[..(boundary / SIZE as u64) as usize].to_vec(),
         resume: None,
+        continuation: None,
     };
     file.seek(SeekFrom::Start(boundary))?;
     let mut position = boundary;

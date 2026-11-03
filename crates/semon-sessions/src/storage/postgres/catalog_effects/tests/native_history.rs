@@ -131,20 +131,17 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         &crate::events::Stat::of(&live_path).unwrap(),
     )
     .expect("this request scanned the exact accepted continuation");
-    let mut continued =
+    let continued =
         crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
     assert_eq!(continued.rows.len(), 1);
     assert_eq!(continued.rows[0].sources.len(), 1);
-    // Configured model preparation is a committed Index reader. Its explicit
-    // producer carries the scanner proof in this request's typed publication
-    // envelope; it cannot recover continuation authority from persisted rows.
-    continued
-        .relationships
-        .presentation
-        .as_mut()
-        .unwrap()
-        .set_source_continuations(vec![continuation])
-        .unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            continued.presentation_observations().unwrap().verified_continuations().unwrap(),
+        ).unwrap(),
+        serde_json::to_value([continuation]).unwrap(),
+        "committed Index preparation carries the actual scanner proof without test injection"
+    );
     assert_eq!(
         continued
             .presentation_observations()

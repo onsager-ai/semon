@@ -4053,6 +4053,70 @@ fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
 }
 
 #[test]
+fn staged_verified_native_append_survives_index_restart_and_history_publication() {
+    use crate::storage::native_events::NativeEventStore;
+
+    let home = Home::new();
+    let path = home.top("root", &[human("root", ts(0, 0), "native root")]);
+    home.build_query();
+    let input = crate::native_evidence::catalog_input(&path, &home.options).unwrap();
+    let initial = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    for (number, text) in [(1, "first append"), (2, "second append")] {
+        writeln!(
+            fs::OpenOptions::new().append(true).open(&path).unwrap(),
+            "{}",
+            human("root", ts(0, number), text)
+        )
+        .unwrap();
+        let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+        cache.ingest(&format!("{number:064x}"), &path, "claude").unwrap();
+    }
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let full = prepare_sources(&home.options, &mut cache, std::slice::from_ref(&input), NOW).unwrap();
+    let context = serde_json::to_vec(&full.relationships).unwrap();
+    drop(full);
+    drop(cache);
+    let context: relation_stage::Context = serde_json::from_slice(&context).unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
+    let replay = prepare_staged_sources(
+        &home.options,
+        &mut cache,
+        &[input],
+        &context,
+        false,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        replay.presentation_observations().unwrap().verified_continuations().unwrap().len(),
+        1,
+        "semantic replay must retain the scanner's verified unjournaled append"
+    );
+    let (outcome, generation) = cache.publish_partial_catalog_fenced(&replay).unwrap();
+    assert_eq!(outcome, crate::events::Outcome::Written);
+    assert!(generation.is_some());
+    let current = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert!(current.source_refs[0].source.offset > initial.source_refs[0].source.offset);
+    for scope in ["", "&scope=retained_history"] {
+        let reply = crate::session_transcript_range(
+            &home.options,
+            "fixture",
+            &format!("sid=root&after=0&limit=100{scope}"),
+            None,
+        );
+        assert_eq!(reply.status, 200, "{}", String::from_utf8_lossy(&reply.body));
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let texts = body["entries"].as_array().unwrap().iter()
+            .filter_map(|entry| entry["text"].as_str()).collect::<Vec<_>>();
+        assert_eq!(texts, ["native root", "first append", "second append"]);
+    }
+}
+
+#[test]
 fn staged_foreign_trace_prompt_matches_full_pointer_and_refuses_changed_witnesses() {
     let home = Home::new();
     home.codex(

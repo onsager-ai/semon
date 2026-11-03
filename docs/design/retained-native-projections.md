@@ -85,10 +85,17 @@ runtime capture, admission and stream with the selected predecessor receipts.
 Reads reauthenticate those receipts separately from the new owner's capture.
 Exceeding the bounded composition slot or byte allowance preserves existing
 History without composing it or blocking an otherwise qualified Current update.
-Semantic replay discards request-local scanner continuation proofs. A changed
-source prefix therefore keeps Original custody instead of inventing a composite
-owner (the conservative source classification introduced by `d3c19b7e` and
-restricted to ordinary Current preparation by `a928c1f6`).
+The 2026-11-04 #477 product decision requires native appends in both the live
+viewer and retained History. A scanner-verified prefix-preserving append is a
+verified continuation, whether its evidence comes from an accepted Source writer
+or the existing full-prefix hash comparison. The Index commits this content-free
+witness in its ledger-bound chunk header. Semantic replay checks its exact path,
+current ledger and physical witness and carries it through the digest-bearing
+publication capture. Bounded predecessor ledgers cover consecutive verified
+appends before publication. Rewrites, truncation, changed file identity and
+missing or mismatched proof still preserve Original custody under the conservative
+classification introduced by `d3c19b7e`; replay must not discard verified append
+evidence as `a928c1f6` previously did.
 Original withdrawal custody retains its original publication reference.
 All-history published Catalog Query membership includes that previously observed
 retained owner; the native filesystem Query scan excludes the missing source.

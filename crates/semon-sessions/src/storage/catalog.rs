@@ -28,17 +28,18 @@ impl std::ops::Deref for SelectedCatalogRow {
 
 pub(crate) type OriginalHeader = (String, u32, Option<String>, i64);
 
-/// Ephemeral proof that one indexed prefix advanced on the same file identity.
-/// The ordinary Catalog publisher carries this beside its observations; it is
-/// never stored as row metadata.
+/// Scanner proof that an indexed prefix advanced on the same file identity.
+/// Its ledger-bound Index header survives replay; Catalog rows never carry it.
 pub(crate) const SOURCE_CONTINUATION_LIMIT: usize = 64;
 
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct VerifiedSourceContinuation {
     path: std::path::PathBuf,
     prior: crate::events::Ledger,
     current: crate::events::Ledger,
-    accepted: crate::source_change::AppendEvidence,
+    accepted: Option<crate::source_change::AppendEvidence>,
+    predecessors: Vec<crate::events::Ledger>,
 }
 
 impl VerifiedSourceContinuation {
@@ -61,8 +62,70 @@ impl VerifiedSourceContinuation {
             path: path.to_owned(),
             prior: prior.clone(),
             current: current.clone(),
-            accepted: accepted.clone(),
+            accepted: Some(accepted.clone()),
+            predecessors: Vec::new(),
         })
+    }
+
+    /// Called only after the scanner compares its full captured old prefix
+    /// with the prior ledger, independently of the newly parsed suffix.
+    pub(crate) fn from_verified_prefix(
+        path: &std::path::Path,
+        prior: &crate::events::Ledger,
+        current: &crate::events::Ledger,
+        before: [u8; 32],
+        physical: &crate::events::Stat,
+    ) -> Option<Self> {
+        let proof = Self {
+            path: path.to_owned(),
+            prior: prior.clone(),
+            current: current.clone(),
+            accepted: None,
+            predecessors: Vec::new(),
+        };
+        (before == prior.prefix && proof.valid_for(path, current, physical)).then_some(proof)
+    }
+
+    pub(crate) fn extend(&mut self, previous: Option<&Self>) {
+        if let Some(previous) = previous
+            && previous.valid_for(&self.path, &self.prior, &self.prior.stat)
+        {
+            self.predecessors = previous.predecessors.clone();
+            self.predecessors.push(previous.prior.clone());
+            if self.predecessors.len() >= SOURCE_CONTINUATION_LIMIT {
+                self.predecessors.remove(0);
+            }
+        }
+    }
+
+    pub(crate) fn valid_for(
+        &self,
+        path: &std::path::Path,
+        current: &crate::events::Ledger,
+        physical: &crate::events::Stat,
+    ) -> bool {
+        self.path == path
+            && self.current == *current
+            && self.current.stat == *physical
+            && self.prior.stat.dev == physical.dev
+            && self.prior.stat.ino == physical.ino
+            && self.prior.stat.changed_ns.is_some()
+            && physical.changed_ns.is_some()
+            && self.prior.stat.size == self.prior.offset
+            && self.current.offset > self.prior.offset
+            && self.current.offset <= physical.size
+            && self.accepted.as_ref().is_none_or(|accepted| {
+                accepted.qualifies(&self.prior.stat, physical)
+            })
+            && self.predecessors.len() < SOURCE_CONTINUATION_LIMIT
+            && self.predecessors.iter().enumerate().all(|(at, prior)| {
+                prior.stat.dev == physical.dev
+                    && prior.stat.ino == physical.ino
+                    && prior.stat.changed_ns.is_some()
+                    && prior.stat.size == prior.offset
+                    && prior.offset < self.prior.offset
+                    && (at == 0 || self.predecessors[at - 1].offset < prior.offset)
+            })
     }
 
     fn advances(&self, old: &CatalogSource, new: &CatalogSource) -> bool {
@@ -80,12 +143,11 @@ impl VerifiedSourceContinuation {
             && new.path == self.path
             && old.native_id == new.native_id
             && old.native_role == new.native_role
-            && matches_ledger(old, &self.prior)
+            && std::iter::once(&self.prior)
+                .chain(&self.predecessors)
+                .any(|prior| matches_ledger(old, prior))
             && matches_ledger(new, &self.current)
-            && self.accepted.before == self.prior.stat
-            && self.accepted.after == self.current.stat
-            && self.current.offset > self.prior.offset
-            && self.current.offset <= self.accepted.after.size
+            && self.valid_for(&self.path, &self.current, &self.current.stat)
     }
 
     pub(crate) fn path(&self) -> &std::path::Path {
@@ -167,6 +229,19 @@ mod source_continuation_tests {
         let new = source(&current, &path, "native", role);
 
         assert!(proof.advances(&old, &new));
+        let verified = VerifiedSourceContinuation::from_verified_prefix(
+            &path, &prior, &current, prior.prefix, &physical,
+        )
+        .expect("a fully rehashed native append is a verified continuation");
+        let replay: VerifiedSourceContinuation =
+            serde_json::from_slice(&serde_json::to_vec(&verified).unwrap()).unwrap();
+        assert!(replay.advances(&old, &new));
+        assert!(replay.valid_for(&path, &current, &physical));
+        let mut corrupted_prefix = prior.prefix;
+        corrupted_prefix[0] ^= 1;
+        assert!(VerifiedSourceContinuation::from_verified_prefix(
+            &path, &prior, &current, corrupted_prefix, &physical,
+        ).is_none());
     }
 
     #[test]
@@ -186,6 +261,9 @@ mod source_continuation_tests {
             after: replaced,
             ..accepted.clone()
         };
+        assert!(VerifiedSourceContinuation::from_verified_prefix(
+            &path, &prior, &replaced_current, prior.prefix, &replaced,
+        ).is_none());
         assert!(
             VerifiedSourceContinuation::from_scan(
                 &path,

@@ -1156,11 +1156,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let mut withdraw_options = history_options.clone();
     withdraw_options.cache = oracle.root.join("oracle-withdraw201");
-    // Keep the isolated append oracle at 00:00:02; its capture is at 00:00:03.
-    let source_append = format!(
-        "{}\n",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":"sanitized continuation"}})
-    );
     // The original parent prefix already has records through 00:00:04. These
     // later source and Facts writes make retained-list last differ from the
     // exact History row while preserving the same ordinary producer path.
@@ -1168,6 +1163,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "{}\n",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"u2","parentUuid":"a1","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:05Z","message":{"role":"user","content":"sanitized continuation"}})
     );
+    // Exact append parity requires the same native bytes on both engines.
+    let source_append = parent_source_append.clone();
     let parent_facts_append = format!(
         "{}\n",
         serde_json::json!({"type":"user","sessionId":"one","uuid":"positive-facts158","parentUuid":"u2","cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:06Z","message":{"role":"user","content":"positive Facts source continuation"}})
@@ -1808,16 +1805,21 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     withdrawal_options.scan_window = false;
     let publish_withdrawal_oracle = || {
         let mut cache =
-            EventCache::open_scoped(&withdrawal_options.cache, &withdrawal_options.source)
+            EventCache::open_scoped(&withdrawal_options.cache, &withdrawal_options.source).unwrap();
+        let inputs = crate::inputs::inputs(&withdrawal_options)
+            .unwrap()
+            .into_iter()
+            .filter(|input| {
+                crate::native_evidence::catalog_input(
+                    &input.full_path(&withdrawal_options),
+                    &withdrawal_options,
+                )
+                .is_some()
+            })
+            .collect::<Vec<_>>();
+        let prepared =
+            crate::model::prepare_sources(&withdrawal_options, &mut cache, &inputs, 1790812802000)
                 .unwrap();
-        let inputs = crate::inputs::inputs(&withdrawal_options).unwrap();
-        let prepared = crate::model::prepare_sources(
-            &withdrawal_options,
-            &mut cache,
-            &inputs,
-            1790812802000,
-        )
-        .unwrap();
         cache
             .publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {
@@ -1986,7 +1988,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     // Keep the full response for whole-JSON parity below. The retained-history
     // check itself uses the explicitly scoped range API and a saved source prefix.
-    let append_history_body = append_prefix_body.clone();
     struct SavedPrefix(Vec<(crate::SessionSourceRef, std::sync::Arc<[u8]>)>);
     impl crate::SessionSourceReader for SavedPrefix {
         fn read_range(
@@ -2193,12 +2194,22 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         appended_offset(&append_history_identity) + source_append.len() as u64,
         "SQLite Current consumes the actual appended native record"
     );
-    let append_history_after = crate::session_transcript_range_with_mode(
+    let stale_append_history = crate::session_transcript_range_with_mode(
         &append_oracle_options,
         recent_machine,
         &append_history_query,
         Some(&append_history_reader),
         crate::SessionSourceReadMode::ProviderOnly,
+    );
+    assert_eq!(
+        stale_append_history.status, 409,
+        "an archive holding only the old prefix cannot supply the verified continuation"
+    );
+    let append_history_after = crate::session_transcript_range(
+        &append_oracle_options,
+        recent_machine,
+        &append_history_query,
+        None,
     );
     assert_eq!(
         append_history_after.status,
@@ -2223,22 +2234,41 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .map(|reference| reference["source"].clone())
             .collect::<Vec<_>>(),
-        append_history_prefix["identity"]["source_refs"]
+        serde_json::to_value(&append_current_identity).unwrap()["source_refs"]
             .as_array()
             .unwrap()
             .iter()
             .map(|reference| reference["source"].clone())
             .collect::<Vec<_>>(),
-        "SQLite History keeps the original source prefix after append"
+        "SQLite History advances to the verified Current prefix after append"
     );
     assert_eq!(
-        append_history_after["projection"], append_history_prefix["projection"],
-        "SQLite History keeps the original projection after append"
+        append_history_after["projection"]["total"].as_u64(),
+        Some(append_history_prefix["projection"]["total"].as_u64().unwrap() + 1),
+        "SQLite History publishes the appended recipe"
     );
+    let before_entries = append_history_prefix["entries"].as_array().unwrap();
+    let after_entries = append_history_after["entries"].as_array().unwrap();
     assert_eq!(
-        append_history_after["entries"], append_history_prefix["entries"],
-        "SQLite History keeps the original exact source prefix after append"
+        &after_entries[..before_entries.len()], before_entries.as_slice(),
+        "SQLite History preserves every prior entry while advancing"
     );
+    assert_eq!(after_entries.len(), before_entries.len() + 1);
+    assert_eq!(after_entries.last().unwrap()["text"], "sanitized continuation");
+    let append_history_body = append_successor_query
+        .call_at(
+            "read_transcript",
+            &serde_json::json!({"id":append_oracle_key,"limit":100}),
+            1790812803000,
+        )
+        .expect("SQLite verified continuation body for exact PostgreSQL parity");
+    let append_history_fields = append_successor_query
+        .call_at(
+            "get_session",
+            &serde_json::json!({"id":append_oracle_key}),
+            1790812802000,
+        )
+        .expect("SQLite verified continuation fields for exact PostgreSQL parity");
     drop(append_successor_query);
     drop(append_oracle_query);
     drop(append_oracle_cache);
@@ -4102,17 +4132,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     // explicitly; a current-path entry alone cannot authorize an old prefix.
     next_host.0.extend(retained_host.0.iter().cloned());
     let next_bodies = read_bodies(&mut restarted_query, &next_store, &next_host);
-    assert!(
-        next_bodies[&appended_key]["body"] == append_history_body,
+    assert_eq!(
+        next_bodies[&appended_key]["body"], append_history_body,
         "PG History-selected body must match SQLite after the same append"
     );
     assert_eq!(
-        next_bodies[&appended_key]["body"], expected_bodies[&appended_key]["body"],
-        "PG History-selected body must preserve the original exact prefix"
-    );
-    assert_eq!(
-        next_bodies[&appended_key]["fields"], expected_bodies[&appended_key]["fields"],
-        "PG History-selected fields must preserve the original exact oracle"
+        next_bodies[&appended_key]["fields"], append_history_fields,
+        "PG History-selected fields must match SQLite after the same append"
     );
     let successor_related_body = restarted_query
         .call_bound_selected_at(
@@ -4329,9 +4355,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let assert_history_header_refused =
         |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
-            // d3c19b7e and a928c1f6 retain Original custody without a
-            // request-local verified continuation. Semantic replay deliberately
-            // discards those proofs; it must not mint a composite owner.
+            let composite_expected = incomplete
+                && version == history_version
+                && source_generation.as_deref() == Some(history_source_generation.as_slice());
             update_history_header(version, source_generation.clone(), incomplete)
                 .expect("install exact History header corruption");
             let qualification = super::super::snapshot::with_admitted_snapshot(
@@ -4346,7 +4372,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     let owner = snapshot
                         .owner(&appended_key)?
                         .ok_or(StorageError::ScopeChanged)?;
-                    assert!(owner.original);
+                    assert!(!owner.original);
                     assert!(owner.has_current);
                     let current = snapshot
                         .rows(&history_request)
@@ -4382,9 +4408,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let (qualified, composite_qualified) =
                 qualification.expect("History header uses the admitted snapshot");
             assert!(!qualified, "{reason}");
-            assert!(
-                !composite_qualified,
-                "{reason}: Original custody cannot use composite identity qualification"
+            assert_eq!(
+                composite_qualified, composite_expected,
+                "{reason}: incomplete composite identity qualification"
             );
         };
     assert_history_header_refused(
@@ -4478,7 +4504,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .expect("original History owner is read through admitted snapshot");
-    set_history_original(true).expect("restore original History owner marker");
+    set_history_original(false).expect("restore composite History owner marker");
     update_history_header(
         history_version,
         Some(history_source_generation.clone()),

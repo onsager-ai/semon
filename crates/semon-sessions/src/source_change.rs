@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::io;
 
 /// Accepted custody token plus its exact before and after filesystem Stats.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct AppendEvidence {
     pub(crate) generation: String,
