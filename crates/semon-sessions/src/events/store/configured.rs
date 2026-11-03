@@ -5274,6 +5274,12 @@ mod tests {
         );
         assert!(observation_binding(&db, &binding, &original).is_ok());
         assert!(observation_binding(&db, &binding, &retained).is_ok());
+        let reader = crate::storage::NativeReaderBinding::Semantic(owner.clone());
+        assert!(
+            crate::storage::sqlite::query::current_query_context_header(&db, &reader, &original)
+                .expect("Stage Current context authenticates its immutable Query recipe")
+                .is_none()
+        );
         let history_before: String = db.query_row(
             "SELECT metadata FROM session_history_catalog WHERE namespace=?1 AND session_key=?2",
             params![b.namespace.as_str(), retained.key], |r| r.get(0),

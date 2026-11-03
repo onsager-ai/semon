@@ -952,13 +952,15 @@ fn read_inner(
         vec![(row.clone(), history.is_some())]
     };
     let context: Vec<_> = context_witness.iter().map(|(row, _)| row.clone()).collect();
-    let mut query_headers = Vec::new();
+    let mut current_recipes = Vec::new();
     if search.is_some() || session {
         for (owner, owner_history) in &context_witness {
-            if *owner_history
-                && let Some(encoded) =
+            if *owner_history {
+                let Some(encoded) =
                     crate::history_projection::catalog(&tx, &owner.key).map_err(unavailable)?
-            {
+                else {
+                    return Ok(None);
+                };
                 // History owns its embedded selected recipes. A later Current
                 // publication replaces the mutable Query header for the same
                 // native owner without replacing this retained observation.
@@ -971,28 +973,11 @@ fn read_inner(
                 }
                 continue;
             }
-            let Some(encoded) =
-                crate::query_projection::header(&tx, &crate::query_projection::identity(owner))
-                    .map_err(unavailable)?
-            else {
-                return Ok(None);
-            };
-            let header: Value = serde_json::from_str(&encoded).map_err(unavailable)?;
-            if header["version"] != 1
-                || header["complete"] != true
-                || header["source_generation"]
-                    != crate::retention::source_generation(&owner.sources).map_err(unavailable)?
-                || header["query_generation"]
-                    != format!(
-                        "{:x}",
-                        sha2::Sha256::digest(
-                            serde_json::to_vec(&owner.query).map_err(unavailable)?
-                        )
-                    )
-            {
-                return Ok(None);
-            }
-            query_headers.push((crate::query_projection::identity(owner), encoded));
+            let header = crate::storage::sqlite::query::current_query_context_header(
+                &tx, &binding, owner,
+            )
+            .map_err(unavailable)?;
+            current_recipes.push((owner.clone(), header));
         }
     }
     let mut selected_sources = std::collections::BTreeMap::new();
@@ -1097,11 +1082,10 @@ fn read_inner(
                 "Native session observation changed during this read",
             ));
         }
-        for (owner, expected) in &query_headers {
-            if crate::query_projection::header(&snapshot, owner)
+        for (owner, expected) in &current_recipes {
+            if crate::storage::sqlite::query::current_query_context_header(&snapshot, &binding, owner)
                 .map_err(unavailable)?
-                .as_deref()
-                != Some(expected)
+                != *expected
             {
                 return Err(unavailable("Native query recipes changed"));
             }
@@ -1225,11 +1209,10 @@ fn read_inner(
             headers,
             &slot_generation,
         )?;
-        for (owner, expected) in &query_headers {
-            if crate::query_projection::header(&snapshot, owner)
+        for (owner, expected) in &current_recipes {
+            if crate::storage::sqlite::query::current_query_context_header(&snapshot, &binding, owner)
                 .map_err(unavailable)?
-                .as_deref()
-                != Some(expected)
+                != *expected
             {
                 return Err(unavailable("Native query recipes changed"));
             }

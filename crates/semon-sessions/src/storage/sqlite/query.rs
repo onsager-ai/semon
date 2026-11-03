@@ -55,23 +55,21 @@ pub(crate) fn selected_query_context(
                 .map(Some)
                 .map_err(|_| StorageError::ScopeChanged)
         },
-        |candidate, history| qualify_context_candidate(tx, &current, options, candidate, history),
+        |candidate, history| {
+            qualify_context_candidate(tx, binding, &current, options, candidate, history)
+        },
     )
 }
 
 pub(crate) fn qualify_context_candidate(
     tx: &rusqlite::Transaction<'_>,
+    binding: &crate::storage::NativeReaderBinding,
     current: &crate::storage::QueryRuntimeBinding,
     options: &Options,
     candidate: &crate::model::summary::CatalogRow,
     history: bool,
 ) -> Result<(), crate::storage::StorageError> {
     use crate::storage::{StorageError, catalog::CatalogObservationOwner};
-    let owner = if history {
-        CatalogObservationOwner::History
-    } else {
-        CatalogObservationOwner::Catalog
-    };
     if candidate.sources.is_empty() || candidate.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
@@ -84,36 +82,78 @@ pub(crate) fn qualify_context_candidate(
     {
         return Err(StorageError::ScopeChanged);
     }
-    super::proof_generations::observation_binding_for_physical_owner(
-        tx, current, candidate, owner,
-    )?;
     if history {
+        super::proof_generations::observation_binding_for_physical_owner(
+            tx,
+            current,
+            candidate,
+            CatalogObservationOwner::History,
+        )?;
         if !crate::history_projection::qualified(tx, candidate).map_err(super::failed)? {
             return Err(StorageError::ScopeChanged);
         }
     } else {
-        let header =
-            crate::query_projection::header(tx, &crate::query_projection::identity(candidate))
-                .map_err(super::failed)?
-                .ok_or(StorageError::ScopeChanged)?;
-        let header: Value =
-            serde_json::from_str(&header).map_err(|_| StorageError::ScopeChanged)?;
-        use sha2::Digest;
-        let query_generation = format!(
-            "{:x}",
-            sha2::Sha256::digest(
-                serde_json::to_vec(&candidate.query).map_err(|_| StorageError::ScopeChanged)?
-            )
-        );
-        if header["version"] != 1
-            || header["complete"] != true
-            || header["source_generation"] != saved["source_generation"]
-            || header["query_generation"] != query_generation
-        {
-            return Err(StorageError::ScopeChanged);
-        }
+        current_query_context_header(tx, binding, candidate)?;
     }
     Ok(())
+}
+
+/// Stage Current owns immutable recipes without publishing a mutable header.
+/// Return a header witness only for a direct native Catalog recipe; both paths
+/// authenticate the exact physical owner and its store-issued recipe residence.
+pub(crate) fn current_query_context_header(
+    db: &Connection,
+    binding: &crate::storage::NativeReaderBinding,
+    candidate: &crate::model::summary::CatalogRow,
+) -> Result<Option<String>, crate::storage::StorageError> {
+    use crate::storage::{
+        StorageError,
+        catalog::CatalogObservationOwner,
+        query::{QueryRecipeLoadError, QueryRecipeResidence},
+    };
+    let current = binding.runtime_binding_at(db)?;
+    let observation = super::proof_generations::query_recipe_observation(
+        db,
+        &current,
+        CatalogObservationOwner::Catalog,
+        candidate,
+    )?;
+    match &observation.residence {
+        QueryRecipeResidence::Immutable { .. } => {
+            super::proof_generations::load_query_recipe(db, binding, &observation)
+                .map_err(|error| match error {
+                    QueryRecipeLoadError::Storage(error) => error,
+                    _ => StorageError::ScopeChanged,
+                })?;
+            Ok(None)
+        }
+        QueryRecipeResidence::NativeCatalog { .. } => {
+            let encoded =
+                crate::query_projection::header(db, &crate::query_projection::identity(candidate))
+                    .map_err(super::failed)?
+                    .ok_or(StorageError::ScopeChanged)?;
+            let header: Value =
+                serde_json::from_str(&encoded).map_err(|_| StorageError::ScopeChanged)?;
+            use sha2::Digest;
+            let query_generation = format!(
+                "{:x}",
+                sha2::Sha256::digest(
+                    serde_json::to_vec(&candidate.query).map_err(|_| StorageError::ScopeChanged)?
+                )
+            );
+            if header["version"] != 1
+                || header["complete"] != true
+                || header["source_generation"]
+                    != crate::retention::source_generation(&candidate.sources)
+                        .map_err(|_| StorageError::ScopeChanged)?
+                || header["query_generation"] != query_generation
+            {
+                return Err(StorageError::ScopeChanged);
+            }
+            Ok(Some(encoded))
+        }
+        QueryRecipeResidence::NativeHistory { .. } => Err(StorageError::ScopeChanged),
+    }
 }
 
 pub(crate) struct SqliteQueryCatalog {
