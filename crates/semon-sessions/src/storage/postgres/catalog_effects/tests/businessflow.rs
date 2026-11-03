@@ -6773,12 +6773,27 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .iter()
         .map(|i| i.full_path(&facts_options).to_string_lossy().into_owned())
         .collect::<Vec<_>>();
+    let dump_withdrawal_intents = |phase: &str| {
+        pool.transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            let rows = tx.driver.query(
+                "SELECT encode(sha256(m.source_path),'hex'),convert_from(m.evidence,'UTF8')::jsonb->>0,i.reason,i.revision,s.semantic_pending,EXISTS(SELECT 1 FROM semon_pg_native_catalog_stage_items t WHERE t.namespace_digest=m.namespace_digest AND t.namespace=m.namespace AND t.active) FROM semon_pg_native_source_mutations m LEFT JOIN semon_pg_source_invalidations i ON i.namespace_digest=m.namespace_digest AND i.namespace=m.namespace AND i.source_path=m.source_path JOIN semon_pg_source_state s ON s.namespace_digest=m.namespace_digest AND s.namespace=m.namespace WHERE m.namespace_digest=sha256($1::bytea) AND m.namespace=$1 ORDER BY m.source_path LIMIT 65",
+                &[&tx.namespace.as_str().as_bytes()],
+            ).map_err(sqlstate::error)?;
+            eprintln!("WITHDRAWAL_RUNTIME phase={phase} pending_count={}", rows.len());
+            for row in rows {
+                eprintln!("WITHDRAWAL_RUNTIME path_digest={} kind={} reason={:?} revision={:?} semantic_pending={} active_stage={}", row.get::<_, String>(0), row.get::<_, String>(1), row.get::<_, Option<String>>(2), row.get::<_, Option<i64>>(3), row.get::<_, bool>(4), row.get::<_, bool>(5));
+            }
+            Ok(())
+        }).unwrap();
+    };
+    dump_withdrawal_intents("before-catchup");
     let catchup_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
     catchup
         .begin_semantic_stage(&paths, &catchup_runtime)
         .unwrap();
     let (batch, model) = loop {
         let batch = catchup.semantic_batch(64).unwrap().unwrap();
+        dump_withdrawal_intents(&format!("before-{:?}", batch.phase));
         let model = catchup
             .prepare_semantic_model_batch(
                 &facts_options,
