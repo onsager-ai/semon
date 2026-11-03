@@ -61,6 +61,7 @@ pub(in crate::storage::postgres) struct Snapshot<'a, 'tx> {
     pub(in crate::storage::postgres) tx: std::sync::Mutex<&'a mut PgTxn<'tx>>,
     generation: String,
     runtime_local: std::cell::OnceCell<crate::native_evidence::RuntimeObservations>,
+    publications: RefCell<observations::Publications>,
 }
 
 pub(in crate::storage::postgres) struct HistoryOwner {
@@ -305,6 +306,7 @@ pub(in crate::storage::postgres) fn in_transaction<T>(
         tx: std::sync::Mutex::new(tx),
         generation: generation.to_owned(),
         runtime_local: std::cell::OnceCell::new(),
+        publications: RefCell::new(observations::Publications::default()),
     })
 }
 

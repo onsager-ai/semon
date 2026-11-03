@@ -6320,6 +6320,642 @@ fn staged_publication_refuses_large_bidirectional_message_pages() {
     assert_eq!(complete["error"]["retryable"], false);
 }
 
+#[cfg(feature = "postgres")]
+#[test]
+fn pg_catalog_page_crosses_batch_boundary_with_tied_timestamps() {
+    use crate::storage::native_events::NativeEventStore;
+
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-page-batches-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace, "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres { pool, control })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+
+    let expected = (0..110)
+        .map(|index| format!("page-{index:03}"))
+        .collect::<Vec<_>>();
+    for (index, key) in expected.iter().enumerate() {
+        let minute = if index < 40 {
+            2
+        } else if index < 90 {
+            1
+        } else {
+            0
+        };
+        home.top(key, &[human(key, ts(5, minute), "page fixture")]);
+    }
+    let inputs = crate::inputs(&options).unwrap();
+    let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    cache
+        .discover_catalog_sources(&options, &inputs, true)
+        .unwrap();
+    for (index, input) in inputs.iter().enumerate() {
+        cache
+            .ingest(
+                &format!("{:064x}", index + 1),
+                &input.full_path(&options),
+                "claude",
+            )
+            .unwrap();
+    }
+    for batch in inputs.chunks(55) {
+        let prepared = crate::model::prepare_sources(&options, &mut cache, batch, NOW).unwrap();
+        assert_eq!(prepared.rows.len(), batch.len());
+        let (_, generation) = cache.publish_partial_catalog_fenced(&prepared).unwrap();
+        assert!(generation.is_some());
+    }
+    drop(cache);
+
+    let mut request = crate::catalog::Request::parse("limit=100").unwrap();
+    let read = |request: &crate::catalog::Request| {
+        let reply = crate::storage::read_local_catalog_page(&options, "local", request).unwrap();
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        serde_json::from_slice::<Value>(&reply.body).unwrap()
+    };
+    let keys = |page: &Value| {
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["key"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    crate::storage::postgres::take_catalog_publication_reads();
+    let first = read(&request);
+    assert_eq!(keys(&first), expected[..100]);
+    assert_eq!(
+        crate::storage::postgres::take_catalog_publication_reads(),
+        (100, 2),
+        "each of the two publication payloads is fetched once for 100 row observations"
+    );
+    let cursor: crate::catalog::Cursor =
+        serde_json::from_str(first["next_cursor"].as_str().unwrap()).unwrap();
+    request.cursor = Some(cursor.clone());
+    let second = read(&request);
+    assert_eq!(keys(&second), expected[100..]);
+    assert!(second["next_cursor"].is_null());
+    let (calls, fetches) = crate::storage::postgres::take_catalog_publication_reads();
+    assert_eq!(calls, 10);
+    assert!(
+        (1..=2).contains(&fetches),
+        "a new snapshot authenticates its publication payloads again"
+    );
+
+    let mut inclusive = cursor;
+    inclusive.last = at(5, 1);
+    inclusive.key = expected[64].clone();
+    inclusive.inclusive = true;
+    request.cursor = Some(inclusive);
+    let tied = read(&request);
+    assert_eq!(keys(&tied), expected[64..]);
+    assert!(tied["next_cursor"].is_null());
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages() {
+    use crate::storage::native_events::NativeEventStore;
+
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-oversized-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+
+    home.top(
+        "prior",
+        &[human("prior", ts(5, 0), "Last admitted Catalog")],
+    );
+    let prior_inputs = crate::inputs(&options).unwrap();
+    assert_eq!(prior_inputs.len(), 1);
+    let mut pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    pg_cache
+        .discover_catalog_sources(&options, &prior_inputs, true)
+        .unwrap();
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
+    for (at, input) in prior_inputs.iter().enumerate() {
+        let path = input.full_path(&options);
+        let receipt = pg_cache
+            .ingest(&format!("{:064x}", at + 1), &path, "claude")
+            .unwrap();
+        assert_eq!(receipt.consumed_bytes, fs::metadata(&path).unwrap().len());
+    }
+    let prior_prepared =
+        crate::model::prepare_sources(&options, &mut pg_cache, &prior_inputs, NOW).unwrap();
+    assert_eq!(prior_prepared.rows.len(), 1);
+    assert_eq!(prior_prepared.rows[0].key, "prior");
+    assert!(!prior_prepared.transcripts.is_empty());
+    let (prior_outcome, prior_generation) = pg_cache
+        .publish_partial_catalog_fenced(&prior_prepared)
+        .unwrap();
+    assert_eq!(prior_outcome, crate::events::Outcome::Written);
+    assert!(
+        prior_generation.is_some(),
+        "PG publication returned no head"
+    );
+    assert_eq!(pg_cache.session_catalog_generation(), prior_generation);
+    drop(pg_cache);
+
+    let prior_page = crate::session_catalog_page(&options, "local", "sid=prior");
+    assert_eq!(prior_page.status, 200);
+    let prior_page: Value = serde_json::from_slice(&prior_page.body).unwrap();
+    let prior_item = prior_page["items"][0].clone();
+    assert_eq!(prior_item["key"], "prior");
+
+    write_bidirectional_message_page_fixture(&home, 360);
+    let inputs = crate::inputs(&options).unwrap();
+    let prior_path = options.claude_home.join("projects/-work-proj/prior.jsonl");
+    let selected_inputs = inputs
+        .iter()
+        .filter(|input| input.full_path(&options) != prior_path)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(selected_inputs.len(), 72);
+    let component_paths = ["alpha", "beta"]
+        .map(|id| {
+            options
+                .claude_home
+                .join(format!("projects/-work-proj/{id}.jsonl"))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    for (page_index, page) in selected_inputs.chunks(64).enumerate() {
+        let complete = (page_index + 1) * 64 >= selected_inputs.len();
+        pg_cache
+            .discover_catalog_sources(&options, page, complete)
+            .unwrap();
+    }
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
+    let pending = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending),
+        "the target bidirectional component was discovered as pending"
+    );
+
+    // This diagnostic enters NativeEvidence only after real PG native ingest
+    // receipts. Discover persists membership and claims; it does not produce
+    // Index ledgers. This isolates post-ingestion Stage refusal and says
+    // nothing about fresh PG cold-ingestion qualification.
+    let selected_paths = selected_inputs
+        .iter()
+        .map(|input| input.full_path(&options).to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    for (at, input) in selected_inputs.iter().enumerate() {
+        let path = input.full_path(&options);
+        let receipt = pg_cache
+            .ingest(&format!("{:064x}", at + 2), &path, "claude")
+            .unwrap();
+        assert_eq!(receipt.consumed_bytes, fs::metadata(&path).unwrap().len());
+    }
+    assert_eq!(
+        pg_cache.session_catalog_generation(),
+        prior_generation,
+        "native ingestion must preserve the prior published Catalog head"
+    );
+    assert_eq!(
+        pg_cache.backfill_state().unwrap().as_deref(),
+        Some("draining")
+    );
+    for page in selected_paths.chunks(64) {
+        let ledgers = pg_cache.stored_ledger_batch(page).unwrap();
+        assert_eq!(ledgers.len(), page.len());
+        for (path, ledger) in page.iter().zip(ledgers) {
+            let ledger = ledger.expect("native ingest must commit each selected PG ledger");
+            assert_eq!(ledger.offset, fs::metadata(path).unwrap().len());
+        }
+    }
+    let pending_after_ingest = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending_after_ingest),
+        "the target component claims remain pending after native ingestion"
+    );
+    drop(pg_cache);
+
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    let mut marker_observed = false;
+    for _ in 0..1024 {
+        assert!(
+            !evidence
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .unwrap(),
+            "oversized PG stage must remain pending"
+        );
+        if crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control)
+            .unwrap()
+            .is_some()
+        {
+            marker_observed = true;
+            break;
+        }
+    }
+    evidence.retire();
+    assert!(
+        marker_observed,
+        "large PostgreSQL fixture did not persist a refusal"
+    );
+
+    let diagnostic =
+        crate::storage::postgres::take_semantic_stage_save_diagnostic(namespace.as_str())
+            .expect("PostgreSQL semantic-stage save recorded the bounded refusal");
+    let before = diagnostic
+        .before
+        .as_ref()
+        .expect("diagnostic captured the active stage before the failed record");
+    let after = diagnostic
+        .after
+        .as_ref()
+        .expect("diagnostic captured the active stage after marker commit");
+    assert!(
+        diagnostic.relations >= 720,
+        "refusal covers the bidirectional component"
+    );
+    assert_eq!(before.generation, after.generation);
+    assert_eq!(before.epoch, after.epoch);
+    assert_eq!(before.phase, after.phase);
+    assert_eq!(before.paths, after.paths);
+    assert_eq!(before.claims, after.claims);
+    assert_eq!(before.stage_hash, after.stage_hash);
+    assert_eq!(before.path_hash, after.path_hash);
+    assert_eq!(before.claims_hash, after.claims_hash);
+    assert!(!before.stage_hash.is_empty());
+    assert!(diagnostic.stage_bytes_exceeded);
+    assert!(!diagnostic.path_limit_exceeded);
+    assert!(!diagnostic.endpoint_limit_exceeded);
+    assert!(diagnostic.largest_owner_row_bytes > 1024 * 1024);
+    assert!(
+        diagnostic.stage_bytes_exceeded
+            || diagnostic.path_limit_exceeded
+            || diagnostic.endpoint_limit_exceeded,
+        "semantic-stage save reported no exceeded bound"
+    );
+    eprintln!(
+        "pg_post_ingest_oversized_native_diagnostic phase={} before_phase={} before_epoch={} outcome=Deferred candidate_stage_bytes={} paths={} endpoints={} relations={} largest_owner_row_bytes={} largest_owner_witness_bytes={} model_witness_bytes={} stage_bytes_exceeded={} path_limit_exceeded={} endpoint_limit_exceeded={}",
+        diagnostic.phase,
+        before.phase.as_deref().unwrap_or("absent"),
+        before.epoch.unwrap_or_default(),
+        diagnostic.candidate_stage_bytes,
+        diagnostic.paths,
+        diagnostic.endpoints,
+        diagnostic.relations,
+        diagnostic.largest_owner_row_bytes,
+        diagnostic.largest_owner_witness_bytes,
+        diagnostic.model_witness_bytes,
+        diagnostic.stage_bytes_exceeded,
+        diagnostic.path_limit_exceeded,
+        diagnostic.endpoint_limit_exceeded,
+    );
+
+    let pg_cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        pg_cache.session_catalog_generation(),
+        after.generation,
+        "the publication head matches the state immediately before the failed record"
+    );
+    let pending = pg_cache
+        .pending_catalog_sources(128)
+        .unwrap()
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    assert!(
+        component_paths.is_subset(&pending),
+        "the refused bidirectional component claims remain pending"
+    );
+    drop(pg_cache);
+
+    let generation = after.generation.as_deref().expect("prior Catalog head");
+    let marker =
+        crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control)
+            .unwrap()
+            .expect("qualified oversized owner row persisted a refusal marker");
+    assert!(marker.len() <= 4096);
+    let marker_value: Value = serde_json::from_slice(&marker).unwrap();
+    assert_eq!(marker_value["version"], 1);
+    assert_eq!(marker_value["active_phase"], "identity");
+    assert_eq!(marker_value["attempted_phase"], "relations");
+    assert!(marker_value.get("source_path").is_none());
+    assert!(marker_value.get("native_id").is_none());
+    let marker_text = String::from_utf8(marker.clone()).unwrap();
+    assert!(
+        selected_paths
+            .iter()
+            .all(|path| !marker_text.contains(path))
+    );
+    assert!(!marker_text.contains("Last admitted Catalog"));
+    assert!(
+        !marker_text.contains(&crate::native_evidence::query_runtime_generation(&options).unwrap())
+    );
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_publication_blocker(
+            &pool, &namespace, &control, generation,
+        )
+        .unwrap(),
+        Some(crate::storage::catalog::CatalogPublicationBlocker::PublicationTooLarge)
+    );
+
+    for field in [
+        "stage_epoch",
+        "active_stage_sha256",
+        "active_claims_sha256",
+        "claims_sha256",
+        "runtime_sha256",
+        "head_sha256",
+        "source_revision",
+        "active_phase",
+    ] {
+        let mut changed = marker_value.clone();
+        match field {
+            "stage_epoch" | "source_revision" => {
+                changed[field] = json!(changed[field].as_i64().unwrap() + 1);
+            }
+            "active_phase" => {
+                changed["active_phase"] = json!("indexing");
+                changed["attempted_phase"] = json!("identity");
+            }
+            "head_sha256" => changed[field] = json!("0".repeat(64)),
+            _ => changed[field] = json!("0".repeat(64)),
+        }
+        let changed = serde_json::to_vec(&changed).unwrap();
+        crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+            &pool, &namespace, &control, &changed,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::storage::postgres::semantic_stage_test_publication_blocker(
+                &pool, &namespace, &control, generation,
+            )
+            .unwrap(),
+            None,
+            "changed {field} fence must expire the blocker"
+        );
+        crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+            &pool, &namespace, &control, &marker,
+        )
+        .unwrap();
+    }
+    let mut corrupt = marker_value.clone();
+    corrupt["unknown"] = json!(true);
+    crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+        &pool,
+        &namespace,
+        &control,
+        &serde_json::to_vec(&corrupt).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::storage::postgres::semantic_stage_test_publication_blocker(
+            &pool, &namespace, &control, generation,
+        ),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
+    crate::storage::postgres::semantic_stage_test_write_refusal_bytes(
+        &pool, &namespace, &control, &marker,
+    )
+    .unwrap();
+
+    let page = crate::session_catalog_page(&options, "local", "limit=100");
+    assert_eq!(page.status, 200);
+    let page: Value = serde_json::from_slice(&page.body).unwrap();
+    assert_eq!(page["completeness"]["state"], "partial");
+    assert_eq!(
+        page["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
+    assert_eq!(page["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(page["freshness"], "updating");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["key"], "prior");
+
+    let search = crate::session_catalog_page(&options, "local", "q=prior&limit=100");
+    assert_eq!(search.status, 200);
+    let search: Value = serde_json::from_slice(&search.body).unwrap();
+    assert_eq!(search["completeness"]["state"], "partial");
+    assert_eq!(
+        search["completeness"]["blocker"]["code"],
+        "publication_too_large"
+    );
+    assert_eq!(search["completeness"]["blocker"]["retryable"], false);
+    assert_eq!(search["items"][0]["key"], "prior");
+
+    let mut complete_request = crate::catalog::Request::parse("limit=100").unwrap();
+    complete_request.require_complete = true;
+    let complete =
+        crate::storage::read_local_catalog_page(&options, "local", &complete_request).unwrap();
+    assert_eq!(complete.status, 503);
+    let complete: Value = serde_json::from_slice(&complete.body).unwrap();
+    assert_eq!(complete["error"]["code"], "publication_too_large");
+    assert_eq!(complete["error"]["retryable"], false);
+
+    let after_page = crate::session_catalog_page(&options, "local", "sid=prior");
+    assert_eq!(after_page.status, 200);
+    let after_page: Value = serde_json::from_slice(&after_page.body).unwrap();
+    assert_eq!(after_page["items"][0], prior_item);
+    assert_ne!(
+        crate::session_catalog_page(&options, "local", "sid=alpha").status,
+        200,
+        "unpublished fixture owners remain unavailable"
+    );
+
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_finish(
+            &pool,
+            &namespace,
+            &control,
+            before.epoch.expect("active stage epoch"),
+        )
+        .unwrap(),
+        crate::events::Outcome::Written
+    );
+    assert_eq!(
+        crate::storage::postgres::semantic_stage_test_refusal_bytes(&pool, &namespace, &control,)
+            .unwrap(),
+        None,
+        "a successful stage mutation clears its stale refusal marker"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[test]
+fn pg_semantic_stage_empty_probe_resumes_without_mutation() {
+    let home = Home::new();
+    let namespace = crate::storage::LogicalSourceNamespace::new(format!(
+        "pg-semantic-probe-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+    .unwrap();
+    let source = crate::storage::HostSource::new(namespace.clone(), "d".repeat(64)).unwrap();
+    let pool = crate::storage::postgres::test_fixture_pool();
+    let control = crate::storage::postgres::PgCancellation::default();
+    let config = source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    config.create_native_store().unwrap();
+    let mut options = home.options.clone();
+    options.source = source.with_store(config).unwrap();
+    let runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    let snapshot = || {
+        crate::storage::postgres::semantic_stage_test_snapshot(&pool, &namespace, &control).unwrap()
+    };
+
+    let initial = snapshot();
+    assert_eq!(initial.epoch, None);
+    let mut probe = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        probe.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Conflict,
+        "an empty probe with no active stage reports no resumable work"
+    );
+    assert_eq!(
+        snapshot(),
+        initial,
+        "an empty probe leaves storage unchanged"
+    );
+
+    let paths = vec!["source-a.jsonl".to_owned()];
+    let mut first = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        first.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let active = snapshot();
+    let epoch = active.epoch.expect("begin created an active stage");
+    assert_eq!(active.paths, 1);
+
+    let mut exact_resume = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        exact_resume.begin_semantic_stage(&paths, &runtime).unwrap(),
+        crate::events::Outcome::Written,
+        "a supplied nonempty seed list must match the active stage"
+    );
+    assert_eq!(snapshot(), active, "exact resume retains the active stage");
+
+    let mut resume = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        resume.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Written,
+        "an empty probe resumes the active stage"
+    );
+    assert_eq!(
+        snapshot(),
+        active,
+        "empty resume retains the original seeds"
+    );
+    let conflict =
+        crate::events::StoreError::Configured(crate::storage::StorageError::Conflict).to_string();
+    assert_eq!(
+        resume
+            .begin_semantic_stage(&[], "mismatched-runtime")
+            .unwrap_err()
+            .to_string(),
+        conflict,
+    );
+    assert_eq!(
+        snapshot(),
+        active,
+        "runtime mismatch leaves the stage unchanged"
+    );
+    assert_eq!(
+        resume
+            .begin_semantic_stage(&["different-source.jsonl".to_owned()], &runtime)
+            .unwrap_err()
+            .to_string(),
+        conflict,
+    );
+    assert_eq!(
+        snapshot(),
+        active,
+        "seed mismatch leaves the stage unchanged"
+    );
+
+    let mut successor = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    assert_eq!(
+        successor.finish_semantic_stage(epoch).unwrap(),
+        crate::events::Outcome::Written
+    );
+    let inactive = snapshot();
+    assert_eq!(inactive.epoch, None);
+    assert_eq!(
+        successor.begin_semantic_stage(&[], &runtime).unwrap(),
+        crate::events::Outcome::Conflict,
+        "an empty probe does not resume an inactive stage"
+    );
+    assert_eq!(
+        snapshot(),
+        inactive,
+        "inactive probe leaves storage unchanged"
+    );
+    assert_eq!(
+        successor
+            .begin_semantic_stage(&["source-b.jsonl".to_owned()], &runtime)
+            .unwrap(),
+        crate::events::Outcome::Written
+    );
+    let successor_stage = snapshot();
+    assert_eq!(successor_stage.epoch, Some(epoch + 1));
+    assert_eq!(
+        first
+            .begin_semantic_stage(&[], &runtime)
+            .unwrap_err()
+            .to_string(),
+        conflict,
+    );
+    assert_eq!(
+        snapshot(),
+        successor_stage,
+        "a stale holder cannot mutate the successor stage"
+    );
+}
+
 fn assert_staged_bidirectional_message_pages(rounds: i64) {
     let home = Home::new();
     write_bidirectional_message_page_fixture(&home, rounds);

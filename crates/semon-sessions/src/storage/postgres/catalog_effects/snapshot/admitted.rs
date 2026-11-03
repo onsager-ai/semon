@@ -99,13 +99,16 @@ impl Snapshot<'_, '_> {
                     .ok_or_else(|| failed(StorageError::ScopeChanged))?
                     .clone();
                 original.lifecycle = reference.lifecycle;
-                let observations = observations::publication(
-                    &mut tx,
-                    &current,
-                    &encoded(&original).map_err(failed)?,
-                    &reference.receipt,
-                )
-                .map_err(failed)?;
+                let observations = self
+                    .publications
+                    .borrow_mut()
+                    .observation(
+                        &mut tx,
+                        &current,
+                        &encoded(&original).map_err(failed)?,
+                        &reference.receipt,
+                    )
+                    .map_err(failed)?;
                 return Ok(Some((
                     current,
                     observations,
@@ -145,8 +148,11 @@ impl Snapshot<'_, '_> {
             };
             let receipt: observations::NativeReceipt =
                 serde_json::from_slice(&native).map_err(io::Error::other)?;
-            let observations =
-                observations::publication(&mut tx, &current, original, &receipt).map_err(failed)?;
+            let observations = self
+                .publications
+                .borrow_mut()
+                .observation(&mut tx, &current, original, &receipt)
+                .map_err(failed)?;
             return Ok(Some((current, observations, Origin::Native(receipt))));
         }
         let reference_kind = owner.map(|owner| match owner {
@@ -310,6 +316,17 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let admitted: bool = tx.driver.query_one("SELECT EXISTS(SELECT 1 FROM semon_pg_native_catalog_operations WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2)", &[&tx.namespace.as_str().as_bytes(), &self.generation.as_bytes()]).map_err(sqlstate::error).map_err(failed)?.get(0);
         if admitted { Ok(()) } else { unavailable() }
     }
+    fn publication_blocker(
+        &self,
+    ) -> io::Result<Option<crate::storage::catalog::CatalogPublicationBlocker>> {
+        self.require_current()?;
+        let mut tx = self
+            .tx
+            .lock()
+            .map_err(|_| failed(StorageError::Unavailable))?;
+        super::super::super::semantic_stage::publication_blocker(&mut tx, &self.generation)
+            .map_err(failed)
+    }
     fn publication_value(&self, key: &str) -> io::Result<Option<String>> {
         self.require_current()?;
         let value = if key == "catalog_backfill_state" {
@@ -394,9 +411,6 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<SelectedCatalogRow>> {
         self.require_current()?;
-        if request.limit > 64 {
-            return unavailable();
-        }
         // Retained lists use the latest Current row's indexed fields when it
         // exists, matching SQLite's Catalog index. History-only keys fall
         // back to their proof-owned header. The shared renderer overlays the
@@ -413,89 +427,104 @@ impl CatalogSnapshot for Snapshot<'_, '_> {
         let harness = request.harness.as_ref().map(|v| v.as_bytes());
         let repo = request.repo.as_ref().map(|v| v.as_bytes());
         let model = request.model.as_ref().map(|v| v.as_bytes());
-        let cursor_last = request.cursor.as_ref().map(|v| v.last);
-        let cursor_key = request.cursor.as_ref().map(|v| v.key.as_bytes());
-        let inclusive = request.cursor.as_ref().is_some_and(|v| v.inclusive);
-        let limit = request.limit as i64 + 1;
-        let rows = tx
-            .driver
-            .query(
-                "WITH visible AS (
-                SELECT session_key,metadata,last_ms,harness,repo,model,false AS retained
-                FROM semon_pg_native_catalog_rows r
-                WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
-                UNION ALL
-                SELECT o.session_key,h.metadata,o.last_ms,o.harness,o.repo,o.model,true
-                FROM semon_pg_native_catalog_history_owners o
-                JOIN semon_pg_native_catalog_history_headers h
-                  ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
-                 AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
-                 AND h.session_key=o.session_key
-                WHERE $11 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
-                  AND NOT EXISTS (
-                    SELECT 1 FROM semon_pg_native_catalog_rows r
-                    WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
-                      AND r.generation=o.generation AND r.key_digest=o.key_digest
-                      AND r.session_key=o.session_key)
-             ), page AS MATERIALIZED (
-                SELECT session_key,metadata,last_ms,harness,repo,model,retained
-                FROM visible
-                WHERE ($3::bytea IS NULL OR session_key=$3)
-                  AND ($4::bytea IS NULL OR harness=$4)
-                  AND ($5::bytea IS NULL OR repo=$5)
-                  AND ($6::bytea IS NULL OR model=$6)
-                  AND ($7::bigint IS NULL OR last_ms<$7
-                       OR (last_ms=$7 AND (session_key>$8 OR ($9 AND session_key=$8))))
-                ORDER BY last_ms DESC,session_key LIMIT $10
-             ) SELECT session_key,
-                 CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
-                 last_ms,harness,repo,model,retained FROM page ORDER BY last_ms DESC,session_key",
-                &[
-                    &ns,
-                    &self.generation.as_bytes(),
-                    &sid,
-                    &harness,
-                    &repo,
-                    &model,
-                    &cursor_last,
-                    &cursor_key,
-                    &inclusive,
-                    &limit,
-                    &history,
-                ],
-            )
-            .map_err(sqlstate::error)
-            .map_err(failed)?;
+        let mut cursor_last = request.cursor.as_ref().map(|v| v.last);
+        let mut cursor_key = request.cursor.as_ref().map(|v| v.key.as_bytes().to_vec());
+        let mut inclusive = request.cursor.as_ref().is_some_and(|v| v.inclusive);
         let mut output = Vec::new();
-        for row in rows {
-            let key: Vec<u8> = row.get(0);
-            let bytes: Vec<u8> = row
-                .get::<_, Option<Vec<u8>>>(1)
-                .ok_or_else(|| failed(StorageError::Busy))?;
-            crate::selected_read::charge(64, bytes.len())?;
-            let mut value: CatalogRow = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-            if value.key.as_bytes() != key
-                || value.sources.len() > 64
-                || value.last.unwrap_or(0) != row.get::<_, i64>(2)
-                || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3)
-                || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4)
-                || value.model.as_bytes() != row.get::<_, Vec<u8>>(5)
-            {
-                return Err(failed(StorageError::ScopeChanged));
+        let mut metadata_bytes = 0usize;
+        while output.len() < request.limit + 1 {
+            let limit = (request.limit + 1 - output.len()).min(65) as i64;
+            let rows = tx
+                .driver
+                .query(
+                    "WITH visible AS (
+                    SELECT session_key,metadata,last_ms,harness,repo,model,false AS retained
+                    FROM semon_pg_native_catalog_rows r
+                    WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2
+                    UNION ALL
+                    SELECT o.session_key,h.metadata,o.last_ms,o.harness,o.repo,o.model,true
+                    FROM semon_pg_native_catalog_history_owners o
+                    JOIN semon_pg_native_catalog_history_headers h
+                      ON h.namespace_digest=o.namespace_digest AND h.namespace=o.namespace
+                     AND h.generation=o.owner_generation AND h.key_digest=o.key_digest
+                     AND h.session_key=o.session_key
+                    WHERE $11 AND o.namespace_digest=sha256($1::bytea) AND o.namespace=$1 AND o.generation=$2
+                      AND NOT EXISTS (
+                        SELECT 1 FROM semon_pg_native_catalog_rows r
+                        WHERE r.namespace_digest=o.namespace_digest AND r.namespace=o.namespace
+                          AND r.generation=o.generation AND r.key_digest=o.key_digest
+                          AND r.session_key=o.session_key)
+                 ), page AS MATERIALIZED (
+                    SELECT session_key,metadata,last_ms,harness,repo,model,retained
+                    FROM visible
+                    WHERE ($3::bytea IS NULL OR session_key=$3)
+                      AND ($4::bytea IS NULL OR harness=$4)
+                      AND ($5::bytea IS NULL OR repo=$5)
+                      AND ($6::bytea IS NULL OR model=$6)
+                      AND ($7::bigint IS NULL OR last_ms<$7
+                           OR (last_ms=$7 AND (session_key>$8 OR ($9 AND session_key=$8))))
+                    ORDER BY last_ms DESC,session_key LIMIT $10
+                 ) SELECT session_key,
+                     CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END,
+                     last_ms,harness,repo,model,retained FROM page ORDER BY last_ms DESC,session_key",
+                    &[
+                        &ns,
+                        &self.generation.as_bytes(),
+                        &sid,
+                        &harness,
+                        &repo,
+                        &model,
+                        &cursor_last,
+                        &cursor_key.as_deref(),
+                        &inclusive,
+                        &limit,
+                        &history,
+                    ],
+                )
+                .map_err(sqlstate::error)
+                .map_err(failed)?;
+            let count = rows.len();
+            for row in rows {
+                let key: Vec<u8> = row.get(0);
+                let bytes: Vec<u8> = row
+                    .get::<_, Option<Vec<u8>>>(1)
+                    .ok_or_else(|| failed(StorageError::Busy))?;
+                metadata_bytes = metadata_bytes.saturating_add(bytes.len());
+                if metadata_bytes > 1_048_576 {
+                    return Err(failed(StorageError::Busy));
+                }
+                crate::selected_read::charge(64, bytes.len())?;
+                let mut value: CatalogRow =
+                    serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                if value.key.as_bytes() != key
+                    || value.sources.len() > 64
+                    || value.last.unwrap_or(0) != row.get::<_, i64>(2)
+                    || value.harness.as_bytes() != row.get::<_, Vec<u8>>(3)
+                    || value.repo.as_deref().unwrap_or("").as_bytes() != row.get::<_, Vec<u8>>(4)
+                    || value.model.as_bytes() != row.get::<_, Vec<u8>>(5)
+                {
+                    return Err(failed(StorageError::ScopeChanged));
+                }
+                if row.get::<_, bool>(6) {
+                    value.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                }
+                cursor_last = Some(value.last.unwrap_or(0));
+                cursor_key = Some(key);
+                inclusive = false;
+                output.push(SelectedCatalogRow {
+                    row: value,
+                    owner: Some(if row.get::<_, bool>(6) {
+                        CatalogObservationOwner::History
+                    } else {
+                        CatalogObservationOwner::Catalog
+                    }),
+                });
             }
-            if row.get::<_, bool>(6) {
-                value.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            tx.check().map_err(failed)?;
+            if count < limit as usize {
+                break;
             }
-            output.push(SelectedCatalogRow {
-                row: value,
-                owner: Some(if row.get::<_, bool>(6) {
-                    CatalogObservationOwner::History
-                } else {
-                    CatalogObservationOwner::Catalog
-                }),
-            });
         }
-        tx.check().map_err(failed)?;
         Ok(output)
     }
     fn search(
