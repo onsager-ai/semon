@@ -34,6 +34,136 @@ pub(super) fn advance(options: &Options, row: &CatalogRow, operation: &str) -> S
 }
 
 #[test]
+fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
+    let data = build_oracle(true, false);
+    let (pool, _) = fixture(|_| {});
+    let namespace = ns("verified-composite-identity");
+    let control = PgCancellation::default();
+    let mut options = Options {
+        source: crate::storage::HostSource::new(namespace.clone(), "c".repeat(64)).unwrap(),
+        claude_home: data.root.join("claude"),
+        claude_json: data.root.join("claude.json"),
+        codex_home: data.root.join("codex"),
+        copilot_home: data.root.join("copilot"),
+        proc_root: data.root.join("proc"),
+        cache: data.root.join("composite-index.json"),
+        all: true,
+        ..Default::default()
+    };
+    let old_path = data.rows[0].sources[0].path.clone();
+    let live_path = options.claude_home.join("projects/project/resume.jsonl");
+    writeln!(fs::File::create(&live_path).unwrap(), "{}",
+        serde_json::json!({"type":"user","sessionId":"resume","session_id":"one","uuid":"resume-user","timestamp":"2026-10-01T00:00:02Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized resumed source"}})).unwrap();
+    options
+        .source
+        .config(&options.cache)
+        .unwrap()
+        .create_native_store()
+        .unwrap();
+    let inputs = crate::inputs::inputs(&options).unwrap();
+    let mut sqlite = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    let initial =
+        crate::model::prepare_sources(&options, &mut sqlite, &inputs, 1790812803000).unwrap();
+    assert_eq!(initial.rows.len(), 1);
+    assert_eq!(initial.rows[0].sources.len(), 2);
+    drop(sqlite);
+    bind_custody_fixture(
+        &pool,
+        &namespace,
+        &options,
+        &initial.rows,
+        &initial.transcripts,
+    );
+    let config = options
+        .source
+        .store_config(crate::storage::StoreBackend::Postgres {
+            pool: pool.clone(),
+            control: control.clone(),
+        })
+        .unwrap();
+    options.source = options.source.with_store(config).unwrap();
+    let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+    fs::rename(&old_path, data.root.join("retained-composite-original.jsonl")).unwrap();
+    cache
+        .retain(
+            &BTreeSet::from([live_path.to_string_lossy().into_owned()]),
+            &mut false,
+        )
+        .unwrap();
+    let input = crate::native_evidence::catalog_input(&live_path, &options).unwrap();
+    let from = fs::metadata(&live_path).unwrap().len();
+    let writer =
+        crate::SessionSourceWrite::begin(&options, &input, Some(&"a".repeat(32)), from).unwrap();
+    writeln!(fs::OpenOptions::new().append(true).open(&live_path).unwrap(), "{}",
+        serde_json::json!({"type":"user","sessionId":"resume","session_id":"one","uuid":"continued-user","parentUuid":"resume-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized verified continuation"}})).unwrap();
+    writer
+        .complete(fs::metadata(&live_path).unwrap().len())
+        .unwrap();
+    let continued =
+        crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
+    assert_eq!(continued.rows.len(), 1);
+    assert_eq!(continued.rows[0].sources.len(), 1);
+    assert_eq!(
+        continued
+            .presentation_observations()
+            .unwrap()
+            .verified_continuations()
+            .unwrap()
+            .len(),
+        1,
+        "the ordinary preparation must carry a real request-local scanner continuation"
+    );
+    let mut generation = None;
+    for _ in 0..4 {
+        let (outcome, published) = cache.publish_partial_catalog_fenced(&continued).unwrap();
+        if published.is_some() {
+            assert_eq!(outcome, Outcome::Written);
+            generation = published;
+            break;
+        }
+        assert_eq!(outcome, Outcome::Deferred);
+    }
+    let generation = generation.expect("ordinary verified-continuation publication");
+    let key = &continued.rows[0].key;
+    let owner = snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
+        let owner = view.owner(key)?.unwrap();
+        assert!(!owner.original);
+        assert!(owner.has_current);
+        let history = view.catalog(key, true)?.unwrap();
+        assert_eq!(history.sources.len(), 2);
+        assert!(history.sources.iter().any(|source| source.path == old_path));
+        Ok(owner.generation)
+    })
+    .unwrap();
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_history_headers SET incomplete=true WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3", &[&namespace.as_str().as_bytes(), &owner.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?, 1);
+        Ok(())
+    })
+    .unwrap();
+    snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
+        let history = view.catalog(key, true)?.unwrap();
+        let request = crate::catalog::Request::parse(&format!(
+            "sid={}",
+            crate::viewer::percent_encode(key)
+        ))
+        .unwrap();
+        let current = view.rows(&request).unwrap().remove(0);
+        assert!(
+            !view.history_qualified(&history).unwrap(),
+            "incomplete recipes cannot qualify full History"
+        );
+        assert!(
+            view.composite_history_identity_qualified(&current, &history)
+                .unwrap(),
+            "verified continuation permits compact identity for an exact non-original composite"
+        );
+        Ok(())
+    })
+    .unwrap();
+    fs::remove_dir_all(&data.root).unwrap();
+}
+
+#[test]
 fn pg_withdrawal_preserves_current_and_older_original_custody() {
     for case in ["current-only", "older-original"] {
         let data = build_oracle(true, false);
