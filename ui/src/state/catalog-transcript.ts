@@ -229,11 +229,13 @@ export class CatalogTranscriptStore {
         const first = Math.max(page.range.first, range.first),
           end = Math.min(page.range.end, range.end);
         return first < end
-          ? [{
-              ...page,
-              range: { first, end, next: end < page.projection.total ? end : null },
-              entries: page.entries.filter((entry) => entry.slot >= first && entry.slot < end),
-            }]
+          ? [
+              {
+                ...page,
+                range: { first, end, next: end < page.projection.total ? end : null },
+                entries: page.entries.filter((entry) => entry.slot >= first && entry.slot < end),
+              },
+            ]
           : [];
       }),
     );

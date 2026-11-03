@@ -385,7 +385,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     // acquires its own custody reference instead of borrowing Current's grant.
     let successor =
         snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |held| {
-            let next = super::native_history::replace_source(&options, row, "query-recipe-successor");
+            let next =
+                super::native_history::replace_source(&options, row, "query-recipe-successor");
             assert_eq!(
                 held.load_query_recipe(&token).unwrap(),
                 Some(expected.clone())

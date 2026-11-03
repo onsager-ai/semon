@@ -117,6 +117,7 @@ interface SelectedView {
   transientNote?: boolean;
   observationFailure?: { text: string; retryable: boolean };
   anchorNote?: string;
+  anchorFlash?: { turn: string; until: number };
   ticket?: CatalogSelectionRequest;
   identityLoading: boolean;
   opening: boolean;
@@ -2174,6 +2175,9 @@ export function createCatalogViewer(
   }
   function drawList() {
     if (disposed || navigation.route.v !== 'sessions' || active || sourcesOpen) return;
+    if (!items.length && (updating || page?.completeness.state === 'partial'))
+      root.setAttribute('aria-busy', 'true');
+    else root.removeAttribute('aria-busy');
     const anchor = root.querySelector<HTMLElement>('.session-list .nrow');
     const anchorId = anchor?.dataset.id;
     const anchorTop = anchor?.getBoundingClientRect().top;
@@ -3028,6 +3032,11 @@ export function createCatalogViewer(
       },
     );
     measureSessionScreen(view.root);
+    const anchorFlash = view.anchorFlash;
+    if (anchorFlash && performance.now() < anchorFlash.until)
+      [...view.root.querySelectorAll<HTMLElement>('[data-turn]')]
+        .find((node) => node.dataset.turn === anchorFlash.turn)
+        ?.classList.add('flash');
     const main = document.querySelector<HTMLElement>('#main')!;
     if (view.following) {
       if (view.opening) {
@@ -3702,6 +3711,7 @@ export function createCatalogViewer(
     };
     focusHeading();
     view.anchorNote = undefined;
+    view.anchorFlash = undefined;
     if (turn && view.store.selectedPage()) {
       if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
@@ -3831,6 +3841,7 @@ export function createCatalogViewer(
           };
           view.renderedRevision = -1;
           view.note = '';
+          view.anchorFlash = { turn, until: performance.now() + 1400 };
           chrome();
           drawSelected(view);
           void hydrateContext(view);
@@ -3845,7 +3856,12 @@ export function createCatalogViewer(
               target?.scrollIntoView({ block: 'start' });
               syncJump(view, true);
               target?.classList.add('flash');
-              scope.timeout(() => target?.classList.remove('flash'), 1400);
+              scope.timeout(() => {
+                if (!currentAnchor()) return;
+                view.anchorFlash = undefined;
+                for (const node of view.root.querySelectorAll('.flash'))
+                  node.classList.remove('flash');
+              }, 1400);
             }, 0);
           return;
         }
