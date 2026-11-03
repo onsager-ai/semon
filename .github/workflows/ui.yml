@@ -103,7 +103,7 @@ jobs:
           text = text.replace(old, new)
           old = "pathname: location.pathname,"
           new = old + "\n          text: document.querySelector('#page')?.innerText.slice(0, 1500),\n          nestedBusy: [...document.querySelectorAll('[aria-busy]')].map(x => x.outerHTML.slice(0, 500)),"
-          assert text.count(old) == 1
+          assert text.count(old) == 4
           text = text.replace(old, new)
           old = "const pageErrors = 'errors' in page ?"
           new = "console.log('GOTO_STATE', JSON.stringify(state), JSON.stringify(readerEvents));\n      " + old
