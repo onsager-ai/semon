@@ -76,7 +76,10 @@ struct VerifiedPublication {
 }
 
 impl VerifiedPublication {
-    fn observation(&self, original: &[u8]) -> Result<Option<PresentationObservations>, StorageError> {
+    fn observation(
+        &self,
+        original: &[u8],
+    ) -> Result<Option<PresentationObservations>, StorageError> {
         let original: serde_json::Value =
             serde_json::from_slice(original).map_err(|_| StorageError::ScopeChanged)?;
         if !self.rows.contains(&original) {
@@ -86,7 +89,10 @@ impl VerifiedPublication {
     }
 }
 
-fn check_binding(current: &QueryRuntimeBinding, receipt: &NativeReceipt) -> Result<(), StorageError> {
+fn check_binding(
+    current: &QueryRuntimeBinding,
+    receipt: &NativeReceipt,
+) -> Result<(), StorageError> {
     if receipt.0 != current.admission || receipt.1 != current.stream_epoch {
         return Err(StorageError::ScopeChanged);
     }
@@ -130,7 +136,10 @@ fn load_publication(
     if values.len() != 9 || values[0] != "catalog-publication-v1" {
         return Err(StorageError::ScopeChanged);
     }
-    let rows = values[1].as_array().ok_or(StorageError::ScopeChanged)?.clone();
+    let rows = values[1]
+        .as_array()
+        .ok_or(StorageError::ScopeChanged)?
+        .clone();
     let observations =
         serde_json::from_value(values[4].clone()).map_err(|_| StorageError::ScopeChanged)?;
     Ok(VerifiedPublication { rows, observations })
