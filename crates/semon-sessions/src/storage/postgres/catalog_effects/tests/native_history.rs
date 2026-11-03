@@ -866,7 +866,8 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     let control = PgCancellation::default();
     let mut bound = None;
     let data = build_oracle_with_binding(true, true, |options, rows, projections| {
-        let (generation, rows) = bind_custody_fixture(&pool, &namespace, options, rows, projections);
+        let (generation, rows) =
+            bind_custody_fixture(&pool, &namespace, options, rows, projections);
         bound = Some((options.clone(), generation, rows));
     });
     let (mut sqlite_options, original_generation, rows) = bound.unwrap();
@@ -883,7 +884,7 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     let original = &rows[0];
     let key = &original.key;
     let path = &original.sources[0].path;
-    let mut index = config.native_event_store().unwrap();
+    let mut index = config.native_events().unwrap();
     let removal = index.file_ledgers().unwrap();
     let archived = data.root.join("older-owner-retained.jsonl");
     fs::rename(path, &archived).unwrap();
@@ -904,12 +905,8 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
     let sqlite: serde_json::Value = serde_json::from_slice(&sqlite.body).unwrap();
     assert!(sqlite["items"][0]["details"].is_object());
     assert!(sqlite["items"][0]["transcript"].is_object());
-    let owner = snapshot::with_admitted_snapshot(
-        &pool,
-        &namespace,
-        &control,
-        &generation,
-        |snapshot| {
+    let owner =
+        snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |snapshot| {
             let owner = snapshot.owner(key)?.ok_or(StorageError::ScopeChanged)?;
             assert!(owner.original && owner.has_current);
             assert_ne!(owner.generation, generation);
@@ -928,7 +925,10 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
             assert_eq!(pg.status, 200);
             let pg: serde_json::Value = serde_json::from_slice(&pg.body).unwrap();
             assert_eq!(pg["items"][0]["details"], sqlite["items"][0]["details"]);
-            assert_eq!(pg["items"][0]["transcript"], sqlite["items"][0]["transcript"]);
+            assert_eq!(
+                pg["items"][0]["transcript"],
+                sqlite["items"][0]["transcript"]
+            );
             let mut mismatched = retained.sources.clone();
             mismatched[0].prefix_sha256[0] ^= 1;
             assert!(
@@ -944,9 +944,8 @@ fn pg_history_older_owner_details_and_transcript_match_sqlite_without_current_fa
                     .is_none()
             );
             Ok(owner.generation)
-        },
-    )
-    .unwrap();
+        })
+        .unwrap();
     let source = crate::retention::source_generation(&original.sources).unwrap();
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         let ns = namespace.as_str().as_bytes();
