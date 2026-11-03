@@ -3893,7 +3893,9 @@ fn scan_file_with_mode(
             .and_then(|chunks| chunks.continuation.as_ref())
             .filter(|proof| proof.valid_for(path, &ledger, &current_stat))
         {
-            cache.source_continuations.insert(key.clone(), proof.clone());
+            cache
+                .source_continuations
+                .insert(key.clone(), proof.clone());
         }
         let index = Arc::new(index);
         cache.files.insert(
@@ -4103,7 +4105,9 @@ fn scan_file_with_mode(
                 .and_then(|chunks| chunks.continuation.as_ref())
                 .filter(|proof| proof.valid_for(path, ledger, &stat))
             {
-                cache.source_continuations.insert(key.clone(), proof.clone());
+                cache
+                    .source_continuations
+                    .insert(key.clone(), proof.clone());
             }
             cache.files.insert(
                 key,
@@ -4353,7 +4357,11 @@ fn scan_file_with_mode(
                 })
             } else {
                 crate::storage::catalog::VerifiedSourceContinuation::from_verified_prefix(
-                    path, prior, &ledger, verified_prefix, &stat,
+                    path,
+                    prior,
+                    &ledger,
+                    verified_prefix,
+                    &stat,
                 )
             };
             if let Some(proof) = continuation.as_mut() {
@@ -4481,7 +4489,9 @@ fn scan_file_with_mode(
             .as_ref()
             .and_then(|chunks| chunks.continuation.as_ref())
         {
-            cache.source_continuations.insert(key.clone(), proof.clone());
+            cache
+                .source_continuations
+                .insert(key.clone(), proof.clone());
         }
         cache.files.insert(
             key,

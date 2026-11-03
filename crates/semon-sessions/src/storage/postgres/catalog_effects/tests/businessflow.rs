@@ -2244,17 +2244,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         append_history_after["projection"]["total"].as_u64(),
-        Some(append_history_prefix["projection"]["total"].as_u64().unwrap() + 1),
+        Some(
+            append_history_prefix["projection"]["total"]
+                .as_u64()
+                .unwrap()
+                + 1
+        ),
         "SQLite History publishes the appended recipe"
     );
     let before_entries = append_history_prefix["entries"].as_array().unwrap();
     let after_entries = append_history_after["entries"].as_array().unwrap();
     assert_eq!(
-        &after_entries[..before_entries.len()], before_entries.as_slice(),
+        &after_entries[..before_entries.len()],
+        before_entries.as_slice(),
         "SQLite History preserves every prior entry while advancing"
     );
     assert_eq!(after_entries.len(), before_entries.len() + 1);
-    assert_eq!(after_entries.last().unwrap()["text"], "sanitized continuation");
+    assert_eq!(
+        after_entries.last().unwrap()["text"],
+        "sanitized continuation"
+    );
     let append_history_body = append_successor_query
         .call_at(
             "read_transcript",

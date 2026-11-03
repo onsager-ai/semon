@@ -137,8 +137,13 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
     assert_eq!(continued.rows[0].sources.len(), 1);
     assert_eq!(
         serde_json::to_value(
-            continued.presentation_observations().unwrap().verified_continuations().unwrap(),
-        ).unwrap(),
+            continued
+                .presentation_observations()
+                .unwrap()
+                .verified_continuations()
+                .unwrap(),
+        )
+        .unwrap(),
         serde_json::to_value([continuation]).unwrap(),
         "committed Index preparation carries the actual scanner proof without test injection"
     );

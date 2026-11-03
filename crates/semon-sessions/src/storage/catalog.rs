@@ -114,9 +114,10 @@ impl VerifiedSourceContinuation {
             && self.prior.stat.size == self.prior.offset
             && self.current.offset > self.prior.offset
             && self.current.offset <= physical.size
-            && self.accepted.as_ref().is_none_or(|accepted| {
-                accepted.qualifies(&self.prior.stat, physical)
-            })
+            && self
+                .accepted
+                .as_ref()
+                .is_none_or(|accepted| accepted.qualifies(&self.prior.stat, physical))
             && self.predecessors.len() < SOURCE_CONTINUATION_LIMIT
             && self.predecessors.iter().enumerate().all(|(at, prior)| {
                 prior.stat.dev == physical.dev
@@ -230,7 +231,11 @@ mod source_continuation_tests {
 
         assert!(proof.advances(&old, &new));
         let verified = VerifiedSourceContinuation::from_verified_prefix(
-            &path, &prior, &current, prior.prefix, &physical,
+            &path,
+            &prior,
+            &current,
+            prior.prefix,
+            &physical,
         )
         .expect("a fully rehashed native append is a verified continuation");
         let replay: VerifiedSourceContinuation =
@@ -239,9 +244,16 @@ mod source_continuation_tests {
         assert!(replay.valid_for(&path, &current, &physical));
         let mut corrupted_prefix = prior.prefix;
         corrupted_prefix[0] ^= 1;
-        assert!(VerifiedSourceContinuation::from_verified_prefix(
-            &path, &prior, &current, corrupted_prefix, &physical,
-        ).is_none());
+        assert!(
+            VerifiedSourceContinuation::from_verified_prefix(
+                &path,
+                &prior,
+                &current,
+                corrupted_prefix,
+                &physical,
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -261,9 +273,16 @@ mod source_continuation_tests {
             after: replaced,
             ..accepted.clone()
         };
-        assert!(VerifiedSourceContinuation::from_verified_prefix(
-            &path, &prior, &replaced_current, prior.prefix, &replaced,
-        ).is_none());
+        assert!(
+            VerifiedSourceContinuation::from_verified_prefix(
+                &path,
+                &prior,
+                &replaced_current,
+                prior.prefix,
+                &replaced,
+            )
+            .is_none()
+        );
         assert!(
             VerifiedSourceContinuation::from_scan(
                 &path,
