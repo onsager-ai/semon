@@ -387,7 +387,7 @@ fn publish_current_owned_with_policy(
     measurements.record("history_lookup", started, 1);
     if let Some(history) = history
         && history.sources != row.sources
-        && row.overview.is_none()
+        && (matches!(query_recipe_policy, QueryRecipePolicy::Publish) || row.overview.is_none())
     {
         let started = measurements.start();
         if let Some(budget) = budget.as_deref_mut() {
@@ -474,7 +474,7 @@ fn publish_current_owned_with_policy(
         }
         return Ok(());
     }
-    // Publish a complete Current Overview/Trace cohort, including when
+    // Stage publishes a complete Current Overview/Trace cohort, including when
     // an independent immutable History owns a different source generation.
     // Stage must prove that the whole summary fits the remaining shared
     // metadata budget before deriving or publishing its Trace digest. Keep the
