@@ -798,6 +798,45 @@ pub(crate) fn retain_outgoing_history_refs(
     // references copied from an exact local Current grant. They never grant
     // History origin.
     for row in outgoing_owners {
+        // A retired Catalog row still owns a physical observation after its
+        // Current receipt moves to History. Authenticate that exact preimage
+        // before releasing the ref, then carry its runtime into a direct grant.
+        let retained_metadata: Option<String> = tx
+            .query_row(
+                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='retained' AND octet_length(metadata)<=1048576",
+                params![namespace, row.key],
+                |record| record.get(0),
+            )
+            .optional()
+            .map_err(failed)?;
+        let retained_capture = if let Some(metadata) = retained_metadata {
+            let mut retained: CatalogRow =
+                serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
+            retained.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            let mut original = row.clone();
+            original.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+            if retained.query.is_some()
+                && serde_json::to_value(&retained).map_err(|_| StorageError::Unavailable)?
+                    == serde_json::to_value(&original).map_err(|_| StorageError::Unavailable)?
+            {
+                let binding = crate::storage::QueryRuntimeBinding {
+                    namespace: crate::storage::LogicalSourceNamespace::new(namespace)?,
+                    admission,
+                    stream_epoch: stream.to_owned(),
+                };
+                let (_, observations) = observation_binding_with_observations(
+                    tx,
+                    &binding,
+                    &retained,
+                    CatalogObservationOwner::Catalog,
+                )?;
+                Some((metadata, observations))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         retain_current_refs_for_unowned_history(
             tx,
             namespace,
@@ -811,6 +850,17 @@ pub(crate) fn retain_outgoing_history_refs(
             params![namespace, row.key],
         )
         .map_err(failed)?;
+        if let Some((metadata, observations)) = retained_capture {
+            native_catalog_observation_grant(
+                tx,
+                namespace,
+                &row.key,
+                admission,
+                stream,
+                &metadata,
+                Some(&observations),
+            )?;
+        }
     }
     Ok(())
 }

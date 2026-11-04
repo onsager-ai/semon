@@ -134,16 +134,14 @@ fn publish(home: &Home) {
 // Capture runtime from the real producer and grant the exact published rows.
 fn publish_direct(home: &Home) {
     let mut cache =
-        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
-            .unwrap();
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let mut inputs = crate::inputs::inputs(&home.options).unwrap();
     inputs.extend(cache.paths().filter_map(|path| {
         crate::native_evidence::catalog_input(std::path::Path::new(path), &home.options)
     }));
     inputs.sort();
     inputs.dedup();
-    let prepared =
-        crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let prepared = crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
     cache
         .publish_catalog_projection(
             &crate::slot_projection::Publication {

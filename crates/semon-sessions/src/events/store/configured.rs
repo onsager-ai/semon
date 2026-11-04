@@ -5235,6 +5235,9 @@ mod tests {
         cache.finish_semantic_stage(batch.epoch).unwrap();
         let mut retained = model.prepared().rows[0].clone();
         retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        let reset = path.with_extension("original-reset");
+        fs::copy(&path, &reset).unwrap();
+        fs::rename(reset, &path).unwrap();
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{}", serde_json::json!({"type":"user","sessionId":"model-1","uuid":"reprice-successor","parentUuid":"answer","timestamp":"2026-10-01T00:02:00Z","message":{"role":"user","content":"retained price cohort"}})).unwrap();
         drop(raw);
@@ -11871,6 +11874,17 @@ mod tests {
                     1_790_000_000_000,
                 )
                 .unwrap();
+                // The builder can repeat known endpoints. Keep this page's
+                // authored endpoints so the other side must resolve from the
+                // already committed Stage, as this cross-page fixture intends.
+                prepared.relationships.endpoints.retain(|_, endpoint| {
+                    endpoint.row.sources.iter().any(|source| {
+                        batch
+                            .paths
+                            .iter()
+                            .any(|path| source.path == std::path::Path::new(path))
+                    })
+                });
                 let candidate =
                     prepared
                         .relationships

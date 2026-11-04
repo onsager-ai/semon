@@ -6218,7 +6218,12 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
             metadata.len() < 8192,
             "Catalog metadata grew with selected history: {}; field bytes: {:?}",
             metadata.len(),
-            catalog.as_object().unwrap().iter().map(|(key, value)| (key, value.to_string().len())).collect::<Vec<_>>()
+            catalog
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key, value.to_string().len()))
+                .collect::<Vec<_>>()
         );
         assert!(catalog["query"]["rows"]["lead"].get("busy").is_none());
         let busy: String = db

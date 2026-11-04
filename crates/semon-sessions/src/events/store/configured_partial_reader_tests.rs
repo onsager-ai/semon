@@ -87,13 +87,16 @@ mod partial_readers {
         // Use the ordinary default-local producer, rather than marking a
         // complete publication partial or borrowing the private listing port.
         let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-        let prepared = crate::model::prepare_sources(
+        let mut prepared = crate::model::prepare_sources(
             options,
             &mut cache,
             std::slice::from_ref(input),
             1_790_000_000_000,
         )
         .unwrap();
+        // Establish the receipt-less direct boundary explicitly; ordinary
+        // partial publications with observations now issue immutable receipts.
+        let observations = prepared.relationships.presentation.take().unwrap();
         assert_eq!(
             cache.publish_partial_catalog_fenced(&prepared).unwrap().0,
             Outcome::Written
@@ -118,6 +121,17 @@ mod partial_readers {
         )
         .unwrap()
         .into_test_connection();
+        let binding = cache.query_runtime_binding().unwrap().unwrap();
+        crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+            &db,
+            binding.namespace.as_str(),
+            &row.key,
+            binding.admission,
+            &binding.stream_epoch,
+            &serde_json::to_string(row).unwrap(),
+            Some(&observations),
+        )
+        .unwrap();
         let completeness: String = db
             .query_row(
                 "SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_completeness'",

@@ -1322,6 +1322,12 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         continued_parent_source,
         "SQLite History follows both verified parent continuations"
     );
+    // Mirror the PostgreSQL reset used by the stored-header controls below.
+    // Both withdrawal oracles retain the exact appended parent as original.
+    let parent_reset = claude_parent.with_extension("history-reset");
+    fs::copy(&claude_parent, &parent_reset).unwrap();
+    fs::rename(parent_reset, &claude_parent).unwrap();
+    let continued_listing = refresh(&withdraw_options);
     let composite_before_withdrawal =
         crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
             .unwrap()
@@ -1472,8 +1478,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let sqlite_parent_exact: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
     assert_eq!(
-        sqlite_parent_exact["items"][0]["lifecycle"], "current",
-        "verified parent continuation keeps its Current display lifecycle in History"
+        sqlite_parent_exact["items"][0]["lifecycle"], "retained",
+        "the inode reset preserves the appended parent under original History custody"
     );
     let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
         &withdraw_options,
