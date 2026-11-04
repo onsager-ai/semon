@@ -3220,8 +3220,8 @@ mod tests {
         );
     }
 
-    /// A line whose image changed under the same offset (a file replaced,
-    /// or rewritten by redaction) is a new URL: the old one is refused.
+    /// Replacing a file resets its cursor. The image at the same offset gets
+    /// a new URL, and the old authenticated URL is refused.
     #[test]
     fn a_rewritten_line_is_a_new_url() {
         let fixture = Fixture::new();
@@ -3238,7 +3238,10 @@ mod tests {
             crate::session_entry_field(&fixture.options, "local", &old, None).status,
             200
         );
-        let path = fixture.claude("swap", &[line(other)]);
+        let path = fixture.root.join("claude/projects/project/swap.jsonl");
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, line(other).to_string() + "\n").unwrap();
+        fs::rename(replacement, &path).unwrap();
         assert_eq!(offsets(&path), [0]);
         let (_, entries) = native_image_entries(&core, "swap");
         let image = &entries.iter().find_map(|entry| entry.get("img")).unwrap()[0];
@@ -6706,7 +6709,9 @@ mod tests {
             )
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
-            fs::write(&child, record("child", Some("new-parent"))).unwrap();
+            let replacement = child.with_extension("replacement");
+            fs::write(&replacement, record("child", Some("new-parent"))).unwrap();
+            fs::rename(&replacement, &child).unwrap();
             let mut work = Work::default();
             work.events = Some(
                 EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap(),
@@ -6735,7 +6740,8 @@ mod tests {
             assert_retired_routes_absent(&view);
             // The previous parent is required even when the new parent and
             // child alone can derive a valid-looking replacement relationship.
-            fs::write(&child, record("child", Some("old-parent"))).unwrap();
+            fs::write(&replacement, record("child", Some("old-parent"))).unwrap();
+            fs::rename(&replacement, &child).unwrap();
             let input = |id: &str| crate::inputs::Input {
                 root: crate::inputs::InputRoot::Codex,
                 path: format!("sessions/2026/10/01/rollout-{id}.jsonl"),
@@ -6886,20 +6892,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn catalog_refresh_detects_same_size_rewrites_with_restored_modification_time() {
+    fn catalog_refresh_keeps_same_size_rewrite_cursor_until_inode_reset() {
         let fixture = Fixture::new();
         let record = json!({"type":"user","sessionId":"rewrite","uuid":"rewrite","cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"old prompt"}});
         let path = fixture.claude("rewrite", &[record]);
-        let pool = RefreshPool::new(1);
-        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        let view = fixture.viewer();
+        let mut work = Work::default();
         let generation = || {
             let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
             let body: Value = serde_json::from_slice(&reply.body).ok()?;
             (reply.status == 200 && body["completeness"]["state"] == "complete")
                 .then(|| body["generation"].clone())
         };
-        view.note_catalog_read().unwrap();
-        let before = eventually("complete Catalog before rewrite", generation);
+        let before = eventually("complete Catalog before rewrite", || {
+            view.refresh_catalog_locked(&mut work, model::now_ms())
+                .unwrap()
+                .then(generation)
+                .flatten()
+        });
         let original_source =
             crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
                 .unwrap()
@@ -6916,12 +6926,26 @@ mod tests {
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(modified))
             .unwrap();
-        view.invalidate();
-        view.note_catalog_read().unwrap();
-        eventually(
-            "Catalog observes an equal-size rewrite with restored mtime",
-            || generation().filter(|next| next != &before),
+        assert!(
+            view.refresh_catalog_locked(&mut work, model::now_ms())
+                .unwrap()
         );
+        assert_eq!(generation().unwrap(), before);
+        let unchanged =
+            crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
+                .unwrap()
+                .unwrap();
+        assert_eq!(unchanged.source_refs[0].source, original_source);
+        // #520 deliberately does not hash committed bytes. A real inode
+        // replacement must still reset the cursor and expose the new prompt.
+        let reset = path.with_extension("replacement");
+        fs::copy(&path, &reset).unwrap();
+        fs::rename(reset, &path).unwrap();
+        eventually("Catalog observes an inode reset", || {
+            view.refresh_catalog_locked(&mut work, model::now_ms())
+                .unwrap();
+            generation().filter(|next| next != &before)
+        });
         let history =
             crate::session_catalog_history_identity(&fixture.options, "fixture", "rewrite")
                 .unwrap()

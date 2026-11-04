@@ -4478,9 +4478,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     };
     let assert_history_header_refused =
         |version: i64, source_generation: Option<Vec<u8>>, incomplete: bool, reason: &str| {
-            let composite_expected = incomplete
-                && version == history_version
-                && source_generation.as_deref() == Some(history_source_generation.as_slice());
             update_history_header(version, source_generation.clone(), incomplete)
                 .expect("install exact History header corruption");
             let qualification = super::super::snapshot::with_admitted_snapshot(
@@ -4495,7 +4492,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     let owner = snapshot
                         .owner(&appended_key)?
                         .ok_or(StorageError::ScopeChanged)?;
-                    assert!(!owner.original);
+                    assert!(owner.original);
                     assert!(owner.has_current);
                     let current = snapshot
                         .rows(&history_request)
@@ -4531,9 +4528,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             let (qualified, composite_qualified) =
                 qualification.expect("History header uses the admitted snapshot");
             assert!(!qualified, "{reason}");
-            assert_eq!(
-                composite_qualified, composite_expected,
-                "{reason}: incomplete composite identity qualification"
+            assert!(
+                !composite_qualified,
+                "{reason}: original owners cannot qualify as incomplete composites"
             );
         };
     assert_history_header_refused(
@@ -4587,20 +4584,39 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     )
     .expect("install otherwise qualifying incomplete composite header");
     set_history_original(false).expect("install nonoriginal History marker control");
-    let control_original = super::super::snapshot::with_admitted_snapshot(
+    let control_composite_qualified = super::super::snapshot::with_admitted_snapshot(
         &pool,
         &namespace,
         &control,
         &continued_generation,
         |snapshot| {
-            Ok(snapshot
+            let owner = snapshot
                 .owner(&appended_key)?
-                .ok_or(StorageError::ScopeChanged)?
-                .original)
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(!owner.original);
+            assert!(owner.has_current);
+            let history = snapshot
+                .catalog(&appended_key, true)?
+                .ok_or(StorageError::ScopeChanged)?;
+            let current = snapshot
+                .rows(&history_request)
+                .map_err(|_| StorageError::ScopeChanged)?
+                .into_iter()
+                .next()
+                .ok_or(StorageError::ScopeChanged)?;
+            assert!(!snapshot
+                .history_qualified(&history)
+                .map_err(|_| StorageError::ScopeChanged)?);
+            snapshot
+                .composite_history_identity_qualified(&current, &history)
+                .map_err(|_| StorageError::ScopeChanged)
         },
     )
     .expect("marker control changes the selected physical owner");
-    assert!(!control_original);
+    assert!(
+        control_composite_qualified,
+        "the otherwise valid incomplete nonoriginal owner qualifies as a composite"
+    );
     set_history_original(true).expect("restore original History owner marker");
     let original_owner_composite_qualified = super::super::snapshot::with_admitted_snapshot(
         &pool,
@@ -4627,7 +4643,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         },
     )
     .expect("original History owner is read through admitted snapshot");
-    set_history_original(false).expect("restore composite History owner marker");
+    set_history_original(true).expect("restore actual original History owner marker");
     update_history_header(
         history_version,
         Some(history_source_generation.clone()),
