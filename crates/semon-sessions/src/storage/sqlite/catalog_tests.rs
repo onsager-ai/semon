@@ -13658,6 +13658,7 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
     let trace = crate::storage::sqlite::trace::TraceWriter::owned(&tx, &owner).unwrap();
     let mut measurements = crate::native_timing::Measurements::default();
     let mut overview_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+    let current_query_recipe_before: Option<String> = tx.query_row("SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key='shared-key'", [current_namespace], |record| record.get(0)).unwrap();
     crate::overview::publish_current_stage_owned(
         &tx,
         &row,
@@ -13704,7 +13705,7 @@ fn semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_ke
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(current_query_recipe, None);
+    assert_eq!(current_query_recipe, current_query_recipe_before);
     let history_query_state: (Option<String>, bool) = db
         .query_row(
             "SELECT query_recipe,query_active=1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key='shared-key'",

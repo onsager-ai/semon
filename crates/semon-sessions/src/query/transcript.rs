@@ -75,6 +75,14 @@ fn unchanged(
         .optional()
         .map_err(unavailable)?;
     if current.as_deref() != Some(text) || current_slot.as_deref() != Some(slot_generation) {
+        #[cfg(test)]
+        {
+            let before: Value = serde_json::from_str(text).unwrap_or_default();
+            let after: Value = current.as_deref().and_then(|text| serde_json::from_str(text).ok()).unwrap_or_default();
+            let fields = before.as_object().into_iter().flatten().filter(|(field, value)| after.get(*field) != Some(*value)).map(|(field, _)| field.as_str()).collect::<Vec<_>>();
+            let query_fields = before["query"].as_object().into_iter().flatten().filter(|(field, value)| after["query"].get(*field) != Some(*value)).map(|(field, _)| field.as_str()).collect::<Vec<_>>();
+            eprintln!("selected_completion_refused key={key} history={history} fields={fields:?} query_fields={query_fields:?} slot_matches={}", current_slot.as_deref() == Some(slot_generation));
+        }
         return Err(unavailable(
             "Selected native transcript publication changed",
         ));

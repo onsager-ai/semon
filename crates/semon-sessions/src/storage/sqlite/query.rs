@@ -83,11 +83,18 @@ pub(crate) fn qualify_context_candidate(
     if candidate.sources.is_empty() || candidate.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
-    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged).inspect_err(|_| {
-        if cfg!(test) || crate::native_timing::enabled() {
-            eprintln!("selected_context_candidate_refused stage=query_absent key={}", candidate.key);
-        }
-    })?;
+    let saved = candidate
+        .query
+        .as_ref()
+        .ok_or(StorageError::ScopeChanged)
+        .inspect_err(|_| {
+            if cfg!(test) || crate::native_timing::enabled() {
+                eprintln!(
+                    "selected_context_candidate_refused stage=query_absent key={}",
+                    candidate.key
+                );
+            }
+        })?;
     if !crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
         .map_err(|_| StorageError::ScopeChanged)?
         || candidate.sources.iter().any(|source| {
@@ -98,8 +105,22 @@ pub(crate) fn qualify_context_candidate(
             eprintln!(
                 "selected_context_candidate_refused stage=source_observation key={} observation_matches={} paths_match={}",
                 candidate.key,
-                crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None).map_err(|_| StorageError::ScopeChanged)?,
-                candidate.sources.iter().all(|source| crate::catalog::source_relative(options, &candidate.harness, source).is_some())
+                crate::model::summary::query_observation_matches(
+                    saved,
+                    &candidate.sources,
+                    false,
+                    None
+                )
+                .map_err(|_| StorageError::ScopeChanged)?,
+                candidate
+                    .sources
+                    .iter()
+                    .all(|source| crate::catalog::source_relative(
+                        options,
+                        &candidate.harness,
+                        source
+                    )
+                    .is_some())
             );
         }
         return Err(StorageError::ScopeChanged);
@@ -180,6 +201,12 @@ pub(crate) fn current_query_context_header(
                 || header["query_generation"] != query_generation
             {
                 if cfg!(test) || crate::native_timing::enabled() {
+                    let mut inline_query = candidate.query.clone();
+                    if let (Some(query), Some(recipe)) = (&mut inline_query, &candidate.query_recipe) {
+                        query["selected"] = serde_json::to_value(recipe).map_err(|_| StorageError::ScopeChanged)?;
+                    }
+                    let inline_generation = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&inline_query).map_err(|_| StorageError::ScopeChanged)?));
+                    eprintln!("selected_recipe_header_refused stage=representation key={} inline_match={}", candidate.key, header["query_generation"] == inline_generation);
                     eprintln!(
                         "selected_recipe_header_refused stage=header key={} version={} complete={} source_match={} query_match={}",
                         candidate.key,

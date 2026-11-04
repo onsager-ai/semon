@@ -109,9 +109,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         all: true,
         ..Default::default()
     };
-    // Both ordinary current producers still publish inline metadata with a
-    // NULL external cell. Authenticate that representation before exercising
-    // the inactive detached writer below.
+    // Both ordinary producers publish a compact observation and an exact
+    // selected payload. Attaching it preserves the authenticated metadata.
     let sqlite_config = crate::storage::StoreConfig {
         backend: crate::storage::StoreBackend::Sqlite {
             database: crate::events::EventCache::path(&options.cache),
@@ -129,18 +128,17 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         [&data.rows[0].key], |record| record.get(0),
     ).unwrap();
     let mut inline: CatalogRow = serde_json::from_str(&metadata).unwrap();
-    assert!(!crate::query_projection::SelectedRecipe::detached(&inline));
-    assert_eq!(
+    assert!(crate::query_projection::SelectedRecipe::detached(&inline));
+    assert!(
         crate::storage::sqlite::proof_generations::attach_query_recipe(
             &tx,
             &sqlite_reader,
             Owner::Catalog,
             &mut inline,
         )
-        .unwrap(),
-        0
+        .unwrap() > 0
     );
-    assert!(inline.query_recipe.is_none());
+    assert_eq!(inline.query_recipe, data.rows[0].query_recipe);
     assert_eq!(serde_json::to_string(&inline).unwrap(), metadata);
     tx.commit().unwrap();
     drop(db);
@@ -190,11 +188,11 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         |view| {
             let mut selected = view.catalog(inline_key, false)?.unwrap();
             let metadata = serde_json::to_string(&selected).unwrap();
-            assert!(!crate::query_projection::SelectedRecipe::detached(
+            assert!(crate::query_projection::SelectedRecipe::detached(
                 &selected
             ));
-            assert_eq!(view.attach_query_recipe(&mut selected, false)?, 0);
-            assert!(selected.query_recipe.is_none());
+            assert!(view.attach_query_recipe(&mut selected, false)? > 0);
+            assert_eq!(selected.query_recipe, inline_prepared.rows[0].query_recipe);
             assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
             let paths = vec![path.to_str().unwrap().to_owned()];
             let mut tx = view.tx.lock().map_err(|_| StorageError::Unavailable)?;
@@ -641,10 +639,7 @@ fn pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt()
             |row| row.get(0),
         )
         .unwrap();
-    assert!(
-        current_payload.is_none(),
-        "the production Current writer stays inactive"
-    );
+    assert_eq!(current_payload.as_ref(), Some(payload));
     let immutable_payload: Option<String> = tx
         .query_row(
             "SELECT query_recipe FROM main.storage_proof_generations WHERE namespace=?1 AND session_key=?2 AND metadata=?3 AND id=?4",

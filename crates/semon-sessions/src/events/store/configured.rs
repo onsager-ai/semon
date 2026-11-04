@@ -5743,8 +5743,7 @@ mod tests {
             .find(|row| row.key != expected.key)
             .expect("appended Claude subagent peer");
         assert!(
-            current.query.as_ref().unwrap()["selected"]["edges"]
-                .as_array()
+            crate::query_projection::SelectedRecipe::edges_for(&current)
                 .unwrap()
                 .iter()
                 .any(|edge| {
