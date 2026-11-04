@@ -1067,7 +1067,30 @@ mod tests {
             facts: None,
             ..crate::Options::default()
         };
-        super::super::tests::grant_fixture_runtime(store, &options, std::slice::from_ref(row));
+        let binding = crate::storage::QueryRuntimeBinding {
+            namespace: store.owner.config().namespace.clone(),
+            admission: store.owner.admission(),
+            stream_epoch: store.owner.config().expected_stream_epoch.clone().unwrap(),
+        };
+        let mut observations = crate::storage::selected::PresentationObservations::capture(
+            &options,
+            Some(&binding),
+            std::iter::once(row),
+        );
+        // These synthetic normalized-usage fixtures have no native CWD input.
+        let cwds = std::collections::BTreeSet::new();
+        let runtime = observations.runtime_observation(row, &cwds).unwrap();
+        observations.capture_runtime(row, &cwds, runtime).unwrap();
+        crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+            c,
+            binding.namespace.as_str(),
+            &row.key,
+            binding.admission,
+            &binding.stream_epoch,
+            &json(row).unwrap(),
+            Some(&observations),
+        )
+        .unwrap();
         c.execute(
             "INSERT INTO session_descriptions(namespace,session_key,version,inputs,description) VALUES(semon_namespace(),?1,2,'fixture',?2)",
             params![
@@ -3007,7 +3030,7 @@ mod tests {
             before
         );
         assert_eq!(parser_version(&c).unwrap(), Some(CACHE_VERSION));
-        assert_eq!(CACHE_VERSION, 29);
+        assert_eq!(CACHE_VERSION, 30);
         drop(c);
         let second = table("anthropic", "claude-opus-5-5", 12.0, 2);
         drain(&path, &second);

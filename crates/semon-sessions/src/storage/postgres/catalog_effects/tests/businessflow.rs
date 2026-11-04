@@ -2203,6 +2203,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         appended_offset(&append_history_identity) + source_append.len() as u64,
         "SQLite Current consumes the actual appended native record"
     );
+    let selected_history = crate::session_catalog_history_identity(
+        &append_oracle_options, recent_machine, &appended_key,
+    ).unwrap().unwrap();
+    assert_eq!(selected_history.source_refs, append_current_identity.source_refs,
+        "ordinary append History must select the exact Current source cohort");
     let stale_append_history = crate::session_transcript_range_with_mode(
         &append_oracle_options,
         recent_machine,
@@ -2212,7 +2217,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         stale_append_history.status, 409,
-        "an archive holding only the old prefix cannot supply the verified continuation"
+        "an archive holding only the old prefix cannot supply the cursor successor"
     );
     let append_history_after = crate::session_transcript_range(
         &append_oracle_options,

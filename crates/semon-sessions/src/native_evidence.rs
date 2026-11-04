@@ -1148,25 +1148,27 @@ impl NativeEvidence {
                     eprintln!("native catalog phase=cold_partial_publication");
                 })?;
             if outcome == crate::events::Outcome::Deferred {
-                // A receipt capacity deferral cannot shrink by rescanning the
-                // same cold/draining component. Use the bounded stage, just as
-                // the incremental producer does, without raising either bound.
-                let paths = seeds
-                    .iter()
-                    .map(|input| {
-                        input
-                            .full_path(&self.options)
-                            .to_string_lossy()
-                            .into_owned()
-                    })
-                    .collect::<Vec<_>>();
-                if self.begin_catalog_stage(cache, &paths, &self.query_runtime()?)?
-                    != crate::events::Outcome::Written
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "semantic stage changed",
-                    ));
+                if cache.semantic_rejection() != Some("history_custody") {
+                    // A receipt capacity deferral cannot shrink by rescanning the
+                    // same cold/draining component. Use the bounded stage, just as
+                    // the incremental producer does, without raising either bound.
+                    let paths = seeds
+                        .iter()
+                        .map(|input| {
+                            input
+                                .full_path(&self.options)
+                                .to_string_lossy()
+                                .into_owned()
+                        })
+                        .collect::<Vec<_>>();
+                    if self.begin_catalog_stage(cache, &paths, &self.query_runtime()?)?
+                        != crate::events::Outcome::Written
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "semantic stage changed",
+                        ));
+                    }
                 }
                 cache.end_scan();
                 cache.release_published_indexes();

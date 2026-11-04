@@ -432,6 +432,12 @@ fn query_producer_rechecks_cached_and_unread_sources_before_publication() {
             "io"
         );
         assert_eq!(catalog_generation(&home), generation);
+        if mutation == 0 {
+            let path = home.options.claude_home.join("projects/-work-proj/lead.jsonl");
+            let replacement = path.with_extension("replacement");
+            fs::copy(&path, &replacement).unwrap();
+            fs::rename(replacement, path).unwrap();
+        }
         // A failed derivation is not installed as the next query snapshot.
         let recovered = query
             .call_at("get_session", &json!({"id":"lead"}), NOW)
@@ -4679,18 +4685,27 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
                 crate::CatalogReadScope::RetainedHistory,
             )
             .unwrap();
-            assert_ne!(current[0].sources, history[0].sources);
+            if phase == "append" {
+                assert_eq!(current[0].sources, history[0].sources);
+            } else {
+                assert_ne!(current[0].sources, history[0].sources);
+            }
             assert!(
                 current[0]
                     .sources
                     .iter()
                     .all(|source| crate::catalog::source_state(source) == "cached")
             );
-            let metadata = crate::history_projection::catalog(&db, "lead")
-                .unwrap()
-                .unwrap();
+            let (metadata, slot_table) = if phase == "append" {
+                assert!(crate::history_projection::catalog(&db, "lead").unwrap().is_none());
+                let mut retained = current[0].clone();
+                retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+                (serde_json::to_string(&retained).unwrap(), "session_slots")
+            } else {
+                (crate::history_projection::catalog(&db, "lead").unwrap().unwrap(), "session_history_slots")
+            };
             let slots = db
-                .prepare("SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='lead' ORDER BY slot")
+                .prepare(&format!("SELECT metadata FROM main.{slot_table} WHERE namespace=semon_namespace() AND session_key='lead' ORDER BY slot"))
                 .unwrap()
                 .query_map([], |row| row.get::<_, String>(0))
                 .unwrap()

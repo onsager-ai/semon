@@ -3443,6 +3443,7 @@ impl SqliteStore {
                 crate::storage::catalog::preserve_rows(&history, publication.rows, &withdrawn);
             if !preserved.map_err(failure)? {
                 transaction.commit().map_err(failure)?;
+                self.semantic_rejection = Some("history_custody");
                 return Ok(Outcome::Deferred);
             }
             #[cfg(test)]
@@ -8815,6 +8816,9 @@ mod tests {
         let mut raw = fs::OpenOptions::new().append(true).open(source).unwrap();
         writeln!(raw, "{}", serde_json::json!({"type":"user","uuid":"recipe-successor","sessionId":rows[0].key,"timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"A later native turn"}})).unwrap();
         drop(raw);
+        let replacement = source.with_extension("replacement");
+        fs::copy(source, &replacement).unwrap();
+        fs::rename(replacement, source).unwrap();
         let (mut next, next_projections) = catalog_fixture_projection(&options);
         let next_prepared = crate::query_projection::SelectedRecipe::prepare(&next[0]).unwrap();
         next[0].query =

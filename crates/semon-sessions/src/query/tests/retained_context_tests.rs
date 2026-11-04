@@ -76,6 +76,9 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
     )
     .unwrap();
     drop(parent);
+    let replacement = parent_path.with_extension("replacement");
+    fs::copy(parent_path, &replacement).unwrap();
+    fs::rename(replacement, parent_path).unwrap();
     publish();
     let continued_parent = load("lead", false);
     assert_ne!(continued_parent.sources, original_parent.sources);

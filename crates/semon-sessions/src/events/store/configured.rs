@@ -9582,10 +9582,13 @@ mod tests {
                 payload["parent_thread_id"] = serde_json::json!(parent);
                 payload["thread_source"] = serde_json::json!("subagent");
             }
-            fs::write(input.full_path(options), format!("{}\n{}\n",
+            let path = input.full_path(options);
+            let replacement = path.with_extension("replacement");
+            fs::write(&replacement, format!("{}\n{}\n",
                 serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":payload}),
                 serde_json::json!({"type":"response_item","timestamp":"2026-10-01T00:01:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"domain52 lifecycle"}]}})
             )).unwrap();
+            fs::rename(replacement, path).unwrap();
         }
         fn open(config: &StoreConfig) -> EventCache {
             EventCache::open_semantic(
@@ -12045,7 +12048,9 @@ mod tests {
                         })
                     ));
                 }
-                fs::write(path, raw).unwrap();
+                let replacement = path.with_extension("replacement");
+                fs::write(&replacement, raw).unwrap();
+                fs::rename(replacement, path).unwrap();
             }
             let mut cache = open(&f.config);
             // An append is a new native write operation. Reusing the helper's

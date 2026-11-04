@@ -349,7 +349,9 @@ fn configured_semantic_selected75_replaced_prefix_refuses_old_lease_bytes() {
         let replacement = original.replacen("sanitized model fixture", "rewritten model fixture", 1);
         assert_ne!(replacement, original);
         assert_eq!(replacement.len(), original.len());
-        fs::write(&path, replacement).unwrap();
+        let replacement_path = path.with_extension("replacement");
+        fs::write(&replacement_path, replacement).unwrap();
+        fs::rename(replacement_path, &path).unwrap();
         cache.ingest(&"b".repeat(64), &path, "codex").unwrap();
         let (batch, model) = model_ready(f, cache, options, input, "selected75-replacement");
         assert_eq!(cache.publish_semantic_catalog(&batch, model.prepared()).unwrap().0, Outcome::Written);

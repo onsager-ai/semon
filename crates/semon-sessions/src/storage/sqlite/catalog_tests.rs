@@ -1112,12 +1112,20 @@ fn indexed_rows(connection: &Connection, path: &str) -> Vec<Vec<SqlValue>> {
     all
 }
 
+// Give custody tests a real cursor reset while preserving every native byte.
+fn replace_source_identity(path: &std::path::Path) {
+    let replacement = path.with_extension("replacement");
+    fs::copy(path, &replacement).unwrap();
+    fs::rename(replacement, path).unwrap();
+}
+
 #[test]
 fn archived_event_index_survives_absence_without_current_membership() {
     let fixture = Fixture::new();
     fixture.publish(2);
     let relative = "projects/project/session-00000.jsonl";
     let path = fixture.options.claude_home.join(relative);
+    replace_source_identity(&path);
     use std::io::Write;
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     for line in [
@@ -1281,6 +1289,7 @@ fn retained_projection_falls_back_to_history_only_when_main_omits_path() {
             .options
             .claude_home
             .join(format!("projects/project/{id}.jsonl"));
+        replace_source_identity(&path);
         writeln!(
             fs::OpenOptions::new().append(true).open(path).unwrap(),
             "{}",
@@ -2613,25 +2622,17 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
     let appended_size = fs::metadata(&path).unwrap().len();
     fixture.publish_existing();
 
-    let db = fixture.db();
-    let history_metadata: String = db
-        .query_row(
-            "SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let history: crate::model::summary::CatalogRow =
-        serde_json::from_str(&history_metadata).unwrap();
-    let history_source = history
-        .sources
-        .iter()
-        .find(|source| source.path == path)
-        .unwrap();
-    assert_eq!(
-        history_source, &original_source,
-        "real append retains original custody"
-    );
+    let mut db = fixture.db();
+    let tx = db.transaction().unwrap();
+    let history = crate::overview_repair::query_context(
+        &tx,
+        "large-continuation",
+        crate::CatalogReadScope::RetainedHistory,
+    ).unwrap();
+    let history_source = history[0].sources.iter().find(|source| source.path == path).unwrap();
+    assert_eq!(history_source.offset, appended_size, "History follows the committed cursor append");
+    assert_ne!(history_source.prefix_sha256, original_source.prefix_sha256);
+    tx.commit().unwrap();
     let current_metadata: String = db
         .query_row(
             "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='large-continuation'",
@@ -2933,6 +2934,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
         )
     };
 
+    replace_source_identity(&session_path);
     append_model("session-00000", "2026-10-01T00:00:30Z", "original-model");
     fixture.publish_existing();
     let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
@@ -4461,50 +4463,6 @@ fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
         );
         let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
         let fresh_body: Value = serde_json::from_slice(&fresh.body).unwrap();
-        if scope == "retained_history" {
-            assert_eq!(fresh.status, 409, "{fresh_body}");
-            assert_eq!(fresh_body["fence_reason"], "local_source_revision");
-            assert_eq!(fresh_body["local_revision_reason"], "size_grew");
-            assert!(fresh_body.get("entries").is_none());
-
-            // History keeps its original consumed prefix. Only the authorized
-            // provider can serve that exact prefix after the local file grows.
-            let retained = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                &query,
-                Some(&original),
-            );
-            assert_eq!(retained.status, 200);
-            let retained: Value = serde_json::from_slice(&retained.body).unwrap();
-            assert_eq!(retained["projection"], page["projection"]);
-            assert_eq!(retained["entries"], page["entries"]);
-            assert_eq!(retained["content_observation"]["state"], "cached");
-            let generation = retained["projection"]["generation"].as_str().unwrap();
-            let continuation =
-                format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}");
-            assert_eq!(
-                crate::session_transcript_range(
-                    &fixture.options,
-                    "source",
-                    &continuation,
-                    Some(&original)
-                )
-                .status,
-                200
-            );
-            let stale = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                &continuation.replace(generation, "wrong"),
-                Some(&original),
-            );
-            assert_eq!(stale.status, 409);
-            let stale: Value = serde_json::from_slice(&stale.body).unwrap();
-            assert_eq!(stale["error"]["code"], "stale_projection");
-            assert!(stale.get("entries").is_none());
-            continue;
-        }
         assert_eq!(
             fresh.status,
             200,
@@ -4964,6 +4922,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
     );
     let first_runtime = crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
     let mut runtime_phases = vec![("first_current", first_runtime.clone())];
+    replace_source_identity(&source);
     writeln!(
         fs::OpenOptions::new().append(true).open(&source).unwrap(),
         "{}",
@@ -6236,6 +6195,7 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
         assert!(unrelated_name.valid());
         let mut changed_facts = original_facts.clone();
         changed_facts.native_names.push(unrelated_name);
+        changed_facts.repos.insert("/synthetic/project".into(), Some("changed-selected-repo".into()));
         let original_runtime =
             crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
         let intent = crate::SessionFactsWrite::begin(&fixture.options, &changed_facts).unwrap();
@@ -6277,7 +6237,7 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
         assert_eq!(refused.code, "unavailable");
         assert_eq!(
             refused.message, "Native Query runtime observations changed during the query",
-            "changed global runtime must hit the Query observation fence: {refused:?}"
+            "changed selected runtime must hit the Query observation fence: {refused:?}"
         );
         assert_eq!(query_reads, (0, 0, 0));
 
@@ -6842,7 +6802,7 @@ fn pinned_provider_recovers_stale_codex_pages_and_fences_continuations() {
                     "{scope}/{mutation}: provider reads exceeded the page request budget"
                 );
 
-                if scope == "current" {
+                if scope == "current" || mutation == "append" {
                     let entries = fresh["entries"].as_array().unwrap();
                     assert_eq!(entries.len(), 3, "{scope}/{mutation}: {fresh}");
                     assert_eq!(
@@ -7199,6 +7159,7 @@ fn restored_mtime_rewrite_invalidates_local_ranges_and_rebuilds_observation() {
     assert_eq!(range["error"]["code"], "stale_projection");
     assert_eq!(range["resynchronize"], true);
     assert!(!range.to_string().contains("rewritten prompt"));
+    replace_source_identity(&path);
     fixture.publish_existing();
     let fresh = crate::session_transcript_range(
         &fixture.options,
