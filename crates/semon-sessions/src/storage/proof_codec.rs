@@ -515,37 +515,86 @@ mod tests {
         first.proof = presentation_digest("base", &encoded).unwrap();
         second.proof = first.proof.clone();
         let mut cache = PresentationCache::default();
-        assert!(cache.observations(&first, "null", "base", &encoded).unwrap().is_none());
-        assert!(cache.observations(&second, "null", "base", &encoded).unwrap().is_none());
+        assert!(
+            cache
+                .observations(&first, "null", "base", &encoded)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .observations(&second, "null", "base", &encoded)
+                .unwrap()
+                .is_none()
+        );
 
         let mut changed = second.clone();
         changed.metadata.push(' ');
-        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        assert!(
+            cache
+                .observations(&changed, "null", "base", &encoded)
+                .is_err()
+        );
         changed = second.clone();
         changed.slots = "[1]".into();
-        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        assert!(
+            cache
+                .observations(&changed, "null", "base", &encoded)
+                .is_err()
+        );
         assert!(cache.observations(&second, "{}", "base", &encoded).is_err());
         changed = second.clone();
         changed.session_key = "unlisted".into();
-        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        assert!(
+            cache
+                .observations(&changed, "null", "base", &encoded)
+                .is_err()
+        );
         changed = second.clone();
         changed.proof = "0".repeat(64);
-        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
-        assert!(cache.observations(&second, "null", "other-base", &encoded).is_err());
+        assert!(
+            cache
+                .observations(&changed, "null", "base", &encoded)
+                .is_err()
+        );
+        assert!(
+            cache
+                .observations(&second, "null", "other-base", &encoded)
+                .is_err()
+        );
 
         manifest["catalog_generation"] = serde_json::json!("b".repeat(64));
         let replacement = manifest.to_string();
-        assert!(cache.observations(&second, "null", "base", &replacement).is_err());
+        assert!(
+            cache
+                .observations(&second, "null", "base", &replacement)
+                .is_err()
+        );
         second.proof = presentation_digest("base", &replacement).unwrap();
-        assert!(cache.observations(&second, "null", "base", &replacement).is_ok());
-        manifest["entries"].as_array_mut().unwrap().push(serde_json::json!([second.session_key, entry]));
+        assert!(
+            cache
+                .observations(&second, "null", "base", &replacement)
+                .is_ok()
+        );
+        manifest["entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!([second.session_key, entry]));
         let duplicate = manifest.to_string();
         second.proof = presentation_digest("base", &duplicate).unwrap();
-        assert!(cache.observations(&second, "null", "base", &duplicate).is_err());
+        assert!(
+            cache
+                .observations(&second, "null", "base", &duplicate)
+                .is_err()
+        );
         manifest["catalog_generation"] = serde_json::json!("invalid");
         let invalid = manifest.to_string();
         second.proof = presentation_digest("base", &invalid).unwrap();
-        assert!(cache.observations(&second, "null", "base", &invalid).is_err());
+        assert!(
+            cache
+                .observations(&second, "null", "base", &invalid)
+                .is_err()
+        );
     }
 
     #[test]

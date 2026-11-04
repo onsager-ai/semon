@@ -2044,7 +2044,12 @@ fn authenticate_immutable_observation(
     prefix: &str,
 ) -> Result<VerifiedObservation, ObservationPreparationError> {
     authenticate_immutable_observation_with_cache(
-        db, current, selected, reference_kind, prefix, None,
+        db,
+        current,
+        selected,
+        reference_kind,
+        prefix,
+        None,
     )
 }
 
@@ -2123,7 +2128,9 @@ fn authenticate_immutable_observation_with_cache(
     )
     .map_err(|_| StorageError::Busy)?;
     let observations = match cache {
-        Some(cache) => cache.borrow_mut().observations(record, presentation, base, manifest),
+        Some(cache) => cache
+            .borrow_mut()
+            .observations(record, presentation, base, manifest),
         None => proof_codec::verify_presentation_observations(
             &selected.key,
             &record.metadata,
@@ -2424,7 +2431,12 @@ pub(crate) fn observation_binding_for_catalog_page(
     cache: &std::cell::RefCell<proof_codec::PresentationCache>,
 ) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
     observation_authority_for_owner_with_cache(
-        db, current, selected, Some(owner), false, Some(cache),
+        db,
+        current,
+        selected,
+        Some(owner),
+        false,
+        Some(cache),
     )
     .map(|(binding, _)| binding)
     .map_err(ObservationPreparationError::into_storage)
@@ -2679,7 +2691,12 @@ fn observation_authority_for_owner(
     ObservationPreparationError,
 > {
     observation_authority_for_owner_with_cache(
-        db, current, selected, physical_owner, local_only, None,
+        db,
+        current,
+        selected,
+        physical_owner,
+        local_only,
+        None,
     )
 }
 
