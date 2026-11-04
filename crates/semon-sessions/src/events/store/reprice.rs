@@ -1062,21 +1062,12 @@ mod tests {
             params![row.key, row.harness, json(row).unwrap()],
         )
         .unwrap();
-        crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
-            c,
-            store.owner.config().namespace.as_str(),
-            &row.key,
-            store.owner.admission(),
-            store
-                .owner
-                .config()
-                .expected_stream_epoch
-                .as_deref()
-                .unwrap(),
-            &json(row).unwrap(),
-            None,
-        )
-        .unwrap();
+        let options = crate::Options {
+            proc_root: store.path.parent().unwrap().join("proc"),
+            facts: None,
+            ..crate::Options::default()
+        };
+        super::super::tests::grant_fixture_runtime(store, &options, std::slice::from_ref(row));
         c.execute(
             "INSERT INTO session_descriptions(namespace,session_key,version,inputs,description) VALUES(semon_namespace(),?1,2,'fixture',?2)",
             params![

@@ -4182,7 +4182,12 @@ fn scan_file_with_mode(
             .take()
             .expect("parser tracks dirty rows");
         let started = cache.scan_measurements.start();
-        let captured = if append && offset == from {
+        let captured = if append && writable.source_chunks.is_none() {
+            // Chunk headers bind immutable selected reads, independently of
+            // the ingestion cursor. Repair a missing header without replaying
+            // events from the already committed prefix.
+            crate::source_chunks::capture(&mut file, offset, from)?
+        } else if append && offset == from {
             let prior = recorded.as_ref().expect("cursor ledger exists");
             crate::source_chunks::Captured {
                 prefix: prior.prefix,

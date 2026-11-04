@@ -8310,6 +8310,45 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    // Direct-publication fixtures must supply the same independently derived
+    // runtime capture as the ordinary producer; an exact metadata grant alone
+    // does not authorize later observation postimages.
+    pub(super) fn grant_fixture_runtime(
+        store: &SqliteStore,
+        options: &crate::Options,
+        rows: &[crate::model::summary::CatalogRow],
+    ) {
+        let binding = crate::storage::QueryRuntimeBinding {
+            namespace: store.owner.config().namespace.clone(),
+            admission: store.owner.admission(),
+            stream_epoch: store.owner.config().expected_stream_epoch.clone().unwrap(),
+        };
+        let mut observations = crate::storage::selected::PresentationObservations::capture(
+            options,
+            Some(&binding),
+            rows.iter(),
+        );
+        for row in rows {
+            let cwds = crate::storage::sqlite::catalog::runtime_source_cwds(
+                &store.connection,
+                &row.sources,
+            )
+            .unwrap();
+            let runtime = observations.runtime_observation(row, &cwds).unwrap();
+            observations.capture_runtime(row, &cwds, runtime).unwrap();
+            crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+                &store.connection,
+                binding.namespace.as_str(),
+                &row.key,
+                binding.admission,
+                &binding.stream_epoch,
+                &serde_json::to_string(row).unwrap(),
+                Some(&observations),
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn direct_catalog_reprice_preserves_exact_observation_authority() {
         let root = scratch("direct-catalog-reprice-authority");
@@ -8326,6 +8365,7 @@ mod tests {
                 .0,
             Outcome::Written
         );
+        grant_fixture_runtime(&store, &options, &rows);
 
         let original = rows[0].clone();
         let binding = crate::storage::QueryRuntimeBinding {
@@ -8467,6 +8507,7 @@ mod tests {
                     .0,
                 Outcome::Written
             );
+            grant_fixture_runtime(&store, &options, &rows);
             let namespace = config.namespace.as_str();
             let before: String = store.connection.query_row(
                 "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
@@ -8555,6 +8596,7 @@ mod tests {
                     .0,
                 Outcome::Written
             );
+            grant_fixture_runtime(&store, &options, &rows);
             let mut retained = rows[0].clone();
             retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
             store.connection.execute(
@@ -8649,6 +8691,7 @@ mod tests {
                 .0,
             Outcome::Written
         );
+        grant_fixture_runtime(&store, &options, &rows);
         store.connection.execute_batch("CREATE TRIGGER test_reprice_grant_failure BEFORE UPDATE ON storage_catalog_native_observation_grants BEGIN SELECT RAISE(ABORT,'injected reprice grant failure'); END;").unwrap();
         let mut fixture: Value =
             serde_json::from_slice(include_bytes!("../pricing/fixtures/models-dev.json")).unwrap();

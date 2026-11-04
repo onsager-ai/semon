@@ -393,9 +393,11 @@ pub(crate) fn parser_fixture_path(harness: &str, long_path: bool) -> Fixture {
 }
 
 pub(crate) fn parser_fixture_keys(harness: &str, long_path: bool, long_keys: bool) -> Fixture {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let root = std::env::temp_dir().join(format!(
-        "pg100-{}-{}-{harness}",
+        "pg100-{}-{}-{}-{harness}",
         std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()

@@ -1110,7 +1110,12 @@ impl Home {
 
     fn lines(&self, relative: &str, records: &[Value]) -> PathBuf {
         let text: String = records.iter().map(|record| format!("{record}\n")).collect();
-        self.write(relative, &text)
+        let path = self.root.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let replacement = path.with_extension("replacement");
+        fs::write(&replacement, text).unwrap();
+        fs::rename(replacement, &path).unwrap();
+        path
     }
 
     fn top(&self, id: &str, records: &[Value]) {
