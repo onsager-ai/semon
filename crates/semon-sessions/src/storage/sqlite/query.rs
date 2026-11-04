@@ -51,8 +51,8 @@ pub(crate) fn selected_query_context(
             };
             let text = text.ok_or(StorageError::Busy)?;
             crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
-            let mut candidate = serde_json::from_str(&text)
-                .map_err(|_| StorageError::ScopeChanged)?;
+            let mut candidate =
+                serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
             super::proof_generations::attach_query_recipe(
                 tx,
                 binding,

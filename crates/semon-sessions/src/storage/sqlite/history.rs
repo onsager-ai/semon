@@ -72,11 +72,16 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
             .transpose()
             .map_err(<Self as OriginalHistoryStore>::data)?;
         if let Some(old) = &mut old
-            && old.query.as_ref().is_some_and(|query| query["selected"].get("digest").is_some())
+            && old
+                .query
+                .as_ref()
+                .is_some_and(|query| query["selected"].get("digest").is_some())
         {
             let payload: String = self.db.query_row("SELECT CASE WHEN octet_length(metadata)+octet_length(query_recipe)<=1048576 THEN query_recipe END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![self.namespace, old.key], |r| r.get(0))?;
-            old.query_recipe = Some(crate::query_projection::SelectedRecipe::decode(old, &payload)
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?);
+            old.query_recipe = Some(
+                crate::query_projection::SelectedRecipe::decode(old, &payload)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+            );
         }
         Ok(old)
     }

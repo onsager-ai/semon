@@ -405,7 +405,10 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     };
     let mut last = query["last"].as_i64();
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
-    for edge in crate::query_projection::SelectedRecipe::edges_for(row).into_iter().flatten() {
+    for edge in crate::query_projection::SelectedRecipe::edges_for(row)
+        .into_iter()
+        .flatten()
+    {
         let edge = &edge["query"];
         for at in [edge["at"].as_i64(), edge["done"].as_i64()]
             .into_iter()

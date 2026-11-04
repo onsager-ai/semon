@@ -123,9 +123,10 @@ impl SelectedRecipe {
         if selected.get("version").is_none() && selected.get("digest").is_none() {
             return Ok(None);
         }
-        let recipe = row.query_recipe.as_ref().ok_or_else(|| {
-            std::io::Error::other("Selected Query producer recipe unavailable")
-        })?;
+        let recipe = row
+            .query_recipe
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Selected Query producer recipe unavailable"))?;
         let payload = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
         Self::decode(row, &payload).map_err(std::io::Error::other)?;
         Ok(Some(payload))

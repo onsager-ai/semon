@@ -41,7 +41,8 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         metadata: &str,
     ) -> rusqlite::Result<bool> {
         let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
-        let changed = self.db
+        let changed = self
+            .db
             .prepare_cached(sql)?
             .execute(params![
                 self.namespace,
