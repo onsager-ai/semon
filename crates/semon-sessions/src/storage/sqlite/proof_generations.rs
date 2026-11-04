@@ -2846,6 +2846,11 @@ fn observation_authority_for_owner(
                 local_only
             ],
             |r| {
+                for column in [5, 6, 9, 10] {
+                    if matches!(r.get_ref(column)?, rusqlite::types::ValueRef::Null) {
+                        return Ok(Err(StorageError::HistoryRetentionBounds));
+                    }
+                }
                 let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
                         3,
@@ -2853,7 +2858,7 @@ fn observation_authority_for_owner(
                         Box::new(error),
                     )
                 })?;
-                Ok((
+                Ok(Ok((
                     proof_codec::GenerationRecord {
                         namespace: ns.to_owned(),
                         id: ProofGenerationId(r.get(0)?),
@@ -2871,12 +2876,14 @@ fn observation_authority_for_owner(
                     r.get::<_, String>(10)?,
                     r.get::<_, bool>(11)?,
                     r.get::<_, String>(12)?,
-                ))
+                )))
             },
         )
         .map_err(ObservationPreparationError::Sql)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ObservationPreparationError::Sql)?;
+        .map_err(ObservationPreparationError::Sql)?
+        .into_iter()
+        .collect::<Result<Vec<_>, StorageError>>()?;
     let (record, base, manifest, presentation, granted, reference_kind) = values
         .into_iter()
         .next()

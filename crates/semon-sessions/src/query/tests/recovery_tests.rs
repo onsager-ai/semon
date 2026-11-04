@@ -142,6 +142,7 @@ fn publish_direct(home: &Home) {
     inputs.sort();
     inputs.dedup();
     let prepared = crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    let generation = cache.session_catalog_generation();
     cache
         .publish_catalog_projection(
             &crate::slot_projection::Publication {
@@ -149,7 +150,7 @@ fn publish_direct(home: &Home) {
                 transcripts: Some(&prepared.transcripts),
                 observations: None,
             },
-            prepared.base_generation.as_deref(),
+            generation.as_deref(),
         )
         .unwrap();
     let binding = cache.query_runtime_binding().unwrap().unwrap();

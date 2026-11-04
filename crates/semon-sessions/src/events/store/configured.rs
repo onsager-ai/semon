@@ -3879,6 +3879,10 @@ mod tests {
                         })
                         .collect();
                     prepared.relationships.presentation = Some(Default::default());
+                    assert_eq!(
+                        store.record_semantic_batch(&batch, &prepared).unwrap(),
+                        Outcome::Written
+                    );
                     return (batch, prepared);
                 }
             }
@@ -6438,6 +6442,10 @@ mod tests {
         let mut observations = crate::storage::selected::PresentationObservations::default();
         observations.machine_label = Some("original machine".into());
         prepared.relationships.presentation = Some(observations);
+        assert_eq!(
+            store.record_semantic_batch(&batch, &prepared).unwrap(),
+            Outcome::Written
+        );
         let metadata = serde_json::to_value(&prepared.rows).unwrap();
         let first = store.publish_semantic_catalog(&batch, &prepared).unwrap();
         assert_eq!(first.0, Outcome::Written);
@@ -6450,6 +6458,10 @@ mod tests {
         let mut observations = crate::storage::selected::PresentationObservations::default();
         observations.machine_label = Some("changed machine".into());
         prepared.relationships.presentation = Some(observations);
+        assert_eq!(
+            store.record_semantic_batch(&next, &prepared).unwrap(),
+            Outcome::Written
+        );
         let second = store.publish_semantic_catalog(&next, &prepared).unwrap();
         assert_eq!(second.0, Outcome::Written);
         assert_ne!(second.1, first.1);

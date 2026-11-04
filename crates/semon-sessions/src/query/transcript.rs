@@ -20,6 +20,13 @@ fn unavailable(error: impl std::fmt::Display) -> QueryError {
 }
 
 fn runtime_observation_failure(error: io::Error) -> QueryError {
+    if error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+        .is_some_and(|error| matches!(error, crate::storage::StorageError::HistoryRetentionBounds))
+    {
+        return QueryError::new("unavailable", error.to_string());
+    }
     let scope_changed = error
         .get_ref()
         .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())

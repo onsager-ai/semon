@@ -10007,7 +10007,11 @@ fn build_sources_inner(
                     }
                 }
             }
-            if staged_relationships.is_some() {
+            if let Some(staged) = staged_relationships {
+                crate::query_projection::complete_staged_recipes(
+                    catalog.as_mut().expect("source catalog captured"),
+                    &staged.relations,
+                )?;
                 crate::query_projection::complete_staged_recipes(
                     catalog.as_mut().expect("source catalog captured"),
                     &relationships.relations,

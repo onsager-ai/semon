@@ -1322,12 +1322,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         continued_parent_source,
         "SQLite History follows both verified parent continuations"
     );
-    // Mirror the PostgreSQL reset used by the stored-header controls below.
-    // Both withdrawal oracles retain the exact appended parent as original.
-    let parent_reset = claude_parent.with_extension("history-reset");
-    fs::copy(&claude_parent, &parent_reset).unwrap();
-    fs::rename(parent_reset, &claude_parent).unwrap();
-    let continued_listing = refresh(&withdraw_options);
     let composite_before_withdrawal =
         crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
             .unwrap()
@@ -1478,8 +1472,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let sqlite_parent_exact: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
     assert_eq!(
-        sqlite_parent_exact["items"][0]["lifecycle"], "retained",
-        "the inode reset preserves the appended parent under original History custody"
+        sqlite_parent_exact["items"][0]["lifecycle"], "current",
+        "ordinary parent continuation keeps its Current display lifecycle in History"
     );
     let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
         &withdraw_options,
@@ -1861,6 +1855,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .any(|row| row["id"] == copilot_id)
     );
+    // Match the PostgreSQL source state at withdrawal: the ordinary append
+    // advances History, then the inode reset establishes appended custody.
+    let mut parent = fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
+    parent.write_all(parent_source_append.as_bytes()).unwrap();
+    drop(parent);
+    publish_withdrawal_oracle();
+    let parent_reset = claude_parent.with_extension("withdrawal-reset");
+    fs::copy(&claude_parent, &parent_reset).unwrap();
+    fs::rename(parent_reset, &claude_parent).unwrap();
+    publish_withdrawal_oracle();
     let copilot_parked = oracle.root.join("oracle-copilot220.jsonl");
     fs::rename(&copilot, &copilot_parked).unwrap();
     let native_withdrawal = withdrawal_query
@@ -1893,6 +1897,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .any(|row| row["id"] == copilot_id)
     );
     fs::rename(&copilot_parked, &copilot).unwrap();
+    fs::write(&claude_parent, &parent_before_withdrawal).unwrap();
     // Rename preserves bytes but changes the physical ctime witness. Capture
     // the SQLite baseline from the restored Sources before NoSQLiteGuard, so
     // PG must match the same observation, including all proof fields.
