@@ -4218,6 +4218,9 @@ impl Stage {
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
         let mut db = capability.journal().connection()?;
+        // Cache only committed DDL; admission, profile and epoch checks still
+        // execute inside each operation's snapshot.
+        crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(failed)?;
