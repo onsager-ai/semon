@@ -2223,7 +2223,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         stale_append_history.status, 200,
-        "published cursor recipes do not require native continuation evidence"
+        "a missing provider body does not invalidate published cursor recipes"
     );
     let cached_append_history: serde_json::Value =
         serde_json::from_slice(&stale_append_history.body).unwrap();
@@ -2241,9 +2241,45 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let append_history_after: serde_json::Value =
         serde_json::from_slice(&append_history_after.body).unwrap();
+    for field in [
+        "identity",
+        "session",
+        "projection",
+        "range",
+        "relationship_context",
+        "limits",
+    ] {
+        assert_eq!(
+            cached_append_history[field], append_history_after[field],
+            "provider refusal preserves committed {field}"
+        );
+    }
+    let unavailable_entries = cached_append_history["entries"].as_array().unwrap();
+    let available_entries = append_history_after["entries"].as_array().unwrap();
+    assert_eq!(unavailable_entries.len(), available_entries.len());
+    for (unavailable, available) in unavailable_entries.iter().zip(available_entries) {
+        for field in [
+            "k",
+            "slot",
+            "entry_id",
+            "provenance",
+            "observed_at",
+            "turn",
+            "id",
+        ] {
+            assert_eq!(
+                unavailable[field], available[field],
+                "provider refusal preserves recipe {field}"
+            );
+        }
+        assert_eq!(unavailable["freshness"]["state"], "incomplete");
+        assert!(unavailable.get("field").is_none());
+        assert!(unavailable.get("text").is_none_or(|text| text == ""));
+    }
+    assert_eq!(cached_append_history["observation"]["source_bytes"], 0);
     assert_eq!(
-        cached_append_history, append_history_after,
-        "the old-prefix provider cannot change the committed History response"
+        cached_append_history["observation"]["incomplete_entries"],
+        unavailable_entries.len()
     );
     assert_eq!(
         append_history_after["identity"]["read_scope"],
@@ -2280,10 +2316,18 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let before_entries = append_history_prefix["entries"].as_array().unwrap();
     let after_entries = append_history_after["entries"].as_array().unwrap();
+    let mut advanced_entries = before_entries.clone();
+    for entry in &mut advanced_entries {
+        let source = &append_history_after["identity"]["source_refs"][0]["source"];
+        entry["provenance"]["source"] = source.clone();
+        if let Some(field) = entry.get_mut("field") {
+            field["provenance"]["source"] = source.clone();
+        }
+    }
     assert_eq!(
         &after_entries[..before_entries.len()],
-        before_entries.as_slice(),
-        "SQLite History preserves every prior entry while advancing"
+        advanced_entries.as_slice(),
+        "SQLite History preserves every prior entry under the committed cursor source"
     );
     assert_eq!(after_entries.len(), before_entries.len() + 1);
     assert_eq!(

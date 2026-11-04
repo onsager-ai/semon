@@ -1176,6 +1176,11 @@ impl NativeEvidence {
                 return Ok(CatalogPreparation::Pending);
             }
             if outcome != crate::events::Outcome::Written {
+                #[cfg(test)]
+                eprintln!(
+                    "native catalog phase=cold_partial_publication outcome={outcome:?} rejection={:?}",
+                    cache.semantic_rejection()
+                );
                 return Err(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     "backfill publication changed",

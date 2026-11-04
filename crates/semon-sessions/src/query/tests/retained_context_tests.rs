@@ -270,7 +270,7 @@ fn retained_child_fields_use_exact_current_parent_after_original_history_is_pres
             "get_session",
             &json!({"id":"lead"}),
             None,
-            crate::SessionSourceReadMode::LocalThenProvider,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
             NOW,
         )
         .unwrap();
