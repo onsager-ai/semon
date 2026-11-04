@@ -491,10 +491,10 @@ pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
 }
 
 /// Shared source-revision classification for SQLite and PostgreSQL History.
-/// Same-file cursor advances update History. Source-set changes, changed identities,
+/// Same-file cursor advances update History. Additions, changed identities,
 /// role changes and shrink preserve independent original custody.
 pub(crate) fn replaces_original(old: &CatalogRow, current: &CatalogRow) -> bool {
-    if old.harness != current.harness || old.sources.len() != current.sources.len() {
+    if old.harness != current.harness {
         return true;
     }
     let mut old_paths = std::collections::BTreeSet::new();
@@ -1441,8 +1441,8 @@ mod history_composition_tests {
         current.sources.push(source("/two", "other"));
         assert!(replaces_original(&old, &current));
         assert!(
-            replaces_original(&current, &old),
-            "losing a source must preserve its independent original custody"
+            !replaces_original(&current, &old),
+            "composite History retains missing sources alongside the remaining cursor"
         );
     }
 

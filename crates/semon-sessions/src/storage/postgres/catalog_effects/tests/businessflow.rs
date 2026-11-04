@@ -1857,7 +1857,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     // Match the PostgreSQL source state at withdrawal: the ordinary append
     // advances History, then the inode reset establishes appended custody.
-    let mut parent = fs::OpenOptions::new().append(true).open(&claude_parent).unwrap();
+    let mut parent = fs::OpenOptions::new()
+        .append(true)
+        .open(&claude_parent)
+        .unwrap();
     parent.write_all(parent_source_append.as_bytes()).unwrap();
     drop(parent);
     publish_withdrawal_oracle();
@@ -4366,6 +4369,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "selected edge recipe must not use the parent's retained History ref"
         );
     }
+    let continued_parent_proof = pool
+        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
+            native_proof_tuple(tx, &continued_generation, current_parent_source)
+        })
+        .unwrap();
     // The ordinary cursor append above uses Current for History. Give the
     // following physical History corruption checks an independent original
     // by replacing the inode, without changing any native record bytes.
@@ -5688,9 +5696,14 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     current.lifecycle,
                     crate::model::summary::CatalogLifecycle::Current
                 );
-                let history = snapshot.owner(&pid_owner.key)?.is_some();
-                assert!(history, "the PID owner keeps its composite History source");
-                let (row, _, _) = snapshot.selected(&pid_owner.key, history, 0, 1)?.unwrap();
+                let history = snapshot
+                    .owner(&pid_owner.key)?
+                    .ok_or(StorageError::ScopeChanged)?;
+                assert!(
+                    history.original,
+                    "the inode reset keeps original History custody"
+                );
+                let (row, _, _) = snapshot.selected(&pid_owner.key, true, 0, 1)?.unwrap();
                 assert_eq!(row.key, current.key);
                 assert_eq!(row.harness, current.harness);
                 let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
@@ -5708,7 +5721,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     .iter()
                     .find(|source| source.native_id == "one")
                     .ok_or(StorageError::ScopeChanged)?;
-                assert_eq!(history_source, current_source);
+                assert_eq!(history_source, current_parent_source);
+                assert_ne!(history_source, current_source);
+                assert_eq!(history_source.offset, current_source.offset);
+                assert_eq!(history_source.prefix_sha256, current_source.prefix_sha256);
+                assert_eq!(history_source.tail_sha256, current_source.tail_sha256);
                 let history_proof =
                     native_proof_tuple(&mut tx, &moved_store.generation, history_source)?;
                 let current_proof =
@@ -5717,9 +5734,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     history_proof != pid_original_proof,
                     "the old parent Native proof cannot substitute for its continuation"
                 );
-                assert!(
-                    history_proof == current_proof,
-                    "History and Current bind the exact verified parent continuation"
+                assert_eq!(history_proof, continued_parent_proof);
+                assert_ne!(
+                    history_proof, current_proof,
+                    "History retains the pre-reset proof while Current owns the new inode"
                 );
                 assert!(
                     super::super::super::native_reader::runtime_source_cwds_if_current(

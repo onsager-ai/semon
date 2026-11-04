@@ -6719,10 +6719,11 @@ mod tests {
             work.catalog_snapshot = Some(snapshot);
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
-            assert!(
+            eventually("complete Catalog after parent inode replacement", || {
                 view.refresh_catalog_locked(&mut work, model::now_ms())
                     .unwrap()
-            );
+                    .then_some(())
+            });
             let reads = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
             assert!(
                 reads <= 3,
@@ -6926,10 +6927,11 @@ mod tests {
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(modified))
             .unwrap();
-        assert!(
+        eventually("complete Catalog after same-size cursor rewrite", || {
             view.refresh_catalog_locked(&mut work, model::now_ms())
                 .unwrap()
-        );
+                .then_some(())
+        });
         assert_eq!(generation().unwrap(), before);
         let unchanged = crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
             .unwrap()

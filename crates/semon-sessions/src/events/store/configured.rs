@@ -6564,6 +6564,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
+        let reset = a.raw.with_extension("original-reset");
+        fs::copy(&a.raw, &reset).unwrap();
+        fs::rename(reset, &a.raw).unwrap();
         let mut raw = fs::OpenOptions::new().append(true).open(&a.raw).unwrap();
         writeln!(raw, "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"type\":\"input_text\",\"text\":\"continued replacement\"}}]}}}}").unwrap();
         drop(raw);

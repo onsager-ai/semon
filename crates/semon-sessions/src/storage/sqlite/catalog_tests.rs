@@ -7545,7 +7545,17 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
             .and_then(|query| query["runtime"].as_str()),
         "the typed row keeps its published runtime witness"
     );
-    let inputs = crate::inputs::inputs(&fixture.options).unwrap();
+    let inputs = crate::inputs::inputs(&fixture.options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| {
+            crate::native_evidence::catalog_input(
+                &input.full_path(&fixture.options),
+                &fixture.options,
+            )
+            .is_some()
+        })
+        .collect::<Vec<_>>();
     let prepared =
         crate::model::prepare_sources(&fixture.options, &mut cache, &inputs, 1790812800000)
             .unwrap();

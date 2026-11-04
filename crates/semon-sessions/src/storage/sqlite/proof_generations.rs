@@ -2047,7 +2047,12 @@ fn authenticate_immutable_observation(
                 current.stream_epoch
             ],
             |row| {
-                Ok((
+                for column in [5, 6, 9, 10] {
+                    if matches!(row.get_ref(column)?, rusqlite::types::ValueRef::Null) {
+                        return Ok(Err(StorageError::HistoryRetentionBounds));
+                    }
+                }
+                Ok(Ok((
                     proof_codec::GenerationRecord {
                         namespace: current.namespace.as_str().to_owned(),
                         id: ProofGenerationId(row.get(0)?),
@@ -2069,12 +2074,14 @@ fn authenticate_immutable_observation(
                     row.get::<_, String>(8)?,
                     row.get::<_, String>(9)?,
                     row.get::<_, String>(10)?,
-                ))
+                )))
             },
         )
         .map_err(ObservationPreparationError::Sql)?
         .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ObservationPreparationError::Sql)?;
+        .map_err(ObservationPreparationError::Sql)?
+        .into_iter()
+        .collect::<Result<Vec<_>, StorageError>>()?;
     let [(record, base, manifest, presentation)] = rows.as_slice() else {
         if cfg!(test) || crate::native_timing::enabled() {
             eprintln!(
