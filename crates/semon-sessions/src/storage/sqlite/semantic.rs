@@ -4337,7 +4337,10 @@ impl Stage {
 
     /// Equivalent to reopening this admitted Stage after a peer publication,
     /// without repeating connection and committed-schema initialization.
-    pub(crate) fn refresh_catalog_generation(&mut self, generation: &str) -> Result<bool, StoreError> {
+    pub(crate) fn refresh_catalog_generation(
+        &mut self,
+        generation: &str,
+    ) -> Result<bool, StoreError> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Deferred)

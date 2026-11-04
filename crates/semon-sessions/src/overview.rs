@@ -398,8 +398,7 @@ fn publish_current_owned_with_policy(
                 && history.sources.iter().any(|old| {
                     row.sources.iter().any(|new| {
                         new.path == old.path
-                            && ((new.dev, new.ino) != (old.dev, old.ino)
-                                || new.offset < old.offset)
+                            && ((new.dev, new.ino) != (old.dev, old.ino) || new.offset < old.offset)
                     })
                 })
         });
