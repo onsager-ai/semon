@@ -1492,7 +1492,6 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     let sqlite_retained = sqlite_scoped("scope=retained_history&", 50);
-    let sqlite_retained_parent_search = sqlite_scoped("scope=retained_history&q=one&", 50);
     let sqlite_parent_exact = crate::catalog::session_catalog_page(
         &withdraw_options,
         recent_machine,
@@ -7380,7 +7379,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .map(stable)
             .collect::<Vec<_>>(),
-        sqlite_retained_parent_search
+        sqlite_scoped("scope=retained_history&q=one&", 50)
             .iter()
             .map(stable)
             .collect::<Vec<_>>(),
