@@ -7343,6 +7343,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         generation: caught.clone(),
         options: options.clone(),
     };
+    // This shared parity host also serves PostgreSQL's independently captured
+    // continued and reset sources; SQLite clone identities cannot authorize them.
+    sqlite_host.0.extend(next_host.0.iter().cloned());
     let pg_parent_transcript = query
         .call_bound_selected_at(
             "read_transcript",
