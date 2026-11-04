@@ -1644,10 +1644,9 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
         "first",
         &[human("first", ts(1, 0), "stage-only query repair")],
     );
-    publish_semantic(&home);
-    // A closed single-source component normally takes the direct publisher.
-    // Explicitly drive the admitted Stage with the producer's real indexed
-    // Claude input so its immutable receipt, presentation and grant exist.
+    // Publish the first observation through Stage itself. Replaying an already
+    // published direct observation reuses its receipt without minting a Stage
+    // origin grant, so it cannot establish this Stage-only preimage fixture.
     publish_semantic_stage(
         &home,
         &crate::Input {

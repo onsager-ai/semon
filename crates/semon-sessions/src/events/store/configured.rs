@@ -11889,50 +11889,21 @@ mod tests {
                     1_790_000_000_000,
                 )
                 .unwrap();
-                // The builder can repeat known endpoints. Keep this page's
-                // authored endpoints so the other side must resolve from the
-                // already committed Stage, as this cross-page fixture intends.
-                prepared.relationships.endpoints.retain(|_, endpoint| {
-                    endpoint.paths.iter().any(|path| batch.paths.contains(path))
+                // Pick an endpoint already authenticated by an earlier page,
+                // then omit its redundant inline witnesses. The relation must
+                // resolve that endpoint from durable Stage state.
+                let candidate = prepared.relationships.relations.iter().find_map(|(id, relation)| {
+                    let real = |key: &String| prepared.relationships.endpoints.contains_key(key);
+                    if relation.to.as_ref().is_some_and(real)
+                        && batch.context.endpoints.contains_key(&relation.from)
+                    {
+                        return Some((id.clone(), relation.from.clone(), true));
+                    }
+                    relation.to.as_ref().and_then(|to| {
+                        (real(&relation.from) && batch.context.endpoints.contains_key(to))
+                            .then(|| (id.clone(), to.clone(), false))
+                    })
                 });
-                prepared.relationships.relations.retain(|_, relation| {
-                    prepared.relationships.endpoints.contains_key(&relation.from)
-                        || relation.to.as_ref().is_some_and(|to| {
-                            prepared.relationships.endpoints.contains_key(to)
-                        })
-                });
-                // A repeated inline stub would authorize the other endpoint
-                // independently. Require the already staged real endpoint so
-                // the absent-endpoint mutation exercises that exact boundary.
-                for relation in prepared.relationships.relations.values_mut() {
-                    relation
-                        .stubs
-                        .retain(|stub| !batch.context.endpoints.contains_key(&stub.key));
-                }
-                let candidate =
-                    prepared
-                        .relationships
-                        .relations
-                        .iter()
-                        .find_map(|(id, relation)| {
-                            let real =
-                                |key: &String| prepared.relationships.endpoints.contains_key(key);
-                            let stub =
-                                |key: &String| relation.stubs.iter().any(|entry| &entry.key == key);
-                            if !(real(&relation.from) || relation.to.as_ref().is_some_and(real)) {
-                                return None;
-                            }
-                            if !real(&relation.from)
-                                && !stub(&relation.from)
-                                && batch.context.endpoints.contains_key(&relation.from)
-                            {
-                                return Some((id.clone(), relation.from.clone(), true));
-                            }
-                            relation.to.as_ref().and_then(|to| {
-                                (!real(to) && !stub(to) && batch.context.endpoints.contains_key(to))
-                                    .then(|| (id.clone(), to.clone(), false))
-                            })
-                        });
                 let Some(candidate) = candidate else {
                     assert_eq!(
                         cache.record_semantic_batch(&batch, &prepared).unwrap(),
@@ -11940,6 +11911,10 @@ mod tests {
                     );
                     continue;
                 };
+                prepared.relationships.endpoints.remove(&candidate.1);
+                for relation in prepared.relationships.relations.values_mut() {
+                    relation.stubs.retain(|stub| stub.key != candidate.1);
+                }
                 assert!(
                     f.db()
                         .query_row(

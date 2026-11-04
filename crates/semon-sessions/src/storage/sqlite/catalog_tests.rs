@@ -125,6 +125,61 @@ impl Fixture {
         drop(work);
         evidence.retire();
     }
+    fn publish_direct(&self) {
+        let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
+        let mut inputs = crate::inputs::inputs(&self.options).unwrap();
+        inputs.extend(cache.paths().filter_map(|path| {
+            crate::native_evidence::catalog_input(std::path::Path::new(path), &self.options)
+        }));
+        inputs.sort();
+        inputs.dedup();
+        crate::events::store::audit_catalog_sources(
+            &self.options,
+            &inputs,
+            Some(""),
+            &crate::native_evidence::query_runtime_generation(&self.options).unwrap(),
+        )
+        .unwrap();
+        let prepared =
+            crate::model::prepare_sources(&self.options, &mut cache, &inputs, 1790812800000)
+                .unwrap();
+        let generation = cache.session_catalog_generation();
+        let mut published = false;
+        for _ in 0..128 {
+            match cache.publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                    observations: None,
+                },
+                generation.as_deref(),
+            ) {
+                Ok(Some(_)) => {
+                    published = true;
+                    break;
+                }
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && cache.semantic_rejection().is_none() => {}
+                result => panic!("direct fixture publication: {result:?}"),
+            }
+        }
+        assert!(published, "direct fixture custody must converge");
+        let binding = cache.query_runtime_binding().unwrap().unwrap();
+        let db = self.db();
+        for row in &prepared.rows {
+            crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+                &db,
+                binding.namespace.as_str(),
+                &row.key,
+                binding.admission,
+                &binding.stream_epoch,
+                &serde_json::to_string(row).unwrap(),
+                prepared.presentation_observations(),
+            )
+            .unwrap();
+        }
+    }
     fn begin_relation_stage(&self, paths: &[String]) -> crate::model::relation_stage::Batch {
         assert!(!paths.is_empty());
         let mut cache = EventCache::open_scoped(&self.options.cache, &self.options.source).unwrap();
@@ -7942,7 +7997,7 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     let facts_write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
     crate::write_facts(path, &facts, &fixture.options.source).unwrap();
     facts_write.complete().unwrap();
-    fixture.publish_existing();
+    fixture.publish_direct();
     family_owner_phase_diagnostic(&fixture, "status_after_initial_publish", "family-child");
     let status = || {
         let (code, body) = fixture.body("sid=family-parent");
@@ -7956,7 +8011,7 @@ fn family_status_does_not_treat_a_retired_native_selection_as_current() {
     facts_write.complete().unwrap();
     assert_eq!(status(), json!({"state":null,"observation":"unavailable"}));
     family_owner_phase_diagnostic(&fixture, "status_before_retirement_publish", "family-child");
-    fixture.publish_existing();
+    fixture.publish_direct();
     family_owner_phase_diagnostic(&fixture, "status_after_retirement_publish", "family-child");
     assert_eq!(status(), json!({"state":"off","observation":"retained"}));
     let missing_raw_path = fixture.options.codex_home.join(child);

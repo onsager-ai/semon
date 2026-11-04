@@ -8092,6 +8092,17 @@ mod tests {
         scoped: bool,
         writer: CatalogWriter,
     ) -> Result<(Outcome, Option<String>), StoreError> {
+        catalog_write_observed(store, rows, projections, scoped, writer, None)
+    }
+
+    fn catalog_write_observed(
+        store: &mut SqliteStore,
+        rows: &[crate::model::summary::CatalogRow],
+        projections: &[crate::slot_projection::Projection],
+        scoped: bool,
+        writer: CatalogWriter,
+        observations: Option<&crate::storage::selected::PresentationObservations>,
+    ) -> Result<(Outcome, Option<String>), StoreError> {
         let generation: Option<String> = store
             .connection
             .query_row(
@@ -8124,7 +8135,7 @@ mod tests {
             &crate::slot_projection::Publication {
                 rows,
                 transcripts: Some(projections),
-                observations: None,
+                observations,
             },
             generation.as_deref(),
             scoped.then_some(claims.as_slice()),
@@ -8141,6 +8152,17 @@ mod tests {
         projections: &[crate::slot_projection::Projection],
         scoped: bool,
     ) {
+        catalog_write_pair_observed(batch, row_wise, rows, projections, scoped, None);
+    }
+
+    fn catalog_write_pair_observed(
+        batch: &mut SqliteStore,
+        row_wise: &mut SqliteStore,
+        rows: &[crate::model::summary::CatalogRow],
+        projections: &[crate::slot_projection::Projection],
+        scoped: bool,
+        observations: Option<&crate::storage::selected::PresentationObservations>,
+    ) {
         // Original custody copying is a bounded durable continuation. A
         // Deferred tick does not publish rows or stamp an observation clock.
         let publish = |store: &mut SqliteStore, writer| {
@@ -8148,7 +8170,9 @@ mod tests {
                 let timing = matches!(writer, CatalogWriter::RowWise);
                 let recording = crate::native_timing::catalog_commit_tests::recording(timing);
                 let before = crate::model::now_ms();
-                let outcome = catalog_write(store, rows, projections, scoped, writer).unwrap();
+                let outcome =
+                    catalog_write_observed(store, rows, projections, scoped, writer, observations)
+                        .unwrap();
                 if outcome.0 == Outcome::Written {
                     crate::native_timing::catalog_commit_tests::assert_written(timing);
                     return (
@@ -11418,7 +11442,19 @@ mod tests {
         assert!(!original_recipes.is_empty());
         drop(seed);
         fs::remove_file(&path).unwrap();
-        let (rows, projections) = catalog_fixture_projection(&options);
+        let inputs = crate::inputs::inputs(&options).unwrap();
+        let mut cache =
+            crate::events::EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let mut prepared =
+            crate::model::prepare_sources(&options, &mut cache, &inputs, CATALOG_FIXTURE_NOW)
+                .unwrap();
+        // The composite owner needs a real producer runtime capture for its
+        // surviving cohort; row/recipe bytes alone cannot authorize it.
+        prepared.rows.reverse();
+        prepared.transcripts.reverse();
+        drop(cache);
+        let rows = &prepared.rows;
+        let projections = &prepared.transcripts;
         assert_eq!(
             rows.iter()
                 .find(|row| row.key == old.key)
@@ -11428,7 +11464,14 @@ mod tests {
             1
         );
         let (mut batch, mut row_wise) = catalog_pair(&options);
-        catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        catalog_write_pair_observed(
+            &mut batch,
+            &mut row_wise,
+            rows,
+            projections,
+            false,
+            prepared.presentation_observations(),
+        );
         let text = crate::history_projection::catalog(&batch.connection, &old.key)
             .unwrap()
             .unwrap();

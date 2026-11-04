@@ -426,8 +426,8 @@ mod tests {
             rusqlite::Connection::open(path)
                 .unwrap()
                 .query_row(
-                    "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key='catalog_source_revision'),0)",
-                    [],
+                    "SELECT revision FROM storage_source_journal WHERE namespace=?1",
+                    [options.source.namespace().unwrap().as_str()],
                     |row| row.get::<_, i64>(0),
                 )
                 .unwrap()

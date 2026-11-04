@@ -388,6 +388,16 @@ fn publish_current_owned_with_policy(
     if let Some(history) = history
         && history.sources != row.sources
     {
+        // Stage's mutable Trace belongs to its exact Current receipt. History
+        // already owns an independent immutable projection of the old cohort.
+        if matches!(query_recipe_policy, QueryRecipePolicy::TraceOnly)
+            && let Some(trace) = &row.trace
+        {
+            let started = measurements.start();
+            let trace_store = trace_store.ok_or(rusqlite::Error::InvalidQuery)?;
+            crate::causal_trace::publish_with_store(trace_store, row, trace)?;
+            measurements.record("trace_publish_inclusive", started, 1);
+        }
         let started = measurements.start();
         if let Some(budget) = budget.as_deref_mut() {
             // Charge retained summaries before loading them, including rows without Current overview.
@@ -437,7 +447,9 @@ fn publish_current_owned_with_policy(
                     )?;
                 }
             }
-            if let Some(current) = &row.trace {
+            if matches!(query_recipe_policy, QueryRecipePolicy::Publish)
+                && let Some(current) = &row.trace
+            {
                 let started = measurements.start();
                 let trace_generation = crate::causal_trace::update_current_observation(
                     tx,
