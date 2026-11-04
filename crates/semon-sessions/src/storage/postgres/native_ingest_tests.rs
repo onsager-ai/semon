@@ -514,3 +514,15 @@ fn pg_usage_batch_130_real_native_publication_matches_sqlite() {
     assert_eq!(fingerprint(&index), oracle);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn pg_native_cursor_newlines_anomalies_shrink_and_inode_restart() {
+    let root = std::env::temp_dir().join(format!("cursor520-pg-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let (pool, _) = tests::fixture(|_| {});
+    let namespace = tests::ns("cursor520");
+    crate::events::cursor_tests::lifecycle(&root, || {
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default()).unwrap()
+    });
+    std::fs::remove_dir_all(root).unwrap();
+}

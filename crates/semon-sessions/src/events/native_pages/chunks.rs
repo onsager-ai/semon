@@ -58,7 +58,6 @@ pub(crate) fn plan(ledger: &Ledger, chunks: &Chunks) -> serde_json::Result<Optio
         fingerprint: chunks.fingerprint(),
         pages_root: root,
         resume: chunks.resume.clone(),
-        continuation: chunks.continuation.clone(),
     })?;
     Ok(Some(Plan {
         header,
@@ -79,8 +78,6 @@ pub(crate) struct Header {
     pub(crate) pages_root: [u8; 32],
     #[serde(default)]
     pub(crate) resume: Option<crate::source_chunks::PrefixState>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) continuation: Option<crate::storage::catalog::VerifiedSourceContinuation>,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -85,19 +85,25 @@ runtime capture, admission and stream with the selected predecessor receipts.
 Reads reauthenticate those receipts separately from the new owner's capture.
 Exceeding the bounded composition slot or byte allowance preserves existing
 History without composing it or blocking an otherwise qualified Current update.
-The 2026-11-04 #477 product decision requires native appends in both the live
-viewer and retained History. A scanner-verified prefix-preserving append is a
-verified continuation, whether its evidence comes from an accepted Source writer
-or the existing full-prefix hash comparison. The Index commits this content-free
-witness in its ledger-bound chunk header. Semantic replay checks its exact path,
-current ledger and physical witness and carries it through the digest-bearing
-publication capture. Bounded predecessor ledgers cover consecutive verified
-appends before publication. A Sources cohort exceeding the separate runtime
-capture bound still carries its verified append evidence in that envelope.
-Rewrites, truncation, changed file identity and missing or mismatched proof
-still preserve Original custody under the conservative
-classification introduced by `d3c19b7e`; replay must not discard verified append
-evidence as `a928c1f6` previously did.
+The 2026-11-04 #520 decision requires plain native cursor tailing, with appends
+visible in both Current and History. Each source resumes from its committed
+newline byte offset when path, device and inode still identify the same file
+and size has not decreased. Shrink or changed identity resets the per-file
+projection and rereads from zero. Complete malformed lines advance the cursor
+and count as anomalies; partial final lines wait for their newline. Stable
+native event IDs and source byte ordinals, and replacement of reset per-file
+projections, prevent replay duplicates. Same-size non-prefix rewrites are not
+detected by ingestion. No accepted-writer evidence, prefix comparison or
+request-local continuation proof gates resumption or History advancement.
+
+Native chunk hashes and incremental digest state still construct immutable
+selected-read snapshots; unchanged complete chunks are reused on append.
+The overlapping final chunk is read to construct its new snapshot hash, without
+checking native continuity. Semon-stored ledger/page/manifest integrity checks,
+publication receipts, exact-owner grants and withdrawal custody remain intact.
+A changed native identity, source role, source addition or shrink preserves
+independent replacement custody. Removing those protections is a separate
+decision from cursor tailing.
 Original withdrawal custody retains its original publication reference.
 All-history published Catalog Query membership includes that previously observed
 retained owner; the native filesystem Query scan excludes the missing source.

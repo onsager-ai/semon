@@ -623,11 +623,7 @@ pub(super) fn preserve(
         },
         previous,
     };
-    let continuations = publication
-        .observations
-        .and_then(crate::storage::selected::PresentationObservations::verified_continuations)
-        .unwrap_or(&[]);
-    if !catalog::preserve_rows(&store, publication.rows, &old, continuations)? {
+    if !catalog::preserve_rows(&store, publication.rows, &old)? {
         return Ok(false);
     }
     let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);

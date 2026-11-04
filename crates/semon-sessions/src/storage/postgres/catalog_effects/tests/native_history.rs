@@ -41,7 +41,7 @@ pub(super) fn replace_source(options: &Options, row: &CatalogRow, operation: &st
 }
 
 #[test]
-fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
+fn pg_cursor_append_qualifies_incomplete_composite_identity() {
     let data = build_oracle(true, false);
     let (pool, _) = fixture(|_| {});
     let namespace = ns("verified-composite-identity");
@@ -102,68 +102,16 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         )
         .unwrap();
     let input = crate::native_evidence::catalog_input(&live_path, &options).unwrap();
-    let path = live_path.to_string_lossy().into_owned();
-    let prior = cache
-        .stored_ledger_batch(std::slice::from_ref(&path))
-        .unwrap()
-        .remove(0)
-        .unwrap();
-    let from = fs::metadata(&live_path).unwrap().len();
-    let writer =
-        crate::SessionSourceWrite::begin(&options, &input, Some(&"a".repeat(32)), from).unwrap();
     writeln!(fs::OpenOptions::new().append(true).open(&live_path).unwrap(), "{}",
-        serde_json::json!({"type":"user","sessionId":"one","uuid":"continued-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized verified continuation"}})).unwrap();
-    writer
-        .complete(fs::metadata(&live_path).unwrap().len())
-        .unwrap();
-    let accepted = crate::events::store::source_write_store(&options)
-        .unwrap()
-        .append_evidence(&path)
-        .unwrap()
-        .expect("the completed native writer owns exact append evidence");
+        serde_json::json!({"type":"user","sessionId":"one","uuid":"continued-user","timestamp":"2026-10-01T00:00:03Z","cwd":"/synthetic/project","message":{"role":"user","content":"sanitized cursor append"}})).unwrap();
     let receipt = cache
         .ingest(&format!("{:064x}", 128), &live_path, "claude")
         .unwrap();
     assert!(!receipt.replayed);
-    let current = cache
-        .stored_ledger_batch(&[path])
-        .unwrap()
-        .remove(0)
-        .unwrap();
-    let continuation = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
-        &live_path,
-        &prior,
-        &current,
-        &accepted,
-        &crate::events::Stat::of(&live_path).unwrap(),
-    )
-    .expect("this request scanned the exact accepted continuation");
     let continued =
         crate::model::prepare_sources(&options, &mut cache, &[input], 1790812804000).unwrap();
     assert_eq!(continued.rows.len(), 1);
     assert_eq!(continued.rows[0].sources.len(), 1);
-    assert_eq!(
-        serde_json::to_value(
-            continued
-                .presentation_observations()
-                .unwrap()
-                .verified_continuations()
-                .unwrap(),
-        )
-        .unwrap(),
-        serde_json::to_value([continuation]).unwrap(),
-        "committed Index preparation carries the actual scanner proof without test injection"
-    );
-    assert_eq!(
-        continued
-            .presentation_observations()
-            .unwrap()
-            .verified_continuations()
-            .unwrap()
-            .len(),
-        1,
-        "the ordinary publication must carry the real request-local scanner continuation"
-    );
     let mut generation = None;
     for _ in 0..4 {
         let (outcome, published) = cache.publish_partial_catalog_fenced(&continued).unwrap();
@@ -174,7 +122,7 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         }
         assert_eq!(outcome, Outcome::Deferred);
     }
-    let generation = generation.expect("ordinary verified-continuation publication");
+    let generation = generation.expect("ordinary cursor-append publication");
     let key = &continued.rows[0].key;
     let owner =
         snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
@@ -205,7 +153,7 @@ fn pg_verified_continuation_qualifies_incomplete_composite_identity() {
         assert!(
             view.composite_history_identity_qualified(&current, &history)
                 .unwrap(),
-            "verified continuation permits compact identity for an exact non-original composite"
+            "cursor append permits compact identity for an exact non-original composite"
         );
         Ok(())
     })

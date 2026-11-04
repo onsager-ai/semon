@@ -9872,7 +9872,7 @@ fn build_sources_inner(
         }
         crate::query_projection::complete_recipes(rows)?;
     }
-    let mut presentation = presentation
+    let presentation = presentation
         .map(|observations| {
             let rows = catalog.as_deref().expect("publication catalog");
             let cohort = rows.iter().chain(
@@ -10013,24 +10013,6 @@ fn build_sources_inner(
                     &relationships.relations,
                 )?;
             }
-            if history_records.is_none() {
-                let rows = catalog.as_deref().unwrap_or_default();
-                let continuations = builder.cache.take_source_continuations(rows);
-                if let Some(observations) = presentation.as_mut() {
-                    observations.set_source_continuations(continuations)?;
-                } else if !continuations.is_empty() {
-                    // Runtime capture has its own cohort bound. Its absence
-                    // must not discard independently verified source appends.
-                    let mut proof_only =
-                        crate::storage::selected::PresentationObservations::default();
-                    proof_only.set_source_continuations(continuations)?;
-                    if proof_only.verified_continuations().is_some() {
-                        presentation = Some(proof_only);
-                    }
-                }
-            } else {
-                builder.cache.discard_source_continuations();
-            }
             relationships.presentation = presentation;
             let mut message_ids = BTreeSet::new();
             let mut message_bytes = 0usize;
@@ -10108,24 +10090,6 @@ fn build_sources_inner(
         }
         BuildTarget::Catalog => {
             let rows = catalog.as_deref().unwrap_or_default();
-            if history_records.is_none() {
-                let continuations = cache.take_source_continuations(rows);
-                if let Some(observations) = presentation.as_mut() {
-                    observations.set_source_continuations(continuations)?;
-                } else if !continuations.is_empty() {
-                    // Large Catalogs do not capture the bounded runtime cohort,
-                    // but still carry request-local continuation proofs through
-                    // the existing digest-bearing publication envelope.
-                    let mut proof_only =
-                        crate::storage::selected::PresentationObservations::default();
-                    proof_only.set_source_continuations(continuations)?;
-                    if proof_only.verified_continuations().is_some() {
-                        presentation = Some(proof_only);
-                    }
-                }
-            } else {
-                cache.discard_source_continuations();
-            }
             let publication_started = std::time::Instant::now();
             let generation = cache.publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {

@@ -3446,17 +3446,10 @@ impl SqliteStore {
             .map_err(failure)?;
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition");
-            let continuations = publication
-                .observations
-                .and_then(
-                    crate::storage::selected::PresentationObservations::verified_continuations,
-                )
-                .unwrap_or(&[]);
             let preserved = crate::storage::catalog::preserve_rows(
                 &history,
                 publication.rows,
                 &withdrawn,
-                continuations,
             );
             if !preserved.map_err(failure)? {
                 transaction.commit().map_err(failure)?;
@@ -12283,7 +12276,7 @@ mod tests {
                 offset: 3,
                 hashes: vec![[1; 32]],
                 resume: None,
-                continuation: None,
+
             })),
             marker_index: Some(crate::native_marker::Index::default()),
             handoff_index: Some(crate::native_handoff::Index::default()),
@@ -14070,7 +14063,7 @@ mod tests {
                     offset: 3,
                     hashes: vec![[1; 32]],
                     resume: None,
-                    continuation: None,
+
                 })),
                 marker_index: Some(crate::native_marker::Index::default()),
                 handoff_index: Some(crate::native_handoff::Index::default()),

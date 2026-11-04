@@ -99,26 +99,6 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
         *index = (*scanned).clone();
         index.tree_summary = tree;
         index.native_usage_observations = usage;
-        // A fresh parse has no predecessor. Keep the independently persisted
-        // scanner witness that the SQLite byte oracle carries after an append.
-        let persisted = crate::events::scan_file(
-            std::path::Path::new(physical),
-            harness,
-            &mut oracle_cache,
-            &mut false,
-        )
-        .unwrap();
-        assert_eq!(
-            index.source_chunks.as_ref().unwrap().fingerprint(),
-            persisted.source_chunks.as_ref().unwrap().fingerprint()
-        );
-        let chunks = std::sync::Arc::make_mut(index.source_chunks.as_mut().unwrap());
-        chunks.continuation = persisted
-            .source_chunks
-            .as_ref()
-            .unwrap()
-            .continuation
-            .clone();
         if harness != "copilot" {
             assert!(index.tree_summary.is_some(), "production Tree input");
         }

@@ -33,6 +33,8 @@ pub(crate) mod native_rows;
 pub(crate) mod reported_rows;
 pub(crate) mod store;
 pub(crate) mod tree_rows;
+#[cfg(test)]
+pub(crate) mod cursor_tests;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 
@@ -112,7 +114,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v28: source-qualified code-mode output/terminal attribution and direct formatter
 /// outcomes; event-state envelopes preserve bounded selected output evidence.
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
-pub(crate) const CACHE_VERSION: u32 = 29;
+pub(crate) const CACHE_VERSION: u32 = 30;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -957,16 +959,13 @@ impl Ledger {
         }
     }
 
-    /// The file still holds what was read, so reading resumes at the
-    /// offset: the same identity, at least as long, and the consumed prefix
-    /// unchanged. That covers a file that grew and one only touched; any
-    /// other change (a rewrite, a truncation, a new inode) rereads it.
-    pub(crate) fn resumes(&self, stat: &Stat, file: &mut LogFile) -> bool {
+    /// Resume a native cursor without inspecting already committed content.
+    /// Shrink and a changed device/inode reset the per-file projection.
+    pub(crate) fn resumes(&self, stat: &Stat) -> bool {
         self.stat.dev == stat.dev
             && self.stat.ino == stat.ino
-            && self.offset <= stat.size
-            && consumed_hashes(file, self.offset)
-                .is_ok_and(|(prefix, tail)| prefix == self.prefix && tail == self.tail)
+            && stat.size >= self.stat.size
+            && stat.size >= self.offset
     }
 }
 
@@ -1511,7 +1510,6 @@ struct CachedFile {
 #[derive(Default)]
 pub(crate) struct EventCache {
     files: BTreeMap<String, CachedFile>,
-    source_continuations: BTreeMap<String, crate::storage::catalog::VerifiedSourceContinuation>,
     reported_runs: BTreeMap<String, BTreeMap<i64, crate::facts::ReportedRunSnapshot>>,
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
@@ -3066,7 +3064,6 @@ impl EventCache {
     pub(crate) fn begin_scan(&mut self) -> io::Result<()> {
         self.require_current_store()?;
         self.cold_writes.clear();
-        self.source_continuations.clear();
         self.index_clone = Duration::ZERO;
         self.scan_timing = crate::native_timing::enabled();
         self.parse_duration = Duration::ZERO;
@@ -3074,26 +3071,6 @@ impl EventCache {
         self.scan_measurements = crate::native_timing::Measurements::new(self.scan_timing);
         self.replaced.clear();
         Ok(())
-    }
-
-    pub(crate) fn take_source_continuations(
-        &mut self,
-        rows: &[crate::model::summary::CatalogRow],
-    ) -> Vec<crate::storage::catalog::VerifiedSourceContinuation> {
-        let published_paths = rows
-            .iter()
-            .flat_map(|row| row.sources.iter())
-            .map(|source| source.path.clone())
-            .collect::<BTreeSet<_>>();
-        std::mem::take(&mut self.source_continuations)
-            .into_values()
-            .filter(|proof| published_paths.contains(proof.path()))
-            .take(crate::storage::catalog::SOURCE_CONTINUATION_LIMIT)
-            .collect()
-    }
-
-    pub(crate) fn discard_source_continuations(&mut self) {
-        self.source_continuations.clear();
     }
 
     fn from_loaded(loaded: Loaded) -> Self {
@@ -3783,7 +3760,6 @@ fn scan_file_with_mode(
             None
         };
     let key = path.to_string_lossy().into_owned();
-    cache.source_continuations.remove(&key);
     let mut initial_recorded = host_operation.as_ref().and(initial_recorded);
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3887,16 +3863,7 @@ fn scan_file_with_mode(
                 CommittedSourceChanged { path: key },
             ));
         }
-        if let Some(proof) = index
-            .source_chunks
-            .as_ref()
-            .and_then(|chunks| chunks.continuation.as_ref())
-            .filter(|proof| proof.valid_for(path, &ledger, &current_stat))
-        {
-            cache
-                .source_continuations
-                .insert(key.clone(), proof.clone());
-        }
+
         let index = Arc::new(index);
         cache.files.insert(
             key,
@@ -3912,7 +3879,6 @@ fn scan_file_with_mode(
     *dirty = true;
     let mut attempt = 0;
     let mut force_replace = false;
-    let mut verify_prefix = false;
     loop {
         attempt += 1;
         let last = attempt >= COMMIT_ATTEMPTS;
@@ -4006,25 +3972,10 @@ fn scan_file_with_mode(
             }
         }
         let started = cache.scan_measurements.start();
-        let accepted_evidence = match recorded.as_ref() {
-            Some(_) if !verify_prefix => cache
-                .store
-                .as_ref()
-                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
-                .append_evidence(&key)
-                .map_err(store_io_error)?,
-            _ => None,
-        };
-        let trusted_receiver = recorded.as_ref().is_some_and(|ledger| {
-            accepted_evidence
-                .as_ref()
-                .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat))
-        });
-        let mut trusted_append = false;
         let mut base = None;
         if let Some(ledger) = &recorded
             && !force_replace
-            && (ledger.stat == stat || trusted_receiver || ledger.resumes(&stat, &mut file))
+            && ledger.resumes(&stat)
         {
             let restored = match existing_base.take() {
                 Some(index) => Base::Found(index),
@@ -4033,14 +3984,7 @@ fn scan_file_with_mode(
             match restored {
                 Base::Found(index) => {
                     cache.require_usage_store(&index)?;
-                    trusted_append = trusted_receiver
-                        && index
-                            .source_chunks
-                            .as_ref()
-                            .is_some_and(|chunks| chunks.resume.is_some());
-                    if ledger.stat == stat || trusted_append || ledger.resumes(&stat, &mut file) {
-                        base = Some(index);
-                    }
+                    base = Some(index);
                 }
                 Base::Moved if !last => continue,
                 Base::Moved | Base::Unreadable => {}
@@ -4099,25 +4043,7 @@ fn scan_file_with_mode(
             }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
-            if let Some(proof) = index
-                .source_chunks
-                .as_ref()
-                .and_then(|chunks| chunks.continuation.as_ref())
-                .filter(|proof| proof.valid_for(path, ledger, &stat))
-            {
-                cache
-                    .source_continuations
-                    .insert(key.clone(), proof.clone());
-            }
-            cache.files.insert(
-                key,
-                CachedFile {
-                    ledger: ledger.clone(),
-                    index: Some(Arc::clone(index)),
-                },
-            );
-            return Ok(Arc::clone(index));
-        }
+
         let from = match (&recorded, &base) {
             (Some(ledger), Some(_)) => ledger.offset,
             _ => 0,
@@ -4194,23 +4120,8 @@ fn scan_file_with_mode(
         }
         if harness != "copilot" && writable.tree_summary.is_none() && !deferred_tree {
             let started = cache.scan_measurements.start();
-            let (summary, observed) =
-                crate::native_tree::Summary::repair(&mut file, from, harness)?;
+            let (summary, _) = crate::native_tree::Summary::repair(&mut file, from, harness)?;
             cache.scan_measurements.record("tree_repair", started, 1);
-            if append
-                && recorded
-                    .as_ref()
-                    .is_some_and(|ledger| observed != ledger.prefix)
-            {
-                if last {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "native tree metadata generation changed",
-                    ));
-                }
-                force_replace = true;
-                continue;
-            }
             writable.tree_summary = Some(summary);
         }
         writable.dirty_rows = Some(DirtyRows::begin(writable));
@@ -4257,40 +4168,19 @@ fn scan_file_with_mode(
             .take()
             .expect("parser tracks dirty rows");
         let started = cache.scan_measurements.start();
-        let captured = if trusted_append {
-            let previous = writable
-                .source_chunks
-                .as_ref()
-                .expect("trusted chunks exist");
-            match crate::source_chunks::capture_append(
+        let captured = if append {
+            crate::source_chunks::capture_append(
                 &mut file,
                 offset,
                 from,
-                previous,
-                recorded.as_ref().expect("trusted ledger exists").prefix,
-            ) {
-                Ok(captured) => captured,
-                Err(error)
-                    if !last
-                        && error.get_ref().and_then(|error| {
-                            error.downcast_ref::<crate::storage::StorageError>()
-                        }) == Some(&crate::storage::StorageError::Conflict) =>
-                {
-                    verify_prefix = true;
-                    continue;
-                }
-                Err(error) => return Err(error),
-            }
+                writable.source_chunks.as_ref().expect("cursor chunks exist"),
+                recorded.as_ref().expect("cursor ledger exists").prefix,
+            )?
         } else {
             crate::source_chunks::capture(&mut file, offset, from)?
         };
         cache.scan_measurements.record("chunk_capture", started, 1);
-        if captured.parsed != parsed
-            || (append
-                && recorded
-                    .as_ref()
-                    .is_some_and(|ledger| captured.before != ledger.prefix))
-        {
+        if captured.parsed != parsed {
             if last {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -4300,9 +4190,13 @@ fn scan_file_with_mode(
             force_replace = true;
             continue;
         }
-        let (prefix, tail) = (captured.prefix, captured.tail);
-        let verified_prefix = captured.before;
-        let mut chunks = captured.chunks;
+        let prefix = captured.prefix;
+        let tail = if append && offset == from {
+            recorded.as_ref().expect("cursor ledger exists").tail
+        } else {
+            captured.tail
+        };
+        let chunks = captured.chunks;
         writable.native_path = path.to_str().is_none().then(|| path.to_owned());
         if let Some(header) = header_bytes {
             let started = cache.scan_measurements.start();
@@ -4348,35 +4242,9 @@ fn scan_file_with_mode(
             prefix,
             tail,
         };
-        if append && let Some(prior) = recorded.as_ref() {
-            let mut continuation = if trusted_append {
-                accepted_evidence.as_ref().and_then(|accepted| {
-                    crate::storage::catalog::VerifiedSourceContinuation::from_scan(
-                        path, prior, &ledger, accepted, &stat,
-                    )
-                })
-            } else {
-                crate::storage::catalog::VerifiedSourceContinuation::from_verified_prefix(
-                    path,
-                    prior,
-                    &ledger,
-                    verified_prefix,
-                    &stat,
-                )
-            };
-            if let Some(proof) = continuation.as_mut() {
-                proof.extend(
-                    writable
-                        .source_chunks
-                        .as_ref()
-                        .and_then(|chunks| chunks.continuation.as_ref()),
-                );
-            }
-            chunks.continuation = continuation;
-        }
         writable.source_chunks = Some(Arc::new(chunks));
         // A byte slice must retain one exact physical generation across its
-        // checkpoint. Only verified same-file prefixes qualify continuations.
+        // checkpoint. Cursor resumption itself requires no content proof.
         if bounded && Stat::of(path).ok().as_ref() != Some(&stat) {
             if last {
                 return Err(io::Error::new(
@@ -4393,7 +4261,7 @@ fn scan_file_with_mode(
         let invalid_markers = writable
             .marker_index
             .as_ref()
-            .is_some_and(|markers| !markers.valid(&ledger) || markers.verify(&mut file).is_err());
+            .is_some_and(|markers| !markers.valid(&ledger) || (!append && markers.verify(&mut file).is_err()));
         cache.scan_measurements.record("marker_verify", started, 1);
         if invalid_markers {
             if last {
@@ -4410,7 +4278,7 @@ fn scan_file_with_mode(
             .as_ref()
             .and_then(|_| cache.scan_measurements.start());
         let invalid_handoffs = writable.handoff_index.as_ref().is_some_and(|handoffs| {
-            !handoffs.valid(&ledger) || handoffs.verify(&mut file).is_err()
+            !handoffs.valid(&ledger) || (!append && handoffs.verify(&mut file).is_err())
         });
         cache.scan_measurements.record("handoff_verify", started, 1);
         if invalid_handoffs {
@@ -4484,15 +4352,7 @@ fn scan_file_with_mode(
                 Arc::make_mut(&mut index).tree_summary = Some(metadata.summary);
             }
         }
-        if let Some(proof) = index
-            .source_chunks
-            .as_ref()
-            .and_then(|chunks| chunks.continuation.as_ref())
-        {
-            cache
-                .source_continuations
-                .insert(key.clone(), proof.clone());
-        }
+
         cache.files.insert(
             key,
             CachedFile {
@@ -10685,7 +10545,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn receiver_append_chain_reads_only_boundary_and_recovers_interrupted_or_corrupt_proofs() {
+    fn native_cursor_append_ignores_receiver_evidence_and_keeps_read_bounds() {
         use std::io::Write;
         use std::os::fd::AsRawFd;
         for history_bytes in [4 * 1024 * 1024, 16 * 1024 * 1024] {
@@ -10761,7 +10621,7 @@ mod tests {
             eprintln!(
                 "trusted-chain history_bytes={history_bytes} records=5 source_read_bytes={reads} source_hashed_bytes={hashes} full_prefix_hashed_bytes=0"
             );
-            // A crash between Raw fsync and evidence commit withdraws trust.
+            // Native tailing does not depend on receiver evidence after a crash.
             let from = fs::metadata(&path).unwrap().len();
             let intent =
                 crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
@@ -10772,32 +10632,10 @@ mod tests {
             let full = HASHED_BYTES.with(std::cell::Cell::get);
             scan_file(&path, "claude", &mut cache, &mut false).unwrap();
             assert!(
-                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
-                "interrupted proof bypassed conservative verification"
-            );
-            // Corrupt continuation words cannot bless the previous prefix.
-            let from = fs::metadata(&path).unwrap().len();
-            let intent =
-                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
-            writer.write_all(append.as_bytes()).unwrap();
-            writer.sync_all().unwrap();
-            intent.complete(from + append.len() as u64).unwrap();
-            drop(cache);
-            let db = crate::storage::sqlite::source_journal::SourceJournal(
-                options.source.config(&options.cache).unwrap(),
-            )
-            .connection()
-            .unwrap();
-            db.execute("UPDATE meta SET value=json_set(value,'$.resume.words[0]',0) WHERE key LIKE 'native_source_chunks:%:header'",[]).unwrap();
-            let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
-            let full = HASHED_BYTES.with(std::cell::Cell::get);
-            scan_file(&path, "claude", &mut cache, &mut false).unwrap();
-            assert!(
-                HASHED_BYTES.with(std::cell::Cell::get) - full >= from,
-                "corrupt chaining state bypassed prefix repair"
+                HASHED_BYTES.with(std::cell::Cell::get) == full,
+                "an interrupted writer must not force a native-prefix rehash"
             );
             drop(cache);
-            drop(db);
             fs::remove_dir_all(root).unwrap();
         }
     }
@@ -10899,7 +10737,7 @@ mod tests {
     }
 
     #[test]
-    fn an_interior_rewrite_between_unchanged_windows_rebuilds_after_restart() {
+    fn a_same_size_native_rewrite_does_not_reset_the_cursor() {
         let root = scratch("interior-rewrite");
         let cache_path = root.join("index.json");
         let log = root.join("session.jsonl");
@@ -10921,6 +10759,7 @@ mod tests {
             &mut false,
         )
         .unwrap();
+        let indexed = stored(&cache_path, &log);
         let original = fs::read_to_string(&log).unwrap();
         let changed = original.replacen("\"id\":\"t1\"", "\"id\":\"t2\"", 1);
         assert_ne!(original, changed);
@@ -10940,8 +10779,9 @@ mod tests {
             &mut false,
         )
         .unwrap();
-        assert_eq!(ledger_trace(), ["replace"]);
-        assert_eq!(stored(&cache_path, &log), cold(&log));
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(stored(&cache_path, &log), indexed);
+        assert_ne!(indexed, cold(&log), "same-size rewrite detection is not promised");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -11080,16 +10920,17 @@ mod tests {
         assert_eq!(parsed(), before);
         assert_eq!(stored(&v1, &log), cold(&log));
 
-        // Rewritten in place at the same size: the head hash differs.
+        // Same-size rewrites are outside the plain cursor contract.
         ledger_trace();
+        let indexed = stored(&v1, &log);
         let text = fs::read_to_string(&log).unwrap();
         let rewritten = text.replace("\"aa\"", "\"zz\"");
         assert_eq!(rewritten.len(), text.len());
         fs::write(&log, rewritten).unwrap();
         touch(&log, 4);
         scan(&mut cache);
-        assert_eq!(ledger_trace(), ["replace"]);
-        assert_eq!(stored(&v1, &log), cold(&log));
+        assert_eq!(ledger_trace(), ["append"]);
+        assert_eq!(stored(&v1, &log), indexed);
 
         // Truncated: shorter than the offset.
         ledger_trace();

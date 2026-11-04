@@ -297,7 +297,7 @@ pub(super) fn read(
         offset: ledger.offset,
         hashes,
         resume: header.resume,
-        continuation: header.continuation,
+
     };
     if !chunks.valid(ledger.offset) || chunks.fingerprint() != header.fingerprint {
         return Ok(None);
@@ -892,7 +892,7 @@ mod tests {
                 offset: ledger.offset,
                 hashes: vec![Sha256::digest(&bytes).into()],
                 resume: None,
-                continuation: None,
+
             }));
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
@@ -1065,7 +1065,7 @@ mod tests {
                 offset: ledger.offset,
                 hashes: vec![hash; count],
                 resume: None,
-                continuation: None,
+
             }));
             let tx = store.connection.transaction().unwrap();
             write(&tx, "original", &ledger, index.source_chunks.as_deref()).unwrap();
@@ -1519,7 +1519,7 @@ mod tests {
                 offset,
                 hashes: vec![[byte; 32]; count],
                 resume: None,
-                continuation: None,
+
             })),
             ..FileIndex::default()
         };
@@ -1919,7 +1919,7 @@ mod tests {
             offset: crate::source_chunks::SIZE as u64 * 1024 + 19,
             hashes: vec![[42; 32]; 1025],
             resume: None,
-            continuation: None,
+
         };
         let ledger = Ledger {
             stat: Stat {
@@ -1995,7 +1995,7 @@ mod tests {
             offset: crate::source_chunks::SIZE as u64 * 1025,
             hashes: vec![[1; 32]; 1025],
             resume: None,
-            continuation: None,
+
         };
         let mut ledger = Ledger {
             stat: Stat {
@@ -2033,7 +2033,7 @@ mod tests {
             offset: 19,
             hashes: vec![[2; 32]],
             resume: None,
-            continuation: None,
+
         };
         ledger.offset = short.offset;
         ledger.stat.size = short.offset;

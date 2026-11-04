@@ -4053,7 +4053,7 @@ fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
 }
 
 #[test]
-fn staged_verified_native_append_survives_index_restart_and_history_publication() {
+fn staged_native_cursor_append_survives_index_restart_and_history_publication() {
     use crate::storage::native_events::NativeEventStore;
 
     let home = Home::new();
@@ -4085,16 +4085,6 @@ fn staged_verified_native_append_survives_index_restart_and_history_publication(
     let mut cache = EventCache::open_scoped(&home.options.cache, &home.options.source).unwrap();
     let replay =
         prepare_staged_sources(&home.options, &mut cache, &[input], &context, false, NOW).unwrap();
-    assert_eq!(
-        replay
-            .presentation_observations()
-            .unwrap()
-            .verified_continuations()
-            .unwrap()
-            .len(),
-        1,
-        "semantic replay must retain the scanner's verified unjournaled append"
-    );
     let (outcome, generation) = cache.publish_partial_catalog_fenced(&replay).unwrap();
     assert_eq!(outcome, crate::events::Outcome::Written);
     assert!(generation.is_some());
@@ -4125,7 +4115,7 @@ fn staged_verified_native_append_survives_index_restart_and_history_publication(
         assert_eq!(texts, ["native root", "first append", "second append"]);
     }
     // A complete Sources producer can exceed the bounded runtime capture.
-    // That must not erase the independent append witness from publication.
+    // Cursor appends advance History independently of runtime capture.
     let mut inputs = vec![crate::native_evidence::catalog_input(&path, &home.options).unwrap()];
     for number in 0..64 {
         let key = format!("independent-{number}");
@@ -4140,9 +4130,7 @@ fn staged_verified_native_append_survives_index_restart_and_history_publication(
     .unwrap();
     let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
     assert_eq!(full.rows.len(), 65);
-    let observations = full.presentation_observations().unwrap();
-    assert!(observations.runtime.is_none());
-    assert_eq!(observations.verified_continuations().unwrap().len(), 1);
+    assert!(full.presentation_observations().is_none());
     assert!(
         cache
             .publish_catalog_projection_fenced(

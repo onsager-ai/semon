@@ -403,13 +403,6 @@ pub(crate) struct PresentationObservations {
     pub(crate) machine_label: Option<String>,
     sources: BTreeMap<String, SourceObservation>,
     pub(crate) relative_statuses: BTreeMap<String, Value>,
-    /// Binds ordinary Catalog continuation proofs into the existing
-    /// publication observation digest. The typed proof itself is request
-    /// local and never survives serialization.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    source_continuation_digest: Option<String>,
-    #[serde(skip)]
-    source_continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
     /// Request-local capture authority. Neither physical roots nor an open
     /// Facts connection can enter the durable witness or a leased read.
     #[serde(skip)]
@@ -434,43 +427,6 @@ struct SourceObservation {
     cached: bool,
 }
 impl PresentationObservations {
-    pub(crate) fn set_source_continuations(
-        &mut self,
-        continuations: Vec<crate::storage::catalog::VerifiedSourceContinuation>,
-    ) -> io::Result<()> {
-        self.source_continuation_digest = None;
-        self.source_continuations.clear();
-        if continuations.is_empty()
-            || continuations.len() > crate::storage::catalog::SOURCE_CONTINUATION_LIMIT
-        {
-            return Ok(());
-        }
-        use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&continuations).map_err(io::Error::other)?;
-        if encoded.len() > 1_048_576 {
-            return Ok(());
-        }
-        let mut digest = Sha256::new();
-        digest.update(b"semon-catalog-source-continuations-v1\0");
-        digest.update(encoded);
-        self.source_continuation_digest = Some(format!("{:x}", digest.finalize()));
-        self.source_continuations = continuations;
-        Ok(())
-    }
-
-    pub(crate) fn verified_continuations(
-        &self,
-    ) -> Option<&[crate::storage::catalog::VerifiedSourceContinuation]> {
-        let expected = self.source_continuation_digest.as_deref()?;
-        use sha2::{Digest, Sha256};
-        let encoded = serde_json::to_vec(&self.source_continuations).ok()?;
-        let mut digest = Sha256::new();
-        digest.update(b"semon-catalog-source-continuations-v1\0");
-        digest.update(encoded);
-        (format!("{:x}", digest.finalize()) == expected)
-            .then_some(self.source_continuations.as_slice())
-    }
-
     /// A publication may contain a larger cohort than the row being reused.
     /// Compare this row's producer inputs, retaining the original scoped runtime.
     pub(crate) fn same_publication_inputs_for(
@@ -637,8 +593,6 @@ impl PresentationObservations {
             machine_label,
             sources,
             relative_statuses: BTreeMap::new(),
-            source_continuation_digest: None,
-            source_continuations: Vec::new(),
             authority: Some(std::sync::Arc::new(PresentationAuthority {
                 options: options.clone(),
                 runtime: scoped,
@@ -774,8 +728,6 @@ impl PresentationObservations {
             machine_label: None,
             sources: BTreeMap::new(),
             relative_statuses: BTreeMap::new(),
-            source_continuation_digest: None,
-            source_continuations: Vec::new(),
             authority: None,
         })
     }
@@ -1146,66 +1098,4 @@ impl crate::SessionSourceReader for Controlled<'_> {
         self.control.check()?;
         Ok(value)
     }
-}
-
-#[cfg(test)]
-#[test]
-fn catalog_continuation_digest_is_bounded_and_deserialization_fails_closed() {
-    let prior_stat = crate::events::Stat {
-        dev: 1,
-        ino: 2,
-        size: 10,
-        modified_ns: 3,
-        changed_ns: Some(4),
-    };
-    let physical = crate::events::Stat {
-        size: 20,
-        modified_ns: 5,
-        changed_ns: Some(6),
-        ..prior_stat
-    };
-    let prior = crate::events::Ledger {
-        stat: prior_stat,
-        offset: 10,
-        prefix: [1; 32],
-        tail: [2; 32],
-    };
-    let current = crate::events::Ledger {
-        stat: physical,
-        offset: 18,
-        prefix: [3; 32],
-        tail: [4; 32],
-    };
-    let accepted = crate::source_change::AppendEvidence {
-        generation: "0123456789abcdef0123456789abcdef".into(),
-        before: prior_stat,
-        after: physical,
-    };
-    let proof = crate::storage::catalog::VerifiedSourceContinuation::from_scan(
-        std::path::Path::new("/source.jsonl"),
-        &prior,
-        &current,
-        &accepted,
-        &physical,
-    )
-    .unwrap();
-
-    let mut captured = PresentationObservations::default();
-    captured
-        .set_source_continuations(vec![proof.clone()])
-        .unwrap();
-    assert_eq!(captured.verified_continuations().unwrap().len(), 1);
-
-    let encoded = serde_json::to_vec(&captured).unwrap();
-    let replayed: PresentationObservations = serde_json::from_slice(&encoded).unwrap();
-    assert!(replayed.verified_continuations().is_none());
-
-    let mut oversized = PresentationObservations::default();
-    oversized
-        .set_source_continuations(vec![
-            proof;
-            crate::storage::catalog::SOURCE_CONTINUATION_LIMIT + 1
-        ])
-        .unwrap();
-    assert!(oversized.verified_continuations().is_none());
 }

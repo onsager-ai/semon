@@ -3572,7 +3572,6 @@ impl Stage {
             &history,
             &prepared.rows,
             &prepared.relationships.retired_owners,
-            &[],
         )
         .map_err(error)?
         {

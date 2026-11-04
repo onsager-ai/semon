@@ -19,7 +19,6 @@ pub(crate) struct Chunks {
     pub(crate) offset: u64,
     pub(crate) hashes: Vec<[u8; 32]>,
     pub(crate) resume: Option<PrefixState>,
-    pub(crate) continuation: Option<crate::storage::catalog::VerifiedSourceContinuation>,
 }
 
 impl Chunks {
@@ -33,6 +32,9 @@ impl Chunks {
         hash.update(self.offset.to_be_bytes());
         for part in &self.hashes {
             hash.update(part);
+        }
+        if let Some(state) = &self.resume {
+            hash.update(serde_json::to_vec(state).expect("SHA state serializes"));
         }
         hash.finalize().into()
     }
@@ -83,9 +85,6 @@ fn unavailable() -> io::Error {
 pub(crate) struct Captured {
     pub(crate) prefix: [u8; 32],
     pub(crate) tail: [u8; 32],
-    /// The old indexed prefix and the newly parsed complete lines are checked
-    /// independently, so metadata never commits against different source bytes.
-    pub(crate) before: [u8; 32],
     pub(crate) parsed: [u8; 32],
     pub(crate) chunks: Chunks,
 }
@@ -102,13 +101,11 @@ pub(crate) fn capture(
     }
     file.seek(SeekFrom::Start(0))?;
     let mut prefix = Sha256::new();
-    let mut before = Sha256::new();
     let mut parsed = Sha256::new();
     let mut chunks = Chunks {
         offset,
         hashes: Vec::new(),
         resume: None,
-        continuation: None,
     };
     let mut state = PrefixState::default();
     let mut tail = Vec::new();
@@ -131,7 +128,6 @@ pub(crate) fn capture(
         prefix.update(&*bytes);
         chunks.hashes.push(Sha256::digest(&*bytes).into());
         let split = from.saturating_sub(position).min(len as u64) as usize;
-        before.update(&bytes[..split]);
         parsed.update(&bytes[split..]);
         if len >= 4096 {
             tail.clear();
@@ -150,15 +146,14 @@ pub(crate) fn capture(
     Ok(Captured {
         prefix: prefix.finalize().into(),
         tail: Sha256::digest(tail).into(),
-        before: before.finalize().into(),
         parsed: parsed.finalize().into(),
         chunks,
     })
 }
 
-/// Resume only after receiver-owned append evidence has bound the old and new
-/// physical revisions. Validate continuation against the old full-prefix SHA
-/// and its boundary proof before deriving the appended generation.
+/// Build the next immutable read snapshot after a native cursor advances.
+/// Reuse complete block hashes; read the overlapping final block to construct
+/// its new hash, without checking it against the previous native content.
 pub(crate) fn capture_append(
     file: &mut (impl Read + Seek),
     offset: u64,
@@ -169,24 +164,24 @@ pub(crate) fn capture_append(
     if from > offset || !old.valid(from) {
         return Err(unavailable());
     }
+    if offset == from {
+        // The caller keeps its previous tail digest when no records commit.
+        return Ok(Captured {
+            prefix: expected,
+            tail: [0; 32],
+            parsed: Sha256::digest([]).into(),
+            chunks: old.clone(),
+        });
+    }
     let mut state = old.resume.clone().ok_or_else(unavailable)?;
     let boundary = from / SIZE as u64 * SIZE as u64;
     if state.at != boundary {
-        return Err(unavailable());
-    }
-    let remainder = if boundary < from {
-        old.read(file, (boundary / SIZE as u64) as usize)?
-    } else {
-        Vec::new()
-    };
-    if state.finish(&remainder) != expected {
         return Err(unavailable());
     }
     let mut chunks = Chunks {
         offset,
         hashes: old.hashes[..(boundary / SIZE as u64) as usize].to_vec(),
         resume: None,
-        continuation: None,
     };
     file.seek(SeekFrom::Start(boundary))?;
     let mut position = boundary;
@@ -198,10 +193,6 @@ pub(crate) fn capture_append(
         let bytes = &mut buffer[..len];
         file.read_exact(bytes)?;
         let split = from.saturating_sub(position).min(len as u64) as usize;
-        // Re-read old boundary bytes, including after parser I/O.
-        if position == boundary && bytes[..split] != remainder {
-            return Err(unavailable());
-        }
         parsed.update(&bytes[split..]);
         chunks.hashes.push(Sha256::digest(&*bytes).into());
         if len == SIZE {
@@ -233,13 +224,12 @@ pub(crate) fn capture_append(
     {
         READ_BYTES.with(|count| count.set(count.get() + width as u64));
         crate::events::SOURCE_HASHED_BYTES.with(|count| {
-            count.set(count.get() + remainder.len() as u64 + last.len() as u64 + width as u64)
+            count.set(count.get() + last.len() as u64 + width as u64)
         });
     }
     Ok(Captured {
         prefix,
         tail: Sha256::digest(&tail).into(),
-        before: expected,
         parsed: parsed.finalize().into(),
         chunks,
     })
@@ -331,7 +321,7 @@ mod tests {
         ] {
             let error = capture_append(
                 &mut FailedReader(kind),
-                4,
+                8,
                 4,
                 &captured.chunks,
                 captured.prefix,
@@ -349,7 +339,7 @@ mod tests {
         }
         let mut stale = captured.chunks;
         stale.resume = None;
-        let error = capture_append(&mut Cursor::new(original), 4, 4, &stale, captured.prefix)
+        let error = capture_append(&mut Cursor::new(original), 8, 4, &stale, captured.prefix)
             .err()
             .unwrap();
         assert_eq!(
@@ -375,10 +365,6 @@ mod tests {
                 assert_eq!(
                     captured.tail,
                     <[u8; 32]>::from(Sha256::digest(&bytes[offset.saturating_sub(4096)..offset]))
-                );
-                assert_eq!(
-                    captured.before,
-                    <[u8; 32]>::from(Sha256::digest(&bytes[..from]))
                 );
                 assert_eq!(
                     captured.parsed,
