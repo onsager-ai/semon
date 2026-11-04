@@ -83,13 +83,25 @@ pub(crate) fn qualify_context_candidate(
     if candidate.sources.is_empty() || candidate.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
-    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged)?;
+    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged).inspect_err(|_| {
+        if cfg!(test) || crate::native_timing::enabled() {
+            eprintln!("selected_context_candidate_refused stage=query_absent key={}", candidate.key);
+        }
+    })?;
     if !crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
         .map_err(|_| StorageError::ScopeChanged)?
         || candidate.sources.iter().any(|source| {
             crate::catalog::source_relative(options, &candidate.harness, source).is_none()
         })
     {
+        if cfg!(test) || crate::native_timing::enabled() {
+            eprintln!(
+                "selected_context_candidate_refused stage=source_observation key={} observation_matches={} paths_match={}",
+                candidate.key,
+                crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None).map_err(|_| StorageError::ScopeChanged)?,
+                candidate.sources.iter().all(|source| crate::catalog::source_relative(options, &candidate.harness, source).is_some())
+            );
+        }
         return Err(StorageError::ScopeChanged);
     }
     if history {
@@ -129,7 +141,7 @@ pub(crate) fn current_query_context_header(
         candidate,
     )
     .inspect_err(|error| {
-        if crate::native_timing::enabled() {
+        if cfg!(test) || crate::native_timing::enabled() {
             eprintln!(
                 "selected_recipe_header_refused stage=observation key={} error={error}",
                 candidate.key
@@ -167,13 +179,15 @@ pub(crate) fn current_query_context_header(
                         .map_err(|_| StorageError::ScopeChanged)?
                 || header["query_generation"] != query_generation
             {
-                if crate::native_timing::enabled() {
+                if cfg!(test) || crate::native_timing::enabled() {
                     eprintln!(
                         "selected_recipe_header_refused stage=header key={} version={} complete={} source_match={} query_match={}",
                         candidate.key,
                         header["version"],
                         header["complete"],
-                        header["source_generation"] == crate::retention::source_generation(&candidate.sources).map_err(|_| StorageError::ScopeChanged)?,
+                        header["source_generation"]
+                            == crate::retention::source_generation(&candidate.sources)
+                                .map_err(|_| StorageError::ScopeChanged)?,
                         header["query_generation"] == query_generation
                     );
                 }
@@ -693,7 +707,7 @@ fn read(
         let row_runtime = if current_lifecycle {
             let cwds = super::catalog::runtime_source_cwds_if_current(db, &row.sources)
                 .inspect_err(|_| {
-                    if crate::native_timing::enabled() {
+                    if cfg!(test) || crate::native_timing::enabled() {
                         eprintln!("semon sessions native: observation_stage_refused boundary=query_current_source_cwds");
                     }
                 })
@@ -709,7 +723,7 @@ fn read(
                     })
                 }
                 None if imported_origin => {
-                    if crate::native_timing::enabled() {
+                    if cfg!(test) || crate::native_timing::enabled() {
                         eprintln!(
                             "semon sessions native: observation_stage_refused boundary=query_current_source_cwds"
                         );

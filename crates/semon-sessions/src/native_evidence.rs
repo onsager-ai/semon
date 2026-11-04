@@ -846,7 +846,8 @@ impl NativeEvidence {
         if work.events.as_ref().is_some_and(|cache| {
             cache.scoped_store_lost()
                 || (work.observed_catalog_generation.is_some()
-                    && cache.session_catalog_generation() != work.observed_catalog_generation)
+                    && cache.session_catalog_generation() != work.observed_catalog_generation
+                    && cache.session_catalog_generation() != work.opened_catalog_generation)
         }) {
             work.events = None;
         }
@@ -857,6 +858,10 @@ impl NativeEvidence {
                 None => EventCache::open_scoped(&self.options.cache, &self.options.source)
                     .map_err(io::Error::other),
             }?);
+            work.opened_catalog_generation = work
+                .events
+                .as_ref()
+                .and_then(|cache| cache.session_catalog_generation());
         }
         let cache = work.events.as_mut().expect("event cache initialized");
         #[cfg(feature = "postgres")]
@@ -2313,6 +2318,9 @@ pub(crate) struct Work {
     pub(crate) catalog_snapshot: Option<Snapshot>,
     /// This owner's acknowledged shared publication, never a completeness proof.
     observed_catalog_generation: Option<String>,
+    /// Revision loaded by the index handle. A peer revision is acknowledged
+    /// only after the audit, but nested cold steps need not reopen it again.
+    opened_catalog_generation: Option<String>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
     tree_repair_pending: bool,

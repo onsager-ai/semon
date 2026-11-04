@@ -778,7 +778,7 @@ mod tests {
         assert!(recipe.turns.len() >= PREFIX);
         assert_eq!(
             producer_row.query.as_ref().unwrap()["selected"],
-            serde_json::to_value(&recipe).unwrap()
+            serde_json::to_value(recipe.reference(&producer_row).unwrap()).unwrap()
         );
 
         let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
@@ -791,8 +791,8 @@ mod tests {
             .metadata
             .expect("admitted persisted Catalog metadata");
         assert!(
-            persisted.len() > 8192,
-            "growing producer Catalog metadata should exceed the cell bound: {} bytes",
+            persisted.len() < 8192,
+            "growing producer Catalog metadata must remain within the cell bound: {} bytes",
             persisted.len()
         );
         assert_eq!(
@@ -821,7 +821,7 @@ mod tests {
         assert_eq!(decoded, recipe);
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
-            producer_row.query.unwrap()["selected"]
+            serde_json::to_value(&recipe).unwrap()
         );
     }
 

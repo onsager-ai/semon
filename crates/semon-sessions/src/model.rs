@@ -10090,6 +10090,11 @@ fn build_sources_inner(
             if let Some(dependencies) = &mut message_dependencies {
                 dependencies.extend(message_ids);
             }
+            // Stage and direct publication share the same compact observation;
+            // the complete recipe remains attached for the atomic payload write.
+            for row in catalog.as_mut().expect("source catalog captured") {
+                crate::query_projection::SelectedRecipe::detach(row)?;
+            }
             return Ok(BuildOutput::Sources(Box::new(PreparedSources {
                 base_generation: catalog_base,
                 claims,

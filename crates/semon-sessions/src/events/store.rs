@@ -8755,8 +8755,8 @@ mod tests {
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
         use crate::storage::sqlite::proof_generations::query_recipe_observation;
         // The ordinary producer authors metadata, source witnesses and grants.
-        // Until its payload hook exists, the admitted fixture writer supplies
-        // only the matching payload cell; it never writes observation authority.
+        // The admitted fixture writer injects missing or corrupt payload cells;
+        // it never writes observation authority.
         let supply_payload = |store: &SqliteStore,
                               owner: CatalogObservationOwner,
                               metadata: &str,
@@ -8812,6 +8812,18 @@ mod tests {
             options: options.clone(),
             binding: reader.clone(),
         };
+        assert_eq!(
+            port.selected_recipe(&original).unwrap(),
+            Some(expected.clone())
+        );
+        let mut payload_db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        )
+        .unwrap()
+        .into_test_connection();
+        let payload_tx = payload_db.transaction().unwrap();
+        assert_eq!(payload_tx.execute("UPDATE main.session_catalog SET query_recipe=NULL WHERE namespace=?1 AND session_key=?2 AND metadata=?3", params![binding.namespace.as_str(), rows[0].key, prepared.metadata]).unwrap(), 1);
+        payload_tx.commit().unwrap();
         assert!(matches!(
             port.selected_recipe(&original),
             Err(QueryRecipeLoadError::MissingPayload)
