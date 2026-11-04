@@ -4218,9 +4218,6 @@ impl Stage {
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
         let mut db = capability.journal().connection()?;
-        // Cache only the committed physical layout. Every operation still
-        // rechecks its schema cookie, admission and epoch inside its snapshot.
-        crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(failed)?;
