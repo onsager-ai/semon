@@ -817,10 +817,12 @@ pub(crate) fn retain_outgoing_history_refs(
             original.lifecycle = crate::model::summary::CatalogLifecycle::Current;
             let original_metadata =
                 serde_json::to_string(&original).map_err(|_| StorageError::Unavailable)?;
+            let sql_admission =
+                i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
             let outgoing_receipt: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND g.metadata=?5)",
-                    params![namespace, row.key, admission, stream, original_metadata],
+                    params![namespace, row.key, sql_admission, stream, original_metadata],
                     |record| record.get(0),
                 )
                 .map_err(failed)?;

@@ -478,6 +478,7 @@ mod tests {
         assert!(CurrentSources::open(&path).is_err());
         fs::remove_dir(database(&path)).unwrap();
         assert_eq!(read_facts(&path).unwrap(), facts);
+        write_facts(&path, &facts, &crate::Options::default().source).unwrap();
         assert_eq!(
             CurrentSources::open(&path)
                 .unwrap()

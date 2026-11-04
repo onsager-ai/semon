@@ -93,7 +93,11 @@ mod tests {
             result
         }
         fn connection(&self) -> Connection {
-            Connection::open(crate::events::EventCache::path(&self.options.cache)).unwrap()
+            crate::events::store::qualified_event_writer_connection_for_test(
+                &crate::events::EventCache::path(&self.options.cache),
+                &self.options.source,
+            )
+            .unwrap()
         }
         fn header_text(&self) -> String {
             self.connection()

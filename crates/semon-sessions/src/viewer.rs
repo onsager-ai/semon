@@ -4397,8 +4397,11 @@ mod tests {
             assert_eq!(loads, 0);
             assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
 
-            let connection =
-                rusqlite::Connection::open(EventCache::path(&first.options.cache)).unwrap();
+            let connection = crate::events::store::qualified_event_writer_connection_for_test(
+                &EventCache::path(&first.options.cache),
+                &first.options.source,
+            )
+            .unwrap();
             connection
                 .execute(
                     "UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='selected'",
@@ -4437,8 +4440,11 @@ mod tests {
                 "message":{"role":"user","content":"a newly discovered duplicate"}
             })],
         );
-        let connection =
-            rusqlite::Connection::open(EventCache::path(&second.options.cache)).unwrap();
+        let connection = crate::events::store::qualified_event_writer_connection_for_test(
+            &EventCache::path(&second.options.cache),
+            &second.options.source,
+        )
+        .unwrap();
         connection
             .execute(
                 "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",

@@ -2917,6 +2917,20 @@ impl Snapshot {
         if self.watched.iter().any(|(path, original)| {
             let observed = stamp(path);
             match (observed, original) {
+                (Some(observed), Some(original))
+                    if native_generation && catalog_input(path, options).is_some() =>
+                {
+                    observed.kind != original.kind
+                        || (
+                            observed.generation.dev,
+                            observed.generation.ino,
+                            observed.generation.size,
+                        ) != (
+                            original.generation.dev,
+                            original.generation.ino,
+                            original.generation.size,
+                        )
+                }
                 (Some(observed), Some(original)) if !native_generation => {
                     observed.kind != original.kind
                         || (

@@ -1725,7 +1725,7 @@ mod namespace_isolation_tests {
              INSERT INTO session_catalog VALUES('a','shared','{\"query\":{\"last\":1}}'),('b','shared','{\"query\":{\"state\":\"work\"}}');
              INSERT INTO session_trace_edges VALUES('a','shared','edge','{\"status\":\"done\",\"at\":1}'),('b','shared','edge','{\"status\":\"work\",\"at\":1}'),('b','shared','b-only','{\"status\":\"work\"}');
              INSERT INTO session_trace_turns VALUES('b','shared','turn','edge','{\"start\":\"edge\",\"last\":1}');
-             INSERT INTO session_history_catalog VALUES('b','shared','{\"key\":\"shared\"}');",
+             INSERT INTO session_history_catalog(namespace,session_key,metadata) VALUES('b','shared','{\"key\":\"shared\"}');",
         )
         .unwrap();
         let stale = serde_json::json!({"last": 1});
