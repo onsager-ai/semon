@@ -385,8 +385,27 @@ fn publish_current_owned_with_policy(
         .transpose()
         .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     measurements.record("history_lookup", started, 1);
+    // A reset of the complete physical cohort starts a new Current derivation.
+    // An append or a partial owner page still needs the retained natural
+    // context; neither can replace that Overview with its smaller projection.
+    let reset_cohort = matches!(query_recipe_policy, QueryRecipePolicy::TraceOnly)
+        && history.as_ref().is_some_and(|history| {
+            history.harness == row.harness
+                && history
+                    .sources
+                    .iter()
+                    .all(|old| row.sources.iter().any(|new| new.path == old.path))
+                && history.sources.iter().any(|old| {
+                    row.sources.iter().any(|new| {
+                        new.path == old.path
+                            && ((new.dev, new.ino) != (old.dev, old.ino)
+                                || new.offset < old.offset)
+                    })
+                })
+        });
     if let Some(history) = history
         && history.sources != row.sources
+        && !reset_cohort
     {
         // Stage's mutable Trace belongs to its exact Current receipt. History
         // already owns an independent immutable projection of the old cohort.
