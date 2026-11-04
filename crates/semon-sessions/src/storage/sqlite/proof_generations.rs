@@ -3530,7 +3530,14 @@ pub(crate) fn publish_repaired_query_observation(
     }
     prepared.publish(db).map_err(failed)?;
     if recipe.is_some() {
-        db.execute(&format!("UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2", owner.table()), params![current.namespace.as_str(), selected.key, payload]).map_err(failed)?;
+        db.execute(
+            &format!(
+                "UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2",
+                owner.table()
+            ),
+            params![current.namespace.as_str(), selected.key, payload],
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
