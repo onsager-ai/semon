@@ -1820,17 +1820,26 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         let prepared =
             crate::model::prepare_sources(&withdrawal_options, &mut cache, &inputs, 1790812802000)
                 .unwrap();
-        cache
-            .publish_catalog_projection_fenced(
+        // Original custody advances at most one owner per bounded attempt.
+        // A deferral commits that progress without advancing the Catalog head.
+        for _ in 0..128 {
+            let result = cache.publish_catalog_projection_fenced(
                 &crate::slot_projection::Publication {
                     rows: &prepared.rows,
                     transcripts: Some(&prepared.transcripts),
                     observations: prepared.presentation_observations(),
                 },
                 prepared.base_generation.as_deref(),
-            )
-            .expect("SQLite withdrawal oracle publication")
-            .expect("SQLite withdrawal oracle generation");
+            );
+            match result {
+                Ok(Some(_)) => return,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        && cache.semantic_rejection().is_none() => {}
+                result => panic!("SQLite withdrawal oracle publication: {result:?}"),
+            }
+        }
+        panic!("SQLite withdrawal oracle exceeded bounded custody work");
     };
     publish_withdrawal_oracle();
     let mut withdrawal_query = crate::Query::from_sources(std::sync::Arc::new(

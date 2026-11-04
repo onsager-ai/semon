@@ -92,8 +92,10 @@ or the existing full-prefix hash comparison. The Index commits this content-free
 witness in its ledger-bound chunk header. Semantic replay checks its exact path,
 current ledger and physical witness and carries it through the digest-bearing
 publication capture. Bounded predecessor ledgers cover consecutive verified
-appends before publication. Rewrites, truncation, changed file identity and
-missing or mismatched proof still preserve Original custody under the conservative
+appends before publication. A Sources cohort exceeding the separate runtime
+capture bound still carries its verified append evidence in that envelope.
+Rewrites, truncation, changed file identity and missing or mismatched proof
+still preserve Original custody under the conservative
 classification introduced by `d3c19b7e`; replay must not discard verified append
 evidence as `a928c1f6` previously did.
 Original withdrawal custody retains its original publication reference.

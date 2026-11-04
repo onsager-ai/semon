@@ -75,6 +75,13 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
     ));
     let source = fixture_host_source();
     let mut cache = crate::events::EventCache::open(&cache_path, &source).unwrap();
+    let oracle_source = if data.oracle.line_count == 0 {
+        fixture_host_source()
+    } else {
+        crate::storage::postgres::tree_checkpoint::tests::fixture_host_source()
+    };
+    let mut oracle_cache =
+        crate::events::EventCache::open(&data.root.join("index.json"), &oracle_source).unwrap();
     for (path, _, index) in &mut data.sources {
         let physical = path.strip_suffix("\0🦀").unwrap();
         let scanned = crate::events::scan_file(
@@ -92,6 +99,21 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
         *index = (*scanned).clone();
         index.tree_summary = tree;
         index.native_usage_observations = usage;
+        // A fresh parse has no predecessor. Keep the independently persisted
+        // scanner witness that the SQLite byte oracle carries after an append.
+        let persisted = crate::events::scan_file(
+            std::path::Path::new(physical),
+            harness,
+            &mut oracle_cache,
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(
+            index.source_chunks.as_ref().unwrap().fingerprint(),
+            persisted.source_chunks.as_ref().unwrap().fingerprint()
+        );
+        let chunks = std::sync::Arc::make_mut(index.source_chunks.as_mut().unwrap());
+        chunks.continuation = persisted.source_chunks.as_ref().unwrap().continuation.clone();
         if harness != "copilot" {
             assert!(index.tree_summary.is_some(), "production Tree input");
         }

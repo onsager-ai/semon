@@ -10018,6 +10018,15 @@ fn build_sources_inner(
                 let continuations = builder.cache.take_source_continuations(rows);
                 if let Some(observations) = presentation.as_mut() {
                     observations.set_source_continuations(continuations)?;
+                } else if !continuations.is_empty() {
+                    // Runtime capture has its own cohort bound. Its absence
+                    // must not discard independently verified source appends.
+                    let mut proof_only =
+                        crate::storage::selected::PresentationObservations::default();
+                    proof_only.set_source_continuations(continuations)?;
+                    if proof_only.verified_continuations().is_some() {
+                        presentation = Some(proof_only);
+                    }
                 }
             } else {
                 builder.cache.discard_source_continuations();

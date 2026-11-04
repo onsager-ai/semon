@@ -4124,6 +4124,42 @@ fn staged_verified_native_append_survives_index_restart_and_history_publication(
             .collect::<Vec<_>>();
         assert_eq!(texts, ["native root", "first append", "second append"]);
     }
+    // A complete Sources producer can exceed the bounded runtime capture.
+    // That must not erase the independent append witness from publication.
+    let mut inputs = vec![crate::native_evidence::catalog_input(&path, &home.options).unwrap()];
+    for number in 0..64 {
+        let key = format!("independent-{number}");
+        let other = home.top(&key, &[human(&key, ts(0, 0), "independent native source")]);
+        inputs.push(crate::native_evidence::catalog_input(&other, &home.options).unwrap());
+    }
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{}",
+        human("root", ts(0, 3), "large-cohort append")
+    )
+    .unwrap();
+    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    assert_eq!(full.rows.len(), 65);
+    let observations = full.presentation_observations().unwrap();
+    assert!(observations.runtime.is_none());
+    assert_eq!(observations.verified_continuations().unwrap().len(), 1);
+    assert!(
+        cache
+            .publish_catalog_projection_fenced(
+                &crate::slot_projection::Publication {
+                    rows: &full.rows,
+                    transcripts: Some(&full.transcripts),
+                    observations: full.presentation_observations(),
+                },
+                full.base_generation.as_deref(),
+            )
+            .unwrap()
+            .is_some()
+    );
+    let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
+        .unwrap()
+        .unwrap();
+    assert!(history.source_refs[0].source.offset > current.source_refs[0].source.offset);
 }
 
 #[test]
