@@ -1514,6 +1514,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     assert_eq!(sqlite_parent_transcript.status, 200);
     let sqlite_parent_transcript: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_transcript.body).unwrap();
+    assert!(sqlite_parent_transcript["projection"]["total"].is_u64());
     // Keyset pages over equal timestamps continue without gap or overlap.
     assert_eq!(
         sqlite_scoped("scope=retained_history&", 3)
@@ -7365,7 +7366,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .collect::<Vec<_>>()
     };
     assert_eq!(
-        pg_parent_transcript["total"], sqlite_parent_transcript["total"],
+        pg_parent_transcript["total"],
+        sqlite_parent_transcript["projection"]["total"],
         "retained parent transcript totals match SQLite"
     );
     assert_eq!(
