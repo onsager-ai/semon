@@ -10178,6 +10178,7 @@ mod tests {
         assert!(!original_recipes.is_empty());
         let shared_source = rows[7].sources[0].clone();
         rows[6].sources.push(shared_source);
+        crate::query_projection::SelectedRecipe::detach(&mut rows[6]).unwrap();
         rows[6].query.as_mut().expect("prepared query envelope")["rows"] =
             serde_json::json!({"runtime":{"summary":{"pid":101}}});
         rows[7].query.as_mut().expect("prepared query envelope")["rows"] =
@@ -10669,6 +10670,10 @@ mod tests {
         // OriginalHistory. Keep both sources in the incoming publication so
         // catalog_write claims every affected owner's current source.
         oversized[1].sources.extend(rows[0].sources.iter().cloned());
+        // Keep the complete recipe inside this deliberately maximal cell so
+        // the unchanged one-cell limit measures all selected payload bytes.
+        oversized[1].query.as_mut().unwrap()["selected"] =
+            serde_json::to_value(oversized[1].query_recipe.as_ref().unwrap()).unwrap();
         // Fill one row's metadata budget exactly. Each row remains admissible,
         // while their combined metadata exceeds the batch writer's budget.
         oversized[1].name.clear();

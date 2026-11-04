@@ -202,11 +202,24 @@ pub(crate) fn current_query_context_header(
             {
                 if cfg!(test) || crate::native_timing::enabled() {
                     let mut inline_query = candidate.query.clone();
-                    if let (Some(query), Some(recipe)) = (&mut inline_query, &candidate.query_recipe) {
-                        query["selected"] = serde_json::to_value(recipe).map_err(|_| StorageError::ScopeChanged)?;
+                    if let (Some(query), Some(recipe)) =
+                        (&mut inline_query, &candidate.query_recipe)
+                    {
+                        query["selected"] =
+                            serde_json::to_value(recipe).map_err(|_| StorageError::ScopeChanged)?;
                     }
-                    let inline_generation = format!("{:x}", sha2::Sha256::digest(serde_json::to_vec(&inline_query).map_err(|_| StorageError::ScopeChanged)?));
-                    eprintln!("selected_recipe_header_refused stage=representation key={} inline_match={}", candidate.key, header["query_generation"] == inline_generation);
+                    let inline_generation = format!(
+                        "{:x}",
+                        sha2::Sha256::digest(
+                            serde_json::to_vec(&inline_query)
+                                .map_err(|_| StorageError::ScopeChanged)?
+                        )
+                    );
+                    eprintln!(
+                        "selected_recipe_header_refused stage=representation key={} inline_match={}",
+                        candidate.key,
+                        header["query_generation"] == inline_generation
+                    );
                     eprintln!(
                         "selected_recipe_header_refused stage=header key={} version={} complete={} source_match={} query_match={}",
                         candidate.key,

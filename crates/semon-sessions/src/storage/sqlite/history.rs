@@ -187,10 +187,15 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         // Withdrawal rows come from authenticated stored metadata, which does
         // not carry the request-local recipe. Copy the exact Current cell under
         // this custody transaction before its owner is replaced.
-        let payload = if row.query.as_ref().is_some_and(|query| query["selected"].get("digest").is_some()) {
+        let payload = if row
+            .query
+            .as_ref()
+            .is_some_and(|query| query["selected"].get("digest").is_some())
+        {
             let mut current = row.clone();
             current.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-            let current = serde_json::to_string(&current).map_err(<Self as OriginalHistoryStore>::data)?;
+            let current =
+                serde_json::to_string(&current).map_err(<Self as OriginalHistoryStore>::data)?;
             self.db.query_row("SELECT CASE WHEN octet_length(metadata)+octet_length(query_recipe)<=1048576 THEN query_recipe END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3", params![self.namespace, key, current], |record| record.get::<_, String>(0)).map(Some)?
         } else {
             None

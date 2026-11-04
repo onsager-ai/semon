@@ -136,7 +136,8 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
             Owner::Catalog,
             &mut inline,
         )
-        .unwrap() > 0
+        .unwrap()
+            > 0
     );
     assert_eq!(inline.query_recipe, data.rows[0].query_recipe);
     assert_eq!(serde_json::to_string(&inline).unwrap(), metadata);
@@ -188,9 +189,7 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
         |view| {
             let mut selected = view.catalog(inline_key, false)?.unwrap();
             let metadata = serde_json::to_string(&selected).unwrap();
-            assert!(crate::query_projection::SelectedRecipe::detached(
-                &selected
-            ));
+            assert!(crate::query_projection::SelectedRecipe::detached(&selected));
             assert!(view.attach_query_recipe(&mut selected, false)? > 0);
             assert_eq!(selected.query_recipe, inline_prepared.rows[0].query_recipe);
             assert_eq!(serde_json::to_string(&selected).unwrap(), metadata);
@@ -233,6 +232,21 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     assert_eq!(outcome, crate::events::Outcome::Written);
     let generation = generation.unwrap();
     let row = &prepared.rows[0];
+    snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
+        let token = view.query_recipe_observation(Owner::Catalog, row).unwrap();
+        assert_eq!(
+            view.load_query_recipe(&token).unwrap(),
+            Some(expected.clone())
+        );
+        Ok(())
+    })
+    .unwrap();
+    // Keep the missing-cell refusal control after the producer has supplied
+    // and authenticated the complete detached payload.
+    pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
+        assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=NULL WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3 AND metadata=$4", &[&namespace.as_str().as_bytes(), &generation.as_bytes(), &row.key.as_bytes(), &compact.metadata.as_bytes()]).map_err(sqlstate::error)?, 1);
+        Ok(())
+    }).unwrap();
     let token =
         snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
             // Retained display does not move a physical Current selection to History.

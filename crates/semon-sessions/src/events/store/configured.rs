@@ -5184,10 +5184,11 @@ mod tests {
         );
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
-        assert!(!crate::query_projection::SelectedRecipe::detached(row));
-        assert!(
-            load_query_recipe(&db, &reader, &token).unwrap().is_none(),
-            "the real inline producer authenticates and owns no detached payload"
+        assert!(crate::query_projection::SelectedRecipe::detached(row));
+        assert_eq!(
+            load_query_recipe(&db, &reader, &token).unwrap(),
+            row.query_recipe,
+            "the real producer authenticates its exact detached payload"
         );
         let namespace = fixture.config.namespace.as_str();
         for sql in [
@@ -5205,7 +5206,10 @@ mod tests {
             db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
                 .unwrap();
         }
-        assert!(load_query_recipe(&db, &reader, &token).unwrap().is_none());
+        assert_eq!(
+            load_query_recipe(&db, &reader, &token).unwrap(),
+            row.query_recipe
+        );
     }
 
     #[test]

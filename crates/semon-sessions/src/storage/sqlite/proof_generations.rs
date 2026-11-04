@@ -3500,6 +3500,7 @@ pub(crate) fn publish_repaired_query_observation(
     owner: CatalogObservationOwner,
     selected: &CatalogRow,
     query: &serde_json::Value,
+    recipe: Option<&crate::query_projection::SelectedRecipe>,
 ) -> Result<(), StorageError> {
     let source_generation = crate::retention::source_generation(&selected.sources)
         .map_err(|_| StorageError::Unavailable)?;
@@ -3512,12 +3513,26 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = selected.clone();
     repaired.query = Some(query.clone());
+    repaired.query_recipe = recipe.cloned();
     let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
         .map_err(ObservationPreparationError::into_storage)?;
+    let payload = if recipe.is_some() {
+        crate::query_projection::SelectedRecipe::publication_payload(&repaired)
+            .map_err(|_| StorageError::ScopeChanged)?
+    } else {
+        if selected.query.as_ref().map(|query| &query["selected"]) != Some(&query["selected"]) {
+            return Err(StorageError::ScopeChanged);
+        }
+        None
+    };
     if selected.query.as_ref() == Some(query) {
         return Ok(());
     }
-    prepared.publish(db).map_err(failed)
+    prepared.publish(db).map_err(failed)?;
+    if recipe.is_some() {
+        db.execute(&format!("UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2", owner.table()), params![current.namespace.as_str(), selected.key, payload]).map_err(failed)?;
+    }
+    Ok(())
 }
 
 /// Cost publication cannot use an imported receipt to mint local authority.

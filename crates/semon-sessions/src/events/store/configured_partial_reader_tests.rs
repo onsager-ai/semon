@@ -400,6 +400,7 @@ mod partial_readers {
             crate::storage::catalog::CatalogObservationOwner::Catalog,
             &repriced,
             &repaired_query,
+            None,
         )
         .unwrap();
         tx.commit().unwrap();
