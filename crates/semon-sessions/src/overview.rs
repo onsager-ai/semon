@@ -387,7 +387,7 @@ fn publish_current_owned_with_policy(
     measurements.record("history_lookup", started, 1);
     if let Some(history) = history
         && history.sources != row.sources
-        && matches!(query_recipe_policy, QueryRecipePolicy::Publish)
+        && (matches!(query_recipe_policy, QueryRecipePolicy::Publish) || row.overview.is_none())
     {
         let started = measurements.start();
         if let Some(budget) = budget.as_deref_mut() {

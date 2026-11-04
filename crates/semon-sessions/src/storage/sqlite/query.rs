@@ -127,7 +127,15 @@ pub(crate) fn current_query_context_header(
         &current,
         CatalogObservationOwner::Catalog,
         candidate,
-    )?;
+    )
+    .inspect_err(|error| {
+        if crate::native_timing::enabled() {
+            eprintln!(
+                "selected_recipe_header_refused stage=observation key={} error={error}",
+                candidate.key
+            );
+        }
+    })?;
     match &observation.residence {
         QueryRecipeResidence::Immutable { .. } => {
             super::proof_generations::load_query_recipe(db, binding, &observation).map_err(
@@ -159,6 +167,16 @@ pub(crate) fn current_query_context_header(
                         .map_err(|_| StorageError::ScopeChanged)?
                 || header["query_generation"] != query_generation
             {
+                if crate::native_timing::enabled() {
+                    eprintln!(
+                        "selected_recipe_header_refused stage=header key={} version={} complete={} source_match={} query_match={}",
+                        candidate.key,
+                        header["version"],
+                        header["complete"],
+                        header["source_generation"] == crate::retention::source_generation(&candidate.sources).map_err(|_| StorageError::ScopeChanged)?,
+                        header["query_generation"] == query_generation
+                    );
+                }
                 return Err(StorageError::ScopeChanged);
             }
             Ok(Some(encoded))
