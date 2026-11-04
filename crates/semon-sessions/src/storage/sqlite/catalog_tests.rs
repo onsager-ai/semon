@@ -5080,7 +5080,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             crate::CatalogReadScope::RetainedHistory,
             &json!({"id":"live-history"}),
             Some(&original_provider),
-            crate::SessionSourceReadMode::LocalThenProvider,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
             crate::model::now_ms(),
         )
     };
