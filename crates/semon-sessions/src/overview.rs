@@ -512,7 +512,12 @@ fn publish_current_owned_with_policy(
                     .optional()?;
                 if let Some(generation) = generation {
                     let started = measurements.start();
-                    crate::causal_trace::publish_current_query_owned(tx, row, current, &generation)?;
+                    crate::causal_trace::publish_current_query_owned(
+                        tx,
+                        row,
+                        current,
+                        &generation,
+                    )?;
                     measurements.record("query_projection_update", started, 1);
                 }
             }
