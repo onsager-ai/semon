@@ -325,6 +325,7 @@ pub(crate) struct AdmittedSnapshot<'a, 'b>(
     Option<crate::storage::QueryRuntimeBinding>,
     crate::storage::QueryRuntimeBinding,
     std::cell::OnceCell<crate::native_evidence::RuntimeObservations>,
+    std::cell::RefCell<crate::storage::proof_codec::PresentationCache>,
 );
 
 /// Metadata from the caller's validated snapshot, never an Options-derived
@@ -421,6 +422,7 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
         binding.runtime_binding()?,
         binding.runtime_binding_at(transaction)?,
         std::cell::OnceCell::new(),
+        std::cell::RefCell::default(),
     ))
 }
 
@@ -447,8 +449,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .inspect_err(|error| diagnose("current_source_cwds", error))?
         {
             Some(cwds) => {
-                let binding = super::proof_generations::observation_binding_for_physical_owner(
-                    self.0, &self.2, row, owner,
+                let binding = super::proof_generations::observation_binding_for_catalog_page(
+                    self.0, &self.2, row, owner, &self.4,
                 )
                 .map_err(io::Error::other)
                 .inspect_err(|error| diagnose("current_row_binding", error))?;

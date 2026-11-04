@@ -2043,6 +2043,19 @@ fn authenticate_immutable_observation(
     reference_kind: &str,
     prefix: &str,
 ) -> Result<VerifiedObservation, ObservationPreparationError> {
+    authenticate_immutable_observation_with_cache(
+        db, current, selected, reference_kind, prefix, None,
+    )
+}
+
+fn authenticate_immutable_observation_with_cache(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    reference_kind: &str,
+    prefix: &str,
+    cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
+) -> Result<VerifiedObservation, ObservationPreparationError> {
     let mut statement = db
         .prepare(
             "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
@@ -2109,15 +2122,18 @@ fn authenticate_immutable_observation(
         record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
     )
     .map_err(|_| StorageError::Busy)?;
-    let observations = proof_codec::verify_presentation_observations(
-        &selected.key,
-        &record.metadata,
-        &record.slots,
-        presentation,
-        base,
-        manifest,
-        &record.proof,
-    )
+    let observations = match cache {
+        Some(cache) => cache.borrow_mut().observations(record, presentation, base, manifest),
+        None => proof_codec::verify_presentation_observations(
+            &selected.key,
+            &record.metadata,
+            &record.slots,
+            presentation,
+            base,
+            manifest,
+            &record.proof,
+        ),
+    }
     .inspect_err(|_| diagnose_observation_refusal("immutable_presentation"))?;
     let original: CatalogRow =
         serde_json::from_str(&record.metadata).map_err(|_| StorageError::Unavailable)?;
@@ -2399,6 +2415,21 @@ pub(crate) fn observation_binding_for_physical_owner(
         .map_err(ObservationPreparationError::into_storage)
 }
 
+/// Catalog rows share this cache only inside their admitted read transaction.
+pub(crate) fn observation_binding_for_catalog_page(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    owner: CatalogObservationOwner,
+    cache: &std::cell::RefCell<proof_codec::PresentationCache>,
+) -> Result<crate::storage::QueryRuntimeBinding, StorageError> {
+    observation_authority_for_owner_with_cache(
+        db, current, selected, Some(owner), false, Some(cache),
+    )
+    .map(|(binding, _)| binding)
+    .map_err(ObservationPreparationError::into_storage)
+}
+
 pub(crate) fn observation_binding_with_observations(
     db: &Connection,
     current: &crate::storage::QueryRuntimeBinding,
@@ -2647,6 +2678,25 @@ fn observation_authority_for_owner(
     ),
     ObservationPreparationError,
 > {
+    observation_authority_for_owner_with_cache(
+        db, current, selected, physical_owner, local_only, None,
+    )
+}
+
+fn observation_authority_for_owner_with_cache(
+    db: &Connection,
+    current: &crate::storage::QueryRuntimeBinding,
+    selected: &CatalogRow,
+    physical_owner: Option<CatalogObservationOwner>,
+    local_only: bool,
+    cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::query::QueryRecipeResidence,
+    ),
+    ObservationPreparationError,
+> {
     let ns = current.namespace.as_str();
     let owner_kind = physical_owner.map(CatalogObservationOwner::kind);
     let proof_kind = physical_owner.map(|owner| match owner {
@@ -2705,12 +2755,13 @@ fn observation_authority_for_owner(
                 &current.stream_epoch,
                 &current_metadata,
             )? {
-                let verified = authenticate_immutable_observation(
+                let verified = authenticate_immutable_observation_with_cache(
                     db,
                     current,
                     selected,
                     reference_kind,
                     &prefix,
+                    cache,
                 )?;
                 // A different owner needs its own authenticated capture. A
                 // metadata digest alone cannot lend authority to a receipt.

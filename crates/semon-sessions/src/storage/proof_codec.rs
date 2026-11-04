@@ -17,6 +17,54 @@ pub(crate) struct PresentationManifest {
     pub(crate) observations: Option<crate::storage::selected::PresentationObservations>,
 }
 
+/// One authenticated root, retained only for the lifetime of a Catalog snapshot.
+/// Every row still authenticates its own metadata, slots and presentation entry.
+#[derive(Default)]
+pub(crate) struct PresentationCache {
+    root: Option<CachedPresentation>,
+}
+
+struct CachedPresentation {
+    base: String,
+    manifest: String,
+    digest: String,
+    decoded: PresentationManifest,
+}
+
+impl PresentationCache {
+    pub(crate) fn observations(
+        &mut self,
+        record: &GenerationRecord,
+        presentation: &str,
+        base: &str,
+        manifest: &str,
+    ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+        if self.root.as_ref().is_none_or(|root| {
+            root.base != base || root.manifest != manifest || root.digest != record.proof
+        }) {
+            let decoded = decode_presentation_manifest(manifest)?;
+            if presentation_digest(base, manifest)? != record.proof {
+                return Err(StorageError::ScopeChanged);
+            }
+            self.root = Some(CachedPresentation {
+                base: base.to_owned(),
+                manifest: manifest.to_owned(),
+                digest: record.proof.clone(),
+                decoded,
+            });
+        }
+        let root = self.root.as_ref().expect("authenticated presentation root");
+        verify_decoded_presentation_entry(
+            &record.session_key,
+            &record.metadata,
+            &record.slots,
+            presentation,
+            &root.decoded,
+        )?;
+        Ok(root.decoded.observations.clone())
+    }
+}
+
 pub(crate) fn decode_presentation_manifest(
     manifest: &str,
 ) -> Result<PresentationManifest, StorageError> {
@@ -450,6 +498,54 @@ mod tests {
             presentation_digest("a", "b").unwrap(),
             presentation_digest("a", "c").unwrap()
         );
+    }
+
+    #[test]
+    fn cached_presentation_rechecks_each_entry_and_exact_root() {
+        let mut first = fixture();
+        let mut second = first.clone();
+        second.session_key = "other".into();
+        let entry = presentation_entry(&first.metadata, &first.slots, "null").unwrap();
+        let mut manifest = serde_json::json!({
+            "catalog_generation": "a".repeat(64),
+            "entries": [[first.session_key, entry], [second.session_key, entry]],
+            "observations": null,
+        });
+        let encoded = manifest.to_string();
+        first.proof = presentation_digest("base", &encoded).unwrap();
+        second.proof = first.proof.clone();
+        let mut cache = PresentationCache::default();
+        assert!(cache.observations(&first, "null", "base", &encoded).unwrap().is_none());
+        assert!(cache.observations(&second, "null", "base", &encoded).unwrap().is_none());
+
+        let mut changed = second.clone();
+        changed.metadata.push(' ');
+        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        changed = second.clone();
+        changed.slots = "[1]".into();
+        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        assert!(cache.observations(&second, "{}", "base", &encoded).is_err());
+        changed = second.clone();
+        changed.session_key = "unlisted".into();
+        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        changed = second.clone();
+        changed.proof = "0".repeat(64);
+        assert!(cache.observations(&changed, "null", "base", &encoded).is_err());
+        assert!(cache.observations(&second, "null", "other-base", &encoded).is_err());
+
+        manifest["catalog_generation"] = serde_json::json!("b".repeat(64));
+        let replacement = manifest.to_string();
+        assert!(cache.observations(&second, "null", "base", &replacement).is_err());
+        second.proof = presentation_digest("base", &replacement).unwrap();
+        assert!(cache.observations(&second, "null", "base", &replacement).is_ok());
+        manifest["entries"].as_array_mut().unwrap().push(serde_json::json!([second.session_key, entry]));
+        let duplicate = manifest.to_string();
+        second.proof = presentation_digest("base", &duplicate).unwrap();
+        assert!(cache.observations(&second, "null", "base", &duplicate).is_err());
+        manifest["catalog_generation"] = serde_json::json!("invalid");
+        let invalid = manifest.to_string();
+        second.proof = presentation_digest("base", &invalid).unwrap();
+        assert!(cache.observations(&second, "null", "base", &invalid).is_err());
     }
 
     #[test]
