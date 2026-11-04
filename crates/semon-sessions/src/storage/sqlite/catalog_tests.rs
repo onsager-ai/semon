@@ -2628,9 +2628,17 @@ fn full_catalog_large_source_progress_keeps_custody_until_a_real_append() {
         &tx,
         "large-continuation",
         crate::CatalogReadScope::RetainedHistory,
-    ).unwrap();
-    let history_source = history[0].sources.iter().find(|source| source.path == path).unwrap();
-    assert_eq!(history_source.offset, appended_size, "History follows the committed cursor append");
+    )
+    .unwrap();
+    let history_source = history[0]
+        .sources
+        .iter()
+        .find(|source| source.path == path)
+        .unwrap();
+    assert_eq!(
+        history_source.offset, appended_size,
+        "History follows the committed cursor append"
+    );
     assert_ne!(history_source.prefix_sha256, original_source.prefix_sha256);
     tx.commit().unwrap();
     let current_metadata: String = db
@@ -5071,7 +5079,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             "live-history",
             crate::CatalogReadScope::RetainedHistory,
             &json!({"id":"live-history"}),
-            None,
+            Some(&original_provider),
             crate::SessionSourceReadMode::LocalThenProvider,
             crate::model::now_ms(),
         )
@@ -6195,7 +6203,10 @@ fn index_leading_catalog_keeps_published_codex_pages_and_query_readable() {
         assert!(unrelated_name.valid());
         let mut changed_facts = original_facts.clone();
         changed_facts.native_names.push(unrelated_name);
-        changed_facts.repos.insert("/synthetic/project".into(), Some("changed-selected-repo".into()));
+        changed_facts.repos.insert(
+            "/synthetic/project".into(),
+            Some("changed-selected-repo".into()),
+        );
         let original_runtime =
             crate::native_evidence::query_runtime_generation(&fixture.options).unwrap();
         let intent = crate::SessionFactsWrite::begin(&fixture.options, &changed_facts).unwrap();

@@ -2204,10 +2204,16 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "SQLite Current consumes the actual appended native record"
     );
     let selected_history = crate::session_catalog_history_identity(
-        &append_oracle_options, recent_machine, &appended_key,
-    ).unwrap().unwrap();
-    assert_eq!(selected_history.source_refs, append_current_identity.source_refs,
-        "ordinary append History must select the exact Current source cohort");
+        &append_oracle_options,
+        recent_machine,
+        &appended_key,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        selected_history.source_refs, append_current_identity.source_refs,
+        "ordinary append History must select the exact Current source cohort"
+    );
     let stale_append_history = crate::session_transcript_range_with_mode(
         &append_oracle_options,
         recent_machine,
@@ -2216,9 +2222,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         crate::SessionSourceReadMode::ProviderOnly,
     );
     assert_eq!(
-        stale_append_history.status, 409,
-        "an archive holding only the old prefix cannot supply the cursor successor"
+        stale_append_history.status, 200,
+        "published cursor recipes do not require native continuation evidence"
     );
+    let cached_append_history: serde_json::Value =
+        serde_json::from_slice(&stale_append_history.body).unwrap();
     let append_history_after = crate::session_transcript_range(
         &append_oracle_options,
         recent_machine,
@@ -2233,6 +2241,10 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     let append_history_after: serde_json::Value =
         serde_json::from_slice(&append_history_after.body).unwrap();
+    assert_eq!(
+        cached_append_history, append_history_after,
+        "the old-prefix provider cannot change the committed History response"
+    );
     assert_eq!(
         append_history_after["identity"]["read_scope"],
         "retained_history"

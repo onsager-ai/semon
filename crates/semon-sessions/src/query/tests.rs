@@ -433,7 +433,10 @@ fn query_producer_rechecks_cached_and_unread_sources_before_publication() {
         );
         assert_eq!(catalog_generation(&home), generation);
         if mutation == 0 {
-            let path = home.options.claude_home.join("projects/-work-proj/lead.jsonl");
+            let path = home
+                .options
+                .claude_home
+                .join("projects/-work-proj/lead.jsonl");
             let replacement = path.with_extension("replacement");
             fs::copy(&path, &replacement).unwrap();
             fs::rename(replacement, path).unwrap();
@@ -4697,12 +4700,21 @@ fn ordinary_focused_query_refreshes_selected_log_without_unrelated_index_loads()
                     .all(|source| crate::catalog::source_state(source) == "cached")
             );
             let (metadata, slot_table) = if phase == "append" {
-                assert!(crate::history_projection::catalog(&db, "lead").unwrap().is_none());
+                assert!(
+                    crate::history_projection::catalog(&db, "lead")
+                        .unwrap()
+                        .is_none()
+                );
                 let mut retained = current[0].clone();
                 retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
                 (serde_json::to_string(&retained).unwrap(), "session_slots")
             } else {
-                (crate::history_projection::catalog(&db, "lead").unwrap().unwrap(), "session_history_slots")
+                (
+                    crate::history_projection::catalog(&db, "lead")
+                        .unwrap()
+                        .unwrap(),
+                    "session_history_slots",
+                )
             };
             let slots = db
                 .prepare(&format!("SELECT metadata FROM main.{slot_table} WHERE namespace=semon_namespace() AND session_key='lead' ORDER BY slot"))
