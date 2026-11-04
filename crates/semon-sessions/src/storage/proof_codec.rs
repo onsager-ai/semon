@@ -52,8 +52,12 @@ pub(crate) fn verify_presentation_observations(
     manifest: &str,
     expected_digest: &str,
 ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
-    verify_presentation_digest(base, manifest, expected_digest)?;
-    Ok(verify_presentation_manifest_entry(key, metadata, slots, text, manifest)?.observations)
+    let decoded = decode_presentation_manifest(manifest)?;
+    if presentation_digest(base, manifest)? != expected_digest {
+        return Err(StorageError::ScopeChanged);
+    }
+    verify_decoded_presentation_entry(key, metadata, slots, text, &decoded)?;
+    Ok(decoded.observations)
 }
 
 fn verify_presentation_manifest_entry(
@@ -64,6 +68,17 @@ fn verify_presentation_manifest_entry(
     manifest: &str,
 ) -> Result<PresentationManifest, StorageError> {
     let manifest = decode_presentation_manifest(manifest)?;
+    verify_decoded_presentation_entry(key, metadata, slots, text, &manifest)?;
+    Ok(manifest)
+}
+
+fn verify_decoded_presentation_entry(
+    key: &str,
+    metadata: &str,
+    slots: &str,
+    text: &str,
+    manifest: &PresentationManifest,
+) -> Result<(), StorageError> {
     let entry = presentation_entry(metadata, slots, text)?;
     if manifest.entries.iter().filter(|(k, _)| k == key).count() != 1
         || !manifest
@@ -73,7 +88,7 @@ fn verify_presentation_manifest_entry(
     {
         return Err(StorageError::ScopeChanged);
     }
-    Ok(manifest)
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
