@@ -7150,7 +7150,7 @@ mod tests {
         let pool = RefreshPool::new(3);
         let views: Vec<_> = (0..50)
             .map(|_| {
-                let view = pooled(&fixture, Refresh::Background, &pool);
+                let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
                 publish_native(&view);
                 assert_eq!(native_api(&view, "/api/sessions", "").status, 200);
                 view
@@ -7160,6 +7160,11 @@ mod tests {
         let shown = |view: &Arc<MachineView>| native_snapshot(view);
         let before: Vec<_> = views.iter().map(shown).collect();
         let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
+        // Finish the serial publication setup before the shared workers begin
+        // their concurrent checks against this same physical source.
+        for view in &views {
+            view.set_refresh(Refresh::Background);
+        }
         say(&fixture, "lane", 1, "seen by fifty views");
         eventually("a rebuild of every view, with no read", || {
             assert!(pool.threads() <= 3, "{} threads", pool.threads());

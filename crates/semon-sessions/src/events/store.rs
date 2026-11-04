@@ -11386,6 +11386,9 @@ mod tests {
 
     #[test]
     fn catalog_batch_matches_row_wise_partial_native_lineage_history_and_archive_proofs() {
+        // Receipt presentations authenticate their publication clock. Compare
+        // the two writers with the same clock input, keeping every proof byte.
+        let _clock = crate::model::fixed_clock_for_test(crate::model::now_ms());
         let root = scratch("catalog-batch-partial-lineage");
         let (options, _, _) = catalog_native_fixture(&root, 4, false);
         let relative = "projects/-work-proj/native-cl-02.jsonl";

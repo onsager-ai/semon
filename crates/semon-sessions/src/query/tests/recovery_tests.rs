@@ -1647,6 +1647,10 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     // Publish the first observation through Stage itself. Replaying an already
     // published direct observation reuses its receipt without minting a Stage
     // origin grant, so it cannot establish this Stage-only preimage fixture.
+    drop(
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+            .unwrap(),
+    );
     publish_semantic_stage(
         &home,
         &crate::Input {

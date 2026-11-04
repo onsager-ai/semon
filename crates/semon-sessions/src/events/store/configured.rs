@@ -11892,18 +11892,24 @@ mod tests {
                 // Pick an endpoint already authenticated by an earlier page,
                 // then omit its redundant inline witnesses. The relation must
                 // resolve that endpoint from durable Stage state.
-                let candidate = prepared.relationships.relations.iter().find_map(|(id, relation)| {
-                    let real = |key: &String| prepared.relationships.endpoints.contains_key(key);
-                    if relation.to.as_ref().is_some_and(real)
-                        && batch.context.endpoints.contains_key(&relation.from)
-                    {
-                        return Some((id.clone(), relation.from.clone(), true));
-                    }
-                    relation.to.as_ref().and_then(|to| {
-                        (real(&relation.from) && batch.context.endpoints.contains_key(to))
-                            .then(|| (id.clone(), to.clone(), false))
-                    })
-                });
+                let candidate =
+                    prepared
+                        .relationships
+                        .relations
+                        .iter()
+                        .find_map(|(id, relation)| {
+                            let real =
+                                |key: &String| prepared.relationships.endpoints.contains_key(key);
+                            if relation.to.as_ref().is_some_and(real)
+                                && batch.context.endpoints.contains_key(&relation.from)
+                            {
+                                return Some((id.clone(), relation.from.clone(), true));
+                            }
+                            relation.to.as_ref().and_then(|to| {
+                                (real(&relation.from) && batch.context.endpoints.contains_key(to))
+                                    .then(|| (id.clone(), to.clone(), false))
+                            })
+                        });
                 let Some(candidate) = candidate else {
                     assert_eq!(
                         cache.record_semantic_batch(&batch, &prepared).unwrap(),

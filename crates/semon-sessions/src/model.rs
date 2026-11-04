@@ -520,7 +520,31 @@ fn session_parent(sid: &str, session: &Session, handoffs: &[Handoff]) -> Option<
         .map(|handoff| handoff.from.clone())
 }
 
+#[cfg(test)]
+thread_local! {
+    static FIXED_CLOCK: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct TestClock(Option<i64>);
+
+#[cfg(test)]
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        FIXED_CLOCK.with(|clock| clock.set(self.0));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn fixed_clock_for_test(now: i64) -> TestClock {
+    TestClock(FIXED_CLOCK.with(|clock| clock.replace(Some(now))))
+}
+
 pub(crate) fn now_ms() -> i64 {
+    #[cfg(test)]
+    if let Some(now) = FIXED_CLOCK.with(std::cell::Cell::get) {
+        return now;
+    }
     // CI's browser suite serves a fixture whose clock must stand still. Only
     // a debug build with the `test-clock` feature reads this: without the
     // feature, or in a release build, the variable is ignored.
