@@ -1313,7 +1313,7 @@ mod generation_tests {
             transcripts: None,
             observations: None,
         };
-        let writer = crate::events::store::configured::Writer::owned(owner).unwrap();
+        let mut writer = crate::events::store::configured::Writer::owned(owner).unwrap();
         let (outcome, generation) = writer
             .publish_catalog(&publication, None, None, false)
             .unwrap()

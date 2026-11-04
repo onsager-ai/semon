@@ -5044,7 +5044,7 @@ fn mcp_history_selection_keeps_current_runtime_qualification() {
             "get_session",
             &json!({"id":"live-history"}),
             None,
-            crate::SessionSourceReadMode::LocalThenProvider,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
         )
         .unwrap();
     runtime_phases.push((
