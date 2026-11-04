@@ -141,6 +141,15 @@ fn publish_direct(home: &Home) {
     }));
     inputs.sort();
     inputs.dedup();
+    // A disappearing file needs the producer's explicit negative observation
+    // before a complete direct publication can retire its Current membership.
+    crate::events::store::audit_catalog_sources(
+        &home.options,
+        &inputs,
+        Some(""),
+        &crate::native_evidence::query_runtime_generation(&home.options).unwrap(),
+    )
+    .unwrap();
     let prepared = crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
     let generation = cache.session_catalog_generation();
     let mut published = false;
@@ -1667,7 +1676,8 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
     assert!(
         stage_grants_before
             .iter()
-            .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest))
+            .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest)),
+        "exact preimage grant {preimage_stage_digest} missing from {stage_grants_before:?}"
     );
     let direct_grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
     assert_eq!(

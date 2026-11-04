@@ -784,9 +784,9 @@ pub(crate) fn audit_catalog_sources(
         }
         let recorded = ledger_row(&tx, &key).map_err(io::Error::other)?;
         if match recorded.as_ref() {
-            Some((_, ledger)) => observed.ok().is_none_or(|stat| {
-                !ledger.resumes(&stat) || stat.size != ledger.stat.size
-            }),
+            Some((_, ledger)) => observed
+                .ok()
+                .is_none_or(|stat| !ledger.resumes(&stat) || stat.size != ledger.stat.size),
             None => true,
         } {
             changed.insert(key.clone());
@@ -849,11 +849,9 @@ pub(crate) fn audit_catalog_sources(
                 && !machine.codex_rollout_is_current(options, Path::new(&path)))
                 || saved_runtime != expected.as_deref()
                 || match recorded.as_ref() {
-                    Some((_, ledger)) => {
-                        super::Stat::of(Path::new(&path)).ok().is_none_or(|stat| {
-                            !ledger.resumes(&stat) || stat.size != ledger.stat.size
-                        })
-                    }
+                    Some((_, ledger)) => super::Stat::of(Path::new(&path))
+                        .ok()
+                        .is_none_or(|stat| !ledger.resumes(&stat) || stat.size != ledger.stat.size),
                     None => true,
                 }
             {

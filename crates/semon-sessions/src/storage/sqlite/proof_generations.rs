@@ -817,8 +817,7 @@ pub(crate) fn retain_outgoing_history_refs(
             original.lifecycle = crate::model::summary::CatalogLifecycle::Current;
             let original_metadata =
                 serde_json::to_string(&original).map_err(|_| StorageError::Unavailable)?;
-            let sql_admission =
-                i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
+            let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
             let outgoing_receipt: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND g.metadata=?5)",
@@ -3639,6 +3638,15 @@ fn prepare_observation_update(
     let direct_capture = if exact_postimage {
         None
     } else {
+        let immutable_preimage = exact_immutable_observation_owner(
+            db,
+            namespace,
+            &selected.key,
+            proof_kind,
+            admission,
+            &current.stream_epoch,
+            &before_metadata,
+        )?;
         let (binding, observations) =
             observation_binding_with_observations(db, current, selected, owner)?;
         if binding != proven {
@@ -3646,13 +3654,29 @@ fn prepare_observation_update(
         }
         let capture = observations
             .runtime_capture_for(repaired)
-            .filter(|capture| capture.is_runtime_capture_for(repaired))
-            .ok_or(StorageError::ScopeChanged)?;
-        let capture = serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
-        if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
-            return Err(StorageError::HistoryRetentionBounds.into());
+            .filter(|capture| capture.is_runtime_capture_for(repaired));
+        if local_only
+            && immutable_preimage
+            && observations.runtime_for(repaired) == observations.runtime_for(selected)
+            && capture.is_some()
+        {
+            // Cost-only metadata keeps the authenticated receipt's exact
+            // source and runtime inputs. The new owner grant binds the
+            // postimage; it does not need a second runtime capture.
+            None
+        } else if let Some(capture) = capture {
+            let capture = serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
+            if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
+                return Err(StorageError::HistoryRetentionBounds.into());
+            }
+            Some(capture)
+        } else if !local_only {
+            // Query repair can change the dependency set, but cannot claim
+            // the old runtime capture authenticates those new dependencies.
+            None
+        } else {
+            return Err(StorageError::ScopeChanged.into());
         }
-        Some(capture)
     };
     Ok(PreparedObservationUpdate {
         namespace: namespace.to_owned(),

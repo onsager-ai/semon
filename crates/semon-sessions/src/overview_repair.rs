@@ -1713,6 +1713,9 @@ mod tests {
                 |row| row.get(3),
             )
             .unwrap();
-        assert!(plan.contains("SEARCH main.meta USING PRIMARY KEY"), "{plan}");
+        assert!(
+            plan.contains("SEARCH main.meta USING PRIMARY KEY"),
+            "{plan}"
+        );
     }
 }

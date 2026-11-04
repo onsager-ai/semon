@@ -846,7 +846,12 @@ impl NativeEvidence {
         if work
             .events
             .as_ref()
-            .is_some_and(|cache| cache.scoped_store_lost())
+            .is_some_and(|cache| {
+                cache.scoped_store_lost()
+                    || (work.observed_catalog_generation.is_some()
+                        && cache.session_catalog_generation()
+                            != work.observed_catalog_generation)
+            })
         {
             work.events = None;
         }

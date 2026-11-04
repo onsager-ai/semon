@@ -11895,6 +11895,12 @@ mod tests {
                 prepared.relationships.endpoints.retain(|_, endpoint| {
                     endpoint.paths.iter().any(|path| batch.paths.contains(path))
                 });
+                prepared.relationships.relations.retain(|_, relation| {
+                    prepared.relationships.endpoints.contains_key(&relation.from)
+                        || relation.to.as_ref().is_some_and(|to| {
+                            prepared.relationships.endpoints.contains_key(to)
+                        })
+                });
                 // A repeated inline stub would authorize the other endpoint
                 // independently. Require the already staged real endpoint so
                 // the absent-endpoint mutation exercises that exact boundary.

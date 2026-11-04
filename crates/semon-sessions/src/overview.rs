@@ -1687,10 +1687,10 @@ mod tests {
         for fixture in [&first, &second] {
             fixture.put("same", "idle", "current");
             let db = crate::events::store::qualified_event_writer_connection_for_test(
-            &EventCache::path(&fixture.source.options.cache),
-            &fixture.source.options.source,
-        )
-        .unwrap();
+                &EventCache::path(&fixture.source.options.cache),
+                &fixture.source.options.source,
+            )
+            .unwrap();
             db.execute("UPDATE session_overview SET summary=json_set(summary,'$.home.events[0].ask','result')", []).unwrap();
         }
         let encoded = crate::viewer::percent_encode(r#"["[\"first\",\"answer\"]"]"#);

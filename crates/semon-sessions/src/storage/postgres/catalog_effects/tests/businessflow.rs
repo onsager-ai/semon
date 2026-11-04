@@ -1283,6 +1283,34 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .open(&claude_parent)
         .unwrap();
     parent.write_all(parent_source_append.as_bytes()).unwrap();
+    drop(parent);
+    refresh(&withdraw_options);
+    let pre_reset_parent =
+        crate::session_catalog_identity(&withdraw_options, recent_machine, "one")
+            .unwrap()
+            .unwrap();
+    let pre_reset_parent_source = parent_source(&pre_reset_parent);
+    let mut pre_reset_cache =
+        EventCache::open_scoped(&withdraw_options.cache, &withdraw_options.source).unwrap();
+    let pre_reset_prepared = crate::model::prepare_sources(
+        &withdraw_options,
+        &mut pre_reset_cache,
+        &inputs,
+        1790812805000,
+    )
+    .unwrap();
+    let pre_reset_host = body_host(&withdraw_options, &pre_reset_prepared.rows);
+    drop(pre_reset_cache);
+    // Match PostgreSQL's independent original-custody reset before Facts
+    // advances the Current source again.
+    let parent_reset = claude_parent.with_extension("history-reset-oracle");
+    fs::copy(&claude_parent, &parent_reset).unwrap();
+    fs::rename(parent_reset, &claude_parent).unwrap();
+    refresh(&withdraw_options);
+    let mut parent = fs::OpenOptions::new()
+        .append(true)
+        .open(&claude_parent)
+        .unwrap();
     parent.write_all(parent_facts_append.as_bytes()).unwrap();
     drop(parent);
     let oracle_pid = options.claude_home.join("sessions/4242.json");
@@ -1319,8 +1347,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .expect("SQLite continued parent retained identity");
     assert_eq!(
         parent_source(&continued_parent_history),
-        continued_parent_source,
-        "SQLite History follows both verified parent continuations"
+        pre_reset_parent_source,
+        "SQLite History retains the exact appended pre-reset parent"
     );
     let composite_before_withdrawal =
         crate::session_catalog_identity(&withdraw_options, recent_machine, composite_key)
@@ -1357,6 +1385,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     .unwrap();
     let mut sqlite_host = body_host(&withdraw_options, &withdrawal_prepared.rows);
     sqlite_host.0.extend(body_host(&options, &expected.rows).0);
+    sqlite_host.0.extend(pre_reset_host.0);
     drop(withdrawal_cache);
     let parked = [
         (
@@ -1432,8 +1461,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     );
     assert_eq!(
         parent_source(&parent_history_after_withdrawal),
-        continued_parent_source,
-        "withdrawing other sources preserves the continued parent History"
+        pre_reset_parent_source,
+        "withdrawing other sources preserves the exact pre-reset parent History"
     );
     let sqlite_scoped = |scope: &str, limit: usize| {
         let mut items = Vec::new();
@@ -1472,8 +1501,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
     let sqlite_parent_exact: serde_json::Value =
         serde_json::from_slice(&sqlite_parent_exact.body).unwrap();
     assert_eq!(
-        sqlite_parent_exact["items"][0]["lifecycle"], "current",
-        "ordinary parent continuation keeps its Current display lifecycle in History"
+        sqlite_parent_exact["items"][0]["lifecycle"], "retained",
+        "the inode reset preserves the original parent lifecycle in History"
     );
     let sqlite_parent_transcript = crate::session_transcript_range_with_mode(
         &withdraw_options,
@@ -7200,7 +7229,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         &caught,
         |snapshot| {
             let owner = snapshot.owner("one")?.ok_or(StorageError::ScopeChanged)?;
-            assert!(!owner.original, "verified append selects composite History");
+            assert!(owner.original, "the inode reset preserves original History");
             assert!(owner.has_current, "reused key also has Current");
             crate::catalog::read_page_snapshot(
                 &options,
