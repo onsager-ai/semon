@@ -86,6 +86,7 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         &self,
         current: &CatalogRow,
         budget: &mut crate::overview::SummaryPublicationBudget,
+        authenticate_receipts: bool,
     ) -> Result<HistoryCompositionSnapshot, StorageError> {
         let owner = self.owner(&current.key)?;
         let history = owner.is_some();
@@ -107,6 +108,27 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         if snapshot.original {
             return Ok(snapshot);
         }
+        if budget
+            .charge(snapshot.previous.as_ref().map_or(0, String::len))
+            .is_err()
+        {
+            snapshot.unavailable = true;
+            return Ok(snapshot);
+        }
+        let Some(metadata) = snapshot.previous.as_ref() else {
+            return Ok(snapshot);
+        };
+        let row: CatalogRow =
+            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
+        if !authenticate_receipts
+            && !catalog::replaces_original(&row, current)
+            && row
+                .sources
+                .iter()
+                .all(|source| current.sources.iter().any(|now| now.path == source.path))
+        {
+            return Ok(snapshot);
+        }
         if snapshot.recipe_header.is_some() {
             let Some(slots) = self.bounded_recipe_slots(&current.key, history)? else {
                 snapshot.unavailable = true;
@@ -115,10 +137,7 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             snapshot.recipe_slots = slots;
         }
         if budget
-            .charge(
-                snapshot.previous.as_ref().map_or(0, String::len)
-                    + snapshot.recipe_slots.iter().map(String::len).sum::<usize>(),
-            )
+            .charge(snapshot.recipe_slots.iter().map(String::len).sum::<usize>())
             .is_err()
         {
             snapshot.unavailable = true;
@@ -134,11 +153,6 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
             )?
         };
         let binding = super::super::super::model_cache::binding(&mut tx)?;
-        let Some(metadata) = snapshot.previous.as_ref() else {
-            return Ok(snapshot);
-        };
-        let row: CatalogRow =
-            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
         if row.sources.len() > 64 {
             return Err(StorageError::Busy);
         }
@@ -187,7 +201,7 @@ impl VerifiedHistoryCompositionStore for History<'_, '_> {
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
         let row: CatalogRow =
             serde_json::from_str(composition.metadata).map_err(|_| StorageError::ScopeChanged)?;
-        let snapshot = self.composition_snapshot(&row, &mut budget)?;
+        let snapshot = self.composition_snapshot(&row, &mut budget, true)?;
         let mut tx = self.effects.tx.borrow_mut();
         let binding = super::super::super::model_cache::binding(&mut tx)?;
         let mut receipts = Vec::new();

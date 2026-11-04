@@ -315,6 +315,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         &self,
         current: &CatalogRow,
         budget: &mut crate::overview::SummaryPublicationBudget,
+        authenticate_receipts: bool,
     ) -> rusqlite::Result<crate::storage::catalog::HistoryCompositionSnapshot> {
         use crate::storage::catalog::HistoryCompositionSnapshot;
 
@@ -375,7 +376,6 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             .and_then(|bytes| i64::try_from(bytes).ok())
             .unwrap_or(i64::MAX);
         let sizes = [
-            previous_bytes.unwrap_or(0),
             header_bytes,
             if recipe_header_exists { slot_bytes } else { 0 },
             cwd_bytes,
@@ -399,6 +399,38 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             current_cwds: None,
             unavailable: false,
         };
+        let metadata_bytes = usize::try_from(previous_bytes.unwrap_or(0))
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if budget.charge(metadata_bytes).is_err() {
+            snapshot.unavailable = true;
+            return Ok(snapshot);
+        }
+        if previous_bytes.is_some() {
+            snapshot.previous = self.db.query_row(
+                &format!("SELECT metadata FROM {metadata_table} WHERE namespace=?1 AND session_key=?2"),
+                params![self.namespace, current.key],
+                |row| row.get(0),
+            ).optional()?;
+        }
+        let previous_row = snapshot
+            .previous
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        if snapshot.previous.is_some() && previous_row.is_none() {
+            snapshot.unavailable = true;
+            return Ok(snapshot);
+        }
+        if !authenticate_receipts
+            && previous_row.as_ref().is_none_or(|old| {
+                !crate::storage::catalog::replaces_original(old, current)
+                    && old
+                        .sources
+                        .iter()
+                        .all(|source| current.sources.iter().any(|now| now.path == source.path))
+            })
+        {
+            return Ok(snapshot);
+        }
         if slot_count > 64 || total_bytes.is_none_or(|bytes| budget.charge(bytes).is_err()) {
             snapshot.unavailable = true;
             return Ok(snapshot);
@@ -419,20 +451,6 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             None
         };
 
-        if previous_bytes.is_some() {
-            snapshot.previous = self.db.query_row(
-                &format!("SELECT metadata FROM {metadata_table} WHERE namespace=?1 AND session_key=?2"),
-                params![self.namespace, current.key],
-                |row| row.get(0),
-            ).optional()?;
-        }
-        let previous_row = snapshot
-            .previous
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
-        if snapshot.previous.is_some() && previous_row.is_none() {
-            snapshot.unavailable = true;
-        }
         if snapshot.recipe_header.is_some() {
             snapshot.recipe_slots =
                 <Self as crate::storage::catalog::CompositeHistoryStore>::recipe_slots(
@@ -457,10 +475,6 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             }
             if !snapshot.unavailable
                 && snapshot.recipe_header.is_some()
-                && previous_row
-                    .sources
-                    .iter()
-                    .any(|source| !current.sources.iter().any(|now| now.path == source.path))
                 && let Some(stream) = self.stream
             {
                 let Some(exact_owner_metadata) = snapshot.previous.as_deref() else {

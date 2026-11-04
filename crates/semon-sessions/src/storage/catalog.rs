@@ -235,10 +235,13 @@ pub(crate) trait CompositeHistoryStore {
 /// dynamic request budget. Other adapters keep their established publisher
 /// until their receipt contract is reviewed.
 pub(crate) trait VerifiedHistoryCompositionStore: CompositeHistoryStore {
+    /// Planning can use metadata alone when Current covers every prior source.
+    /// Composed-grant validation must authenticate all predecessor receipts.
     fn composition_snapshot(
         &self,
         current: &CatalogRow,
         budget: &mut crate::overview::SummaryPublicationBudget,
+        authenticate_receipts: bool,
     ) -> Result<HistoryCompositionSnapshot, Self::Error>;
     fn composed_verified(
         &self,
@@ -490,7 +493,7 @@ pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
 /// Shared source-revision classification for SQLite and PostgreSQL History.
 /// Same-file cursor advances update History. Additions, changed identities,
 /// role changes and shrink preserve independent original custody.
-fn replaces_original(old: &CatalogRow, current: &CatalogRow) -> bool {
+pub(crate) fn replaces_original(old: &CatalogRow, current: &CatalogRow) -> bool {
     if old.harness != current.harness {
         return true;
     }
@@ -861,7 +864,7 @@ fn history_snapshots<P: VerifiedHistoryCompositionStore>(
                 unavailable: false,
             }
         } else {
-            store.composition_snapshot(current, budget)?
+            store.composition_snapshot(current, budget, false)?
         };
         snapshots.push(snapshot);
     }
@@ -1544,6 +1547,7 @@ mod history_composition_tests {
             &self,
             _: &CatalogRow,
             _: &mut crate::overview::SummaryPublicationBudget,
+            _: bool,
         ) -> Result<HistoryCompositionSnapshot, Self::Error> {
             Ok(self.snapshot.borrow().clone())
         }
