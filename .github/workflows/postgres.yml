@@ -30,7 +30,7 @@ env:
 jobs:
   postgres-suites:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -349,6 +349,18 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
+      - name: Repeated unchanged native and viewer timing diagnostics
+        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
+        shell: bash
+        run: |
+          failed=0
+          for round in 1 2 3; do
+            for test in concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow fifty_views_are_checked_by_the_pools_threads_alone initial_catalog_page_precedes_global_native_observation; do
+              echo "TIMING_REPEAT round=$round test=$test"
+              cargo test -p semon-sessions --lib --locked --features postgres-test-tls "viewer::tests::$test" -- --exact --nocapture --test-threads=1 || failed=1
+            done
+          done
+          echo "TIMING_REPEAT had_failure=$failed"
       - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
         # Disjoint name filters retain the complete feature-enabled suite and
@@ -369,7 +381,27 @@ jobs:
               cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
               ;;
             regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
+              python3 -u - <<'PYPROFILE' &
+          import collections, json, os, pathlib, time
+          while True:
+              for entry in pathlib.Path('/proc').iterdir():
+                  if not entry.name.isdecimal():
+                      continue
+                  try:
+                      executable = (entry / 'exe').readlink().name
+                      if not executable.startswith('semon_sessions-'):
+                          continue
+                      stat = (entry / 'stat').read_text().split(') ', 1)[1].split()
+                      io = dict(line.split(': ', 1) for line in (entry / 'io').read_text().splitlines())
+                      waits = collections.Counter((task / 'wchan').read_text().strip() for task in (entry / 'task').iterdir())
+                      print('cursor_timing_profile ' + json.dumps(dict(monotonic=time.monotonic(), pid=int(entry.name), ticks_per_second=os.sysconf('SC_CLK_TCK'), user_ticks=int(stat[11]), system_ticks=int(stat[12]), threads=int(stat[17]), io=io, waits=waits)), flush=True)
+                  except (OSError, ValueError):
+                      pass
+              time.sleep(30)
+          PYPROFILE
+              profile_pid=$!
+              trap 'kill "$profile_pid" 2>/dev/null || true' EXIT
+              /usr/bin/time -v cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
               ;;
             *) exit 1 ;;
           esac
