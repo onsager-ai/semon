@@ -75,13 +75,6 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
     ));
     let source = fixture_host_source();
     let mut cache = crate::events::EventCache::open(&cache_path, &source).unwrap();
-    let oracle_source = if data.oracle.line_count == 0 {
-        fixture_host_source()
-    } else {
-        crate::storage::postgres::tree_checkpoint::tests::fixture_host_source()
-    };
-    let mut oracle_cache =
-        crate::events::EventCache::open(&data.root.join("index.json"), &oracle_source).unwrap();
     for (path, _, index) in &mut data.sources {
         let physical = path.strip_suffix("\0🦀").unwrap();
         let scanned = crate::events::scan_file(

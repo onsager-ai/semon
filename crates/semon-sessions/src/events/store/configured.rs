@@ -2444,7 +2444,6 @@ mod tests {
                 offset,
                 hashes: vec![[marker; 32]; 1025],
                 resume: None,
-
             };
             let mut calls = crate::native_handoff::Index::default();
             let value = serde_json::json!({"message":{"content":[{"type":"tool_use","id":namespace,"name":"Bash","input":{"command":"codex exec"}}]}});

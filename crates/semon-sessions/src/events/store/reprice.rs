@@ -1753,7 +1753,6 @@ mod tests {
             offset: old.offset,
             hashes: vec![[7; 32]],
             resume: None,
-
         };
         for namespace in ["a", "b"] {
             bind_fixture(&db, namespace);

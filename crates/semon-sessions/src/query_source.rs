@@ -734,7 +734,7 @@ impl Records<'_> {
                     .insert(0);
             }
             self.recheck(path, &file, &before)?;
-        } else if (!unchanged && !proof.ledger.resumes(&before, &mut file))
+        } else if (!unchanged && !proof.ledger.matches_prefix(&before, &mut file))
             || Stat::from_metadata(&file.metadata()?)? != before
         {
             return Err(unavailable());
@@ -993,7 +993,7 @@ impl Records<'_> {
         let unchanged = before.changed_ns.is_some()
             && (same_physical_generation(&proof.ledger, &before)
                 || checked.get(path) == Some(&before));
-        if !qualified && !unchanged && !proof.ledger.resumes(&before, &mut file) {
+        if !qualified && !unchanged && !proof.ledger.matches_prefix(&before, &mut file) {
             return Err(unavailable());
         }
         let first = usize::try_from(offset / crate::source_chunks::SIZE as u64)
@@ -1039,7 +1039,7 @@ impl Records<'_> {
         if Stat::from_metadata(&file.metadata()?)? != before
             || (!qualified
                 && before.changed_ns.is_none()
-                && !proof.ledger.resumes(&before, &mut file))
+                && !proof.ledger.matches_prefix(&before, &mut file))
         {
             return Err(unavailable());
         }
@@ -2006,7 +2006,7 @@ mod tests {
         assert!(
             !proof
                 .ledger
-                .resumes(&after, &mut LogFile::open(&fixture.path).unwrap())
+                .matches_prefix(&after, &mut LogFile::open(&fixture.path).unwrap())
         );
         assert!(
             records.finish().is_err(),

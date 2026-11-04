@@ -159,19 +159,9 @@ pub(crate) fn capture_append(
     offset: u64,
     from: u64,
     old: &Chunks,
-    expected: [u8; 32],
 ) -> io::Result<Captured> {
-    if from > offset || !old.valid(from) {
+    if from >= offset || !old.valid(from) {
         return Err(unavailable());
-    }
-    if offset == from {
-        // The caller keeps its previous tail digest when no records commit.
-        return Ok(Captured {
-            prefix: expected,
-            tail: [0; 32],
-            parsed: Sha256::digest([]).into(),
-            chunks: old.clone(),
-        });
     }
     let mut state = old.resume.clone().ok_or_else(unavailable)?;
     let boundary = from / SIZE as u64 * SIZE as u64;
@@ -223,9 +213,8 @@ pub(crate) fn capture_append(
     #[cfg(test)]
     {
         READ_BYTES.with(|count| count.set(count.get() + width as u64));
-        crate::events::SOURCE_HASHED_BYTES.with(|count| {
-            count.set(count.get() + last.len() as u64 + width as u64)
-        });
+        crate::events::SOURCE_HASHED_BYTES
+            .with(|count| count.set(count.get() + last.len() as u64 + width as u64));
     }
     Ok(Captured {
         prefix,
@@ -319,15 +308,9 @@ mod tests {
             io::ErrorKind::Other,
             io::ErrorKind::InvalidData,
         ] {
-            let error = capture_append(
-                &mut FailedReader(kind),
-                8,
-                4,
-                &captured.chunks,
-                captured.prefix,
-            )
-            .err()
-            .unwrap();
+            let error = capture_append(&mut FailedReader(kind), 8, 4, &captured.chunks)
+                .err()
+                .unwrap();
             assert_eq!(error.kind(), kind);
             assert!(
                 error
@@ -339,7 +322,7 @@ mod tests {
         }
         let mut stale = captured.chunks;
         stale.resume = None;
-        let error = capture_append(&mut Cursor::new(original), 8, 4, &stale, captured.prefix)
+        let error = capture_append(&mut Cursor::new(original), 8, 4, &stale)
             .err()
             .unwrap();
         assert_eq!(

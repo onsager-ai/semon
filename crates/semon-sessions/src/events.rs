@@ -24,6 +24,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
+#[cfg(test)]
+pub(crate) mod cursor_tests;
 pub(crate) mod file_rows;
 pub(crate) mod native_aux;
 pub(crate) mod native_commit;
@@ -33,8 +35,6 @@ pub(crate) mod native_rows;
 pub(crate) mod reported_rows;
 pub(crate) mod store;
 pub(crate) mod tree_rows;
-#[cfg(test)]
-pub(crate) mod cursor_tests;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 
@@ -967,6 +967,16 @@ impl Ledger {
             && self.stat.ino == stat.ino
             && stat.size >= self.stat.size
             && stat.size >= self.offset
+    }
+
+    /// Selected immutable reads still authenticate their captured byte prefix.
+    /// This check is independent of native ingestion's cursor policy.
+    pub(crate) fn matches_prefix(&self, stat: &Stat, file: &mut LogFile) -> bool {
+        self.stat.dev == stat.dev
+            && self.stat.ino == stat.ino
+            && self.offset <= stat.size
+            && consumed_hashes(file, self.offset)
+                .is_ok_and(|(prefix, tail)| prefix == self.prefix && tail == self.tail)
     }
 }
 
@@ -4173,13 +4183,27 @@ fn scan_file_with_mode(
             .take()
             .expect("parser tracks dirty rows");
         let started = cache.scan_measurements.start();
-        let captured = if append {
+        let captured = if append && offset == from {
+            let prior = recorded.as_ref().expect("cursor ledger exists");
+            crate::source_chunks::Captured {
+                prefix: prior.prefix,
+                tail: prior.tail,
+                parsed: Sha256::digest([]).into(),
+                chunks: writable
+                    .source_chunks
+                    .as_deref()
+                    .expect("cursor chunks exist")
+                    .clone(),
+            }
+        } else if append {
             crate::source_chunks::capture_append(
                 &mut file,
                 offset,
                 from,
-                writable.source_chunks.as_ref().expect("cursor chunks exist"),
-                recorded.as_ref().expect("cursor ledger exists").prefix,
+                writable
+                    .source_chunks
+                    .as_ref()
+                    .expect("cursor chunks exist"),
             )?
         } else {
             crate::source_chunks::capture(&mut file, offset, from)?
@@ -4195,12 +4219,7 @@ fn scan_file_with_mode(
             force_replace = true;
             continue;
         }
-        let prefix = captured.prefix;
-        let tail = if append && offset == from {
-            recorded.as_ref().expect("cursor ledger exists").tail
-        } else {
-            captured.tail
-        };
+        let (prefix, tail) = (captured.prefix, captured.tail);
         let chunks = captured.chunks;
         writable.native_path = path.to_str().is_none().then(|| path.to_owned());
         if let Some(header) = header_bytes {
@@ -4263,10 +4282,9 @@ fn scan_file_with_mode(
             .marker_index
             .as_ref()
             .and_then(|_| cache.scan_measurements.start());
-        let invalid_markers = writable
-            .marker_index
-            .as_ref()
-            .is_some_and(|markers| !markers.valid(&ledger) || (!append && markers.verify(&mut file).is_err()));
+        let invalid_markers = writable.marker_index.as_ref().is_some_and(|markers| {
+            !markers.valid(&ledger) || (!append && markers.verify(&mut file).is_err())
+        });
         cache.scan_measurements.record("marker_verify", started, 1);
         if invalid_markers {
             if last {
@@ -10786,7 +10804,11 @@ mod tests {
         .unwrap();
         assert_eq!(ledger_trace(), ["append"]);
         assert_eq!(stored(&cache_path, &log), indexed);
-        assert_ne!(indexed, cold(&log), "same-size rewrite detection is not promised");
+        assert_ne!(
+            indexed,
+            cold(&log),
+            "same-size rewrite detection is not promised"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -522,7 +522,8 @@ fn pg_native_cursor_newlines_anomalies_shrink_and_inode_restart() {
     let (pool, _) = tests::fixture(|_| {});
     let namespace = tests::ns("cursor520");
     crate::events::cursor_tests::lifecycle(&root, || {
-        EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default()).unwrap()
+        EventCache::open_pg_native(pool.clone(), namespace.clone(), PgCancellation::default())
+            .unwrap()
     });
     std::fs::remove_dir_all(root).unwrap();
 }

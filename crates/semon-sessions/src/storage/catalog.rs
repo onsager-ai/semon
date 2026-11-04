@@ -492,10 +492,7 @@ pub(crate) fn preserve_rows<P: OriginalHistoryStore>(
 /// Shared source-revision classification for SQLite and PostgreSQL History.
 /// Same-file cursor advances update History. Additions, changed identities,
 /// role changes and shrink preserve independent original custody.
-fn replaces_original(
-    old: &CatalogRow,
-    current: &CatalogRow,
-) -> bool {
+fn replaces_original(old: &CatalogRow, current: &CatalogRow) -> bool {
     if old.harness != current.harness {
         return true;
     }

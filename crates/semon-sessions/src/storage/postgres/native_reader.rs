@@ -407,7 +407,6 @@ pub(super) fn file(
         offset: ledger.offset,
         hashes,
         resume: header.resume,
-
     };
     if !chunks.valid(ledger.offset) || chunks.fingerprint() != header.fingerprint {
         return Err(StorageError::ScopeChanged);
