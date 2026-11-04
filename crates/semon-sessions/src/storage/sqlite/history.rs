@@ -457,9 +457,10 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             }
             if !snapshot.unavailable
                 && snapshot.recipe_header.is_some()
-                && previous_row.sources.iter().any(|source| {
-                    !current.sources.iter().any(|now| now.path == source.path)
-                })
+                && previous_row
+                    .sources
+                    .iter()
+                    .any(|source| !current.sources.iter().any(|now| now.path == source.path))
                 && let Some(stream) = self.stream
             {
                 let Some(exact_owner_metadata) = snapshot.previous.as_deref() else {

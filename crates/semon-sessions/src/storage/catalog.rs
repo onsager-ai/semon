@@ -1592,7 +1592,11 @@ mod history_composition_tests {
         assert_eq!(store.effects.get(), 1, "History follows authorized Current");
         store.original.set(true);
         apply_prepared_history_composition(&store, &plan, &captures).unwrap();
-        assert_eq!(store.effects.get(), 1, "Original custody remains independent");
+        assert_eq!(
+            store.effects.get(),
+            1,
+            "Original custody remains independent"
+        );
     }
 
     #[test]
