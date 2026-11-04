@@ -354,7 +354,7 @@ impl IndexStore for ConfiguredIndex {
     }
     fn semantic_rejection(&self) -> Option<&'static str> {
         if self.semantic.is_some() {
-            None
+            self.native.catalog_rejection()
         } else {
             Some("namespace_upgrade_pending")
         }

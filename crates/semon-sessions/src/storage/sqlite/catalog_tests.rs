@@ -3091,7 +3091,7 @@ fn retained_history_list_keeps_indexed_fields_and_positions_across_append() {
     assert_eq!(retained_local.status, 409);
     let retained_local: Value = serde_json::from_slice(&retained_local.body).unwrap();
     assert_eq!(retained_local["fence_reason"], "local_source_revision");
-    assert_eq!(retained_local["local_revision_reason"], "size_grew");
+    assert_eq!(retained_local["local_revision_reason"], "identity");
     assert!(retained_local.get("entries").is_none());
 
     let retained_transcript = crate::session_transcript_range(

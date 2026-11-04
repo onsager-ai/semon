@@ -1287,6 +1287,7 @@ pub(crate) struct Writer {
     owner: Option<NativeOwnership>,
     connection: Connection,
     intents: BTreeMap<String, Intent>,
+    catalog_rejection: Option<&'static str>,
 }
 
 impl Writer {
@@ -1348,12 +1349,13 @@ impl Writer {
     }
 
     pub(crate) fn publish_catalog(
-        &self,
+        &mut self,
         publication: &crate::slot_projection::Publication<'_>,
         expected: Option<&str>,
         claims: Option<&[(String, Option<i64>)]>,
         closed: bool,
     ) -> Result<Option<(Outcome, Option<String>)>, StoreError> {
+        self.catalog_rejection = None;
         let connection = connection(&self.config).map_err(StoreError::Configured)?;
         connection
             .create_scalar_function(
@@ -1397,6 +1399,7 @@ impl Writer {
             None,
             super::CatalogWriter::Auto,
         )?;
+        self.catalog_rejection = store.semantic_rejection;
         Ok(
             if closed && store.semantic_rejection == Some("closed_scope") {
                 None
@@ -1404,6 +1407,10 @@ impl Writer {
                 Some(result)
             },
         )
+    }
+
+    pub(crate) fn catalog_rejection(&self) -> Option<&'static str> {
+        self.catalog_rejection
     }
 
     pub(crate) fn relocate_codex(
@@ -1639,6 +1646,7 @@ impl Writer {
             owner: None,
             connection: connection(config)?,
             intents: BTreeMap::new(),
+            catalog_rejection: None,
         })
     }
 
@@ -1648,6 +1656,7 @@ impl Writer {
             connection: connection(&owner.config)?,
             owner: Some(owner),
             intents: BTreeMap::new(),
+            catalog_rejection: None,
         })
     }
 

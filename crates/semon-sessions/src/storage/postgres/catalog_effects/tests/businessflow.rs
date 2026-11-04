@@ -4346,6 +4346,51 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "selected edge recipe must not use the parent's retained History ref"
         );
     }
+    // The ordinary cursor append above uses Current for History. Give the
+    // following physical History corruption checks an independent original
+    // by replacing the inode, without changing any native record bytes.
+    let reset_path = path.with_extension("history-reset");
+    fs::copy(&path, &reset_path).unwrap();
+    fs::rename(reset_path, &path).unwrap();
+    resumed
+        .ingest(&format!("{:064x}", 129), &path, "claude")
+        .unwrap();
+    let reset =
+        crate::model::prepare_sources(&options, &mut resumed, &inputs, 1790812807000).unwrap();
+    let reset_runtime = crate::native_evidence::query_runtime_generation(&options).unwrap();
+    resumed
+        .begin_semantic_stage(&paths, &reset_runtime)
+        .unwrap();
+    let continued_generation = loop {
+        let batch = resumed.semantic_batch(64).unwrap().unwrap();
+        let model = resumed
+            .prepare_semantic_model_batch(
+                &options,
+                &stage_inputs(&options, &batch),
+                &batch,
+                1790812807000,
+            )
+            .unwrap()
+            .expect("Postgres inode replacement batch is recorded");
+        if batch.phase == crate::model::relation_stage::Phase::Publication {
+            let ack = resumed
+                .publish_semantic_catalog(&batch, model.prepared())
+                .unwrap();
+            resumed.finish_semantic_stage(batch.epoch).unwrap();
+            break ack.1.unwrap();
+        }
+    };
+    let next_store = super::super::snapshot::query::QueryCatalog {
+        captured: false,
+        pool: pool.clone(),
+        namespace: namespace.clone(),
+        control: control.clone(),
+        generation: continued_generation.clone(),
+        options: options.clone(),
+    };
+    let mut reset_host = body_host(&options, &reset.rows);
+    reset_host.0.extend(next_host.0.iter().cloned());
+    let next_host = reset_host;
     let (
         history_harness,
         current_harness,
@@ -4660,8 +4705,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         )
         .expect("restoring same-harness runtime recovers the retained body");
     assert_eq!(
-        recovered_history_body, expected_bodies[&appended_key]["body"],
-        "restored runtime recovers the original retained source body"
+        recovered_history_body, append_history_body,
+        "restored runtime recovers the exact appended body retained before inode replacement"
     );
     let successor_current_body = super::super::snapshot::with_admitted_snapshot(
         &pool,

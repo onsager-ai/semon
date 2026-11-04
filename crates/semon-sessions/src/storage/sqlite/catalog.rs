@@ -482,7 +482,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
                         .3
                         .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
                         .scope(row, &cwds)?;
-                    return binding.witness(&scoped).map(Some);
+                    let current = binding.witness(&scoped)?;
+                    let captured = observations.runtime_for(row).ok_or_else(|| {
+                        io::Error::other(crate::storage::StorageError::ScopeChanged)
+                    })?;
+                    if current != captured {
+                        return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+                    }
+                    return Ok(Some(captured));
                 }
                 let captured = observations
                     .runtime_for(row)
