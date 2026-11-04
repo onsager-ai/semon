@@ -9,15 +9,17 @@ use std::io::Write;
 
 pub(super) fn replace_source(options: &Options, row: &CatalogRow, operation: &str) -> String {
     let path = &row.sources[0].path;
-    // Original-custody cases require a non-prefix replacement. A verified
-    // append now continues History (2026-11-04 retained-native-projections).
+    // Original-custody cases require a real replacement. Plain cursor tailing
+    // detects the inode change; same-inode nonshrinking rewrites are not detected.
     let prior = fs::read(path).unwrap();
-    let mut replacement = fs::File::create(path).unwrap();
+    let replacement_path = path.with_extension("replacement");
+    let mut replacement = fs::File::create(&replacement_path).unwrap();
     writeln!(replacement, "{}", serde_json::json!({"type":"custom-title","customTitle":operation,"sessionId":row.native_ids[0]})).unwrap();
     replacement.write_all(&prior).unwrap();
     drop(replacement);
-    writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{}",
+    writeln!(fs::OpenOptions::new().append(true).open(&replacement_path).unwrap(), "{}",
         serde_json::json!({"type":"user","sessionId":row.native_ids[0],"uuid":operation,"timestamp":"2026-10-01T00:01:00Z","cwd":"/synthetic/project","message":{"role":"user","content":operation}})).unwrap();
+    fs::rename(&replacement_path, path).unwrap();
     let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
     cache
         .ingest(

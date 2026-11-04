@@ -1907,6 +1907,38 @@ mod tests {
     }
 
     #[test]
+    fn native_cursor_snapshot_state_tamper_is_refused() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        proof_catalog_tables(&connection);
+        let path = "/fixture/cursor.jsonl";
+        let captured =
+            crate::source_chunks::capture(&mut std::io::Cursor::new(b"{}\n"), 3, 0).unwrap();
+        let ledger = Ledger {
+            stat: Stat {
+                dev: 1,
+                ino: 2,
+                size: 3,
+                modified_ns: 3,
+                changed_ns: Some(4),
+            },
+            offset: 3,
+            prefix: captured.prefix,
+            tail: captured.tail,
+        };
+        let transaction = connection.transaction().unwrap();
+        write(&transaction, path, &ledger, Some(&captured.chunks)).unwrap();
+        transaction.commit().unwrap();
+        assert!(read(&connection, path, &ledger).unwrap().is_some());
+        connection
+            .execute(
+                "UPDATE main.meta SET value=json_set(value,'$.resume.words[0]',0) WHERE namespace=semon_namespace() AND key=?1",
+                [format!("{}header", prefix(path))],
+            )
+            .unwrap();
+        assert!(read(&connection, path, &ledger).unwrap().is_none());
+    }
+
+    #[test]
     fn paged_proofs_round_trip_and_refuse_corruption_or_a_different_ledger() {
         let mut connection = Connection::open_in_memory().unwrap();
         proof_catalog_tables(&connection);

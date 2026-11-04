@@ -92,8 +92,11 @@ fallback. Broad fixture qualification remains subject to exact-revision CI.
 Ordinary host scans reconcile a ledger CAS conflict within the existing three
 attempt limit, loading the winner's committed rows before parsing again. Each
 attempt has an immutable operation identity; explicit ingest retains its caller's
-exact replay identity. A rejected append continuation requires full prefix
-verification before the existing ledger can be used again.
+exact replay identity. Native ingestion resumes from the committed newline byte
+offset when path, device and inode match and the file has not shrunk. Shrink or
+identity change resets the per-file projection and rereads from zero. No prefix
+hash or receiver append evidence gates resumption. Same-size rewrites are outside
+this cursor contract; immutable selected reads retain their independent checks.
 
 Current SQLite remains a supported alternative backend. External Claude/Codex Raw
 formats and their existing event parsers remain supported independently of the
@@ -110,7 +113,7 @@ operations retain namespace, epoch, generation/CAS and resource checks.
 | Operation | Required outcome |
 | --- | --- |
 | Admit read snapshot | Pin namespace, epoch, Catalog/source vectors, recipes and proofs; release leases on every exit. |
-| Commit parsed source batch | Event families, consumed ledger, proof generation and continuation commit atomically against the expected ledger. |
+| Commit parsed source batch | Event families, newline cursor ledger and immutable selected-read snapshot commit atomically against the expected ledger. |
 | Claim source work | CAS the durable revision and claim generation; stale workers cannot publish, complete or ACK replacement work. |
 | Publish Catalog | Source witnesses, claims, Catalog/recipes, retained custody and outbox commit together; failed CAS publishes nothing. |
 | Journal Raw mutation | Persist intent before bytes, qualify durable bytes before completion, and retain exact OpID reconciliation after a lost reply. |

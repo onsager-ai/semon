@@ -4114,13 +4114,11 @@ fn staged_native_cursor_append_survives_index_restart_and_history_publication() 
             .collect::<Vec<_>>();
         assert_eq!(texts, ["native root", "first append", "second append"]);
     }
-    // A complete Sources producer can exceed the bounded runtime capture.
-    // Cursor appends advance History independently of runtime capture.
-    let mut inputs = vec![crate::native_evidence::catalog_input(&path, &home.options).unwrap()];
+    // The complete Catalog producer can exceed the bounded runtime capture.
+    // Scoped Sources preparation retains its separate 64-source input limit.
     for number in 0..64 {
         let key = format!("independent-{number}");
-        let other = home.top(&key, &[human(&key, ts(0, 0), "independent native source")]);
-        inputs.push(crate::native_evidence::catalog_input(&other, &home.options).unwrap());
+        home.top(&key, &[human(&key, ts(0, 0), "independent native source")]);
     }
     writeln!(
         fs::OpenOptions::new().append(true).open(&path).unwrap(),
@@ -4128,22 +4126,17 @@ fn staged_native_cursor_append_survives_index_restart_and_history_publication() 
         human("root", ts(0, 3), "large-cohort append")
     )
     .unwrap();
-    let full = prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
-    assert_eq!(full.rows.len(), 65);
-    assert!(full.presentation_observations().is_none());
-    assert!(
-        cache
-            .publish_catalog_projection_fenced(
-                &crate::slot_projection::Publication {
-                    rows: &full.rows,
-                    transcripts: Some(&full.transcripts),
-                    observations: full.presentation_observations(),
-                },
-                full.base_generation.as_deref(),
-            )
-            .unwrap()
-            .is_some()
-    );
+    capture_observed_catalog_rows();
+    let (_, generation) = observe_catalog_fenced(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    assert!(generation.is_some());
+    assert_eq!(take_observed_catalog_rows().unwrap().len(), 65);
     let history = crate::session_catalog_history_identity(&home.options, "fixture", "root")
         .unwrap()
         .unwrap();
