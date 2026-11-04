@@ -973,19 +973,6 @@ impl IndexStore for NativeIndex {
         measurements.record("relocation_candidate", started, 1);
         Ok(result.then_some(old))
     }
-    fn append_evidence(
-        &self,
-        path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        self.pool
-            .transaction(
-                &self.namespace,
-                TxnKind::ReadSnapshot,
-                &self.control,
-                |tx| super::model_cache::append_evidence(tx, path),
-            )
-            .map_err(err)
-    }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         self.pool.transaction(&self.namespace, TxnKind::ReadSnapshot, &self.control, |tx| {
             let Some(generation) = super::model_cache::generation(tx)? else { return Ok(false); };

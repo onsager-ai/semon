@@ -1607,14 +1607,6 @@ impl Writer {
         Ok(Outcome::Written)
     }
 
-    pub(crate) fn append_evidence(
-        &self,
-        path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StorageError> {
-        let snapshot = self.snapshot()?;
-        super::read_append_evidence(&snapshot, path).map_err(failed)
-    }
-
     pub(crate) fn session_descriptions(
         &self,
         requests: &[SessionDescriptionRequest],

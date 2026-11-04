@@ -2390,13 +2390,6 @@ impl IndexStore for SqliteStore {
         relocation::reuse(self, path, stat, id, file, measurements, &writer)
     }
 
-    fn append_evidence(
-        &self,
-        path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        read_append_evidence(&self.connection, path).map_err(failure)
-    }
-
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;

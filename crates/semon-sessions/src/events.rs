@@ -114,6 +114,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v28: source-qualified code-mode output/terminal attribution and direct formatter
 /// outcomes; event-state envelopes preserve bounded selected output evidence.
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
+/// v30: cursor tailing; chunk headers no longer carry Catalog continuation proofs.
 pub(crate) const CACHE_VERSION: u32 = 30;
 
 /// The four token categories the model serves for an exact model id.
@@ -1245,10 +1246,6 @@ pub(crate) trait IndexStore: Send {
         file: &mut LogFile,
         measurements: &mut crate::native_timing::Measurements,
     ) -> Result<Option<String>, StoreError>;
-    fn append_evidence(
-        &self,
-        path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError>;
     fn qualified_catalog(&self) -> Result<bool, StoreError>;
     fn catalog_component_paths(
         &self,
@@ -4043,7 +4040,15 @@ fn scan_file_with_mode(
             }
             // The store holds it as it is now: nothing waits to be written.
             cache.unpersisted.remove(&key);
-
+            cache.files.insert(
+                key,
+                CachedFile {
+                    ledger: ledger.clone(),
+                    index: Some(Arc::clone(index)),
+                },
+            );
+            return Ok(Arc::clone(index));
+        }
         let from = match (&recorded, &base) {
             (Some(ledger), Some(_)) => ledger.offset,
             _ => 0,

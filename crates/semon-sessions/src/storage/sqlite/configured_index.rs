@@ -300,14 +300,6 @@ impl IndexStore for ConfiguredIndex {
         self.native
             .relocate_codex(path, stat, id, file, measurements)
     }
-    fn append_evidence(
-        &self,
-        path: &str,
-    ) -> Result<Option<crate::source_change::AppendEvidence>, StoreError> {
-        self.native
-            .append_evidence(path)
-            .map_err(StoreError::Configured)
-    }
     fn qualified_catalog(&self) -> Result<bool, StoreError> {
         self.native.qualified_catalog()
     }
