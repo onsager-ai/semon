@@ -3683,11 +3683,9 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         &row.key,
                         &reference,
                     );
-                    let parked_claude = row.harness == "claude"
-                        && (source.path == claude_agent
-                            || source.path == claude_agent191
-                            || source.path == composite_b_path);
-                    if !source.path.exists() && (row.harness == "copilot" || parked_claude) {
+                    let parked_agent = row.harness == "claude"
+                        && (source.path == claude_agent || source.path == claude_agent191);
+                    if !source.path.exists() && (row.harness == "copilot" || parked_agent) {
                         // The fixture's host independently retained these
                         // bytes outside the input roots. Source cannot certify
                         // a vanished local carrier.
