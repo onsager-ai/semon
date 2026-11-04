@@ -7341,7 +7341,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         namespace: namespace.clone(),
         control: control.clone(),
         generation: caught.clone(),
-        options: options.clone(),
+        options: facts_options.clone(),
     };
     // This shared parity host also serves PostgreSQL's independently captured
     // continued and reset sources; SQLite clone identities cannot authorize them.
