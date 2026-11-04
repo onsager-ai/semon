@@ -1225,6 +1225,10 @@ impl ViewerCore {
                 }
             };
             work_guards.push(work_guard);
+            if !crate::storage::catalog_page_ready(view.options()).unwrap_or(false) {
+                unavailable = true;
+                continue;
+            }
             let reply = crate::session_bookmark(
                 view.options(),
                 source,
@@ -1691,7 +1695,13 @@ impl ViewerCore {
             Ok(selected)
         };
         let mut selected = None;
+        let mut selected_limit = views.len();
         for (index, (key, view)) in views.iter().enumerate() {
+            // Later received copies cannot replace an earlier qualified owner,
+            // nor make its control destination depend on the copy's readiness.
+            if index >= self.droppable() && selected.is_some() {
+                continue;
+            }
             if view.catalog_observation_pending() {
                 return Ok(None);
             }
@@ -1705,6 +1715,7 @@ impl ViewerCore {
                         }
                     } else {
                         selected = Some((key.clone(), labels[index].clone()));
+                        selected_limit = index + 1;
                     }
                 }
                 Ok(None) => {}
@@ -1722,7 +1733,8 @@ impl ViewerCore {
                 let source = if key.is_empty() { "local" } else { key };
                 match lookup(view, source, own) {
                     Ok(Some(_)) if selected.is_none() => {
-                        selected = Some((key.clone(), label.to_owned()))
+                        selected = Some((key.clone(), label.to_owned()));
+                        selected_limit = index + 1;
                     }
                     Ok(Some(_)) | Err(_) => return Ok(None),
                     Ok(None) => {}
@@ -1732,6 +1744,7 @@ impl ViewerCore {
         // A publication/audit that starts during lookup cannot lend ownership.
         if views
             .iter()
+            .take(selected_limit.max(self.droppable()).min(views.len()))
             .any(|(_, view)| view.catalog_observation_pending())
         {
             return Ok(None);
