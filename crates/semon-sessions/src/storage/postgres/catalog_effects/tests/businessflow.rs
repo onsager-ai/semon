@@ -1492,6 +1492,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         }
     };
     let sqlite_retained = sqlite_scoped("scope=retained_history&", 50);
+    let sqlite_retained_parent_search = sqlite_scoped("scope=retained_history&q=one&", 50);
     let sqlite_parent_exact = crate::catalog::session_catalog_page(
         &withdraw_options,
         recent_machine,
@@ -3682,9 +3683,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         &row.key,
                         &reference,
                     );
-                    let parked_agent = row.harness == "claude"
-                        && (source.path == claude_agent || source.path == claude_agent191);
-                    if !source.path.exists() && (row.harness == "copilot" || parked_agent) {
+                    let parked_claude = row.harness == "claude"
+                        && (source.path == claude_agent
+                            || source.path == claude_agent191
+                            || source.path == composite_b_path);
+                    if !source.path.exists() && (row.harness == "copilot" || parked_claude) {
                         // The fixture's host independently retained these
                         // bytes outside the input roots. Source cannot certify
                         // a vanished local carrier.
@@ -7379,7 +7382,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .iter()
             .map(stable)
             .collect::<Vec<_>>(),
-        sqlite_scoped("scope=retained_history&q=one&", 50)
+        sqlite_retained_parent_search
             .iter()
             .map(stable)
             .collect::<Vec<_>>(),

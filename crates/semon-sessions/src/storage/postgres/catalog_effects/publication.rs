@@ -138,6 +138,62 @@ fn retirement_plan(
         .collect())
 }
 
+/// A leaving Current owner may already have an older original History owner.
+/// Its search fields and posting time must follow that exact retained header.
+fn retired_search(
+    tx: &mut PgTxn<'_>,
+    generation: &str,
+    previous: &str,
+    digests: &[Vec<u8>],
+) -> Result<(), StorageError> {
+    let ns = tx.namespace.as_str().as_bytes().to_vec();
+    for digests in digests.chunks(64) {
+        tx.check()?;
+        let keys = tx.driver.query("SELECT key_digest,session_key FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=ANY($3::bytea[]) ORDER BY key_digest", &[&ns, &previous.as_bytes(), &digests]).map_err(sqlstate::error)?;
+        if keys.len() != digests.len() {
+            return Err(StorageError::ScopeChanged);
+        }
+        let store = super::history::History {
+            effects: Effects {
+                tx: RefCell::new(&mut *tx),
+                generation,
+            },
+            previous,
+        };
+        let mut remaining = MAX;
+        let rows = keys
+            .iter()
+            .map(|row| {
+                let key = row.get::<_, Vec<u8>>(1);
+                if digest(&key) != row.get::<_, Vec<u8>>(0) {
+                    return Err(StorageError::ScopeChanged);
+                }
+                let key = String::from_utf8(key).map_err(|_| StorageError::ScopeChanged)?;
+                store.selected_row(&key, &mut remaining)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let keys = rows.iter().map(|row| row.key.clone()).collect::<Vec<_>>();
+        let scoped = rows
+            .iter()
+            .map(|row| crate::catalog_search::ScopedCatalogRow {
+                row,
+                scopes: crate::catalog_search::SearchScopeEligibility {
+                    current: false,
+                    retained_history: true,
+                },
+            })
+            .collect::<Vec<_>>();
+        crate::catalog_search::stage_scoped_rows_port(
+            &store.effects,
+            &keys,
+            &scoped,
+            64,
+            |_, _| {},
+        )?;
+    }
+    Ok(())
+}
+
 /// A new destination operation over an already applied, source-authorized
 /// snapshot. Original producer receipts remain immutable; no claims are ACKed
 /// and no live source lease or unfinished producer stage is synthesized.
@@ -496,7 +552,7 @@ pub(in crate::storage::postgres) fn publish(
         super::carry::unmentioned(tx, &generation, previous, &mentioned, &claimed)?;
         #[cfg(test)]
         eprintln!("PG_PUBLISH_STAGE carry_retained_search");
-        super::carry::retained_search(tx, &generation, previous, &leaving)?;
+        retired_search(tx, &generation, previous, &leaving)?;
         // Staged counts predate the carried owners' memberships; the
         // unadmitted successor's aggregate is rebuilt once, as withdrawal does.
         use crate::storage::catalog::SearchPublicationStore;
