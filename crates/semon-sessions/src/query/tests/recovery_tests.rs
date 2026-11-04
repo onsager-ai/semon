@@ -143,16 +143,28 @@ fn publish_direct(home: &Home) {
     inputs.dedup();
     let prepared = crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
     let generation = cache.session_catalog_generation();
-    cache
-        .publish_catalog_projection(
+    let mut published = false;
+    for _ in 0..128 {
+        let result = cache.publish_catalog_projection_fenced(
             &crate::slot_projection::Publication {
                 rows: &prepared.rows,
                 transcripts: Some(&prepared.transcripts),
                 observations: None,
             },
             generation.as_deref(),
-        )
-        .unwrap();
+        );
+        match result {
+            Ok(Some(_)) => {
+                published = true;
+                break;
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && cache.semantic_rejection().is_none() => {}
+            result => panic!("direct fixture publication: {result:?}"),
+        }
+    }
+    assert!(published, "direct fixture custody must converge");
     let binding = cache.query_runtime_binding().unwrap().unwrap();
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(

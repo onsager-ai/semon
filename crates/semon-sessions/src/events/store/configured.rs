@@ -11893,13 +11893,16 @@ mod tests {
                 // authored endpoints so the other side must resolve from the
                 // already committed Stage, as this cross-page fixture intends.
                 prepared.relationships.endpoints.retain(|_, endpoint| {
-                    endpoint.row.sources.iter().any(|source| {
-                        batch
-                            .paths
-                            .iter()
-                            .any(|path| source.path == std::path::Path::new(path))
-                    })
+                    endpoint.paths.iter().any(|path| batch.paths.contains(path))
                 });
+                // A repeated inline stub would authorize the other endpoint
+                // independently. Require the already staged real endpoint so
+                // the absent-endpoint mutation exercises that exact boundary.
+                for relation in prepared.relationships.relations.values_mut() {
+                    relation
+                        .stubs
+                        .retain(|stub| !batch.context.endpoints.contains_key(&stub.key));
+                }
                 let candidate =
                     prepared
                         .relationships

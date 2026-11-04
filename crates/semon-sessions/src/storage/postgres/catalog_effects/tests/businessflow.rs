@@ -4369,11 +4369,17 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             "selected edge recipe must not use the parent's retained History ref"
         );
     }
-    let continued_parent_proof = pool
-        .transaction(&namespace, TxnKind::ReadSnapshot, &control, |tx| {
-            native_proof_tuple(tx, &continued_generation, current_parent_source)
-        })
-        .unwrap();
+    let continued_parent_proof = super::super::snapshot::with_admitted_snapshot(
+        &pool,
+        &namespace,
+        &control,
+        &continued_generation,
+        |snapshot| {
+            let mut tx = snapshot.tx.lock().map_err(|_| StorageError::Unavailable)?;
+            native_proof_tuple(&mut tx, &continued_generation, current_parent_source)
+        },
+    )
+    .unwrap();
     // The ordinary cursor append above uses Current for History. Give the
     // following physical History corruption checks an independent original
     // by replacing the inode, without changing any native record bytes.
