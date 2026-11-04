@@ -498,6 +498,24 @@ fn publish_current_owned_with_policy(
             tx.prepare_cached("INSERT OR REPLACE INTO main.meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,'1')")?
                 .execute([format!("overview_needed:{}", row.key)])?;
             measurements.record("repair_request", started, 1);
+            // A retained Overview awaiting repair cannot prevent this direct
+            // Current owner from publishing its exact native Query projection.
+            if matches!(query_recipe_policy, QueryRecipePolicy::Publish)
+                && let Some(current) = &row.trace
+            {
+                let generation: Option<String> = tx
+                    .query_row(
+                        "SELECT generation FROM main.session_trace_headers WHERE namespace=semon_namespace() AND session_key=?1",
+                        [&row.key],
+                        |record| record.get(0),
+                    )
+                    .optional()?;
+                if let Some(generation) = generation {
+                    let started = measurements.start();
+                    crate::causal_trace::publish_current_query_owned(tx, row, current, &generation)?;
+                    measurements.record("query_projection_update", started, 1);
+                }
+            }
         }
         return Ok(());
     }
