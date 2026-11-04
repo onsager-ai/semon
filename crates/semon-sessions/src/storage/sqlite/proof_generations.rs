@@ -517,14 +517,10 @@ fn prepare_proof_publication(
             .map_err(|_| StorageError::Unavailable)?;
         // These values came directly from the model inputs in this owner
         // transaction. Production does not decode this freshly encoded row.
-        let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(row)
-            .map_err(|_| StorageError::ScopeChanged)?;
+        #[cfg(not(test))]
+        let query_recipe: Option<String> = None;
         #[cfg(test)]
-        let query_recipe = match query_recipe {
-            Some(payload) => Some(payload),
-            None => prepared_query_recipe_for_test(row, &metadata)?,
-        };
-        proof_codec::validate_query_recipe_cell(&metadata, query_recipe.as_deref())?;
+        let query_recipe = prepared_query_recipe_for_test(row, &metadata)?;
         let mut sources = row
             .sources
             .iter()
@@ -3500,7 +3496,6 @@ pub(crate) fn publish_repaired_query_observation(
     owner: CatalogObservationOwner,
     selected: &CatalogRow,
     query: &serde_json::Value,
-    recipe: Option<&crate::query_projection::SelectedRecipe>,
 ) -> Result<(), StorageError> {
     let source_generation = crate::retention::source_generation(&selected.sources)
         .map_err(|_| StorageError::Unavailable)?;
@@ -3513,33 +3508,12 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = selected.clone();
     repaired.query = Some(query.clone());
-    repaired.query_recipe = recipe.cloned();
     let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
         .map_err(ObservationPreparationError::into_storage)?;
-    let payload = if recipe.is_some() {
-        crate::query_projection::SelectedRecipe::publication_payload(&repaired)
-            .map_err(|_| StorageError::ScopeChanged)?
-    } else {
-        if selected.query.as_ref().map(|query| &query["selected"]) != Some(&query["selected"]) {
-            return Err(StorageError::ScopeChanged);
-        }
-        None
-    };
     if selected.query.as_ref() == Some(query) {
         return Ok(());
     }
-    prepared.publish(db).map_err(failed)?;
-    if recipe.is_some() {
-        db.execute(
-            &format!(
-                "UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2",
-                owner.table()
-            ),
-            params![current.namespace.as_str(), selected.key, payload],
-        )
-        .map_err(failed)?;
-    }
-    Ok(())
+    prepared.publish(db).map_err(failed)
 }
 
 /// Cost publication cannot use an imported receipt to mint local authority.

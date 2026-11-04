@@ -8755,8 +8755,8 @@ mod tests {
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
         use crate::storage::sqlite::proof_generations::query_recipe_observation;
         // The ordinary producer authors metadata, source witnesses and grants.
-        // The admitted fixture writer injects missing or corrupt payload cells;
-        // it never writes observation authority.
+        // Until its payload hook exists, the admitted fixture writer supplies
+        // only the matching payload cell; it never writes observation authority.
         let supply_payload = |store: &SqliteStore,
                               owner: CatalogObservationOwner,
                               metadata: &str,
@@ -8812,18 +8812,6 @@ mod tests {
             options: options.clone(),
             binding: reader.clone(),
         };
-        assert_eq!(
-            port.selected_recipe(&original).unwrap(),
-            Some(expected.clone())
-        );
-        let mut payload_db = crate::storage::sqlite::semantic::Stage::open(
-            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        )
-        .unwrap()
-        .into_test_connection();
-        let payload_tx = payload_db.transaction().unwrap();
-        assert_eq!(payload_tx.execute("UPDATE main.session_catalog SET query_recipe=NULL WHERE namespace=?1 AND session_key=?2 AND metadata=?3", params![binding.namespace.as_str(), rows[0].key, prepared.metadata]).unwrap(), 1);
-        payload_tx.commit().unwrap();
         assert!(matches!(
             port.selected_recipe(&original),
             Err(QueryRecipeLoadError::MissingPayload)
@@ -10178,7 +10166,6 @@ mod tests {
         assert!(!original_recipes.is_empty());
         let shared_source = rows[7].sources[0].clone();
         rows[6].sources.push(shared_source);
-        crate::query_projection::SelectedRecipe::detach(&mut rows[6]).unwrap();
         rows[6].query.as_mut().expect("prepared query envelope")["rows"] =
             serde_json::json!({"runtime":{"summary":{"pid":101}}});
         rows[7].query.as_mut().expect("prepared query envelope")["rows"] =
@@ -10670,10 +10657,6 @@ mod tests {
         // OriginalHistory. Keep both sources in the incoming publication so
         // catalog_write claims every affected owner's current source.
         oversized[1].sources.extend(rows[0].sources.iter().cloned());
-        // Keep the complete recipe inside this deliberately maximal cell so
-        // the unchanged one-cell limit measures all selected payload bytes.
-        oversized[1].query.as_mut().unwrap()["selected"] =
-            serde_json::to_value(oversized[1].query_recipe.as_ref().unwrap()).unwrap();
         // Fill one row's metadata budget exactly. Each row remains admissible,
         // while their combined metadata exceeds the batch writer's budget.
         oversized[1].name.clear();

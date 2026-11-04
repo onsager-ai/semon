@@ -66,23 +66,11 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=original_previous");
         let text: Option<String> = self.db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata<>?3",params![self.namespace,row.key,serde_json::to_string(row).map_err(<Self as OriginalHistoryStore>::data)?],|r|r.get(0)).optional()?;
-        let mut old: Option<CatalogRow> = text
+        let old: Option<CatalogRow> = text
             .as_deref()
             .map(serde_json::from_str)
             .transpose()
             .map_err(<Self as OriginalHistoryStore>::data)?;
-        if let Some(old) = &mut old
-            && old
-                .query
-                .as_ref()
-                .is_some_and(|query| query["selected"].get("digest").is_some())
-        {
-            let payload: String = self.db.query_row("SELECT CASE WHEN octet_length(metadata)+octet_length(query_recipe)<=1048576 THEN query_recipe END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2", params![self.namespace, old.key], |r| r.get(0))?;
-            old.query_recipe = Some(
-                crate::query_projection::SelectedRecipe::decode(old, &payload)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
-            );
-        }
         Ok(old)
     }
     fn header(&self, key: &str) -> rusqlite::Result<Option<OriginalHeader>> {
@@ -184,25 +172,6 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
         let key = &row.key;
         let (activity, active) = crate::storage::query::history_activity(row);
         self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5)",params![self.namespace,key,metadata,activity,active])?;
-        // Withdrawal rows come from authenticated stored metadata, which does
-        // not carry the request-local recipe. Copy the exact Current cell under
-        // this custody transaction before its owner is replaced.
-        let payload = if row
-            .query
-            .as_ref()
-            .is_some_and(|query| query["selected"].get("digest").is_some())
-        {
-            let mut current = row.clone();
-            current.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-            let current =
-                serde_json::to_string(&current).map_err(<Self as OriginalHistoryStore>::data)?;
-            self.db.query_row("SELECT CASE WHEN octet_length(metadata)+octet_length(query_recipe)<=1048576 THEN query_recipe END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3", params![self.namespace, key, current], |record| record.get::<_, String>(0)).map(Some)?
-        } else {
-            None
-        };
-        crate::storage::proof_codec::validate_query_recipe_cell(metadata, payload.as_deref())
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        self.db.execute("UPDATE main.session_history_catalog SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2", params![self.namespace, key, payload])?;
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_original_header:{key}"),original_header])?;
         if let Some((generation, version, sources, total)) = header {
             self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![self.namespace,key,generation,sources.as_deref().unwrap_or_default(),version,total,!complete])?;

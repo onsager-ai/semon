@@ -257,10 +257,6 @@ impl CurrentPublicationStore for Effects<'_, '_> {
             .parent
             .as_deref()
             .map(|parent| parent.as_bytes().to_vec());
-        let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(row)
-            .map_err(|_| StorageError::ScopeChanged)?;
-        crate::storage::proof_codec::validate_query_recipe_cell(metadata, query_recipe.as_deref())?;
-        let query_recipe = query_recipe.map(String::into_bytes);
         self.put(
             "semon_pg_native_catalog_rows",
             &[
@@ -268,7 +264,6 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 "session_key",
                 "parent_key",
                 "metadata",
-                "query_recipe",
                 "last_ms",
                 "harness",
                 "repo",
@@ -280,7 +275,6 @@ impl CurrentPublicationStore for Effects<'_, '_> {
                 &row.key.as_bytes(),
                 &parent_key,
                 &metadata.as_bytes(),
-                &query_recipe,
                 &row.last.unwrap_or(0),
                 &row.harness.as_bytes(),
                 &row.repo.as_deref().unwrap_or("").as_bytes(),
@@ -289,7 +283,10 @@ impl CurrentPublicationStore for Effects<'_, '_> {
         )?;
         // Physical incident index for ordinary lifecycle lookups: parent and
         // selected trace endpoints. Reverse neighbors use the peer index.
-        let edges = crate::query_projection::SelectedRecipe::edges_for(row)
+        let edges = row
+            .query
+            .as_ref()
+            .and_then(|q| q["selected"]["edges"].as_array())
             .into_iter()
             .flatten()
             .flat_map(|edge| ["from", "to"].map(move |field| edge["query"][field].as_str()));

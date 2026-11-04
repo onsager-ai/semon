@@ -5184,11 +5184,10 @@ mod tests {
         );
         let token =
             query_recipe_observation(&db, &binding, CatalogObservationOwner::Catalog, row).unwrap();
-        assert!(crate::query_projection::SelectedRecipe::detached(row));
-        assert_eq!(
-            load_query_recipe(&db, &reader, &token).unwrap(),
-            row.query_recipe,
-            "the real producer authenticates its exact detached payload"
+        assert!(!crate::query_projection::SelectedRecipe::detached(row));
+        assert!(
+            load_query_recipe(&db, &reader, &token).unwrap().is_none(),
+            "the real inline producer authenticates and owns no detached payload"
         );
         let namespace = fixture.config.namespace.as_str();
         for sql in [
@@ -5206,10 +5205,7 @@ mod tests {
             db.execute_batch("ROLLBACK TO recipe_authority; RELEASE recipe_authority")
                 .unwrap();
         }
-        assert_eq!(
-            load_query_recipe(&db, &reader, &token).unwrap(),
-            row.query_recipe
-        );
+        assert!(load_query_recipe(&db, &reader, &token).unwrap().is_none());
     }
 
     #[test]
@@ -5747,7 +5743,8 @@ mod tests {
             .find(|row| row.key != expected.key)
             .expect("appended Claude subagent peer");
         assert!(
-            crate::query_projection::SelectedRecipe::edges_for(&current)
+            current.query.as_ref().unwrap()["selected"]["edges"]
+                .as_array()
                 .unwrap()
                 .iter()
                 .any(|edge| {

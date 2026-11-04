@@ -51,19 +51,9 @@ pub(crate) fn selected_query_context(
             };
             let text = text.ok_or(StorageError::Busy)?;
             crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
-            let mut candidate =
-                serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
-            super::proof_generations::attach_query_recipe(
-                tx,
-                binding,
-                if history {
-                    crate::storage::catalog::CatalogObservationOwner::History
-                } else {
-                    crate::storage::catalog::CatalogObservationOwner::Catalog
-                },
-                &mut candidate,
-            )?;
-            Ok(Some(candidate))
+            serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|_| StorageError::ScopeChanged)
         },
         |candidate, history| {
             qualify_context_candidate(tx, binding, &current, options, candidate, history)
@@ -83,46 +73,13 @@ pub(crate) fn qualify_context_candidate(
     if candidate.sources.is_empty() || candidate.sources.len() > 64 {
         return Err(StorageError::ScopeChanged);
     }
-    let saved = candidate
-        .query
-        .as_ref()
-        .ok_or(StorageError::ScopeChanged)
-        .inspect_err(|_| {
-            if cfg!(test) || crate::native_timing::enabled() {
-                eprintln!(
-                    "selected_context_candidate_refused stage=query_absent key={}",
-                    candidate.key
-                );
-            }
-        })?;
+    let saved = candidate.query.as_ref().ok_or(StorageError::ScopeChanged)?;
     if !crate::model::summary::query_observation_matches(saved, &candidate.sources, false, None)
         .map_err(|_| StorageError::ScopeChanged)?
         || candidate.sources.iter().any(|source| {
             crate::catalog::source_relative(options, &candidate.harness, source).is_none()
         })
     {
-        if cfg!(test) || crate::native_timing::enabled() {
-            eprintln!(
-                "selected_context_candidate_refused stage=source_observation key={} observation_matches={} paths_match={}",
-                candidate.key,
-                crate::model::summary::query_observation_matches(
-                    saved,
-                    &candidate.sources,
-                    false,
-                    None
-                )
-                .map_err(|_| StorageError::ScopeChanged)?,
-                candidate
-                    .sources
-                    .iter()
-                    .all(|source| crate::catalog::source_relative(
-                        options,
-                        &candidate.harness,
-                        source
-                    )
-                    .is_some())
-            );
-        }
         return Err(StorageError::ScopeChanged);
     }
     if history {
@@ -160,15 +117,7 @@ pub(crate) fn current_query_context_header(
         &current,
         CatalogObservationOwner::Catalog,
         candidate,
-    )
-    .inspect_err(|error| {
-        if cfg!(test) || crate::native_timing::enabled() {
-            eprintln!(
-                "selected_recipe_header_refused stage=observation key={} error={error}",
-                candidate.key
-            );
-        }
-    })?;
+    )?;
     match &observation.residence {
         QueryRecipeResidence::Immutable { .. } => {
             super::proof_generations::load_query_recipe(db, binding, &observation).map_err(
@@ -200,37 +149,6 @@ pub(crate) fn current_query_context_header(
                         .map_err(|_| StorageError::ScopeChanged)?
                 || header["query_generation"] != query_generation
             {
-                if cfg!(test) || crate::native_timing::enabled() {
-                    let mut inline_query = candidate.query.clone();
-                    if let (Some(query), Some(recipe)) =
-                        (&mut inline_query, &candidate.query_recipe)
-                    {
-                        query["selected"] =
-                            serde_json::to_value(recipe).map_err(|_| StorageError::ScopeChanged)?;
-                    }
-                    let inline_generation = format!(
-                        "{:x}",
-                        sha2::Sha256::digest(
-                            serde_json::to_vec(&inline_query)
-                                .map_err(|_| StorageError::ScopeChanged)?
-                        )
-                    );
-                    eprintln!(
-                        "selected_recipe_header_refused stage=representation key={} inline_match={}",
-                        candidate.key,
-                        header["query_generation"] == inline_generation
-                    );
-                    eprintln!(
-                        "selected_recipe_header_refused stage=header key={} version={} complete={} source_match={} query_match={}",
-                        candidate.key,
-                        header["version"],
-                        header["complete"],
-                        header["source_generation"]
-                            == crate::retention::source_generation(&candidate.sources)
-                                .map_err(|_| StorageError::ScopeChanged)?,
-                        header["query_generation"] == query_generation
-                    );
-                }
                 return Err(StorageError::ScopeChanged);
             }
             Ok(Some(encoded))
@@ -747,7 +665,7 @@ fn read(
         let row_runtime = if current_lifecycle {
             let cwds = super::catalog::runtime_source_cwds_if_current(db, &row.sources)
                 .inspect_err(|_| {
-                    if cfg!(test) || crate::native_timing::enabled() {
+                    if crate::native_timing::enabled() {
                         eprintln!("semon sessions native: observation_stage_refused boundary=query_current_source_cwds");
                     }
                 })
@@ -763,7 +681,7 @@ fn read(
                     })
                 }
                 None if imported_origin => {
-                    if cfg!(test) || crate::native_timing::enabled() {
+                    if crate::native_timing::enabled() {
                         eprintln!(
                             "semon sessions native: observation_stage_refused boundary=query_current_source_cwds"
                         );

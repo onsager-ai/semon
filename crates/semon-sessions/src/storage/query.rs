@@ -278,11 +278,7 @@ pub(crate) fn selected_edge_context(
                     continue;
                 }
                 if qualified.insert(key) {
-                    qualify(&row, candidate_history).inspect_err(|_| {
-                        if cfg!(test) || crate::native_timing::enabled() {
-                            eprintln!("selected_query_context_refused stage=recipe_owner history={candidate_history}");
-                        }
-                    })?;
+                    qualify(&row, candidate_history)?;
                 }
                 let mut additions = Vec::new();
                 let mut compatible = true;
@@ -311,9 +307,6 @@ pub(crate) fn selected_edge_context(
             }
         }
         if !matched {
-            if cfg!(test) || crate::native_timing::enabled() {
-                eprintln!("selected_query_context_refused stage=recipe_source");
-            }
             return Err(StorageError::ScopeChanged);
         }
     }
@@ -405,10 +398,7 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     };
     let mut last = query["last"].as_i64();
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
-    for edge in crate::query_projection::SelectedRecipe::edges_for(row)
-        .into_iter()
-        .flatten()
-    {
+    for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
         let edge = &edge["query"];
         for at in [edge["at"].as_i64(), edge["done"].as_i64()]
             .into_iter()
@@ -778,7 +768,7 @@ mod tests {
         assert!(recipe.turns.len() >= PREFIX);
         assert_eq!(
             producer_row.query.as_ref().unwrap()["selected"],
-            serde_json::to_value(recipe.reference(&producer_row).unwrap()).unwrap()
+            serde_json::to_value(&recipe).unwrap()
         );
 
         let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
@@ -791,8 +781,8 @@ mod tests {
             .metadata
             .expect("admitted persisted Catalog metadata");
         assert!(
-            persisted.len() < 8192,
-            "growing producer Catalog metadata must remain within the cell bound: {} bytes",
+            persisted.len() > 8192,
+            "growing producer Catalog metadata should exceed the cell bound: {} bytes",
             persisted.len()
         );
         assert_eq!(
@@ -821,7 +811,7 @@ mod tests {
         assert_eq!(decoded, recipe);
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
-            serde_json::to_value(&recipe).unwrap()
+            producer_row.query.unwrap()["selected"]
         );
     }
 

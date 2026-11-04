@@ -41,8 +41,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
         metadata: &str,
     ) -> rusqlite::Result<bool> {
         let sql = "INSERT INTO main.session_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,parent_key,metadata) VALUES(?1,?2,'current',?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,parent_key=excluded.parent_key,metadata=excluded.metadata WHERE session_catalog.lifecycle != 'current' OR session_catalog.metadata != excluded.metadata OR session_catalog.parent_key IS NOT excluded.parent_key";
-        let changed = self
-            .db
+        self.db
             .prepare_cached(sql)?
             .execute(params![
                 self.namespace,
@@ -53,9 +52,7 @@ impl crate::storage::catalog::CurrentPublicationStore for CurrentWriter<'_> {
                 row.parent,
                 metadata
             ])
-            .map(|n| n > 0)?;
-        put_query_recipe(self.db, self.namespace, row, metadata)?;
-        Ok(changed)
+            .map(|n| n > 0)
     }
     fn retire_sources(&self, key: &str) -> rusqlite::Result<()> {
         let sql = "UPDATE main.session_catalog_sources SET lifecycle='retained' WHERE namespace=?1 AND session_key=?2";
@@ -256,23 +253,5 @@ pub(crate) fn put_catalog_batch(
     }
     // Finalize RETURNING before source/search work or its after-DML sample.
     statement.finalize()?;
-    for (row, metadata) in rows.iter().zip(metadata) {
-        put_query_recipe(transaction, namespace, row, metadata)?;
-    }
     Ok(changed)
-}
-
-fn put_query_recipe(
-    db: &rusqlite::Connection,
-    namespace: &str,
-    row: &crate::model::summary::CatalogRow,
-    metadata: &str,
-) -> rusqlite::Result<()> {
-    let payload = crate::query_projection::SelectedRecipe::publication_payload(row)
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    crate::storage::proof_codec::validate_query_recipe_cell(metadata, payload.as_deref())
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    db.prepare_cached("UPDATE main.session_catalog SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2 AND query_recipe IS NOT ?3")?
-        .execute(params![namespace, row.key, payload])?;
-    Ok(())
 }

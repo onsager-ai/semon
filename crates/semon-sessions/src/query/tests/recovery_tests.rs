@@ -1496,7 +1496,6 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
         crate::storage::catalog::CatalogObservationOwner::History,
         &history,
         &repaired_query,
-        None,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -1689,20 +1688,6 @@ fn recovery_stage_only_preimage_authenticates_before_inserting_current_grant() {
             .any(|(grant_key, _)| grant_key.ends_with(&preimage_stage_digest)),
         "exact preimage grant {preimage_stage_digest} missing from {stage_grants_before:?}"
     );
-    // Establish the removable direct slot from the exact Stage observation,
-    // without publishing again or replacing its immutable receipt.
-    let binding = crate::storage::local_navigation_binding(&home.options, "").unwrap();
-    let current_binding = binding.runtime_binding_at(&db).unwrap();
-    crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
-        &db,
-        config.namespace.as_str(),
-        "first",
-        current_binding.admission,
-        &current_binding.stream_epoch,
-        &recovery_catalog_metadata(&db, "session_catalog", "first"),
-        None,
-    )
-    .unwrap();
     let direct_grant_before = recovery_observation_grant(&db, "first", "catalog").unwrap();
     assert_eq!(
         db.execute(
