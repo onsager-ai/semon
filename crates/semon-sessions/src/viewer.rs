@@ -4397,11 +4397,12 @@ mod tests {
             assert_eq!(loads, 0);
             assert_eq!(crate::model::BUILDS.with(std::cell::Cell::get), builds);
 
-            let connection = crate::events::store::qualified_event_writer_connection_for_test(
-                &EventCache::path(&first.options.cache),
-                &first.options.source,
+            let config = first.options.source.config(&first.options.cache).unwrap();
+            let connection = crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
             )
-            .unwrap();
+            .unwrap()
+            .into_test_connection();
             connection
                 .execute(
                     "UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='selected'",
@@ -4440,11 +4441,12 @@ mod tests {
                 "message":{"role":"user","content":"a newly discovered duplicate"}
             })],
         );
-        let connection = crate::events::store::qualified_event_writer_connection_for_test(
-            &EventCache::path(&second.options.cache),
-            &second.options.source,
+        let config = second.options.source.config(&second.options.cache).unwrap();
+        let connection = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
         )
-        .unwrap();
+        .unwrap()
+        .into_test_connection();
         connection
             .execute(
                 "UPDATE meta SET value='partial' WHERE key='catalog_completeness'",

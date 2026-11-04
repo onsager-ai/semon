@@ -7214,8 +7214,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             .cloned()
             .collect::<Vec<_>>()
     );
-    // Verified parent appends advance both the retained list/search fields and
-    // exact History selection on both engines.
+    // The retained list includes the post-reset Current parent; exact History
+    // keeps the independently retained pre-reset observation on both engines.
     let sqlite_parent = sqlite_retained
         .iter()
         .find(|item| item["key"] == "one")
@@ -7251,8 +7251,28 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         "exact retained History selection preserves the SQLite item"
     );
     assert_eq!(
-        sqlite_parent["last"], sqlite_parent_exact["items"][0]["last"],
-        "parent append advances the exact History and retained list together"
+        sqlite_parent["last"],
+        serde_json::json!(
+            withdrawal_prepared
+                .rows
+                .iter()
+                .find(|row| row.key == "one")
+                .unwrap()
+                .last
+        ),
+        "the retained list includes the latest Current parent append"
+    );
+    assert_eq!(
+        sqlite_parent_exact["items"][0]["last"],
+        serde_json::json!(
+            pre_reset_prepared
+                .rows
+                .iter()
+                .find(|row| row.key == "one")
+                .unwrap()
+                .last
+        ),
+        "exact History keeps the appended pre-reset parent observation"
     );
     let current_only_key = super::super::snapshot::with_admitted_snapshot(
         &pool,

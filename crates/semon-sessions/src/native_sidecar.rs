@@ -686,7 +686,7 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,?2)",
                 rusqlite::params![home.key(), record],
             )
             .unwrap();

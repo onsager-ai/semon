@@ -447,9 +447,7 @@ fn publish_current_owned_with_policy(
                     )?;
                 }
             }
-            if matches!(query_recipe_policy, QueryRecipePolicy::Publish)
-                && let Some(current) = &row.trace
-            {
+            if let Some(current) = &row.trace {
                 let started = measurements.start();
                 let trace_generation = crate::causal_trace::update_current_observation(
                     tx,
@@ -1472,6 +1470,14 @@ mod tests {
         root: std::path::PathBuf,
     }
     impl Fixture {
+        fn db(options: &Options) -> rusqlite::Connection {
+            let config = options.source.config(&options.cache).unwrap();
+            crate::storage::sqlite::semantic::Stage::open(
+                crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+            )
+            .unwrap()
+            .into_test_connection()
+        }
         fn new(key: &str) -> Self {
             let root = std::env::temp_dir().join(format!(
                 "semon-overview-{}-{}",
@@ -1484,11 +1490,7 @@ mod tests {
                 ..Options::default()
             };
             drop(EventCache::open_scoped(&options.cache, &options.source).unwrap());
-            let db = crate::events::store::qualified_event_writer_connection_for_test(
-                &EventCache::path(&options.cache),
-                &options.source,
-            )
-            .unwrap();
+            let db = Self::db(&options);
             db.execute(
                 "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),'catalog_completeness','complete')",
                 [],
@@ -1505,11 +1507,7 @@ mod tests {
             }
         }
         fn put(&self, key: &str, state: &str, lifecycle: &str) {
-            let mut db = crate::events::store::qualified_event_writer_connection_for_test(
-                &EventCache::path(&self.source.options.cache),
-                &self.source.options.source,
-            )
-            .unwrap();
+            let mut db = Self::db(&self.source.options);
             let tx = db.transaction().unwrap();
             tx.execute(
                 "INSERT OR REPLACE INTO session_catalog(namespace,session_key,lifecycle,last_ms,harness,metadata) VALUES(semon_namespace(),?1,?2,1000,'codex','{}')",
@@ -1632,11 +1630,7 @@ mod tests {
     fn pending_observation_cursor_advances_past_failed_items_and_wraps_without_loading_native_sources()
      {
         let fixture = Fixture::new("source");
-        let db = crate::events::store::qualified_event_writer_connection_for_test(
-            &EventCache::path(&fixture.source.options.cache),
-            &fixture.source.options.source,
-        )
-        .unwrap();
+        let db = Fixture::db(&fixture.source.options);
         for index in 0..19 {
             db.execute(
                 "INSERT INTO meta(namespace,key,value) VALUES(semon_namespace(),?1,'1')",
@@ -1698,11 +1692,7 @@ mod tests {
         let second = Fixture::new("second");
         for fixture in [&first, &second] {
             fixture.put("same", "idle", "current");
-            let db = crate::events::store::qualified_event_writer_connection_for_test(
-                &EventCache::path(&fixture.source.options.cache),
-                &fixture.source.options.source,
-            )
-            .unwrap();
+            let db = Fixture::db(&fixture.source.options);
             db.execute("UPDATE session_overview SET summary=json_set(summary,'$.home.events[0].ask','result')", []).unwrap();
         }
         let encoded = crate::viewer::percent_encode(r#"["[\"first\",\"answer\"]"]"#);
@@ -1749,16 +1739,12 @@ mod tests {
         let fixture = Fixture::new("source");
         fixture.put("one", "work", "current");
         let before = home(&[fixture.source.clone_for_test()], "");
-        let mut db = crate::events::store::qualified_event_writer_connection_for_test(
-            &EventCache::path(&fixture.source.options.cache),
-            &fixture.source.options.source,
-        )
-        .unwrap();
+        let mut db = Fixture::db(&fixture.source.options);
         {
             let tx = db.transaction().unwrap();
             tx.execute("UPDATE session_overview SET state='off',summary=json_set(summary,'$.home.state','off')", []).unwrap();
             tx.execute(
-                "INSERT OR REPLACE INTO meta VALUES('catalog_generation','aborted')",
+                "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_namespace(),'catalog_generation','aborted')",
                 [],
             )
             .unwrap();
