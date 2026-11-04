@@ -517,10 +517,14 @@ fn prepare_proof_publication(
             .map_err(|_| StorageError::Unavailable)?;
         // These values came directly from the model inputs in this owner
         // transaction. Production does not decode this freshly encoded row.
-        #[cfg(not(test))]
-        let query_recipe: Option<String> = None;
+        let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(row)
+            .map_err(|_| StorageError::ScopeChanged)?;
         #[cfg(test)]
-        let query_recipe = prepared_query_recipe_for_test(row, &metadata)?;
+        let query_recipe = match query_recipe {
+            Some(payload) => Some(payload),
+            None => prepared_query_recipe_for_test(row, &metadata)?,
+        };
+        proof_codec::validate_query_recipe_cell(&metadata, query_recipe.as_deref())?;
         let mut sources = row
             .sources
             .iter()

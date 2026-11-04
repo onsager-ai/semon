@@ -9895,6 +9895,13 @@ fn build_sources_inner(
             }
         }
         crate::query_projection::complete_recipes(rows)?;
+        if target == BuildTarget::Catalog {
+            // The direct Catalog reader loads selected recipes separately, so
+            // listing metadata never grows with the number of native turns.
+            for row in rows {
+                crate::query_projection::SelectedRecipe::detach(row)?;
+            }
+        }
     }
     let presentation = presentation
         .map(|observations| {

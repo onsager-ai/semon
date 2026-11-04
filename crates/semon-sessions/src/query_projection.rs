@@ -44,9 +44,8 @@ impl SelectedRecipe {
         })
     }
 
-    // Ordinary producers still publish inline selected values while detached
-    // publication is inactive. Stored observations authenticate either shape
-    // before these accessors inspect inline values or an attached payload.
+    // Stored observations authenticate inline values or the direct Catalog's
+    // separately persisted payload before these accessors inspect either value.
     pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
         row.query_recipe
             .as_ref()
@@ -101,7 +100,6 @@ impl SelectedRecipe {
 
     /// Replace selected result metadata with its exact publication reference.
     /// The caller publishes the returned bytes atomically with this row.
-    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
         let Some(recipe) = &row.query_recipe else {
             return Ok(None);
@@ -114,6 +112,23 @@ impl SelectedRecipe {
             .ok_or_else(|| std::io::Error::other("Selected Query observation unavailable"))?;
         query["selected"] = serde_json::to_value(reference).map_err(std::io::Error::other)?;
         Ok(Some(encoded))
+    }
+
+    /// The producer keeps the complete payload attached until both cells have
+    /// committed. Inline Stage observations continue to own their whole value.
+    pub(crate) fn publication_payload(row: &CatalogRow) -> std::io::Result<Option<String>> {
+        let Some(selected) = row.query.as_ref().and_then(|query| query.get("selected")) else {
+            return Ok(None);
+        };
+        if selected.get("version").is_none() && selected.get("digest").is_none() {
+            return Ok(None);
+        }
+        let recipe = row.query_recipe.as_ref().ok_or_else(|| {
+            std::io::Error::other("Selected Query producer recipe unavailable")
+        })?;
+        let payload = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
+        Self::decode(row, &payload).map_err(std::io::Error::other)?;
+        Ok(Some(payload))
     }
 
     pub(crate) fn reference(&self, row: &CatalogRow) -> serde_json::Result<SelectedRecipeRef> {

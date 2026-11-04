@@ -51,9 +51,19 @@ pub(crate) fn selected_query_context(
             };
             let text = text.ok_or(StorageError::Busy)?;
             crate::selected_read::charge(512, text.len()).map_err(|_| StorageError::Busy)?;
-            serde_json::from_str(&text)
-                .map(Some)
-                .map_err(|_| StorageError::ScopeChanged)
+            let mut candidate = serde_json::from_str(&text)
+                .map_err(|_| StorageError::ScopeChanged)?;
+            super::proof_generations::attach_query_recipe(
+                tx,
+                binding,
+                if history {
+                    crate::storage::catalog::CatalogObservationOwner::History
+                } else {
+                    crate::storage::catalog::CatalogObservationOwner::Catalog
+                },
+                &mut candidate,
+            )?;
+            Ok(Some(candidate))
         },
         |candidate, history| {
             qualify_context_candidate(tx, binding, &current, options, candidate, history)
