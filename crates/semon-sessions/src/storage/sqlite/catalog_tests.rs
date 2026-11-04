@@ -12940,6 +12940,11 @@ fn semantic_summary_overflow_refuses_a_singleton_publication_group() {
     let fixture = Fixture::new();
     let source = fixture.source("singleton");
     fixture.publish_existing();
+    // Exercise Original custody; ordinary cursor appends do not retain it.
+    let replaced = source.with_extension("replaced");
+    fs::rename(&source, &replaced).unwrap();
+    fs::copy(&replaced, &source).unwrap();
+    fs::remove_file(&replaced).unwrap();
     writeln!(
         fs::OpenOptions::new().append(true).open(&source).unwrap(),
         "{}",

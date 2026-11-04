@@ -176,8 +176,6 @@ enum HistoryCompositionStep {
     },
     Clear {
         key: String,
-        metadata: String,
-        capture_cwds: Option<std::collections::BTreeSet<String>>,
     },
     Retain {
         key: String,
@@ -947,8 +945,6 @@ fn plan_history_rows(
             if snapshot.history_exists {
                 steps.push(HistoryCompositionStep::Clear {
                     key: current.key.clone(),
-                    metadata: serde_json::to_string(current)?,
-                    capture_cwds: snapshot.current_cwds.clone(),
                 });
             } else {
                 steps.push(HistoryCompositionStep::Preserve {
@@ -1199,11 +1195,6 @@ fn prepare_history_captures(
                 metadata,
                 capture_cwds,
                 ..
-            }
-            | HistoryCompositionStep::Clear {
-                key,
-                metadata,
-                capture_cwds,
             } => (key, metadata, capture_cwds.as_ref()),
             _ => continue,
         };
@@ -1250,9 +1241,7 @@ fn apply_history_composition<P: VerifiedHistoryCompositionStore>(
         match step {
             HistoryCompositionStep::Preserve { .. } => unreachable!(),
             HistoryCompositionStep::Clear { key, .. } => {
-                if captures.values.contains_key(key) {
-                    store.clear(key)?;
-                }
+                store.clear(key)?;
             }
             HistoryCompositionStep::Retain {
                 key: _,
@@ -1562,6 +1551,48 @@ mod history_composition_tests {
             self.effects.set(self.effects.get() + 1);
             Ok(())
         }
+    }
+
+    #[test]
+    fn catalog_cursor_current_clears_history_without_runtime_capture() {
+        let current = row("current", vec![source("/sources/a.jsonl", "a")]);
+        let snapshot = HistoryCompositionSnapshot {
+            key: current.key.clone(),
+            original: false,
+            previous: Some(serde_json::to_string(&current).unwrap()),
+            history_exists: true,
+            recipe_history: true,
+            recipe_header: None,
+            recipe_slots: Vec::new(),
+            relocated: BTreeSet::new(),
+            receipts: Vec::new(),
+            current_cwds: None,
+            unavailable: false,
+        };
+        let store = PlanStore {
+            snapshot: RefCell::new(snapshot),
+            original: Cell::new(false),
+            effects: Cell::new(0),
+        };
+        let projection = Projection {
+            key: current.key.clone(),
+            slots: Vec::new(),
+            repair: false,
+        };
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let (plan, captures) = prepare_history_composition(
+            &store,
+            std::slice::from_ref(&current),
+            Some(std::slice::from_ref(&projection)),
+            None,
+            &mut budget,
+        )
+        .unwrap();
+        apply_prepared_history_composition(&store, &plan, &captures).unwrap();
+        assert_eq!(store.effects.get(), 1, "History follows authorized Current");
+        store.original.set(true);
+        apply_prepared_history_composition(&store, &plan, &captures).unwrap();
+        assert_eq!(store.effects.get(), 1, "Original custody remains independent");
     }
 
     #[test]

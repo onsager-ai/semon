@@ -15151,7 +15151,11 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
         .join("projects/-work-proj/root.jsonl");
     let original_source = fs::read(&source_path).unwrap();
     publish();
+    // Original custody requires a detectable replacement under cursor tailing.
+    let replaced = source_path.with_extension("replaced");
+    fs::rename(&source_path, &replaced).unwrap();
     home.top("root", &[human("root", ts(1, 0), "replacement prompt")]);
+    fs::remove_file(&replaced).unwrap();
     publish();
     // Read the original from its archive after the local carrier disappears.
     fs::remove_file(&source_path).unwrap();
