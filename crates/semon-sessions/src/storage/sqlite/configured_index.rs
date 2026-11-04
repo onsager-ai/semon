@@ -228,6 +228,12 @@ impl IndexStore for ConfiguredIndex {
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.native.catalog_generation()
     }
+    fn refresh_catalog_generation(&mut self, generation: &str) -> Result<bool, StoreError> {
+        let Some(stage) = &mut self.semantic else {
+            return Ok(false);
+        };
+        stage.refresh_catalog_generation(generation)
+    }
     fn rebuild_catalog_search(&mut self, expected_generation: &str) -> Result<bool, StoreError> {
         self.native.rebuild_catalog_search(expected_generation)
     }

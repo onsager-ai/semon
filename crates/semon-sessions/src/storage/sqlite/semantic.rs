@@ -892,6 +892,7 @@ impl AdmittedSource {
 pub(crate) struct Stage {
     db: Connection,
     source: AdmittedSource,
+    opened_schema_version: i64,
     reduction: bool,
     epoch: Option<i64>,
     begun: bool,
@@ -4218,6 +4219,9 @@ impl Stage {
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
         let mut db = capability.journal().connection()?;
+        // Cache only the committed physical layout. Every operation still
+        // rechecks its schema cookie, admission and epoch inside its snapshot.
+        crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(failed)?;
@@ -4304,9 +4308,13 @@ impl Stage {
             )
             .optional()
             .map_err(failed)?;
+        let opened_schema_version = tx
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .map_err(failed)?;
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(Self {
             db,
+            opened_schema_version,
             reduction: capability.reduction,
             epoch,
             begun: false,
@@ -4325,6 +4333,39 @@ impl Stage {
         if self.epoch.is_none() && self.source.generation.as_deref() == expected {
             self.source.generation = Some(generation.to_owned());
         }
+    }
+
+    /// Equivalent to reopening this admitted Stage after a peer publication,
+    /// without repeating connection and committed-schema initialization.
+    pub(crate) fn refresh_catalog_generation(&mut self, generation: &str) -> Result<bool, StoreError> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(error)?;
+        let schema_version: i64 = tx
+            .pragma_query_value(None, "schema_version", |row| row.get(0))
+            .map_err(error)?;
+        if schema_version != self.opened_schema_version {
+            return Ok(false);
+        }
+        self.source.validate(&tx).map_err(StoreError::Configured)?;
+        let observed = head(&tx).map_err(error)?;
+        if observed.as_deref() != Some(generation) {
+            return Ok(false);
+        }
+        let epoch = tx
+            .query_row(
+                "SELECT epoch FROM main.catalog_semantic_stage WHERE namespace=?1",
+                [self.source.config.namespace.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        tx.commit().map_err(error)?;
+        self.source.generation = observed;
+        self.epoch = epoch;
+        self.begun = false;
+        Ok(true)
     }
 
     pub(crate) fn runtime_binding(

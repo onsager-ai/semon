@@ -1145,6 +1145,11 @@ pub(crate) trait IndexStore: Send {
 
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+    /// Refresh a peer's committed semantic head using the existing admitted
+    /// connection. Backends without this operation keep the ordinary reopen.
+    fn refresh_catalog_generation(&mut self, _generation: &str) -> Result<bool, StoreError> {
+        Ok(false)
+    }
     /// Rebuild a stale derived Catalog search projection from the current
     /// metadata rows, fenced to the audited Catalog generation.
     fn rebuild_catalog_search(&mut self, _expected_generation: &str) -> Result<bool, StoreError> {
@@ -2966,6 +2971,33 @@ impl EventCache {
             .session_catalog_generation()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn refresh_catalog_generation(&mut self, generation: &str) -> io::Result<bool> {
+        let refreshed = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
+            .refresh_catalog_generation(generation)
+            .map_err(|error| io::Error::other(configured_error(error)))?;
+        if !refreshed {
+            return Ok(false);
+        }
+        // Match a fresh scoped open's process-local state, retaining only the
+        // admitted handles. Pending durable operations are reconciled below.
+        *self = Self {
+            store: self.store.take(),
+            source_observations: self.source_observations.take(),
+            observation_namespace: std::mem::take(&mut self.observation_namespace),
+            observation_path: self.observation_path.take(),
+            scoped: self.scoped,
+            host_source: self.host_source.take(),
+            lock_cache: self.lock_cache.take(),
+            v1_cache: self.v1_cache.take(),
+            ..Self::default()
+        };
+        self.reconcile_pending_source_operation()?;
+        Ok(true)
     }
 
     pub(crate) fn rebuild_catalog_search(&mut self, expected_generation: &str) -> io::Result<bool> {
