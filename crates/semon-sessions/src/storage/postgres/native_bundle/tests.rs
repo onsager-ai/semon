@@ -113,7 +113,12 @@ fn complete_fixture(mut data: Fixture, harness: &str) -> Fixture {
             persisted.source_chunks.as_ref().unwrap().fingerprint()
         );
         let chunks = std::sync::Arc::make_mut(index.source_chunks.as_mut().unwrap());
-        chunks.continuation = persisted.source_chunks.as_ref().unwrap().continuation.clone();
+        chunks.continuation = persisted
+            .source_chunks
+            .as_ref()
+            .unwrap()
+            .continuation
+            .clone();
         if harness != "copilot" {
             assert!(index.tree_summary.is_some(), "production Tree input");
         }

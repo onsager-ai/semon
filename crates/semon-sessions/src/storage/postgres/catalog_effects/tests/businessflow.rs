@@ -1834,7 +1834,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             match result {
                 Ok(Some(_)) => return,
                 Err(error)
-                    if error.kind() == io::ErrorKind::WouldBlock
+                    if error.kind() == std::io::ErrorKind::WouldBlock
                         && cache.semantic_rejection().is_none() => {}
                 result => panic!("SQLite withdrawal oracle publication: {result:?}"),
             }
