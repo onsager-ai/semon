@@ -3869,6 +3869,16 @@ mod tests {
                         .map(|e| e.row.clone())
                         .collect();
                     assert_eq!(prepared.rows.len(), 1);
+                    prepared.transcripts = prepared
+                        .rows
+                        .iter()
+                        .map(|row| crate::slot_projection::Projection {
+                            key: row.key.clone(),
+                            slots: Vec::new(),
+                            repair: false,
+                        })
+                        .collect();
+                    prepared.relationships.presentation = Some(Default::default());
                     return (batch, prepared);
                 }
             }
@@ -5613,6 +5623,9 @@ mod tests {
         }
         let foreign = namespace_state(&a, "source-a");
         let path = inputs[1].full_path(&options[1]);
+        let reset = path.with_extension("original-reset");
+        fs::copy(&path, &reset).unwrap();
+        fs::rename(reset, &path).unwrap();
         let mut raw = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(raw, "{{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"replacement\",\"parentUuid\":\"answer\",\"timestamp\":\"2026-10-01T00:02:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"continued Claude replacement\"}}}}").unwrap();
         writeln!(raw, "{{\"type\":\"assistant\",\"sessionId\":\"model-1\",\"uuid\":\"spawn-peer\",\"parentUuid\":\"replacement\",\"timestamp\":\"2026-10-01T00:03:00Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"tool_use\",\"id\":\"toolu-peer\",\"name\":\"Task\",\"input\":{{\"description\":\"new peer\",\"subagent_type\":\"general-purpose\"}}}}]}}}}").unwrap();

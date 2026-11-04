@@ -129,6 +129,52 @@ fn publish(home: &Home) {
     .unwrap();
 }
 
+// Exercise the receipt-less direct Catalog boundary explicitly. The ordinary
+// observer now issues immutable receipts, so it cannot establish this fixture.
+// Capture runtime from the real producer and grant the exact published rows.
+fn publish_direct(home: &Home) {
+    let mut cache =
+        crate::events::EventCache::open_scoped(&home.options.cache, &home.options.source)
+            .unwrap();
+    let mut inputs = crate::inputs::inputs(&home.options).unwrap();
+    inputs.extend(cache.paths().filter_map(|path| {
+        crate::native_evidence::catalog_input(std::path::Path::new(path), &home.options)
+    }));
+    inputs.sort();
+    inputs.dedup();
+    let prepared =
+        crate::model::prepare_sources(&home.options, &mut cache, &inputs, NOW).unwrap();
+    cache
+        .publish_catalog_projection(
+            &crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+                observations: None,
+            },
+            prepared.base_generation.as_deref(),
+        )
+        .unwrap();
+    let binding = cache.query_runtime_binding().unwrap().unwrap();
+    let config = home.options.source.config(&home.options.cache).unwrap();
+    let db = crate::storage::sqlite::semantic::Stage::open(
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+    )
+    .unwrap()
+    .into_test_connection();
+    for row in &prepared.rows {
+        crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
+            &db,
+            binding.namespace.as_str(),
+            &row.key,
+            binding.admission,
+            &binding.stream_epoch,
+            &serde_json::to_string(row).unwrap(),
+            prepared.presentation_observations(),
+        )
+        .unwrap();
+    }
+}
+
 fn recovery_selected_transcript(home: &Home, key: &str) -> crate::ViewerReply {
     crate::session_transcript_range_with_mode(
         &home.options,
@@ -1471,7 +1517,7 @@ fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
             assistant("lead", ts(1, 1), vec![text("retained answer")]),
         ],
     );
-    publish(&home);
+    publish_direct(&home);
 
     let args = json!({"id":"lead","after":0,"limit":10});
     let expected = home.query().call_at("read_transcript", &args, NOW).unwrap();
@@ -1496,7 +1542,7 @@ fn recovery_ordinary_direct_capture_transfers_to_producer_retired_history() {
     let before_grant = recovery_observation_grant(&db, "lead", "catalog").unwrap();
 
     fs::remove_file(home.options.claude_home.join(&archive.source.path)).unwrap();
-    publish(&home);
+    publish_direct(&home);
 
     let retained = recovery_catalog_row(&db, "session_history_catalog", "lead");
     assert_eq!(
@@ -1716,7 +1762,7 @@ fn recovery_stage_upgrades_direct_authority_then_reuses_immutable_publication() 
             assistant("first", ts(1, 1), vec![text("Publication reuse answer")]),
         ],
     );
-    publish(&home);
+    publish_direct(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -1764,7 +1810,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
             assistant("first", ts(1, 1), vec![text("Index ahead answer")]),
         ],
     );
-    publish(&home);
+    publish_direct(&home);
     let config = home.options.source.config(&home.options.cache).unwrap();
     let before_refresh = crate::storage::sqlite::semantic::Stage::open(
         crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
@@ -1815,7 +1861,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     assert!(proof_snapshot.iter().any(|proof| proof.0 == "current"));
     let metadata_before_identical_publish =
         recovery_catalog_metadata(&db, "session_catalog", "first");
-    publish(&home);
+    publish_direct(&home);
     assert_eq!(
         recovery_catalog_metadata(&db, "session_catalog", "first"),
         metadata_before_identical_publish,
@@ -1848,7 +1894,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     let hostname = home.options.proc_root.join("sys/kernel/hostname");
     let original_hostname = fs::read(&hostname).unwrap();
     fs::write(&hostname, "recovery-index-ahead-runtime-drift\n").unwrap();
-    publish(&home);
+    publish_direct(&home);
     let changed_row = recovery_catalog_row(&db, "session_catalog", "first");
     assert_ne!(
         recovery_catalog_metadata(&db, "session_catalog", "first"),
@@ -1875,7 +1921,7 @@ fn recovery_index_ahead_repriced_snapshot_uses_bound_global_runtime() {
     assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
     fs::write(&hostname, original_hostname).unwrap();
     assert_eq!(recovery_selected_transcript(&home, "first").status, 503);
-    publish(&home);
+    publish_direct(&home);
     assert_eq!(recovery_selected_transcript(&home, "first").status, 200);
     // Restoring hostname bytes changes its stat-based global observation.
     // Capture that observation through the real Stage before repricing it.
@@ -2010,7 +2056,7 @@ fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
             assistant("first", ts(1, 1), vec![text("proof owner answer")]),
         ],
     );
-    publish(&home);
+    publish_direct(&home);
     publish_semantic(&home);
     publish_semantic_stage(
         &home,
@@ -2019,7 +2065,7 @@ fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
             path: "projects/-work-proj/first.jsonl".into(),
         },
     );
-    publish(&home);
+    publish_direct(&home);
 
     let config = home.options.source.config(&home.options.cache).unwrap();
     let db = crate::storage::sqlite::semantic::Stage::open(
@@ -2031,7 +2077,7 @@ fn recovery_direct_capture_does_not_mask_a_damaged_semantic_owner() {
     let hostname = home.options.proc_root.join("sys/kernel/hostname");
     let original_hostname = fs::read(&hostname).unwrap();
     fs::write(&hostname, "recovery-direct-damaged-proof-drift\n").unwrap();
-    publish(&home);
+    publish_direct(&home);
     let after = recovery_catalog_row(&db, "session_catalog", "first");
     assert_eq!(
         crate::retention::source_generation(&before.sources).unwrap(),
@@ -2297,7 +2343,7 @@ fn recovery_ordinary_index_advance_supersedes_the_old_semantic_source() {
         assistant("first", ts(1, 1), vec![text("initial answer")]),
     ];
     home.top("first", &original_records);
-    publish(&home);
+    publish_direct(&home);
     publish_semantic(&home);
     publish_semantic_stage(
         &home,
@@ -2323,7 +2369,7 @@ fn recovery_ordinary_index_advance_supersedes_the_old_semantic_source() {
             assistant("first", ts(1, 3), vec![text("advanced answer")]),
         ],
     );
-    publish(&home);
+    publish_direct(&home);
 
     let after = recovery_catalog_row(&db, "session_catalog", "first");
     assert_ne!(

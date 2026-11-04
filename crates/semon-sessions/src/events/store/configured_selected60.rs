@@ -841,6 +841,10 @@ fn configured_semantic_selected65_gc_requires_both_history_and_lease_to_be_gone(
     let id = runtime.current_generation(key).unwrap();
     let mut lease = runtime.selected_generation(key, &id, &"7".repeat(64), 60_000).unwrap();
     cache.finish_semantic_stage(batch.epoch).unwrap();
+    // Preserve A as an original through an explicit inode reset.
+    let reset = path.with_extension("original-reset");
+    fs::copy(&path, &reset).unwrap();
+    fs::rename(reset, &path).unwrap();
     fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(concat!(
         "{\"timestamp\":\"2026-10-01T00:03:00Z\",\"type\":\"response_item\",",
         "\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"generation B\"}]}}\n"
@@ -1017,6 +1021,10 @@ fn configured_semantic_selected60_history_witness_survives_gc_release_and_runtim
     let key = &model.prepared().rows[0].key;
     let id = runtime.current_generation(key).unwrap();
     cache.finish_semantic_stage(batch.epoch).unwrap();
+    // Preserve A as an original through an explicit inode reset.
+    let reset = path.with_extension("original-reset");
+    fs::copy(&path, &reset).unwrap();
+    fs::rename(reset, &path).unwrap();
     fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(concat!(
         "{\"timestamp\":\"2026-10-01T00:03:00Z\",\"type\":\"response_item\",",
         "\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"generation B\"}]}}\n"

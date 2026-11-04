@@ -3647,6 +3647,15 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                         assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
                         continue;
                     }
+                    if let Ok(physical) = crate::events::Stat::of(&source.path) {
+                        let original = crate::source_carrier::ledger(source).stat;
+                        if physical.dev != original.dev || physical.ino != original.ino {
+                            // A later inode reset preserves the old host bytes,
+                            // but the new local carrier cannot certify them.
+                            assert_eq!(proof.unwrap_err(), StorageError::ScopeChanged);
+                            continue;
+                        }
+                    }
                     let proof = proof.unwrap_or_else(|error| {
                         panic!("captured source proof harness={}: {error:?}", row.harness)
                     });
@@ -4604,9 +4613,11 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                 .into_iter()
                 .next()
                 .ok_or(StorageError::ScopeChanged)?;
-            assert!(!snapshot
-                .history_qualified(&history)
-                .map_err(|_| StorageError::ScopeChanged)?);
+            assert!(
+                !snapshot
+                    .history_qualified(&history)
+                    .map_err(|_| StorageError::ScopeChanged)?
+            );
             snapshot
                 .composite_history_identity_qualified(&current, &history)
                 .map_err(|_| StorageError::ScopeChanged)

@@ -5434,6 +5434,9 @@ fn final_masked_thinking_is_pending_only_for_qualified_current_work() {
         // A second admitted publication retains the first transcript under a
         // physical History owner. Live activity from the current Catalog row
         // must not be borrowed by that immutable History projection.
+        let reset = path.with_extension("original-reset");
+        fs::copy(&path, &reset).unwrap();
+        fs::rename(reset, &path).unwrap();
         let from = fs::metadata(&path).unwrap().len();
         let input = crate::Input {
             root: crate::InputRoot::Claude,
@@ -7542,12 +7545,16 @@ fn family_and_unjoined_trace_extent_qualifies_state(state: &str) {
             .and_then(|query| query["runtime"].as_str()),
         "the typed row keeps its published runtime witness"
     );
+    let inputs = crate::inputs::inputs(&fixture.options).unwrap();
+    let prepared =
+        crate::model::prepare_sources(&fixture.options, &mut cache, &inputs, 1790812800000)
+            .unwrap();
     let generation = cache.session_catalog_generation();
     cache
         .publish_catalog_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog_rows,
-                transcripts: None,
+                transcripts: Some(&prepared.transcripts),
                 observations: Some(&observations),
             },
             generation.as_deref(),

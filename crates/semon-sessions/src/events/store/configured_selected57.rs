@@ -127,6 +127,10 @@ fn configured_semantic_selected57_claude_original_provenance_survives_current_re
     assert_eq!(original, expected);
     cache.finish_semantic_stage(batch.epoch).unwrap();
 
+    // Original custody requires a real cursor reset, not an ordinary append.
+    let reset = path.with_extension("original-reset");
+    fs::copy(&path, &reset).unwrap();
+    fs::rename(reset, &path).unwrap();
     fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(concat!(
         "{\"type\":\"user\",\"sessionId\":\"model-1\",\"uuid\":\"later\",\"parentUuid\":\"answer\",",
         "\"timestamp\":\"2026-10-01T00:03:00Z\",\"message\":{\"role\":\"user\",\"content\":\"later Claude publication\"}}\n"

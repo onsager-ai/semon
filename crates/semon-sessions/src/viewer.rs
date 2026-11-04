@@ -6931,10 +6931,9 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(generation().unwrap(), before);
-        let unchanged =
-            crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
-                .unwrap()
-                .unwrap();
+        let unchanged = crate::session_catalog_identity(&fixture.options, "fixture", "rewrite")
+            .unwrap()
+            .unwrap();
         assert_eq!(unchanged.source_refs[0].source, original_source);
         // #520 deliberately does not hash committed bytes. A real inode
         // replacement must still reset the cursor and expose the new prompt.

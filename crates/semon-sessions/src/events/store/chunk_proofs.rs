@@ -1307,6 +1307,11 @@ mod tests {
         };
         // Real native progress records grow the second observation beyond one
         // proof page without adding transcript slots or admitting another source.
+        // The version-bound oracle needs original A beside Current B. A
+        // same-inode cursor append now advances History too, so reset first.
+        let reset = path.with_extension("original-reset");
+        fs::copy(&path, &reset).unwrap();
+        fs::rename(reset, &path).unwrap();
         let mut progress =
             serde_json::json!({"type":"progress","data":{"type":"bash_progress","output":""}})
                 .to_string();
