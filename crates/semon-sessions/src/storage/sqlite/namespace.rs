@@ -22,7 +22,7 @@ pub(crate) fn require_semantic_admitted(
     db: &Connection,
     namespace: &LogicalSourceNamespace,
 ) -> Result<NamespaceAdmission, StorageError> {
-    let row: Option<(i64,i64,u32,u32)> = db.query_row("SELECT admission_generation,admitted_at,format_version,writer_qualification FROM storage_namespaces WHERE namespace=?1",[namespace.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
+    let row: Option<(i64,i64,u32,u32)> = db.prepare_cached("SELECT admission_generation,admitted_at,format_version,writer_qualification FROM storage_namespaces WHERE namespace=?1").map_err(failed)?.query_row([namespace.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
     let Some((generation, admitted_at, version, qualification)) = row else {
         return Err(StorageError::ScopeChanged);
     };

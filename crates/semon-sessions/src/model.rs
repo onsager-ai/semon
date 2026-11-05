@@ -8614,13 +8614,17 @@ pub(crate) fn prepare_sources(
     inputs: &[crate::inputs::Input],
     now: i64,
 ) -> io::Result<PreparedSources> {
-    prepare_sources_selected(
+    let mut prepared = prepare_sources_selected(
         options,
         cache,
         inputs,
         now,
         BuildSelection::Current(Some(inputs)),
-    )
+    )?;
+    for row in &mut prepared.rows {
+        crate::query_projection::SelectedRecipe::compact_catalog(row)?;
+    }
+    Ok(prepared)
 }
 
 pub(crate) fn prepare_semantic_identity_sources(
