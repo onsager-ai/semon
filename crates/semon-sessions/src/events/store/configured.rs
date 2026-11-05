@@ -1581,15 +1581,7 @@ impl Writer {
     }
 
     pub(crate) fn qualified_catalog(&self) -> Result<bool, StoreError> {
-        let snapshot = self.snapshot().map_err(StoreError::Configured)?;
-        if super::catalog_header_repairs(&snapshot)?.is_empty() {
-            let ready = super::catalog_qualified(&snapshot)?;
-            snapshot.commit().map_err(failure)?;
-            return Ok(ready);
-        }
-        // Repair from a fresh writer snapshot: never upgrade a physical read
-        // snapshot after a peer may have committed another publication.
-        drop(snapshot);
+        NativeOwnership::validate_physical(&self.connection).map_err(StoreError::Configured)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(failure)?;
         self.validate(&tx).map_err(StoreError::Configured)?;
