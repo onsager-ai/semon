@@ -3979,6 +3979,7 @@ impl SqliteStore {
                             return Err(StoreError::Configured(error));
                         }
                     };
+                stage("diag(presentation_capture)", &transaction);
                 if let Some(captured) = captured {
                     let projection_witness = projections
                         .iter()
@@ -4022,6 +4023,7 @@ impl SqliteStore {
                         }
                         Err(error) => return Err(StoreError::Configured(error)),
                     };
+                    stage("diag(presentation_root)", &transaction);
                     if let Some(root) = root {
                         let receipt_publication =
                             crate::storage::sqlite::proof_generations::publish_ordinary(
@@ -4048,6 +4050,7 @@ impl SqliteStore {
                                 },
                                 root,
                             );
+                        stage("diag(receipt_publication)", &transaction);
                         match receipt_publication {
                             Ok(()) => {}
                             Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
