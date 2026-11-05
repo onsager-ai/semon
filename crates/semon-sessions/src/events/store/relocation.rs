@@ -143,7 +143,7 @@ pub(super) fn advance(
     append: bool,
 ) -> rusqlite::Result<()> {
     let olds = connection
-        .prepare("SELECT old_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND new_path=?1")?
+        .prepare_cached("SELECT old_path FROM catalog_relocation_candidates WHERE namespace=semon_namespace() AND new_path=?1")?
         .query_map([path], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
     for old in olds {
@@ -157,22 +157,20 @@ pub(super) fn advance(
         )
         .map_err(|_| rusqlite::Error::InvalidQuery)?
         {
-            connection.execute(
-                "INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)",
+            connection.prepare_cached("INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope(?1),?1,?2)")?.execute(
                 params![catalog_key(&old), encoded],
             )?;
         } else {
-            connection.execute(native_metadata_delete(connection)?, [catalog_key(&old)])?;
+            connection.prepare_cached(native_metadata_delete(connection)?)?.execute( [catalog_key(&old)])?;
         }
     }
     Ok(())
 }
 pub(super) fn acknowledge(connection: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
-    let pending: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM main.catalog_relocation_candidates c JOIN main.session_catalog_invalidations i ON i.namespace=c.namespace AND (i.source_path=c.old_path OR i.source_path=c.new_path) WHERE c.namespace=semon_namespace() AND c.old_path=?1)",[path],|row|row.get(0))?;
+    let pending: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.catalog_relocation_candidates c JOIN main.session_catalog_invalidations i ON i.namespace=c.namespace AND (i.source_path=c.old_path OR i.source_path=c.new_path) WHERE c.namespace=semon_namespace() AND c.old_path=?1)")?.query_row([path],|row|row.get(0))?;
     if !pending {
-        connection.execute(native_metadata_delete(connection)?, [catalog_key(path)])?;
-        connection.execute(
-            "DELETE FROM main.catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1",
+        connection.prepare_cached(native_metadata_delete(connection)?)?.execute( [catalog_key(path)])?;
+        connection.prepare_cached("DELETE FROM main.catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1")?.execute(
             [path],
         )?;
     }

@@ -5169,7 +5169,7 @@ fn write_tree_summary(
             normalized_usage,
         );
         if current.projection_witness.is_some() {
-            let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
+            let mut statement = transaction.prepare_cached(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
                 .query_row([tree_summary_key(path)], |r| {
                     crate::selected_read::row(r, 512)?;
@@ -5208,12 +5208,10 @@ fn write_tree_summary(
         if encoded.len() > NATIVE_METADATA_MAX {
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
-            transaction.execute(
-                native_metadata_put(transaction)?,
+            transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(
                 params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
             )?;
-            transaction.execute(
-                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1",
+            transaction.prepare_cached("UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1")?.execute(
                 [path],
             )?;
             return Ok(());
@@ -5221,8 +5219,7 @@ fn write_tree_summary(
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![tree_summary_key(path), encoded])?;
-        transaction.execute(
-            native_metadata_delete(transaction)?,
+        transaction.prepare_cached(native_metadata_delete(transaction)?)?.execute(
             [format!("native_tree_failure:{path}")],
         )?;
     }

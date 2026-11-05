@@ -298,23 +298,21 @@ pub(super) fn write(
     ledger: &Ledger,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.query_row(
-        "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
+    let id: i64 = tx.prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?.query_row(
         [path],
         |r| r.get(0),
     )?;
     let source_id = native_usage::source(tx, path)?
         .ok_or(rusqlite::Error::InvalidQuery)?
         .0;
-    let previous:Option<i64>=tx.query_row("SELECT g.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.source_id=?2 AND g.version=3",params![path,source_id],|r|r.get(0)).optional()?;
+    let previous:Option<i64>=tx.prepare_cached("SELECT g.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND g.source_id=?2 AND g.version=3")?.query_row(params![path,source_id],|r|r.get(0)).optional()?;
     let projection_id = match previous {
         Some(id) => id,
         None => new_generation(tx, source_id, ledger)?,
     };
-    tx.execute("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
+    tx.prepare_cached("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?.execute(params![path,id,projection_id,header_ledger(ledger)])?;
     write_values(tx, projection_id, summary).map_err(|error| diagnose("write_values", error))?;
-    tx.execute(
-        "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1",
+    tx.prepare_cached("UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?.execute(
         params![projection_id, header_ledger(ledger)],
     )?;
     Ok(())
@@ -325,7 +323,7 @@ pub(super) fn new_generation(
     source_id: i64,
     ledger: &Ledger,
 ) -> rusqlite::Result<i64> {
-    tx.query_row("INSERT INTO native_tree_generations(namespace,projection_id,source_id,version,receipt,complete) VALUES(semon_namespace(),(SELECT coalesce(max(projection_id),0)+1 FROM native_tree_generations WHERE namespace=semon_namespace()),?1,3,?2,0) RETURNING projection_id", params![source_id, header_ledger(ledger)], |r| r.get(0))
+    tx.prepare_cached("INSERT INTO native_tree_generations(namespace,projection_id,source_id,version,receipt,complete) VALUES(semon_namespace(),(SELECT coalesce(max(projection_id),0)+1 FROM native_tree_generations WHERE namespace=semon_namespace()),?1,3,?2,0) RETURNING projection_id")?.query_row(params![source_id, header_ledger(ledger)], |r| r.get(0))
 }
 
 pub(super) fn bind_generation(
@@ -334,16 +332,14 @@ pub(super) fn bind_generation(
     ledger: &Ledger,
     projection_id: i64,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.query_row(
-        "SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1",
+    let id: i64 = tx.prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?.query_row(
         [path],
         |r| r.get(0),
     )?;
-    tx.execute(
-        "UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1",
+    tx.prepare_cached("UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?.execute(
         params![projection_id, header_ledger(ledger)],
     )?;
-    tx.execute("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger",params![path,id,projection_id,header_ledger(ledger)])?;
+    tx.prepare_cached("INSERT INTO native_tree_headers(namespace,source_path,file_id,projection_id,ledger) VALUES(semon_namespace(),?1,?2,?3,?4) ON CONFLICT(namespace,source_path) DO UPDATE SET file_id=excluded.file_id,projection_id=excluded.projection_id,ledger=excluded.ledger")?.execute(params![path,id,projection_id,header_ledger(ledger)])?;
     Ok(())
 }
 

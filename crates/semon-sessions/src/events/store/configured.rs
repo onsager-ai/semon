@@ -725,7 +725,10 @@ impl NativeOwnership {
                 "pricing_recompute_pending",
             ]) {
                 for action in ["INSERT", "UPDATE", "DELETE"] {
-                    if !guards.contains(&(table.to_owned(), format!("storage_owned_guard_{table}_{action}"))) {
+                    if !guards.contains(&(
+                        table.to_owned(),
+                        format!("storage_owned_guard_{table}_{action}"),
+                    )) {
                         return Err(StorageError::NamespaceUpgradePending);
                     }
                 }

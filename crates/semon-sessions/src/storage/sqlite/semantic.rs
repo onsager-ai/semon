@@ -4287,7 +4287,10 @@ impl Stage {
                 let expected = format!(
                     "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN semon_semantic_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'semantic Source refused'); END"
                 );
-                if !guards.get(&name).is_some_and(|(actual_table, sql)| actual_table == table && sql == &expected) {
+                if !guards
+                    .get(&name)
+                    .is_some_and(|(actual_table, sql)| actual_table == table && sql == &expected)
+                {
                     return Err(StorageError::NamespaceUpgradePending);
                 }
             }
