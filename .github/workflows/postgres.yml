@@ -30,8 +30,6 @@ jobs:
   postgres-suites:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      SEMON_BUILD_TIMING: ${{ matrix.suite == 'regression-other' && '1' || '0' }}
     strategy:
       fail-fast: false
       matrix:

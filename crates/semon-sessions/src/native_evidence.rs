@@ -1757,7 +1757,7 @@ impl NativeEvidence {
         &self,
         work: &mut Work,
         now: i64,
-        mut before_build: impl FnMut() -> io::Result<()>,
+        before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
         let before = work
             .events
@@ -1788,28 +1788,7 @@ impl NativeEvidence {
             return Ok(true);
         }
         work.catalog_store_stamp = None;
-        let diagnostic_changed = crate::native_timing::enabled()
-            && work
-                .catalog_snapshot
-                .as_ref()
-                .is_some_and(|snapshot| snapshot.changed(&self.options));
-        let mut observed_builds = 0;
-        let complete = self.refresh_catalog_step(work, now, || {
-            observed_builds += 1;
-            before_build()
-        })?;
-        if diagnostic_changed || (crate::native_timing::enabled() && observed_builds > 0) {
-            eprintln!(
-                "semon sessions native: observer={:p} native_changed_before={diagnostic_changed} builds={observed_builds} complete={complete} pending_sources={} audit={} native_changed_after={} generation={:?}",
-                self,
-                work.pending_sources,
-                work.audit.is_some(),
-                work.catalog_snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.changed(&self.options)),
-                work.observed_catalog_generation
-            );
-        }
+        let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
             lock(&self.catalog_search).close();
             let after = work
