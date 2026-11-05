@@ -1,0 +1,83 @@
+name: Compact metadata diagnostic
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  SEMON_PRICING_REFRESH: "off"
+  SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+jobs:
+  compact:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ephemeral-ci-admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-f1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: pg-f1-${{ runner.os }}-
+      - name: Restricted application role
+        env:
+          PGPASSWORD: ephemeral-ci-admin
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          SQL
+      - name: Resolve lock
+        run: cargo metadata --format-version 1 > "$RUNNER_TEMP/compact-metadata.json"
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Save exact formatting patch
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/compact-rustfmt.patch"
+          git apply --reverse "$RUNNER_TEMP/compact-rustfmt.patch"
+      - name: Boundary inventory
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-native-storage-boundary.py
+      - name: Exact compact metadata and Query recipe cases
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            query::tests::focused_tail_does_not_load_growing_session_busy_metadata \
+            storage::query::tests::observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget \
+            events::store::tests::direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_native_exact_owner_grant_and_payload \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt; do
+            case_log="$RUNNER_TEMP/compact-${test//::/-}.log"
+            cargo test -p semon-sessions --lib --locked --features postgres-test-tls "$test" -- --exact --nocapture > "$case_log" 2>&1 || result=1
+            grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log" || result=1
+            tail -n 18 "$case_log"
+          done
+          exit "$result"
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: compact-metadata
+          path: |
+            ${{ runner.temp }}/compact-*.log
+            ${{ runner.temp }}/compact-rustfmt.patch
