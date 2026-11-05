@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-viewer","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
+        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
     services:
       postgres:
         image: postgres:16
@@ -373,14 +373,11 @@ jobs:
             regression-query)
               cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
               ;;
-            regression-viewer)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'viewer::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
-              ;;
             regression-model)
               cargo test -p semon-sessions --locked --features postgres-test-tls 'model::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'viewer::' --skip 'model::tests::append_resumed_build_matches_fresh_build_for_seeded_sequences'
               ;;
             regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'viewer::' --skip 'model::tests::'
+              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::'
               ;;
             regression-seed-[0-3])
               export SEMON_EQUIV_SHARD="${REGRESSION_SUITE##*-}"
