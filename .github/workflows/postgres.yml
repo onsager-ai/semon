@@ -25,7 +25,6 @@ env:
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
   SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
   SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
-  SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
 
 jobs:
   postgres-suites:
@@ -83,14 +82,16 @@ jobs:
           # receives this ephemeral server key; production credentials are absent.
           sudo chown 999:999 server.key
           sudo chmod 600 server.key
-          docker run -d --name semon-pg-tls -e POSTGRES_PASSWORD=ephemeral-ci-admin -p 55432:5432 \
+          docker run -d --name semon-pg-tls -e POSTGRES_PASSWORD=ephemeral-ci-admin -p 127.0.0.1::5432 \
             -v "$RUNNER_TEMP/pg-tls:/tls:ro" postgres:16 \
             -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key
+          tls_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}' semon-pg-tls)
+          echo "SEMON_PG_TLS_DSN=host=localhost port=$tls_port user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require" >> "$GITHUB_ENV"
           for attempt in $(seq 1 40); do
-            if PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -c 'SELECT 1' >/dev/null 2>&1; then break; fi
+            if PGPASSWORD=ephemeral-ci-admin psql "host=localhost port=$tls_port user=postgres dbname=postgres sslmode=require" -c 'SELECT 1' >/dev/null 2>&1; then break; fi
             sleep 1
           done
-          PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -v ON_ERROR_STOP=1 <<'SQL'
+          PGPASSWORD=ephemeral-ci-admin psql "host=localhost port=$tls_port user=postgres dbname=postgres sslmode=require" -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
           SQL
