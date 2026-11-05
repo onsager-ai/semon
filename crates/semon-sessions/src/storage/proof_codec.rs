@@ -29,6 +29,9 @@ struct CachedPresentation {
     manifest: String,
     digest: String,
     decoded: PresentationManifest,
+    // A Catalog page authenticates many rows from this same immutable cohort.
+    // Share its captures instead of copying all owners for every selected row.
+    observations: Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
 }
 
 impl PresentationCache {
@@ -38,11 +41,14 @@ impl PresentationCache {
         presentation: &str,
         base: &str,
         manifest: &str,
-    ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+    ) -> Result<
+        Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
+        StorageError,
+    > {
         if self.root.as_ref().is_none_or(|root| {
             root.base != base || root.manifest != manifest || root.digest != record.proof
         }) {
-            let decoded = decode_presentation_manifest(manifest)?;
+            let mut decoded = decode_presentation_manifest(manifest)?;
             if presentation_digest(base, manifest)? != record.proof {
                 return Err(StorageError::ScopeChanged);
             }
@@ -50,6 +56,7 @@ impl PresentationCache {
                 base: base.to_owned(),
                 manifest: manifest.to_owned(),
                 digest: record.proof.clone(),
+                observations: decoded.observations.take().map(std::sync::Arc::new),
                 decoded,
             });
         }
@@ -61,7 +68,7 @@ impl PresentationCache {
             presentation,
             &root.decoded,
         )?;
-        Ok(root.decoded.observations.clone())
+        Ok(root.observations.clone())
     }
 }
 
