@@ -45,9 +45,6 @@ impl NativeReaderBinding {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
-        // Catalog pages reuse more statements than the default cache holds.
-        // Use the same bounded working set as the native writer connection.
-        db.set_prepared_statement_cache_capacity(256);
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         super::catalog_namespace::register(&db, &config.namespace)?;
