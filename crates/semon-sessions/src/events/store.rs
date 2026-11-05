@@ -725,17 +725,7 @@ pub(crate) struct CatalogSourceAudit {
     db: Connection,
 }
 
-#[cfg(test)]
 pub(crate) fn audit_catalog_sources(
-    options: &crate::Options,
-    discovered: &[crate::Input],
-    after: Option<&str>,
-    _runtime: &str,
-) -> io::Result<Option<String>> {
-    audit_catalog_sources_step(options, discovered, after, &mut None)
-}
-
-pub(crate) fn audit_catalog_sources_step(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,

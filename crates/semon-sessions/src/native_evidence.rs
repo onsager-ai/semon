@@ -1905,7 +1905,7 @@ impl NativeEvidence {
                         .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                         .extend_sources(&self.options, &page.inputs);
                 }
-                let last = crate::events::store::audit_catalog_sources_step(
+                let last = crate::events::store::audit_catalog_sources(
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
