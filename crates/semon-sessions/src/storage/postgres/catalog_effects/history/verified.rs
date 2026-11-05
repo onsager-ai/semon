@@ -107,9 +107,17 @@ impl History<'_, '_> {
         let mut tx = self.effects.tx.borrow_mut();
         let binding = super::super::super::model_cache::binding(&mut tx)?;
         let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
-        let grant = read_grant(&mut tx, &binding, &owner, metadata.as_bytes(), &row, &mut budget)?
-            .ok_or(StorageError::ScopeChanged)?;
-        let capture = serde_json::to_string(&grant.capture).map_err(|_| StorageError::ScopeChanged)?;
+        let grant = read_grant(
+            &mut tx,
+            &binding,
+            &owner,
+            metadata.as_bytes(),
+            &row,
+            &mut budget,
+        )?
+        .ok_or(StorageError::ScopeChanged)?;
+        let capture =
+            serde_json::to_string(&grant.capture).map_err(|_| StorageError::ScopeChanged)?;
         let receipt_ids = grant
             .receipts
             .into_iter()
