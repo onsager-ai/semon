@@ -2113,6 +2113,8 @@ impl Writer {
         }
         measurements.record("admission", admission_started, files.len());
         let apply_started = measurements.start();
+        let layout = WriterLayout::new(&tx).map_err(failed)?;
+        let mut usage_deletes = UsageDeletes::default();
         for ((path, expected, changes, ledger, _, index), write) in files.iter().zip(work) {
             if !write {
                 continue;
@@ -2129,7 +2131,7 @@ impl Writer {
                         .map_err(failed)?;
                 }
             }
-            write_index_changes_measured(
+            write_index_changes_with_usage_deletes(
                 &tx,
                 path,
                 ledger,
@@ -2138,11 +2140,14 @@ impl Writer {
                 *expected,
                 &mut row_measurements,
                 self.config.namespace.as_str(),
+                &layout,
+                &mut usage_deletes,
             )
             .map_err(|error| failed(error))?;
             let intent = &self.intents[*path];
             tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }
+        drop(usage_deletes);
         #[cfg(test)]
         effect("completion").map_err(failed)?;
         // Inclusive of index leaf timings collected separately below.

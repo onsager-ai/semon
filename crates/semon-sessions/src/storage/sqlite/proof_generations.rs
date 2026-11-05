@@ -561,8 +561,11 @@ fn insert_proof_row(
     publication: &PreparedProofPublication,
     row: &PreparedProofRow,
 ) -> Result<(), StorageError> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    )
+    .map_err(failed)?
+    .execute(
         params![
             namespace,
             publication.id,
@@ -578,14 +581,20 @@ fn insert_proof_row(
         ],
     )
     .map_err(failed)?;
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
+    )
+    .map_err(failed)?
+    .execute(
         params![namespace, publication.id, row.key, row.presentation],
     )
     .map_err(failed)?;
     for source in &row.sources {
-        tx.execute(
+        tx.prepare_cached(
             "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
+    )
+    .map_err(failed)?
+    .execute(
             params![
                 namespace,
                 publication.id,
@@ -616,13 +625,19 @@ fn publish_current_ref(
         stream,
         overview_budget,
     )?;
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+    )
+    .map_err(failed)?
+    .execute(
         params![namespace, session_key],
     )
     .map_err(failed)?;
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
+    )
+    .map_err(failed)?
+    .execute(
         params![namespace, session_key, id],
     )
     .map_err(failed)?;

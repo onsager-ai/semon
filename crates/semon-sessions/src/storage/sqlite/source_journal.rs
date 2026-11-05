@@ -385,6 +385,9 @@ impl SourceJournal {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
+        // A native cohort uses more statements than rusqlite's default cache
+        // holds. Retain the bounded writer working set across source rows.
+        db.set_prepared_statement_cache_capacity(256);
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         catalog_namespace::register(&db, &self.config.namespace)?;

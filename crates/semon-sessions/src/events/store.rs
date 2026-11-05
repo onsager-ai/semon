@@ -5781,32 +5781,6 @@ fn write_index_changes(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn write_index_changes_measured(
-    transaction: &Transaction<'_>,
-    path: &str,
-    ledger: &Ledger,
-    index: &FileIndex,
-    changes: Option<&super::DirtyRows>,
-    expected: Option<&Ledger>,
-    measurements: &mut crate::native_timing::Measurements,
-    namespace: &str,
-) -> rusqlite::Result<()> {
-    let layout = WriterLayout::new(transaction)?;
-    write_index_changes_with_usage_deletes(
-        transaction,
-        path,
-        ledger,
-        index,
-        changes,
-        expected,
-        measurements,
-        namespace,
-        &layout,
-        &mut UsageDeletes::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 fn write_index_changes_with_usage_deletes<'tx>(
     transaction: &'tx Transaction<'_>,
     path: &str,
