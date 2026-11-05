@@ -1032,8 +1032,7 @@ pub(crate) fn validate_publication_support(db: &Connection) -> Result<(), Storag
         let expected = sql.replace(" IF NOT EXISTS", "");
         let expected = expected.trim_end_matches(';');
         let actual: Option<String> = db
-            .query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE name=?1",
+            .prepare_cached("SELECT sql FROM main.sqlite_schema WHERE name=?1").map_err(failed)?.query_row(
                 [name],
                 |row| row.get(0),
             )

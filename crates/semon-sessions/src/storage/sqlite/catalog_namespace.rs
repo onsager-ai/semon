@@ -117,7 +117,7 @@ pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
 
 pub(super) fn validate_guard(db: &Connection, table: &str) -> Result<(), StorageError> {
     for (name, expected) in guards(table) {
-        let actual: Option<String> = db.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", rusqlite::params![name,table], |r|r.get(0)).optional().map_err(failed)?;
+        let actual: Option<String> = db.prepare_cached("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2").map_err(failed)?.query_row( rusqlite::params![name,table], |r|r.get(0)).optional().map_err(failed)?;
         if actual.as_deref() != Some(expected.as_str()) {
             return Err(StorageError::NamespaceUpgradePending);
         }

@@ -4068,7 +4068,7 @@ impl SqliteStore {
                 if let Some(claims) = claims {
                     for (path, revision) in claims {
                         if let Some(revision) = revision {
-                            transaction.execute("DELETE FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND revision=?2",params![path,revision]).map_err(failure)?;
+                            transaction.prepare_cached("DELETE FROM main.session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND revision=?2").map_err(failure)?.execute(params![path,revision]).map_err(failure)?;
                         }
                     }
                 } else {

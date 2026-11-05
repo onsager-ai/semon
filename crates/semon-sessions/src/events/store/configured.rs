@@ -515,6 +515,9 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
+    // Publication and selected-context loops share more than the default
+    // sixteen statements; retain the bounded native working set.
+    db.set_prepared_statement_cache_capacity(128);
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(
@@ -584,13 +587,11 @@ pub(crate) fn validate_catalog_publication_profile(
     namespace: &crate::storage::LogicalSourceNamespace,
     admission: i64,
 ) -> Result<bool, StorageError> {
-    let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![namespace.as_str(),admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
+    let profile: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)").map_err(failed)?.query_row(params![namespace.as_str(),admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
     if !profile {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let (catalog_version, search_version): (Option<String>, Option<String>) = db
-        .query_row(
-            "SELECT (SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_version'),(SELECT value FROM main.meta WHERE namespace=?1 AND key='search_version')",
+    let (catalog_version, search_version): (Option<String>, Option<String>) = db.prepare_cached("SELECT (SELECT value FROM main.meta WHERE namespace=?1 AND key='catalog_version'),(SELECT value FROM main.meta WHERE namespace=?1 AND key='search_version')").map_err(failed)?.query_row(
             [namespace.as_str()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -605,7 +606,7 @@ pub(crate) fn validate_catalog_publication_profile(
     if catalog_version.is_none() && search_version.is_some() {
         return Err(StorageError::NamespaceUpgradePending);
     }
-    let incoming: bool = db.query_row("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')", [namespace.as_str()], |r| r.get(0)).map_err(failed)?;
+    let incoming: bool = db.prepare_cached("SELECT semon_transfer_writer()<>1 AND EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key='native_transfer_v1:incoming' AND value<>'')").map_err(failed)?.query_row( [namespace.as_str()], |r| r.get(0)).map_err(failed)?;
     if incoming {
         return Err(StorageError::NamespaceUpgradePending);
     }
@@ -1848,26 +1849,22 @@ impl Writer {
     }
 
     pub(crate) fn load(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StorageError> {
-        // read_one starts a transaction, so use the snapshot's already pinned
-        // connection directly with the same native row decoder.
         let db = self.snapshot()?;
-        let mut readers = Readers::new(&db).map_err(failed)?;
         let mut statement = db
-            .prepare(&format!(
+            .prepare_cached(&format!(
                 "SELECT {FILE_COLUMNS} FROM files WHERE namespace=semon_namespace() AND path=?1"
             ))
             .map_err(failed)?;
         let mut rows = statement.query([path]).map_err(failed)?;
-        let mut found = rows
-            .next()
-            .map_err(failed)?
-            .map(|row| read_file(&mut readers, row).map(|(_, ledger, index)| (ledger, index)))
-            .transpose()
-            .map_err(failed)?;
-        if let Some((_, index)) = &mut found {
-            self.bind_tree(index.tree_summary.as_mut());
-        }
-        Ok(found)
+        let Some(row) = rows.next().map_err(failed)? else {
+            return Ok(None);
+        };
+        // New cold sources have no children to decode. Prepare the native
+        // readers only after finding a file in this admitted snapshot.
+        let mut readers = Readers::new(&db).map_err(failed)?;
+        let (_, ledger, mut index) = read_file(&mut readers, row).map_err(failed)?;
+        self.bind_tree(index.tree_summary.as_mut());
+        Ok(Some((ledger, index)))
     }
 
     pub(crate) fn tree(

@@ -83,8 +83,7 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
         }
         .ok_or(StorageError::Unavailable)?;
         let actual: Option<String> = db
-            .query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type=?1 AND name=?2",
+            .prepare_cached("SELECT sql FROM main.sqlite_schema WHERE type=?1 AND name=?2").map_err(failed)?.query_row(
                 params![kind.to_ascii_lowercase(), name],
                 |r| r.get(0),
             )
@@ -1036,8 +1035,7 @@ pub(super) fn retain_current_refs_for_unowned_history(
     budget: &mut crate::overview::SummaryPublicationBudget,
 ) -> Result<(), PublicationError> {
     let metadata_bytes: Option<i64> = db
-        .query_row(
-            "SELECT octet_length(metadata) FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+        .prepare_cached("SELECT octet_length(metadata) FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2").map_err(failed)?.query_row(
             params![namespace, session_key],
             |row| row.get(0),
         )
@@ -4184,8 +4182,7 @@ pub(crate) fn capture_presentations(
         let header_generation = crate::slot_projection::generation(&texts, &row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         let header: (String, u32, i64) = tx
-            .query_row(
-                "SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+            .prepare_cached("SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2").map_err(failed)?.query_row(
                 params![ns, row.key],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -4197,8 +4194,7 @@ pub(crate) fn capture_presentations(
             return Err(StorageError::ScopeChanged);
         }
         let has_history = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",
+            .prepare_cached("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)").map_err(failed)?.query_row(
                 params![ns, row.key],
                 |r| r.get(0),
             )
