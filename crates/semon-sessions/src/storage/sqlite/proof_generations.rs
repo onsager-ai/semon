@@ -3079,7 +3079,7 @@ pub(crate) fn attach_query_recipe(
     let current = reader.runtime_binding_at(db)?;
     let observation = query_recipe_observation(db, &current, owner, row)?;
     let (recipe, bytes) =
-        load_query_recipe_with_bytes(db, reader, &observation).map_err(|error| match error {
+        load_query_recipe_with_bytes(db, &current, &observation).map_err(|error| match error {
             Error::Storage(error) => error,
             _ => StorageError::ScopeChanged,
         })?;
@@ -3099,12 +3099,15 @@ pub(crate) fn load_query_recipe(
     Option<crate::query_projection::SelectedRecipe>,
     crate::storage::query::QueryRecipeLoadError,
 > {
-    load_query_recipe_with_bytes(db, reader, observation).map(|(recipe, _)| recipe)
+    let current = reader.runtime_binding_at(db)?;
+    load_query_recipe_with_bytes(db, &current, observation).map(|(recipe, _)| recipe)
 }
 
-fn load_query_recipe_with_bytes(
+/// Custody may use its already validated publication binding in the same
+/// transaction; readers obtain this binding from their admitted capability.
+pub(super) fn load_query_recipe_with_bytes(
     db: &Connection,
-    reader: &NativeReaderBinding,
+    current: &crate::storage::QueryRuntimeBinding,
     observation: &crate::storage::query::QueryRecipeObservation,
 ) -> Result<
     (Option<crate::query_projection::SelectedRecipe>, usize),
@@ -3113,8 +3116,7 @@ fn load_query_recipe_with_bytes(
     use crate::storage::query::{
         QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
     };
-    let current = reader.runtime_binding_at(db)?;
-    if current != observation.destination {
+    if current != &observation.destination {
         return Err(Error::ObservationChanged);
     }
     let selected = observation.row();
@@ -3145,7 +3147,7 @@ fn load_query_recipe_with_bytes(
                 metadata.len() + payload.as_ref().map_or(0, String::len),
             )
             .map_err(|_| StorageError::Busy)?;
-            if metadata != observation.metadata || observation.original != current {
+            if metadata != observation.metadata || &observation.original != current {
                 return Err(Error::ObservationChanged);
             }
             let mut normalized = selected.clone();
@@ -3170,14 +3172,14 @@ fn load_query_recipe_with_bytes(
             .map_err(ObservationPreparationError::into_storage)?
             {
                 let verified =
-                    authenticate_immutable_observation(db, &current, selected, kind, &prefix)
+                    authenticate_immutable_observation(db, current, selected, kind, &prefix)
                         .map_err(ObservationPreparationError::into_storage)?;
                 // This token reads the native row's recipe, never the
                 // predecessor receipt's payload or original coordinates.
                 if verified.record.metadata == normalized
                     && verified.record.admission == current.admission
                 {
-                    authorize_immutable_observation(db, &current, selected, kind, false, &verified)
+                    authorize_immutable_observation(db, current, selected, kind, false, &verified)
                         .map_err(ObservationPreparationError::into_storage)?;
                 }
             }
@@ -3284,7 +3286,7 @@ fn load_query_recipe_with_bytes(
                 slots,
                 prefix,
             };
-            if proof_codec::observation_binding(record, &current, selected)? != observation.original
+            if proof_codec::observation_binding(record, current, selected)? != observation.original
             {
                 return Err(Error::ObservationChanged);
             }

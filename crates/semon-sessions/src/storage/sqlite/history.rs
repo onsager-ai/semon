@@ -176,15 +176,33 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
                 .as_ref()
                 .is_some_and(|query| query["selected"].get("digest").is_some())
         {
-            let payload: String = self.db.query_row(
-                "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND octet_length(metadata)+octet_length(query_recipe)<=1048576",
-                params![self.namespace, original.key],
-                |record| record.get(0),
+            let load = || {
+                let current = crate::storage::QueryRuntimeBinding {
+                    namespace: crate::storage::LogicalSourceNamespace::new(self.namespace)?,
+                    admission: self.admission,
+                    stream_epoch: self
+                        .stream
+                        .ok_or(crate::storage::StorageError::ScopeChanged)?
+                        .to_owned(),
+                };
+                let observation = super::proof_generations::query_recipe_observation(
+                    self.db,
+                    &current,
+                    crate::storage::catalog::CatalogObservationOwner::Catalog,
+                    &original,
+                )?;
+                super::proof_generations::load_query_recipe_with_bytes(
+                    self.db,
+                    &current,
+                    &observation,
+                )
+                .map(|(recipe, _)| recipe)
+            };
+            original.query_recipe = load().map_err(
+                |error: crate::storage::query::QueryRecipeLoadError| {
+                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                },
             )?;
-            original.query_recipe = Some(
-                crate::query_projection::SelectedRecipe::decode(&original, &payload)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
-            );
         }
         let row = &original;
         let key = &row.key;

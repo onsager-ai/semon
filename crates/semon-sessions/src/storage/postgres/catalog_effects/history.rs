@@ -194,15 +194,10 @@ impl History<'_, '_> {
                 .as_ref()
                 .is_some_and(|query| query["selected"].get("digest").is_some())
         {
-            let tx = self.effects.tx.borrow_mut();
-            tx.check()?;
-            let ns = tx.namespace.as_str().as_bytes();
-            let payload: Option<Vec<u8>> = tx.driver.query_one("SELECT CASE WHEN octet_length(metadata)+octet_length(query_recipe)<=1048576 THEN query_recipe END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns,&self.previous.as_bytes(),&row.key.as_bytes()]).map_err(sqlstate::error)?.get(0);
-            let payload = text(payload.ok_or(StorageError::ScopeChanged)?)?;
-            row.query_recipe = Some(
-                crate::query_projection::SelectedRecipe::decode(&row, &payload)
-                    .map_err(|_| StorageError::ScopeChanged)?,
-            );
+            let mut tx = self.effects.tx.borrow_mut();
+            snapshot::in_transaction(&mut tx, self.previous, |view| {
+                view.attach_query_recipe(&mut row, false).map(|_| ())
+            })?;
         }
         let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(&row)
             .map_err(|_| StorageError::ScopeChanged)?
