@@ -135,6 +135,21 @@ impl CatalogPublishLogLimiter {
 enum OrdinaryReceiptStatus {
     IssuedOrNotRequested,
     CaptureBudgetExceeded,
+    /// A provisional publication; the complete publication issues receipts.
+    DeferredUntilComplete,
+}
+
+const DEFERRED_CATALOG_RECEIPT: &str =
+    "semon sessions: ordinary_catalog_receipt=deferred reason=until_complete";
+
+/// Deferral is the expected cold path, so it is reported only to timing
+/// diagnostics, unlike the sanitized capture-budget refusal.
+fn record_deferred_catalog_receipt() {
+    if crate::native_timing::enabled() {
+        eprintln!("{DEFERRED_CATALOG_RECEIPT}");
+    }
+    #[cfg(test)]
+    CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(DEFERRED_CATALOG_RECEIPT.into()));
 }
 
 fn emit_catalog_publish_diagnostic(line: String) {
@@ -3953,7 +3968,14 @@ impl SqliteStore {
                     .map_err(failure)?
                     .parse()
                     .map_err(|_| failure(rusqlite::Error::InvalidQuery))?;
-                let captured =
+                // A provisional (partial) publication is superseded by the
+                // complete publication at the end of global observation, which
+                // issues the receipts. Until then its grants carry direct
+                // captures on the existing receipt-less custody path.
+                let captured = if claims.is_some() && !preserve_complete {
+                    receipt_status = OrdinaryReceiptStatus::DeferredUntilComplete;
+                    None
+                } else {
                     match crate::storage::sqlite::proof_generations::capture_presentations(
                         &transaction,
                         owner.config().namespace.as_str(),
@@ -3978,7 +4000,8 @@ impl SqliteStore {
                             }
                             return Err(StoreError::Configured(error));
                         }
-                    };
+                    }
+                };
                 if let Some(captured) = captured {
                     let projection_witness = projections
                         .iter()
@@ -4073,7 +4096,7 @@ impl SqliteStore {
                     }
                     }
                 }
-                if receipt_status == OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                if receipt_status != OrdinaryReceiptStatus::IssuedOrNotRequested {
                     match crate::storage::sqlite::proof_generations::retain_outgoing_history_refs(
                         &transaction,
                         owner.config().namespace.as_str(),
@@ -4224,10 +4247,12 @@ impl SqliteStore {
             // production publisher has no traversal probes.
             commit_boundary.capture(&transaction);
             transaction.commit().map_err(failure)?;
-            if receipt_status == OrdinaryReceiptStatus::CaptureBudgetExceeded {
-                emit_catalog_publish_diagnostic(
+            match receipt_status {
+                OrdinaryReceiptStatus::IssuedOrNotRequested => {}
+                OrdinaryReceiptStatus::CaptureBudgetExceeded => emit_catalog_publish_diagnostic(
                     "semon sessions: ordinary_catalog_receipt=absent reason=capture_budget".into(),
-                );
+                ),
+                OrdinaryReceiptStatus::DeferredUntilComplete => record_deferred_catalog_receipt(),
             }
             crate::pricing::runtime::notify_reprice();
             commit_boundary.capture(&self.connection);

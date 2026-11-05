@@ -207,6 +207,15 @@ When an ordinary publication exceeds the bounded presentation capture or manifes
 budget, it commits without a receipt and emits a sanitized capture-budget
 diagnostic. Its readers use the existing receipt-less custody path; no exact
 receipt is inferred. Other publication and History retention bounds still apply.
+A provisional publication (a claimed partial Catalog that does not preserve a
+complete Catalog, such as the cold first page) may defer its receipt until the
+complete publication at the end of global observation. The SQLite adapter
+records that deferral as a status distinct from the capture-budget diagnostic,
+releases outgoing Current receipts into History exactly as on the receipt-less
+path, and stores each grant's direct capture. The complete publication issues
+the receipt and its grants then resolve to the exact immutable owner instead of
+the direct capture. A restart in the provisional state serves the receipt-less
+pages until that complete publication.
 
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,
