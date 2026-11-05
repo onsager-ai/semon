@@ -1622,13 +1622,29 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     "offset": source.offset,
                 })
             };
-            let target = context.iter().find(|candidate| candidate.key == key).unwrap();
+            let mut target = context
+                .iter()
+                .find(|candidate| candidate.key == key)
+                .unwrap()
+                .clone();
+            let recipe_owner = if crate::history_projection::catalog(&diagnostic_tx, key)
+                .unwrap()
+                .is_some()
+            {
+                crate::storage::catalog::CatalogObservationOwner::History
+            } else {
+                crate::storage::catalog::CatalogObservationOwner::Catalog
+            };
+            crate::storage::sqlite::proof_generations::attach_query_recipe(
+                &diagnostic_tx,
+                &binding,
+                recipe_owner,
+                &mut target,
+            )
+            .expect("resolve the exact retained handoff recipe through its qualified owner");
             let retained_parent_source = parent_source(&parent_history_after_withdrawal);
             let mut recipe_count = 0;
-            for edge in target
-                .query
-                .as_ref()
-                .and_then(|query| query["selected"]["edges"].as_array())
+            for edge in crate::query_projection::SelectedRecipe::edges_for(&target)
                 .into_iter()
                 .flatten()
             {

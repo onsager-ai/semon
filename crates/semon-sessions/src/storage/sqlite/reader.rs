@@ -45,6 +45,9 @@ impl NativeReaderBinding {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
+        // A Catalog page authenticates rows through the native proof and owner
+        // statements together; retain that working set for the whole snapshot.
+        db.set_prepared_statement_cache_capacity(256);
         db.busy_timeout(Duration::from_millis(100))
             .map_err(failed)?;
         super::catalog_namespace::register(&db, &config.namespace)?;
