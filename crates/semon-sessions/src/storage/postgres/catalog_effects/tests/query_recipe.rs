@@ -237,10 +237,16 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
     let row = &prepared.rows[0];
     snapshot::with_admitted_snapshot(&pool, &namespace, &control, &generation, |view| {
         let selected = view.catalog(&row.key, false)?.unwrap();
-        let observation = view.query_recipe_observation(Owner::Catalog, &selected).unwrap();
-        assert_eq!(view.load_query_recipe(&observation).unwrap(), Some(expected.clone()));
+        let observation = view
+            .query_recipe_observation(Owner::Catalog, &selected)
+            .unwrap();
+        assert_eq!(
+            view.load_query_recipe(&observation).unwrap(),
+            Some(expected.clone())
+        );
         Ok(())
-    }).unwrap();
+    })
+    .unwrap();
     // Exercise the missing-cell refusal after the producer stored its payload.
     pool.transaction(&namespace, TxnKind::Write, &control, |tx| {
         assert_eq!(tx.driver.execute("UPDATE semon_pg_native_catalog_rows SET query_recipe=NULL WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND session_key=$3", &[&namespace.as_str().as_bytes(),&generation.as_bytes(),&row.key.as_bytes()]).map_err(sqlstate::error)?, 1);
@@ -414,7 +420,10 @@ fn pg_query_recipe_loader_native_exact_owner_grant_and_payload() {
                     history_token.residence,
                     QueryRecipeResidence::NativeHistory { .. }
                 ));
-                assert_eq!(view.load_query_recipe(&history_token).unwrap(), Some(expected.clone()));
+                assert_eq!(
+                    view.load_query_recipe(&history_token).unwrap(),
+                    Some(expected.clone())
+                );
                 assert!(matches!(
                     view.load_query_recipe(&token),
                     Err(Error::ObservationChanged)
