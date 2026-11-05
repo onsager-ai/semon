@@ -71,11 +71,31 @@ pub(crate) fn open_semantic(
 pub(crate) fn open_semantic_with_stamp(
     capability: super::semantic::SemanticStaging,
 ) -> Result<(Box<dyn IndexStore>, Option<ReportedFileStamp>), StorageError> {
-    let stamp = capability.reported_stamp()?;
-    Ok((open_semantic(capability)?, stamp))
+    let journal = capability.journal();
+    journal.prepare()?;
+    let native = capability.writer()?;
+    let stamp = capability.reported_stamp(&native)?;
+    Ok((
+        Box::new(ConfiguredIndex {
+            reported_selection: None,
+            native,
+            semantic: Some(super::semantic::Stage::open(capability)?),
+            journal,
+        }),
+        stamp,
+    ))
 }
 
 impl IndexStore for ConfiguredIndex {
+    fn refresh_peer_publication(&mut self) -> Result<bool, StoreError> {
+        let Some(stage) = self.semantic.as_mut() else {
+            return Ok(false);
+        };
+        stage.refresh_peer_publication()?;
+        self.reported_selection = None;
+        Ok(true)
+    }
+
     fn facts_authority(&self, path: &Path) -> io::Result<crate::facts::source_authority::Sources> {
         crate::facts::source_authority::Sources::sqlite(path)
     }

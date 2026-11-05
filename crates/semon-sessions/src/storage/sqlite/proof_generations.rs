@@ -125,7 +125,7 @@ pub(crate) struct OrdinaryReceipt<'a> {
     pub(crate) metadata: &'a str,
 }
 
-struct PreparedPresentationRoot {
+pub(crate) struct PreparedPresentationRoot {
     base: String,
     manifest: String,
     digest: String,
@@ -317,6 +317,7 @@ pub(crate) fn publish_ordinary(
     receipt: &OrdinaryReceipt<'_>,
     base: &str,
     presentations: PreparedPresentations<'_>,
+    root: PreparedPresentationRoot,
 ) -> Result<(), PublicationError> {
     let OrdinaryReceipt {
         namespace,
@@ -334,7 +335,6 @@ pub(crate) fn publish_ordinary(
         presentations: captured_presentations,
         overview_budget,
     } = presentations;
-    let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
     let publication = catalog_publication_id(namespace, inputs.catalog_generation, base)?;
     let proof = root.digest.clone();
     let prepared = prepare_proof_publication(
@@ -561,8 +561,11 @@ fn insert_proof_row(
     publication: &PreparedProofPublication,
     row: &PreparedProofRow,
 ) -> Result<(), StorageError> {
-    tx.execute(
+    tx.prepare_cached(
         "INSERT INTO storage_proof_generations(namespace,id,session_key,publication,proof,admission,stream,metadata,slots,prefix,query_recipe) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+    )
+    .map_err(failed)?
+    .execute(
         params![
             namespace,
             publication.id,
@@ -578,23 +581,26 @@ fn insert_proof_row(
         ],
     )
     .map_err(failed)?;
-    tx.execute(
-        "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
-        params![namespace, publication.id, row.key, row.presentation],
-    )
-    .map_err(failed)?;
+    tx.prepare_cached("INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)")
+        .map_err(failed)?
+        .execute(params![
+            namespace,
+            publication.id,
+            row.key,
+            row.presentation
+        ])
+        .map_err(failed)?;
     for source in &row.sources {
-        tx.execute(
-            "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
-            params![
+        tx.prepare_cached("INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)")
+            .map_err(failed)?
+            .execute(params![
                 namespace,
                 publication.id,
                 row.key,
                 source.path,
                 source.ledger
-            ],
-        )
-        .map_err(failed)?;
+            ])
+            .map_err(failed)?;
     }
     Ok(())
 }
@@ -616,16 +622,16 @@ fn publish_current_ref(
         stream,
         overview_budget,
     )?;
-    tx.execute(
+    tx.prepare_cached(
         "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
-        params![namespace, session_key],
     )
+    .map_err(failed)?
+    .execute(params![namespace, session_key])
     .map_err(failed)?;
-    tx.execute(
-        "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
-        params![namespace, session_key, id],
-    )
-    .map_err(failed)?;
+    tx.prepare_cached("INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)")
+        .map_err(failed)?
+        .execute(params![namespace, session_key, id])
+        .map_err(failed)?;
     // Exact History references are installed by the verified composer.
     // Reconstructing them from path/ledger matches would retain unrelated
     // generations and let imported proof sources acquire local authority.
@@ -801,9 +807,7 @@ pub(crate) fn retain_outgoing_history_refs(
         // A retired Catalog row still owns a physical observation after its
         // Current receipt moves to History. Authenticate that exact preimage
         // before releasing the ref, then carry its runtime into a direct grant.
-        let retained_metadata: Option<String> = tx
-            .query_row(
-                "SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='retained' AND octet_length(metadata)<=1048576",
+        let retained_metadata: Option<String> = tx.prepare_cached("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='retained' AND octet_length(metadata)<=1048576").map_err(failed)?.query_row(
                 params![namespace, row.key],
                 |record| record.get(0),
             )
@@ -818,9 +822,7 @@ pub(crate) fn retain_outgoing_history_refs(
             let original_metadata =
                 serde_json::to_string(&original).map_err(|_| StorageError::Unavailable)?;
             let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-            let outgoing_receipt: bool = tx
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND g.metadata=?5)",
+            let outgoing_receipt: bool = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND g.metadata=?5)").map_err(failed)?.query_row(
                     params![namespace, row.key, sql_admission, stream, original_metadata],
                     |record| record.get(0),
                 )
@@ -856,8 +858,7 @@ pub(crate) fn retain_outgoing_history_refs(
             stream,
             overview_budget,
         )?;
-        tx.execute(
-            "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
+        tx.prepare_cached("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'").map_err(failed)?.execute(
             params![namespace, row.key],
         )
         .map_err(failed)?;
@@ -1428,15 +1429,15 @@ pub(crate) fn verified_publication_receipts(
 /// Add durable references before the existing proof-copy/collection algorithm.
 /// An absent S2 family is an unbound current profile, never a reader fallback.
 pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<String>> {
-    let present: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_proof_sources')",
-        [],
-        |r| r.get(0),
-    )?;
+    let present: bool = db
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_proof_sources')",
+        )?
+        .query_row([], |r| r.get(0))?;
     if !present {
         return Ok(Vec::new());
     }
-    let mut statement = db.prepare("SELECT DISTINCT s.ledger FROM storage_proof_sources s WHERE s.namespace=semon_namespace() AND s.path=?1 AND (EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) OR EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=s.namespace AND l.id=s.id AND l.session_key=s.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=g.stream AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2)) LIMIT 257")?;
+    let mut statement = db.prepare_cached("SELECT DISTINCT s.ledger FROM storage_proof_sources s WHERE s.namespace=semon_namespace() AND s.path=?1 AND (EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) OR EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=s.namespace AND l.id=s.id AND l.session_key=s.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=g.stream AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2)) LIMIT 257")?;
     let values = statement
         .query_map(params![path, crate::model::now_ms()], |r| r.get(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -1877,8 +1878,7 @@ fn immutable_observation_candidate(
     metadata: &str,
 ) -> Result<bool, ObservationPreparationError> {
     // Only route into the immutable verifier; this predicate grants no authority.
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND (g.id IS NULL OR (g.stream=?4 AND (g.prefix=?5 OR g.metadata=?6))))",
+    db.prepare_cached("SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND (g.id IS NULL OR (g.stream=?4 AND (g.prefix=?5 OR g.metadata=?6))))").map_err(ObservationPreparationError::Sql)?.query_row(
         params![namespace, session_key, reference_kind, stream, prefix, metadata],
         |row| row.get(0),
     )
@@ -1895,8 +1895,7 @@ fn exact_immutable_observation_owner(
     metadata: &str,
 ) -> Result<bool, StorageError> {
     // A dangling ref is unusable immutable state and must not enable direct authority.
-    db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND (g.id IS NULL OR (g.admission=?4 AND g.stream=?5 AND g.metadata=?6)))",
+    db.prepare_cached("SELECT EXISTS(SELECT 1 FROM storage_proof_refs f LEFT JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND (g.id IS NULL OR (g.admission=?4 AND g.stream=?5 AND g.metadata=?6)))").map_err(failed)?.query_row(
         params![namespace, session_key, reference_kind, admission, stream, metadata],
         |row| row.get(0),
     )
@@ -2062,7 +2061,7 @@ fn authenticate_immutable_observation_with_cache(
     cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
 ) -> Result<VerifiedObservation, ObservationPreparationError> {
     let mut statement = db
-        .prepare(
+        .prepare_cached(
             "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
         )
         .map_err(ObservationPreparationError::Sql)?;
@@ -2176,8 +2175,7 @@ fn authorize_immutable_observation(
     let transfer_grant = if local_only {
         false
     } else {
-        db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3)",
+        db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3)").map_err(ObservationPreparationError::Sql)?.query_row(
             params![current.namespace.as_str(), record.publication, grant],
             |row| row.get::<_, bool>(0),
         )
@@ -2185,8 +2183,11 @@ fn authorize_immutable_observation(
     };
     let stage_grant = if record.admission == current.admission {
         let digest = proof_codec::digest(record.metadata.as_bytes());
-        db.query_row(
+        db.prepare_cached(
             "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
+        )
+        .map_err(ObservationPreparationError::Sql)?
+        .query_row(
             params![
                 current.namespace.as_str(),
                 format!("catalog_native_observation:{digest}"),
@@ -2218,8 +2219,7 @@ fn authorize_immutable_observation(
         if let Some(owner_kind) = owner_kind {
             let admission =
                 i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-            db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
+            db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)").map_err(ObservationPreparationError::Sql)?.query_row(
                 params![
                     current.namespace.as_str(),
                     selected.key,
@@ -2741,9 +2741,7 @@ fn observation_authority_for_owner_with_cache(
         {
             continue;
         }
-        let native: Option<(String, Option<String>, bool)> = db
-            .query_row(
-                "SELECT owner_kind,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1",
+        let native: Option<(String, Option<String>, bool)> = db.prepare_cached("SELECT owner_kind,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1").map_err(ObservationPreparationError::Sql)?.query_row(
                 params![
                     ns,
                     selected.key,
@@ -2821,7 +2819,7 @@ fn observation_authority_for_owner_with_cache(
         // Observe at most the two owner slots after ordinary authority missed.
         // This diagnostic never supplies authority or changes its outcome.
         let slots = db
-            .prepare(
+            .prepare_cached(
                 "SELECT owner_kind='catalog',metadata_digest IN (?3,?4),admission=?5,stream=?6 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 ORDER BY owner_kind LIMIT 2",
             )
             .and_then(|mut statement| {
@@ -2880,7 +2878,7 @@ fn observation_authority_for_owner_with_cache(
     // Stage grants hash the exact metadata and bind its admission/stream. The
     // joined immutable presentation root is checked below against g.metadata.
     let mut statement = db
-        .prepare(
+        .prepare_cached(
             "SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,
                 CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,
                 CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,
@@ -3313,7 +3311,7 @@ pub(crate) fn native_observation_grant(
     stream: &str,
     metadata: &str,
 ) -> Result<(), StorageError> {
-    db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value", params![namespace,format!("catalog_native_observation:{}",proof_codec::digest(metadata.as_bytes())),format!("{admission}:{stream}")]).map_err(failed)?;
+    db.prepare_cached("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value").map_err(failed)?.execute( params![namespace,format!("catalog_native_observation:{}",proof_codec::digest(metadata.as_bytes())),format!("{admission}:{stream}")]).map_err(failed)?;
     Ok(())
 }
 
@@ -3366,8 +3364,7 @@ pub(crate) fn native_catalog_observation_grant(
             None => None,
         }
     };
-    db.execute(
-        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'catalog',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
+    db.prepare_cached("INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'catalog',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture").map_err(failed)?.execute(
         params![
             namespace,
             session_key,
@@ -3422,8 +3419,7 @@ pub(crate) fn native_history_observation_grant(
     } else {
         Some(capture)
     };
-    db.execute(
-        "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
+    db.prepare_cached("INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture").map_err(failed)?.execute(
         params![
             namespace,
             session_key,
@@ -3773,17 +3769,13 @@ pub(crate) fn reconcile_native_observation_owners(
     stream: &str,
 ) -> Result<(), StorageError> {
     let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-    let catalog: Option<Option<String>> = db
-        .query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2",
+    let catalog: Option<Option<String>> = db.prepare_cached("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_catalog WHERE namespace=?1 AND session_key=?2").map_err(failed)?.query_row(
             params![namespace, session_key],
             |row| row.get(0),
         )
         .optional()
         .map_err(failed)?;
-    let history: Option<Option<String>> = db
-        .query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2",
+    let history: Option<Option<String>> = db.prepare_cached("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata END FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2").map_err(failed)?.query_row(
             params![namespace, session_key],
             |row| row.get(0),
         )
@@ -3842,7 +3834,7 @@ pub(crate) fn reconcile_native_observation_owners(
         .transpose()?
         .unwrap_or(false);
     let mut statement = db
-        .prepare(
+        .prepare_cached(
             "SELECT owner_kind,metadata_digest,admission,stream,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 LIMIT 3",
         )
         .map_err(failed)?;
@@ -3877,15 +3869,13 @@ pub(crate) fn reconcile_native_observation_owners(
         })
     };
     if catalog_proof_owned && let Some(digest) = catalog_digest.as_ref() {
-        db.execute(
-            "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
+        db.prepare_cached("UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL").map_err(failed)?.execute(
             params![namespace, session_key, digest, admission, stream],
         )
         .map_err(failed)?;
     }
     if !owned("catalog", catalog_digest.as_ref()) {
-        db.execute(
-            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+        db.prepare_cached("DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'").map_err(failed)?.execute(
             params![namespace, session_key],
         )
         .map_err(failed)?;
@@ -3903,8 +3893,7 @@ pub(crate) fn reconcile_native_observation_owners(
             .map(|grant| grant.4.clone())
     });
     if history_proof_owned && let Some(digest) = history_digest.as_ref() {
-        db.execute(
-            "UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL",
+        db.prepare_cached("UPDATE storage_catalog_native_observation_grants SET direct_capture=NULL WHERE namespace=?1 AND session_key=?2 AND owner_kind='history' AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND direct_capture IS NOT NULL").map_err(failed)?.execute(
             params![namespace, session_key, digest, admission, stream],
         )
         .map_err(failed)?;
@@ -3919,14 +3908,12 @@ pub(crate) fn reconcile_native_observation_owners(
         } else {
             history_capture.flatten()
         };
-        db.execute(
-            "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture",
+        db.prepare_cached("INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'history',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture").map_err(failed)?.execute(
             params![namespace, session_key, digest, admission, stream, capture],
         )
         .map_err(failed)?;
     } else if !history_owned {
-        db.execute(
-            "DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+        db.prepare_cached("DELETE FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'").map_err(failed)?.execute(
             params![namespace, session_key],
         )
         .map_err(failed)?;
@@ -4270,12 +4257,14 @@ pub(crate) fn bind_presentations(
     Ok(root.digest)
 }
 
-pub(crate) fn check_presentation_budget(
+pub(crate) fn prepare_ordinary_presentation_root(
     base: &str,
     rows: &[(String, String)],
     inputs: &PresentationInputs<'_>,
-) -> Result<(), StorageError> {
-    prepare_presentation_root(base, rows, inputs).map(|_| ())
+) -> Result<PreparedPresentationRoot, StorageError> {
+    // Keep the checked root for issuance: it includes every presentation entry,
+    // so encoding and hashing it again would repeat the full cohort's work.
+    prepare_presentation_root(base, rows, inputs)
 }
 
 fn prepare_presentation_root(

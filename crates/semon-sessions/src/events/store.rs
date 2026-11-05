@@ -615,7 +615,10 @@ fn open_admitted(
     {
         configured::create(&config)?;
     }
-    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    let capability = {
+        let _timing = crate::native_timing::Phase::new(path, "index_admit");
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?
+    };
     #[cfg(test)]
     if let Some(hook) = BEFORE_STORAGE_INIT.with(|slot| slot.borrow_mut().take()) {
         hook();
@@ -3934,16 +3937,17 @@ impl SqliteStore {
                         projections: Some(projections),
                         observations: Some(observations),
                     };
-                    match crate::storage::sqlite::proof_generations::check_presentation_budget(
+                    let root = match crate::storage::sqlite::proof_generations::prepare_ordinary_presentation_root(
                         &base, &captured, &inputs,
                     ) {
-                        Ok(()) => {}
+                        Ok(root) => Some(root),
                         Err(crate::storage::StorageError::HistoryRetentionBounds) => {
                             receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
+                            None
                         }
                         Err(error) => return Err(StoreError::Configured(error)),
-                    }
-                    if receipt_status != OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                    };
+                    if let Some(root) = root {
                         let receipt_publication =
                             crate::storage::sqlite::proof_generations::publish_ordinary(
                                 &transaction,
@@ -3967,6 +3971,7 @@ impl SqliteStore {
                                     presentations: &captured,
                                     overview_budget: &mut history_budget,
                                 },
+                                root,
                             );
                         match receipt_publication {
                             Ok(()) => {}
@@ -4581,7 +4586,8 @@ fn authored_storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
-    static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<String>>>> = OnceLock::new();
+    type Inventory = BTreeMap<(String, String), String>;
+    static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<Inventory>>>> = OnceLock::new();
     let mut inventory = INVENTORY
         .get_or_init(Mutex::default)
         .lock()
@@ -4592,24 +4598,32 @@ pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Resu
         for chunk in authored_storage_ddl() {
             reference.execute_batch(chunk)?;
         }
-        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY type,name")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-            .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        *inventory = Some(std::sync::Arc::new(format!(
-            "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
-            objects.len(),
-            objects.join(",")
-        )));
+        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?
+            .query_map([], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, String>(2)?)))?
+            .collect::<rusqlite::Result<Inventory>>()?;
+        *inventory = Some(std::sync::Arc::new(objects));
     }
-    let sql = inventory
+    let expected = inventory
         .as_ref()
         .cloned()
         .ok_or(rusqlite::Error::InvalidQuery)?;
     drop(inventory);
-    connection
-        .prepare_cached(sql.as_str())?
-        .query_row([], |row| row.get(0))
+    // Bind the authored definitions as data in Rust instead of compiling an
+    // SQL VALUES expression containing the entire schema on every connection.
+    // Every expected definition must still match exactly; extra objects retain
+    // the same acceptance as the original inventory query.
+    let mut statement = connection.prepare_cached("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?;
+    let mut rows = statement.query([])?;
+    let mut matched = 0;
+    while let Some(row) = rows.next()? {
+        let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+        if let Some(definition) = expected.get(&key)
+            && row.get_ref(2)?.as_str()? == definition
+        {
+            matched += 1;
+        }
+    }
+    Ok(matched == expected.len())
 }
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {
@@ -5157,7 +5171,7 @@ fn write_tree_summary(
             normalized_usage,
         );
         if current.projection_witness.is_some() {
-            let mut statement = transaction.prepare(native_metadata_value(transaction)?)?;
+            let mut statement = transaction.prepare_cached(native_metadata_value(transaction)?)?;
             let encoded: Option<Option<String>> = statement
                 .query_row([tree_summary_key(path)], |r| {
                     crate::selected_read::row(r, 512)?;
@@ -5196,12 +5210,13 @@ fn write_tree_summary(
         if encoded.len() > NATIVE_METADATA_MAX {
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
-            transaction.execute(
-                native_metadata_put(transaction)?,
-                params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
-            )?;
-            transaction.execute(
-                "UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1",
+            transaction
+                .prepare_cached(native_metadata_put(transaction)?)?
+                .execute(params![
+                    format!("native_tree_failure:{path}"),
+                    header_ledger(ledger)
+                ])?;
+            transaction.prepare_cached("UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1")?.execute(
                 [path],
             )?;
             return Ok(());
@@ -5209,10 +5224,9 @@ fn write_tree_summary(
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![tree_summary_key(path), encoded])?;
-        transaction.execute(
-            native_metadata_delete(transaction)?,
-            [format!("native_tree_failure:{path}")],
-        )?;
+        transaction
+            .prepare_cached(native_metadata_delete(transaction)?)?
+            .execute([format!("native_tree_failure:{path}")])?;
     }
     Ok(())
 }
@@ -5776,32 +5790,6 @@ fn write_index_changes(
             row.get::<_, String>(0)
         })?,
         layout,
-        &mut UsageDeletes::default(),
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn write_index_changes_measured(
-    transaction: &Transaction<'_>,
-    path: &str,
-    ledger: &Ledger,
-    index: &FileIndex,
-    changes: Option<&super::DirtyRows>,
-    expected: Option<&Ledger>,
-    measurements: &mut crate::native_timing::Measurements,
-    namespace: &str,
-) -> rusqlite::Result<()> {
-    let layout = WriterLayout::new(transaction)?;
-    write_index_changes_with_usage_deletes(
-        transaction,
-        path,
-        ledger,
-        index,
-        changes,
-        expected,
-        measurements,
-        namespace,
-        &layout,
         &mut UsageDeletes::default(),
     )
 }

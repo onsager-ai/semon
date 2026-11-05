@@ -1145,6 +1145,11 @@ pub(crate) trait IndexStore: Send {
 
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
+    /// Reload peer publication state on retained admitted connections. Other
+    /// adapters keep their existing reopen path.
+    fn refresh_peer_publication(&mut self) -> Result<bool, StoreError> {
+        Ok(false)
+    }
     /// Rebuild a stale derived Catalog search projection from the current
     /// metadata rows, fenced to the audited Catalog generation.
     fn rebuild_catalog_search(&mut self, _expected_generation: &str) -> Result<bool, StoreError> {
@@ -2052,6 +2057,19 @@ impl EventCache {
 
     pub(crate) fn scoped_store_lost(&self) -> bool {
         self.scoped && self.store.is_none()
+    }
+
+    pub(crate) fn refresh_peer_publication(&mut self) -> io::Result<bool> {
+        let refreshed = self
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+            .refresh_peer_publication()
+            .map_err(store_io_error)?;
+        if refreshed {
+            self.files.clear();
+        }
+        Ok(refreshed)
     }
 
     pub(crate) fn is_scoped(&self) -> bool {
