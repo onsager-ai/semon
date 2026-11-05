@@ -460,6 +460,7 @@ impl SourceJournal {
         }
         let writer = std::cell::RefMut::map(writer, |writer| writer.as_mut().unwrap());
         crate::events::store::configured::NativeOwnership::validate_physical(&writer)?;
+        self.validate_journal_schema(&writer)?;
         Ok(writer)
     }
 
@@ -490,13 +491,28 @@ impl SourceJournal {
     }
 
     fn validate_journal_layout(&self, tx: &Connection) -> Result<(), StorageError> {
+        self.validate_journal_schema(tx)?;
+        let valid: bool = tx.prepare_cached("SELECT qualification=?2 AND revision>=coalesce((SELECT revision FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision DESC LIMIT 1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1").map_err(failed)?.query_row(params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
+        if !valid {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        Ok(())
+    }
+
+    fn validate_journal_schema(&self, tx: &Connection) -> Result<(), StorageError> {
+        let version: i64 = tx
+            .pragma_query_value(None, "schema_version", |r| r.get(0))
+            .map_err(failed)?;
+        let cached: bool = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_source_journal_layout' AND narg=1)").map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
+        if cached {
+            let layout: Option<bool> = tx.prepare_cached("SELECT semon_source_journal_layout(?1)").map_err(failed)?.query_row([version], |r| r.get(0)).map_err(failed)?;
+            if layout == Some(true) {
+                return Ok(());
+            }
+        }
         let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='table' AND name='storage_source_journal'", [], |r|r.get(0)).optional().map_err(failed)?;
         let expected = JOURNAL_SCHEMA.replace(" IF NOT EXISTS", "");
         if actual.as_deref() != Some(expected.trim_end_matches(';')) {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-        let valid: bool = tx.query_row("SELECT qualification=?2 AND revision>=coalesce((SELECT revision FROM main.session_catalog_invalidations INDEXED BY storage_ns_source_pending WHERE namespace=?1 ORDER BY revision DESC LIMIT 1),0) AND (backfill_state IS NULL OR backfill_state IN('discovering','draining','complete')) FROM storage_source_journal WHERE namespace=?1", params![self.config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION], |r|r.get(0)).optional().map_err(failed)?.unwrap_or(false);
-        if !valid {
             return Err(StorageError::NamespaceUpgradePending);
         }
         for table in ["source_observation_receipts", "source_observation_intents"] {
@@ -519,6 +535,21 @@ impl SourceJournal {
             }
         }
         catalog_namespace::validate_guard(tx, "storage_source_journal")?;
+        // A rolled-back DDL cookie can be reused for a different layout.
+        // Cache only committed schema, never mutable journal or owner rows.
+        if tx.is_autocommit() {
+            tx.create_scalar_function(
+                "semon_source_journal_layout",
+                1,
+                rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                    | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                move |context| {
+                    let observed: i64 = context.get(0)?;
+                    Ok((observed == version).then_some(true))
+                },
+            )
+            .map_err(failed)?;
+        }
         Ok(())
     }
 }
@@ -1311,8 +1342,7 @@ pub(crate) fn stored_receipt(
     operation: &SourceOperation,
 ) -> Result<Option<SourceMutationReceipt>, StorageError> {
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
-    let captured_digest: Option<String> = db.query_row(
-        "SELECT payload_digest FROM main.source_observation_intents WHERE namespace=?1 AND operation_id=?2",
+    let captured_digest: Option<String> = db.prepare_cached("SELECT payload_digest FROM main.source_observation_intents WHERE namespace=?1 AND operation_id=?2").map_err(failed)?.query_row(
         params![namespace, operation.id], |row| row.get(0),
     ).optional().map_err(|error| phase_failed("intent-binding-read", error))?;
     if captured_digest
@@ -1322,8 +1352,7 @@ pub(crate) fn stored_receipt(
         return Ok(Some(SourceMutationReceipt::Conflict));
     }
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
-    let found: Option<(String, String)> = db.query_row(
-        "SELECT payload_digest,outcome FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2",
+    let found: Option<(String, String)> = db.prepare_cached("SELECT payload_digest,outcome FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2").map_err(failed)?.query_row(
         params![namespace, operation.id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|error| phase_failed("receipt-read", error))?;
@@ -1344,8 +1373,7 @@ pub(crate) fn recovery_receipt(
     let Some(receipt) = stored_receipt(db, namespace, operation)? else {
         return Ok(None);
     };
-    let done: Option<Option<bool>> = db.query_row(
-        "SELECT recovery_done FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3",
+    let done: Option<Option<bool>> = db.prepare_cached("SELECT recovery_done FROM main.source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3").map_err(failed)?.query_row(
         params![namespace, operation.id, operation.payload_digest], |row| row.get(0),
     ).optional().map_err(failed)?;
     match done {
@@ -1365,8 +1393,7 @@ pub(crate) fn insert_recovery_receipt(
 ) -> Result<(), StorageError> {
     // Receipt rows are control records, not discovered source rows.
     crate::native_timing::discovery_count(|counts| counts.statements += 1);
-    db.execute(
-        "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES(?1,?2,?3,?4,?5)",
+    db.prepare_cached("INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome,recovery_done) VALUES(?1,?2,?3,?4,?5)").map_err(failed)?.execute(
         params![namespace, operation.id, operation.payload_digest, if applied { "applied" } else { "conflict" }, done],
     ).map_err(|error| phase_failed("recovery-receipt-insert", error))?;
     Ok(())
@@ -1390,8 +1417,7 @@ pub(crate) fn insert_terminal_receipt(
         counts.statements += 1;
         counts.rows += 1;
     });
-    tx.execute(
-        "INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome) VALUES(?1,?2,?3,?4)",
+    tx.prepare_cached("INSERT INTO main.source_observation_receipts(namespace,operation_id,payload_digest,outcome) VALUES(?1,?2,?3,?4)").map_err(failed)?.execute(
         params![namespace, operation.id, operation.payload_digest, outcome],
     ).map_err(|error| phase_failed("receipt-insert", error))?;
     Ok(())
@@ -1408,8 +1434,7 @@ pub(crate) fn persist_intent_sql(
     if payload.len() > 2 * 1024 * 1024 {
         return Err(StorageError::InvalidArguments);
     }
-    let existing: Option<String> = db.query_row(
-        "SELECT payload FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND octet_length(payload)<=2097152",
+    let existing: Option<String> = db.prepare_cached("SELECT payload FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND octet_length(payload)<=2097152").map_err(failed)?.query_row(
         params![namespace, operation.id], |row| row.get(0),
     ).optional().map_err(failed)?;
     if let Some(existing) = existing {
@@ -1419,7 +1444,7 @@ pub(crate) fn persist_intent_sql(
             Err(StorageError::Conflict)
         };
     }
-    let count: i64 = db.query_row("SELECT count(*) FROM (SELECT 1 FROM source_observation_intents WHERE namespace=?1 LIMIT 256)", [namespace], |row| row.get(0)).map_err(failed)?;
+    let count: i64 = db.prepare_cached("SELECT count(*) FROM (SELECT 1 FROM source_observation_intents WHERE namespace=?1 LIMIT 256)").map_err(failed)?.query_row( [namespace], |row| row.get(0)).map_err(failed)?;
     if count >= 256 {
         return Err(StorageError::Busy);
     }
@@ -1427,12 +1452,12 @@ pub(crate) fn persist_intent_sql(
         stored_receipt(db, namespace, operation)?,
         Some(SourceMutationReceipt::Conflict)
     ) {
-        let same_payload: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
+        let same_payload: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)").map_err(failed)?.query_row(params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
         if !same_payload {
             return Err(StorageError::Conflict);
         }
     }
-    db.execute("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)", params![namespace, operation.id, operation.payload_digest, payload]).map_err(failed)?;
+    db.prepare_cached("INSERT INTO source_observation_intents(namespace,operation_id,payload_digest,payload) VALUES(?1,?2,?3,?4)").map_err(failed)?.execute( params![namespace, operation.id, operation.payload_digest, payload]).map_err(failed)?;
     Ok(())
 }
 
@@ -1440,7 +1465,7 @@ pub(crate) fn load_intents(
     db: &Connection,
     namespace: &str,
 ) -> Result<Vec<SourceIntent>, StorageError> {
-    let mut statement = db.prepare("SELECT operation_id,payload_digest,CASE WHEN octet_length(payload)<=2097152 THEN payload END FROM source_observation_intents WHERE namespace=?1 ORDER BY sequence LIMIT 257").map_err(failed)?;
+    let mut statement = db.prepare_cached("SELECT operation_id,payload_digest,CASE WHEN octet_length(payload)<=2097152 THEN payload END FROM source_observation_intents WHERE namespace=?1 ORDER BY sequence LIMIT 257").map_err(failed)?;
     let rows = statement
         .query_map([namespace], |row| {
             Ok((
@@ -1475,13 +1500,13 @@ pub(crate) fn acknowledge_intent_sql(
     if operation.namespace != namespace {
         return Err(StorageError::Conflict);
     }
-    let terminal: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)", params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
+    let terminal: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM source_observation_receipts WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3)").map_err(failed)?.query_row(params![namespace, operation.id, operation.payload_digest], |row| row.get(0)).map_err(failed)?;
     if !terminal {
         return Err(StorageError::Conflict);
     }
     // A reused key with a different digest is never allowed to clear the old
     // pending intent, even though its public mutation result is Conflict.
-    db.execute("DELETE FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3 AND EXISTS(SELECT 1 FROM source_observation_receipts r WHERE r.namespace=?1 AND r.operation_id=?2 AND r.payload_digest=?3)", params![namespace, operation.id, operation.payload_digest]).map_err(failed)?;
+    db.prepare_cached("DELETE FROM source_observation_intents WHERE namespace=?1 AND operation_id=?2 AND payload_digest=?3 AND EXISTS(SELECT 1 FROM source_observation_receipts r WHERE r.namespace=?1 AND r.operation_id=?2 AND r.payload_digest=?3)").map_err(failed)?.execute( params![namespace, operation.id, operation.payload_digest]).map_err(failed)?;
     Ok(())
 }
 

@@ -3937,16 +3937,17 @@ impl SqliteStore {
                         projections: Some(projections),
                         observations: Some(observations),
                     };
-                    match crate::storage::sqlite::proof_generations::check_presentation_budget(
+                    let root = match crate::storage::sqlite::proof_generations::prepare_ordinary_presentation_root(
                         &base, &captured, &inputs,
                     ) {
-                        Ok(()) => {}
+                        Ok(root) => Some(root),
                         Err(crate::storage::StorageError::HistoryRetentionBounds) => {
                             receipt_status = OrdinaryReceiptStatus::CaptureBudgetExceeded;
+                            None
                         }
                         Err(error) => return Err(StoreError::Configured(error)),
-                    }
-                    if receipt_status != OrdinaryReceiptStatus::CaptureBudgetExceeded {
+                    };
+                    if let Some(root) = root {
                         let receipt_publication =
                             crate::storage::sqlite::proof_generations::publish_ordinary(
                                 &transaction,
@@ -3970,6 +3971,7 @@ impl SqliteStore {
                                     presentations: &captured,
                                     overview_budget: &mut history_budget,
                                 },
+                                root,
                             );
                         match receipt_publication {
                             Ok(()) => {}

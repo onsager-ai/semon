@@ -125,7 +125,7 @@ pub(crate) struct OrdinaryReceipt<'a> {
     pub(crate) metadata: &'a str,
 }
 
-struct PreparedPresentationRoot {
+pub(crate) struct PreparedPresentationRoot {
     base: String,
     manifest: String,
     digest: String,
@@ -317,6 +317,7 @@ pub(crate) fn publish_ordinary(
     receipt: &OrdinaryReceipt<'_>,
     base: &str,
     presentations: PreparedPresentations<'_>,
+    root: PreparedPresentationRoot,
 ) -> Result<(), PublicationError> {
     let OrdinaryReceipt {
         namespace,
@@ -334,7 +335,6 @@ pub(crate) fn publish_ordinary(
         presentations: captured_presentations,
         overview_budget,
     } = presentations;
-    let root = prepare_presentation_root(base, captured_presentations, &inputs)?;
     let publication = catalog_publication_id(namespace, inputs.catalog_generation, base)?;
     let proof = root.digest.clone();
     let prepared = prepare_proof_publication(
@@ -4257,12 +4257,14 @@ pub(crate) fn bind_presentations(
     Ok(root.digest)
 }
 
-pub(crate) fn check_presentation_budget(
+pub(crate) fn prepare_ordinary_presentation_root(
     base: &str,
     rows: &[(String, String)],
     inputs: &PresentationInputs<'_>,
-) -> Result<(), StorageError> {
-    prepare_presentation_root(base, rows, inputs).map(|_| ())
+) -> Result<PreparedPresentationRoot, StorageError> {
+    // Keep the checked root for issuance: it includes every presentation entry,
+    // so encoding and hashing it again would repeat the full cohort's work.
+    prepare_presentation_root(base, rows, inputs)
 }
 
 fn prepare_presentation_root(
