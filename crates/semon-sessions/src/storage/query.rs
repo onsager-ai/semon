@@ -398,10 +398,7 @@ pub(crate) fn history_activity(row: &crate::model::summary::CatalogRow) -> (Opti
     };
     let mut last = query["last"].as_i64();
     let mut active = matches!(query["state"].as_str(), Some("work" | "wait"));
-    for edge in crate::query_projection::SelectedRecipe::edges_for(row)
-        .into_iter()
-        .flatten()
-    {
+    for edge in query["selected"]["edges"].as_array().into_iter().flatten() {
         let edge = &edge["query"];
         for at in [edge["at"].as_i64(), edge["done"].as_i64()]
             .into_iter()
@@ -771,11 +768,11 @@ mod tests {
         assert!(recipe.turns.len() >= PREFIX);
         assert_eq!(
             producer_row.query.as_ref().unwrap()["selected"],
-            serde_json::to_value(recipe.reference(&producer_row).unwrap()).unwrap()
+            serde_json::to_value(&recipe).unwrap()
         );
 
         let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
-        let observation = crate::storage::navigation_store(binding.clone())
+        let observation = crate::storage::navigation_store(binding)
             .native_resolution("claude", "lead", crate::CatalogReadScope::Current, None)
             .unwrap();
         assert!(observation.qualified_head().is_some());
@@ -784,32 +781,14 @@ mod tests {
             .metadata
             .expect("admitted persisted Catalog metadata");
         assert!(
-            persisted.len() < 8192,
-            "growing producer Catalog metadata must retain the cell bound: {} bytes",
+            persisted.len() > 8192,
+            "growing producer Catalog metadata should exceed the cell bound: {} bytes",
             persisted.len()
         );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&persisted).unwrap(),
             serde_json::to_value(&producer_row).unwrap(),
             "the captured in-memory row must be the exact persisted producer row"
-        );
-        let db = binding.connection().unwrap();
-        let current = binding.runtime_binding_at(&db).unwrap();
-        let selected = crate::storage::sqlite::proof_generations::query_recipe_observation(
-            &db,
-            &current,
-            crate::storage::catalog::CatalogObservationOwner::Catalog,
-            &producer_row,
-        )
-        .unwrap();
-        let port = crate::storage::sqlite::query::SqliteQueryCatalog {
-            options: home.options.clone(),
-            binding,
-        };
-        assert_eq!(
-            port.selected_recipe(&selected).unwrap(),
-            Some(recipe.clone()),
-            "the persisted reference must resolve to the exact captured producer recipe"
         );
 
         let prepared = crate::query_projection::SelectedRecipe::prepare(&producer_row).unwrap();
@@ -832,7 +811,7 @@ mod tests {
         assert_eq!(decoded, recipe);
         assert_eq!(
             serde_json::to_value(decoded).unwrap(),
-            serde_json::to_value(&recipe).unwrap()
+            producer_row.query.unwrap()["selected"]
         );
     }
 
