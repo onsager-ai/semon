@@ -2063,9 +2063,17 @@ fn authenticate_immutable_observation_with_cache(
     prefix: &str,
     cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
 ) -> Result<VerifiedObservation, ObservationPreparationError> {
+    // A Catalog snapshot already owns the authenticated cohort root. Fetch
+    // its large manifest once, while every row still joins its exact receipt
+    // and authenticates its own metadata, slots and presentation entry.
+    let coordinates = cache.and_then(|cache| cache.borrow().coordinates());
+    let (cached_base, cached_digest) = coordinates
+        .as_ref()
+        .map(|(base, digest)| (Some(base.as_str()), Some(digest.as_str())))
+        .unwrap_or((None, None));
     let mut statement = db
         .prepare_cached(
-            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
+            "SELECT g.id,g.publication,g.proof,g.admission,g.stream,CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,g.prefix,r.base,CASE WHEN r.base=?6 AND r.digest=?7 THEN '' WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key JOIN storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN storage_proof_presentation_roots r ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest JOIN storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind=?3 AND g.prefix=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
         )
         .map_err(ObservationPreparationError::Sql)?;
     let rows = statement
@@ -2075,7 +2083,9 @@ fn authenticate_immutable_observation_with_cache(
                 selected.key,
                 reference_kind,
                 prefix,
-                current.stream_epoch
+                current.stream_epoch,
+                cached_base,
+                cached_digest
             ],
             |row| {
                 for column in [5, 6, 9, 10] {
@@ -2130,6 +2140,11 @@ fn authenticate_immutable_observation_with_cache(
     )
     .map_err(|_| StorageError::Busy)?;
     let observations = match cache {
+        Some(cache) if manifest.is_empty() => {
+            cache
+                .borrow()
+                .cached_observations(record, presentation, base)
+        }
         Some(cache) => cache
             .borrow_mut()
             .observations(record, presentation, base, manifest),

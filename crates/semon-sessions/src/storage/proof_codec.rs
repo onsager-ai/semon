@@ -32,6 +32,34 @@ struct CachedPresentation {
 }
 
 impl PresentationCache {
+    /// Coordinates of a root authenticated in this same Catalog snapshot.
+    pub(crate) fn coordinates(&self) -> Option<(String, String)> {
+        self.root
+            .as_ref()
+            .map(|root| (root.base.clone(), root.digest.clone()))
+    }
+
+    pub(crate) fn cached_observations(
+        &self,
+        record: &GenerationRecord,
+        presentation: &str,
+        base: &str,
+    ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+        let root = self
+            .root
+            .as_ref()
+            .filter(|root| root.base == base && root.digest == record.proof)
+            .ok_or(StorageError::ScopeChanged)?;
+        verify_decoded_presentation_entry(
+            &record.session_key,
+            &record.metadata,
+            &record.slots,
+            presentation,
+            &root.decoded,
+        )?;
+        Ok(root.decoded.observations.clone())
+    }
+
     pub(crate) fn observations(
         &mut self,
         record: &GenerationRecord,
@@ -53,15 +81,7 @@ impl PresentationCache {
                 decoded,
             });
         }
-        let root = self.root.as_ref().expect("authenticated presentation root");
-        verify_decoded_presentation_entry(
-            &record.session_key,
-            &record.metadata,
-            &record.slots,
-            presentation,
-            &root.decoded,
-        )?;
-        Ok(root.decoded.observations.clone())
+        self.cached_observations(record, presentation, base)
     }
 }
 
@@ -515,6 +535,7 @@ mod tests {
         first.proof = presentation_digest("base", &encoded).unwrap();
         second.proof = first.proof.clone();
         let mut cache = PresentationCache::default();
+        assert!(cache.cached_observations(&first, "null", "base").is_err());
         assert!(
             cache
                 .observations(&first, "null", "base", &encoded)
@@ -528,8 +549,21 @@ mod tests {
                 .is_none()
         );
 
+        assert!(
+            cache
+                .cached_observations(&second, "null", "base")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            cache
+                .cached_observations(&second, "null", "other-base")
+                .is_err()
+        );
+        assert!(cache.cached_observations(&second, "{}", "base").is_err());
         let mut changed = second.clone();
         changed.metadata.push(' ');
+        assert!(cache.cached_observations(&changed, "null", "base").is_err());
         assert!(
             cache
                 .observations(&changed, "null", "base", &encoded)
