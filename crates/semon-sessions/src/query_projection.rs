@@ -142,6 +142,16 @@ impl SelectedRecipe {
         Ok(Some(payload))
     }
 
+    /// Spill a growing ordinary observation before it reaches the existing
+    /// compact metadata bound. Small observations retain their exact immutable
+    /// staged receipt identity when an ordinary reader republishes them.
+    pub(crate) fn compact_catalog(row: &mut CatalogRow) -> std::io::Result<()> {
+        if serde_json::to_vec(row).map_err(std::io::Error::other)?.len() >= 8192 {
+            Self::detach(row)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn reference(&self, row: &CatalogRow) -> serde_json::Result<SelectedRecipeRef> {
         let source = crate::retention::source_generation(&row.sources)?;
         let bytes = serde_json::to_vec(&(

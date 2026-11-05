@@ -3597,9 +3597,13 @@ pub(crate) fn publish_repaired_query_observation(
     prepared.publish(db).map_err(failed)?;
     if let Some(payload) = payload {
         db.execute(
-            &format!("UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2", owner.table()),
+            &format!(
+                "UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2",
+                owner.table()
+            ),
             params![current.namespace.as_str(), selected.key, payload],
-        ).map_err(failed)?;
+        )
+        .map_err(failed)?;
     }
     Ok(())
 }
