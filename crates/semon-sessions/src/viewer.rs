@@ -876,16 +876,7 @@ impl MachineView {
 
     /// When reads are brought up to date with the logs: see [`Refresh`].
     pub(crate) fn set_refresh(&self, refresh: Refresh) {
-        let previous = self.mode.swap(refresh.code(), Ordering::Relaxed);
-        if refresh == Refresh::Background && previous != refresh.code() {
-            let mut state = lock(&self.live.state);
-            if state.active() {
-                // A mode change must also move checks queued under the old
-                // invalidation-only safety deadline into the polling cadence.
-                let due = next_check(Instant::now(), state.built_at);
-                self.queue(&mut state, due, false);
-            }
-        }
+        self.mode.store(refresh.code(), Ordering::Relaxed);
     }
 
     fn refresh(&self) -> Refresh {

@@ -158,7 +158,7 @@ pub(super) fn encoded(index: &FileIndex) -> rusqlite::Result<Option<String>> {
 }
 
 pub(super) fn source(c: &Connection, path: &str) -> rusqlite::Result<Option<(i64, String)>> {
-    c.prepare_cached("SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2")?.query_row(params![path,CACHE_VERSION], |r| Ok((r.get(0)?,r.get(1)?))).optional()
+    c.query_row("SELECT s.source_id,s.receipt FROM native_usage_current c JOIN native_usage_sources s USING(namespace,source_id) WHERE c.namespace=semon_namespace() AND c.source_path=?1 AND s.parser_version=?2", params![path,CACHE_VERSION], |r| Ok((r.get(0)?,r.get(1)?))).optional()
 }
 
 pub(super) fn normalized(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
@@ -166,7 +166,8 @@ pub(super) fn normalized(c: &Connection, path: &str, ledger: &Ledger) -> rusqlit
         return Ok(false);
     };
     Ok(receipt == header_ledger(ledger)
-        && c.prepare_cached("SELECT usage_ready FROM native_usage_sources WHERE namespace=semon_namespace() AND source_id=?1")?.query_row(
+        && c.query_row(
+            "SELECT usage_ready FROM native_usage_sources WHERE namespace=semon_namespace() AND source_id=?1",
             [id],
             |r| r.get::<_, bool>(0),
         )?)
@@ -267,8 +268,8 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn create(&mut self, path: &str, receipt: &str) -> Result<i64, StorageError> {
         let tx = self.tx;
         let result = (|| {
-            let id = tx.prepare_cached("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id")?.query_row(params![path,receipt,CACHE_VERSION], |r| r.get::<_, i64>(0))?;
-            tx.prepare_cached("INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id")?.execute(params![path,id])?;
+            let id = tx.query_row("INSERT INTO native_usage_sources(namespace,source_id,source_path,receipt,checkpoint,parser_version) VALUES(semon_namespace(),(SELECT coalesce(max(source_id),0)+1 FROM native_usage_sources WHERE namespace=semon_namespace()),?1,?2,0,?3) RETURNING source_id", params![path,receipt,CACHE_VERSION], |r| r.get::<_, i64>(0))?;
+            tx.execute("INSERT INTO native_usage_current VALUES(semon_namespace(),?1,?2) ON CONFLICT(namespace,source_path) DO UPDATE SET source_id=excluded.source_id",params![path,id])?;
             Ok(id)
         })();
         self.result(result)
@@ -276,7 +277,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn receipt(&mut self, id: i64, receipt: &str) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.prepare_cached("UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1")?.execute(params![id,receipt])?;
+            tx.execute("UPDATE native_usage_sources SET receipt=?2 WHERE namespace=semon_namespace() AND source_id=?1",params![id,receipt])?;
             Ok(())
         })();
         self.result(result)
@@ -284,7 +285,7 @@ impl algorithm::Effects for SqliteEffects<'_, '_> {
     fn unblock(&mut self, path: &str, receipt: &str) -> Result<(), StorageError> {
         let tx = self.tx;
         let result = (|| {
-            tx.prepare_cached("UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')")?.execute(params![path,receipt])?;
+            tx.execute("UPDATE native_tree_repairs SET state='ready' WHERE namespace=semon_namespace() AND source_path=?1 AND state LIKE 'blocked_%' AND (receipt<>?2 OR state='blocked_evidence')",params![path,receipt])?;
             Ok(())
         })();
         self.result(result)

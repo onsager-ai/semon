@@ -934,8 +934,15 @@ impl SemanticStaging {
     pub(crate) fn admit(config: &StoreConfig) -> Result<Self, StorageError> {
         let owner =
             crate::events::store::configured::NativeOwnership::admit_catalog_publisher(config)?;
-        // Admission already validates readiness and the exact composite DDL
-        // in its snapshot; do not repeat it on a discarded connection.
+        let db = SourceJournal::owned(owner.clone()).connection()?;
+        db.execute_batch("BEGIN DEFERRED").map_err(failed)?;
+        owner.validate_ready(&db)?;
+        let composite: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('catalog_semantic_stage','main') WHERE name='namespace' AND pk=1 AND [notnull]=1)", [], |r|r.get(0)).map_err(failed)?;
+        if !composite {
+            return Err(StorageError::NamespaceUpgradePending);
+        }
+        db.execute_batch("COMMIT")
+            .map_err(|_| StorageError::CommitUncertain)?;
         Ok(Self {
             config: config.clone(),
             reduction: true,
@@ -960,16 +967,11 @@ impl SemanticStaging {
     /// still refuse; only a composite owner restores the persisted stamp.
     pub(super) fn reported_stamp(
         &self,
-        writer: &crate::events::store::configured::Writer,
     ) -> Result<Option<crate::events::ReportedFileStamp>, StorageError> {
         let Some(owner) = &self.owner else {
             return Ok(None);
         };
-        let _timing = crate::native_timing::Phase::new(
-            owner.config().backend.sqlite_database()?,
-            "index_reported_stamp",
-        );
-        writer.reported_stamp()
+        crate::events::store::configured::Writer::owned(owner.clone())?.reported_stamp()
     }
     pub(crate) fn validate(config: &StoreConfig) -> Result<Self, StorageError> {
         crate::events::store::configured::validate_semantic_schema(config)?;
@@ -4215,14 +4217,7 @@ impl Stage {
     }
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
-        let _timing =
-            crate::native_timing::Phase::new(config.backend.sqlite_database()?, "index_stage_open");
         let mut db = capability.journal().connection()?;
-        if capability.owner.is_some() {
-            // Cache only the committed physical layout. Every transaction still
-            // validates its live admission, profile and stream independently.
-            crate::events::store::configured::NativeOwnership::validate_physical(&db)?;
-        }
         let tx = db
             .transaction_with_behavior(TransactionBehavior::Deferred)
             .map_err(failed)?;
@@ -4262,11 +4257,6 @@ impl Stage {
             .map_err(failed)?;
         }
         validate_publication_support(&tx)?;
-        // Qualify all guards from one schema scan, retaining exact table and
-        // trigger-body checks without reparsing a query for every operation.
-        let guards = tx.prepare_cached("SELECT name,tbl_name,sql FROM main.sqlite_schema WHERE type='trigger' AND name GLOB 'storage_semantic_guard_*'").map_err(failed)?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?)))).map_err(failed)?
-            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>().map_err(failed)?;
         for table in crate::events::store::configured::semantic_tables()
             .iter()
             .copied()
@@ -4287,10 +4277,8 @@ impl Stage {
                 let expected = format!(
                     "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN semon_semantic_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'semantic Source refused'); END"
                 );
-                if !guards
-                    .get(&name)
-                    .is_some_and(|(actual_table, sql)| actual_table == table && sql == &expected)
-                {
+                let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", params![name,table], |r|r.get(0)).optional().map_err(failed)?;
+                if actual.as_deref() != Some(expected.as_str()) {
                     return Err(StorageError::NamespaceUpgradePending);
                 }
             }

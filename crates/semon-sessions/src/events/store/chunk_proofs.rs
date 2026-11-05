@@ -738,17 +738,15 @@ pub(super) fn preserve(transaction: &Transaction<'_>, path: &str) -> rusqlite::R
 pub(super) fn clear(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     published::preserve(transaction, path)?;
     let prefix = prefix(path);
-    transaction
-        .prepare_cached(
-            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?
-        .execute(params![&prefix, format!("{prefix}~")])?;
+    transaction.execute(
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        params![&prefix, format!("{prefix}~")],
+    )?;
     let namespace = format!("native_proof_tree:{prefix}:");
-    transaction
-        .prepare_cached(
-            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?
-        .execute(params![&namespace, format!("{namespace}~")])?;
+    transaction.execute(
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        params![&namespace, format!("{namespace}~")],
+    )?;
     Ok(())
 }
 
@@ -805,23 +803,21 @@ pub(super) fn write_measured(
             ])?;
         }
         let namespace = format!("native_proof_tree:{prefix}:{level:03}:");
-        transaction
-            .prepare_cached(
-                "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-            )?
-            .execute(params![
+        transaction.execute(
+            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+            params![
                 format!("{namespace}{:010}", nodes.len()),
                 format!("{namespace}~")
-            ])?;
+            ],
+        )?;
     }
-    transaction
-        .prepare_cached(
-            "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
-        )?
-        .execute(params![
+    transaction.execute(
+        "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+        params![
             format!("native_proof_tree:{prefix}:{:03}:", plan.tree.len()),
             format!("native_proof_tree:{prefix}:~")
-        ])?;
+        ],
+    )?;
     measurements.cleanup(
         transaction,
         &prefix,

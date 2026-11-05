@@ -71,19 +71,8 @@ pub(crate) fn open_semantic(
 pub(crate) fn open_semantic_with_stamp(
     capability: super::semantic::SemanticStaging,
 ) -> Result<(Box<dyn IndexStore>, Option<ReportedFileStamp>), StorageError> {
-    let journal = capability.journal();
-    journal.prepare()?;
-    let native = capability.writer()?;
-    let stamp = capability.reported_stamp(&native)?;
-    Ok((
-        Box::new(ConfiguredIndex {
-            reported_selection: None,
-            native,
-            semantic: Some(super::semantic::Stage::open(capability)?),
-            journal,
-        }),
-        stamp,
-    ))
+    let stamp = capability.reported_stamp()?;
+    Ok((open_semantic(capability)?, stamp))
 }
 
 impl IndexStore for ConfiguredIndex {

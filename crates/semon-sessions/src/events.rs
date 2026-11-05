@@ -2054,12 +2054,6 @@ impl EventCache {
         self.scoped && self.store.is_none()
     }
 
-    /// A peer's committed head invalidates lazy file projections, not the
-    /// admitted connections. Subsequent loads still qualify each exact ledger.
-    pub(crate) fn invalidate_peer_files(&mut self) {
-        self.files.clear();
-    }
-
     pub(crate) fn is_scoped(&self) -> bool {
         self.scoped
     }
