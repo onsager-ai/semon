@@ -177,6 +177,20 @@ impl IndexStore for NativeIndex {
         }
         result.map_err(err)
     }
+    fn completed_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Option<String>, StoreError> {
+        self.pool
+            .transaction(
+                &self.namespace,
+                TxnKind::ReadSnapshot,
+                &self.control,
+                |tx| super::semantic_stage::completed_publication(tx, batch, prepared),
+            )
+            .map_err(err)
+    }
     fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,

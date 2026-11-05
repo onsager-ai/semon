@@ -81,6 +81,66 @@ impl ComposedGrant {
     }
 }
 
+impl History<'_, '_> {
+    /// Freeze the complete composite when its final Current projection leaves.
+    /// Its existing recipe and grant already include the surviving Current
+    /// sources; all of those exact Native proofs now need History custody.
+    pub(super) fn preserve_withdrawn_composite(&self, key: &str) -> Result<bool, StorageError> {
+        let Some((owner, false)) = self.owner(key)? else {
+            return Ok(false);
+        };
+        let mut tx = self.effects.tx.borrow_mut();
+        let (row, header, texts) = snapshot::in_transaction(&mut tx, self.previous, |view| {
+            view.selected(key, true, 0, 64)?
+                .ok_or(StorageError::ScopeChanged)
+        })?;
+        if usize::try_from(header.3).ok() != Some(texts.len()) {
+            return Err(StorageError::Busy);
+        }
+        drop(tx);
+        let metadata = self
+            .metadata("semon_pg_native_catalog_history_headers", &owner, key)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let (_, incomplete) = self
+            .recipe(&owner, key, true)?
+            .ok_or(StorageError::ScopeChanged)?;
+        let mut tx = self.effects.tx.borrow_mut();
+        let binding = super::super::super::model_cache::binding(&mut tx)?;
+        let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+        let grant = read_grant(
+            &mut tx,
+            &binding,
+            &owner,
+            metadata.as_bytes(),
+            &row,
+            &mut budget,
+        )?
+        .ok_or(StorageError::ScopeChanged)?;
+        let capture =
+            serde_json::to_string(&grant.capture).map_err(|_| StorageError::ScopeChanged)?;
+        let receipt_ids = grant
+            .receipts
+            .into_iter()
+            .map(|(_, _, id)| id)
+            .collect::<Vec<_>>();
+        drop(tx);
+        for source in &row.sources {
+            self.retain_source(&row, source)?;
+        }
+        self.composed_verified(VerifiedHistoryComposition {
+            key,
+            generation: &header.0,
+            sources: header.2.as_deref().ok_or(StorageError::ScopeChanged)?,
+            metadata: &metadata,
+            texts: &texts,
+            incomplete,
+            receipt_ids: &receipt_ids,
+            capture: &capture,
+        })?;
+        Ok(true)
+    }
+}
+
 impl VerifiedHistoryCompositionStore for History<'_, '_> {
     fn composition_snapshot(
         &self,
