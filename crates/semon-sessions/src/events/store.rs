@@ -615,7 +615,10 @@ fn open_admitted(
     {
         configured::create(&config)?;
     }
-    let capability = crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?;
+    let capability = {
+        let _timing = crate::native_timing::Phase::new(path, "index_admit");
+        crate::storage::sqlite::semantic::SemanticStaging::admit(&config)?
+    };
     #[cfg(test)]
     if let Some(hook) = BEFORE_STORAGE_INIT.with(|slot| slot.borrow_mut().take()) {
         hook();

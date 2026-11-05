@@ -971,6 +971,10 @@ impl SemanticStaging {
         let Some(owner) = &self.owner else {
             return Ok(None);
         };
+        let _timing = crate::native_timing::Phase::new(
+            owner.config().backend.sqlite_database()?,
+            "index_reported_stamp",
+        );
         crate::events::store::configured::Writer::owned(owner.clone())?.reported_stamp()
     }
     pub(crate) fn validate(config: &StoreConfig) -> Result<Self, StorageError> {
@@ -4217,6 +4221,10 @@ impl Stage {
     }
     pub(crate) fn open(capability: SemanticStaging) -> Result<Self, StorageError> {
         let config = &capability.config;
+        let _timing = crate::native_timing::Phase::new(
+            config.backend.sqlite_database()?,
+            "index_stage_open",
+        );
         let mut db = capability.journal().connection()?;
         if capability.owner.is_some() {
             // Cache only the committed physical layout. Every transaction still

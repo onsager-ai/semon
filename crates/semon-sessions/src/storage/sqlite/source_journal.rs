@@ -478,6 +478,10 @@ impl SourceJournal {
     /// Validate the enrolled current journal in a read snapshot. Reopen never
     /// creates tables, repairs profiles or adopts metadata counters.
     pub(crate) fn prepare(&self) -> Result<(), StorageError> {
+        let _timing = crate::native_timing::Phase::new(
+            self.config.backend.sqlite_database()?,
+            "index_journal_prepare",
+        );
         let mut db = self.writer()?;
         let tx = db.transaction().map_err(failed)?;
         self.validate(&tx)?;

@@ -1651,6 +1651,10 @@ impl Writer {
     }
 
     pub(crate) fn owned(owner: NativeOwnership) -> Result<Self, StorageError> {
+        let _timing = crate::native_timing::Phase::new(
+            owner.config().backend.sqlite_database()?,
+            "index_writer_open",
+        );
         Ok(Self {
             config: owner.config.clone(),
             connection: connection(&owner.config)?,
