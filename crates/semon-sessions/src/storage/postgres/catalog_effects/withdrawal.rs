@@ -325,7 +325,8 @@ fn owners(
         if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
             return Err(StorageError::ScopeChanged);
         }
-        if crate::query_projection::SelectedRecipe::detached(&value) {
+        if value.query.as_ref().is_some_and(|query| query.get("selected").is_some())
+            && crate::query_projection::SelectedRecipe::detached(&value) {
             let payload = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::ScopeChanged)?;
             let payload = std::str::from_utf8(&payload).map_err(|_| StorageError::ScopeChanged)?;
             value.query_recipe = Some(crate::query_projection::SelectedRecipe::decode(&value, payload)

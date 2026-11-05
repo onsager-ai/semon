@@ -188,7 +188,8 @@ impl History<'_, '_> {
             return Err(StorageError::ScopeChanged);
         }
         row.query_recipe = supplied.query_recipe.clone();
-        if crate::query_projection::SelectedRecipe::detached(&row) {
+        if row.query.as_ref().is_some_and(|query| query.get("selected").is_some())
+            && crate::query_projection::SelectedRecipe::detached(&row) {
             // Custody reads the exact outgoing physical owner. A source may
             // already be absent; live reader admission is not transfer authority.
             let tx = self.effects.tx.borrow_mut();

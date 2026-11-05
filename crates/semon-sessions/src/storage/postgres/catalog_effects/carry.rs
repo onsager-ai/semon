@@ -222,7 +222,7 @@ pub(super) fn trace_families(
 const OWNED: &[(&str, &str)] = &[
     (
         "catalog_rows",
-        "key_digest,session_key,parent_key,metadata,last_ms,harness,repo,model",
+        "key_digest,session_key,parent_key,metadata,query_recipe,last_ms,harness,repo,model",
     ),
     (
         "catalog_sources",
