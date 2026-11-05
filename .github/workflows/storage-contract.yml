@@ -150,6 +150,7 @@ jobs:
           cursor_log="$RUNNER_TEMP/477-focused-cursor.log"
           plan_log="$RUNNER_TEMP/477-focused-append-plan.log"
           cargo test --locked -p semon-sessions --lib events::cursor_tests:: -- --nocapture 2>&1 | tee "$cursor_log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$cursor_log"
           cargo test --locked -p semon-sessions --lib source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture 2>&1 | tee "$plan_log"
           grep -F 'test result: ok. 1 passed; 0 failed;' "$plan_log"
       - name: Shared Claude selector metadata and event-read budgets
