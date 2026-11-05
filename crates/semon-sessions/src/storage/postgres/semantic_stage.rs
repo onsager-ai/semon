@@ -78,6 +78,19 @@ pub(crate) fn take_save_diagnostic(namespace: &str) -> Option<SaveDiagnostic> {
         .remove(namespace)
 }
 
+// Detached recipes remain part of the exact owner's publication budget.
+#[cfg(test)]
+fn owner_row_bytes(row: &crate::model::summary::CatalogRow) -> usize {
+    serde_json::to_vec(row).map_or(0, |bytes| bytes.len())
+        + if crate::query_projection::SelectedRecipe::detached(row) {
+            row.query_recipe.as_ref().map_or(0, |recipe| {
+                serde_json::to_vec(recipe).map_or(0, |bytes| bytes.len())
+            })
+        } else {
+            0
+        }
+}
+
 #[cfg(test)]
 fn save_diagnostic(
     namespace: &str,
@@ -91,14 +104,14 @@ fn save_diagnostic(
         .context
         .endpoints
         .values()
-        .map(|endpoint| serde_json::to_vec(&endpoint.row).map_or(0, |bytes| bytes.len()))
+        .map(|endpoint| owner_row_bytes(&endpoint.row))
         .chain(
             stage
                 .context
                 .prior_owners
                 .values()
                 .chain(stage.context.retired_owners.iter())
-                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
+                .map(owner_row_bytes),
         )
         .max()
         .unwrap_or_default();
@@ -113,7 +126,7 @@ fn save_diagnostic(
                 .prior_owners
                 .values()
                 .chain(stage.context.retired_owners.iter())
-                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
+                .map(owner_row_bytes),
         )
         .max()
         .unwrap_or_default();
@@ -213,7 +226,7 @@ fn record_owner_sizes(namespace: &str, prepared: &PreparedSources, before: Stage
     let largest_owner_row_bytes = prepared
         .rows
         .iter()
-        .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len()))
+        .map(owner_row_bytes)
         .max()
         .unwrap_or_default();
     let model_witness_bytes = prepared

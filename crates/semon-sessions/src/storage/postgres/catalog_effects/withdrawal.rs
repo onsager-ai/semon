@@ -127,10 +127,7 @@ pub(in crate::storage::postgres) fn remove(
                 continue;
             }
             if row.parent.as_ref().is_some_and(|p| removed.contains(p))
-                || row
-                    .query
-                    .as_ref()
-                    .and_then(|q| q["selected"]["edges"].as_array())
+                || crate::query_projection::SelectedRecipe::edges_for(row)
                     .is_some_and(|edges| {
                         edges.iter().any(|e| {
                             ["from", "to"].iter().any(|f| {
@@ -316,17 +313,23 @@ fn owners(
 ) -> Result<Option<Page>, StorageError> {
     tx.check()?;
     let ns = tx.namespace.as_str().as_bytes().to_vec();
-    let rows = tx.driver.query("WITH page AS MATERIALIZED (SELECT r.key_digest,r.session_key,r.metadata FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND ($3::bytea IS NULL OR r.key_digest>$3) AND ($4::bytea[] IS NULL OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[]))) ORDER BY r.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(metadata)) OVER ()<=1048576 THEN metadata END FROM page ORDER BY key_digest", &[&ns, &previous.as_bytes(), after, &paths]).map_err(sqlstate::error)?;
+    let rows = tx.driver.query("WITH page AS MATERIALIZED (SELECT r.key_digest,r.session_key,r.metadata,r.query_recipe FROM semon_pg_native_catalog_rows r WHERE r.namespace_digest=sha256($1::bytea) AND r.namespace=$1 AND r.generation=$2 AND ($3::bytea IS NULL OR r.key_digest>$3) AND ($4::bytea[] IS NULL OR EXISTS(SELECT 1 FROM semon_pg_native_catalog_sources s WHERE s.namespace_digest=r.namespace_digest AND s.namespace=r.namespace AND s.generation=r.generation AND s.key_digest=r.key_digest AND s.source_path=ANY($4::bytea[]))) ORDER BY r.key_digest LIMIT 64) SELECT key_digest,session_key,CASE WHEN sum(octet_length(metadata)+coalesce(octet_length(query_recipe),0)) OVER ()<=1048576 THEN metadata END,query_recipe FROM page ORDER BY key_digest", &[&ns, &previous.as_bytes(), after, &paths]).map_err(sqlstate::error)?;
     if rows.is_empty() {
         return Ok(None);
     }
     let mut page = Vec::new();
     for row in rows {
         let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
-        let value: CatalogRow =
+        let mut value: CatalogRow =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
             return Err(StorageError::ScopeChanged);
+        }
+        if crate::query_projection::SelectedRecipe::detached(&value) {
+            let payload = row.get::<_, Option<Vec<u8>>>(3).ok_or(StorageError::ScopeChanged)?;
+            let payload = std::str::from_utf8(&payload).map_err(|_| StorageError::ScopeChanged)?;
+            value.query_recipe = Some(crate::query_projection::SelectedRecipe::decode(&value, payload)
+                .map_err(|_| StorageError::ScopeChanged)?);
         }
         page.push((row.get(0), value));
     }
