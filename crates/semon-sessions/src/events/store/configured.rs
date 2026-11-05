@@ -515,9 +515,6 @@ fn failed(error: rusqlite::Error) -> StorageError {
 
 pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageError> {
     let db = SourceJournal(config.clone()).connection()?;
-    // Publication and selected-context loops share more than the default
-    // sixteen statements; retain the bounded native working set.
-    db.set_prepared_statement_cache_capacity(128);
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
     db.create_scalar_function(
@@ -677,12 +674,10 @@ impl NativeOwnership {
         let version: i64 = db
             .pragma_query_value(None, "schema_version", |r| r.get(0))
             .map_err(failed)?;
-        let cached: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)").map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
+        let cached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)", [], |r| r.get(0)).map_err(failed)?;
         if cached {
             let layout: Option<bool> = db
-                .prepare_cached("SELECT semon_native_layout(?1)")
-                .map_err(failed)?
-                .query_row([version], |r| r.get(0))
+                .query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0))
                 .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
@@ -712,7 +707,9 @@ impl NativeOwnership {
         // These guards are added with the admitted writer profile rather than
         // the authored base DDL. Qualify their static presence on schema-cookie
         // misses, after prepare_owned has created the operation table.
-        let owner_ready: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='storage_event_operations')").map_err(failed)?.query_row(
+        let owner_ready: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='storage_event_operations')",
                 [],
                 |row| row.get(0),
             )
@@ -792,11 +789,13 @@ impl NativeOwnership {
         if !catalog_publication && search_stale {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let bound: bool=db.prepare_cached("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')").map_err(failed)?.query_row([],|r|r.get(0)).map_err(failed)?;
+        let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let (count_matches, all_owned): (bool, bool) = db.prepare_cached("WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))").map_err(failed)?.query_row(
+        let (count_matches, all_owned): (bool, bool) = db
+            .query_row(
+                "WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))",
                 rusqlite::params_from_iter(
                     std::iter::once(self.config.namespace.as_str())
                         .chain(TABLES.iter().copied())
@@ -824,11 +823,11 @@ impl NativeOwnership {
             return Err(StorageError::ScopeChanged);
         }
         let epoch: String = db
-            .prepare_cached(
+            .query_row(
                 "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |r| r.get(0),
             )
-            .map_err(failed)?
-            .query_row([], |r| r.get(0))
             .map_err(failed)?;
         if self.config.expected_stream_epoch.as_deref() != Some(epoch.as_str()) {
             return Err(StorageError::ScopeChanged);
@@ -1966,7 +1965,7 @@ impl Writer {
         .map_err(failed)?[0]
             .1;
         let base = expected.map(header_ledger).unwrap_or_default();
-        let prior: Option<(String, String, Option<i64>, String)> = tx.prepare_cached("SELECT source_path,base,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2").map_err(failed)?.query_row(params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
+        let prior: Option<(String, String, Option<i64>, String)> = tx.query_row("SELECT source_path,base,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![self.config.namespace.as_str(),operation_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
         if let Some((old_path, old_base, old_revision, old_request)) = prior {
             if old_path != path
                 || old_base != base
@@ -1976,7 +1975,7 @@ impl Writer {
                 return Err(StorageError::Conflict);
             }
         } else {
-            tx.prepare_cached("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')").map_err(failed)?.execute(params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
+            tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![self.config.namespace.as_str(),operation_id,path,request_digest,base,revision]).map_err(failed)?;
         }
         let id = operation_id.to_owned();
         #[cfg(test)]
@@ -2060,7 +2059,9 @@ impl Writer {
             if intent.base != expected.map(header_ledger).unwrap_or_default() {
                 return Err(StorageError::Conflict);
             }
-            let (state, target): (String, Option<String>) = tx.prepare_cached("SELECT state,target FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2 AND source_path=?3 AND base=?4 AND observed_revision IS ?5").map_err(failed)?.query_row(
+            let (state, target): (String, Option<String>) = tx
+                .query_row(
+                    "SELECT state,target FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2 AND source_path=?3 AND base=?4 AND observed_revision IS ?5",
                     params![self.config.namespace.as_str(),intent.id,path,intent.base,intent.revision],
                     |r| Ok((r.get(0)?,r.get(1)?)),
                 )
@@ -2143,7 +2144,7 @@ impl Writer {
                 } else if *expected == Some(*ledger) && !preserve_tree {
                     // A repaired summary may arrive as an empty append delta.
                     // Retire the bad header so write() cannot reuse its generation.
-                    tx.prepare_cached("DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1").map_err(failed)?.execute([id])
+                    tx.execute("DELETE FROM native_tree_headers WHERE namespace=semon_namespace() AND file_id=?1", [id])
                         .map_err(failed)?;
                 }
             }
@@ -2161,7 +2162,7 @@ impl Writer {
             )
             .map_err(|error| failed(error))?;
             let intent = &self.intents[*path];
-            tx.prepare_cached("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'").map_err(failed)?.execute(params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
+            tx.execute("UPDATE storage_event_operations SET target=?3,consumed_bytes=?4,state='complete' WHERE namespace=?1 AND operation_id=?2 AND state='intent'", params![self.config.namespace.as_str(),intent.id,header_ledger(ledger),int(ledger.offset)]).map_err(failed)?;
         }
         drop(usage_deletes);
         #[cfg(test)]

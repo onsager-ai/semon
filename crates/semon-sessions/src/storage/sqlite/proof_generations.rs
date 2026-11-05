@@ -1951,7 +1951,7 @@ fn same_runtime_inputs(
 struct VerifiedObservation {
     binding: crate::storage::QueryRuntimeBinding,
     row: CatalogRow,
-    observations: Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
+    observations: Option<crate::storage::selected::PresentationObservations>,
     record: proof_codec::GenerationRecord,
     presentation: String,
 }
@@ -2136,8 +2136,7 @@ fn authenticate_immutable_observation_with_cache(
             base,
             manifest,
             &record.proof,
-        )
-        .map(|observations| observations.map(std::sync::Arc::new)),
+        ),
     }
     .inspect_err(|_| diagnose_observation_refusal("immutable_presentation"))?;
     let original: CatalogRow =
@@ -2598,10 +2597,7 @@ pub(crate) fn observation_binding_with_observations(
     }
     #[cfg(test)]
     eprintln!("catalog_runtime_capture_selected origin=immutable");
-    Ok((
-        original_binding,
-        std::sync::Arc::unwrap_or_clone(observations),
-    ))
+    Ok((original_binding, observations))
 }
 
 /// Recover retained CWD inputs only from exact live ledgers or authenticated

@@ -29,7 +29,6 @@ struct CachedPresentation {
     manifest: String,
     digest: String,
     decoded: PresentationManifest,
-    observations: Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
 }
 
 impl PresentationCache {
@@ -39,24 +38,19 @@ impl PresentationCache {
         presentation: &str,
         base: &str,
         manifest: &str,
-    ) -> Result<
-        Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
-        StorageError,
-    > {
+    ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
         if self.root.as_ref().is_none_or(|root| {
             root.base != base || root.manifest != manifest || root.digest != record.proof
         }) {
-            let mut decoded = decode_presentation_manifest(manifest)?;
+            let decoded = decode_presentation_manifest(manifest)?;
             if presentation_digest(base, manifest)? != record.proof {
                 return Err(StorageError::ScopeChanged);
             }
-            let observations = decoded.observations.take().map(std::sync::Arc::new);
             self.root = Some(CachedPresentation {
                 base: base.to_owned(),
                 manifest: manifest.to_owned(),
                 digest: record.proof.clone(),
                 decoded,
-                observations,
             });
         }
         let root = self.root.as_ref().expect("authenticated presentation root");
@@ -67,7 +61,7 @@ impl PresentationCache {
             presentation,
             &root.decoded,
         )?;
-        Ok(root.observations.clone())
+        Ok(root.decoded.observations.clone())
     }
 }
 
