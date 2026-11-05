@@ -149,7 +149,8 @@ fn record_deferred_catalog_receipt() {
         eprintln!("{DEFERRED_CATALOG_RECEIPT}");
     }
     #[cfg(test)]
-    CATALOG_PUBLISH_DIAGNOSTICS.with(|lines| lines.borrow_mut().push(DEFERRED_CATALOG_RECEIPT.into()));
+    CATALOG_PUBLISH_DIAGNOSTICS
+        .with(|lines| lines.borrow_mut().push(DEFERRED_CATALOG_RECEIPT.into()));
 }
 
 fn emit_catalog_publish_diagnostic(line: String) {
@@ -3234,15 +3235,24 @@ impl SqliteStore {
                 .map_err(StoreError::Configured)?;
             crate::storage::sqlite::catalog_namespace::scope_readers(&transaction)
                 .map_err(StoreError::Configured)?;
-            transaction
-                .create_scalar_function(
-                    "semon_semantic_publisher",
-                    0,
-                    rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                        | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-                    |_| Ok(1_i64),
-                )
-                .map_err(failure)?;
+            // Writers opened for publication already registered the publisher
+            // function. Re-registering it would expire every prepared statement
+            // on this connection and force each later query to be re-parsed.
+            let publisher = transaction
+                .prepare_cached("SELECT semon_semantic_publisher()")
+                .and_then(|mut statement| statement.query_row([], |row| row.get::<_, i64>(0)))
+                .unwrap_or(0);
+            if publisher != 1 {
+                transaction
+                    .create_scalar_function(
+                        "semon_semantic_publisher",
+                        0,
+                        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
+                        |_| Ok(1_i64),
+                    )
+                    .map_err(failure)?;
+            }
             if !current_contract(&transaction).map_err(failure)? {
                 return Ok(Outcome::Stale);
             }
@@ -3428,7 +3438,7 @@ impl SqliteStore {
                         self.semantic_rejection = Some("publication_claim");
                         return Ok(Outcome::Conflict);
                     }
-                    let mut statement = transaction.prepare("SELECT session_key FROM session_catalog_sources WHERE lifecycle='current' AND source_path=?1 LIMIT 65").map_err(failure)?;
+                    let mut statement = transaction.prepare_cached("SELECT session_key FROM session_catalog_sources WHERE lifecycle='current' AND source_path=?1 LIMIT 65").map_err(failure)?;
                     for owner in statement
                         .query_map([path], |row| row.get::<_, String>(0))
                         .map_err(failure)?
@@ -3438,7 +3448,7 @@ impl SqliteStore {
                 }
                 for row in rows {
                     for id in &row.native_ids {
-                        let mut statement = transaction.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
+                        let mut statement = transaction.prepare_cached("SELECT DISTINCT session_key FROM session_catalog_sources WHERE lifecycle='current' AND harness=?1 AND native_id=?2 LIMIT 65").map_err(failure)?;
                         for owner in statement
                             .query_map(params![row.harness, id], |row| row.get::<_, String>(0))
                             .map_err(failure)?
@@ -3452,7 +3462,7 @@ impl SqliteStore {
                     return Ok(Outcome::Conflict);
                 }
                 for key in &affected {
-                    let mut statement = transaction.prepare("SELECT source_path FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
+                    let mut statement = transaction.prepare_cached("SELECT source_path FROM session_catalog_sources WHERE session_key=?1 AND lifecycle='current' LIMIT 65").map_err(failure)?;
                     for path in statement
                         .query_map([key], |row| row.get::<_, String>(0))
                         .map_err(failure)?

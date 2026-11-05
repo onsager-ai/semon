@@ -615,6 +615,9 @@ pub(crate) fn validate_catalog_publication_profile(
     )
 }
 
+static PHYSICAL_SCHEMAS: crate::storage::sqlite::catalog_namespace::QualifiedSchemas =
+    crate::storage::sqlite::catalog_namespace::QualifiedSchemas::new();
+
 /// Private primitive writer authority. Database flags cannot manufacture it;
 /// public configuration always uses the sole-Source admission path.
 #[derive(Clone, Debug)]
@@ -685,6 +688,36 @@ impl NativeOwnership {
                 return Ok(());
             }
         }
+        // Every publisher and reader step opens a fresh connection, whose
+        // cookie cache above is empty. Qualification reads only the schema, so
+        // an exact schema text already qualified in this process is reused.
+        // Content rather than the cookie keys it: rollback cannot alias it.
+        let digest = crate::storage::sqlite::catalog_namespace::schema_digest(db, None)?;
+        if !crate::storage::sqlite::catalog_namespace::schema_qualified(
+            &PHYSICAL_SCHEMAS,
+            &digest,
+        ) {
+            Self::validate_physical_layout(db)?;
+            crate::storage::sqlite::catalog_namespace::record_schema(&PHYSICAL_SCHEMAS, digest);
+        }
+        // Match the existing copied-usage/support layout caches: never retain
+        // an uncommitted cookie, which rollback could reuse for different DDL.
+        if db.is_autocommit() {
+            db.create_scalar_function(
+                "semon_native_layout",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                move |context| {
+                    let observed: i64 = context.get(0)?;
+                    Ok((observed == version).then_some(true))
+                },
+            )
+            .map_err(failed)?;
+        }
+        Ok(())
+    }
+
+    fn validate_physical_layout(db: &Connection) -> Result<(), StorageError> {
         if !current_objects_present(db).map_err(failed)? {
             return Err(StorageError::NamespaceUpgradePending);
         }
@@ -736,20 +769,6 @@ impl NativeOwnership {
                     }
                 }
             }
-        }
-        // Match the existing copied-usage/support layout caches: never retain
-        // an uncommitted cookie, which rollback could reuse for different DDL.
-        if db.is_autocommit() {
-            db.create_scalar_function(
-                "semon_native_layout",
-                1,
-                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                move |context| {
-                    let observed: i64 = context.get(0)?;
-                    Ok((observed == version).then_some(true))
-                },
-            )
-            .map_err(failed)?;
         }
         Ok(())
     }
