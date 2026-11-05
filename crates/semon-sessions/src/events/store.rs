@@ -5112,7 +5112,7 @@ fn tree_summary_key(path: &str) -> String {
 }
 
 fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<String> {
-    let mut statement = connection.prepare_cached(native_metadata_value(connection)?)?;
+    let mut statement = connection.prepare(native_metadata_value(connection)?)?;
     let mut values = Vec::<Option<String>>::new();
     for key in ["pricing_recompute_target", "catalog_semantic_recipe"] {
         let value: Option<Option<String>> = statement
@@ -5126,9 +5126,8 @@ fn tree_interpretation(connection: &Connection, path: &str) -> rusqlite::Result<
         }
         values.push(value.flatten());
     }
-    let pricing: Option<String> = connection.prepare_cached(
+    let pricing: Option<String> = connection.query_row(
         "SELECT codex_pricing_fingerprint FROM files WHERE namespace=semon_namespace() AND path=?1",
-    )?.query_row(
         [path],
         |r| {
             crate::selected_read::row(r, 64)?;

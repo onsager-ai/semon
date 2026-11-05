@@ -4204,11 +4204,8 @@ pub(crate) fn capture_presentations(
         let header_generation = crate::slot_projection::generation(&texts, &row.sources)
             .map_err(|_| StorageError::Unavailable)?;
         let header: (String, u32, i64) = tx
-            .prepare_cached(
-                "SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
-            )
-            .map_err(failed)?
             .query_row(
+                "SELECT generation,version,total FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
                 params![ns, row.key],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -4220,11 +4217,8 @@ pub(crate) fn capture_presentations(
             return Err(StorageError::ScopeChanged);
         }
         let has_history = tx
-            .prepare_cached(
-                "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",
-            )
-            .map_err(failed)?
             .query_row(
+                "SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2)",
                 params![ns, row.key],
                 |r| r.get(0),
             )
