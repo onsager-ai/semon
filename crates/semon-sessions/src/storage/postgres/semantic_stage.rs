@@ -630,7 +630,14 @@ fn has_oversized_owner_row(prepared: &PreparedSources) -> Result<bool, StorageEr
             bytes: 0,
             exceeded: false,
         };
-        let serialized = serde_json::to_writer(&mut counter, row);
+        let serialized = serde_json::to_writer(&mut counter, row).and_then(|()| {
+            if crate::query_projection::SelectedRecipe::detached(row)
+                && let Some(recipe) = &row.query_recipe
+            {
+                serde_json::to_writer(&mut counter, recipe)?;
+            }
+            Ok(())
+        });
         if counter.exceeded || counter.bytes > MAX {
             return Ok(true);
         }
