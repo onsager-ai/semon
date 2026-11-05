@@ -1,18 +1,10 @@
-# Diagnostic branch only: this focused workflow is not an integration gate.
+# Diagnostic branch only: exact product plus this workflow; never merge to product.
 name: Native storage contract
 on:
-  pull_request:
   workflow_dispatch:
-  push:
-    branches:
-      - task/479-pg-facts-20261026
-      - task/479-pg-catalog-20261026
-      - task/477-current-transfer-20261027
+  workflow_call:
 permissions:
   contents: read
-concurrency:
-  group: storage-contract-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 jobs:
   formatting:
     runs-on: ubuntu-latest
@@ -47,13 +39,31 @@ jobs:
         run: python3 scripts/check-native-storage-boundary.py
   conformance:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       SEMON_PRICING_REFRESH: "off"
+      SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
+      SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
+      SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ephemeral-ci-admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
@@ -61,27 +71,142 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Record exact tested product and diagnostic revisions
+        run: |
+          git rev-parse HEAD HEAD^ | tee "$RUNNER_TEMP/477-integration-revisions.txt"
+          git diff --exit-code HEAD^ HEAD -- . ':!.github/workflows/storage-contract.yml' ':!.github/workflows/postgres.yml'
+      - name: Create ephemeral restricted application roles
+        env:
+          PGPASSWORD: ephemeral-ci-admin
+        run: |
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
+          CREATE ROLE semon_source LOGIN PASSWORD 'ephemeral-source' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+          GRANT CONNECT ON DATABASE postgres TO semon_source;
+          SQL
       - name: Production host API callers compile
         id: production
-        run: cargo check --locked --workspace --all-targets
-      - name: Producer completion and existing native search demand regressions
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
         shell: bash
         run: |
-          completion_log="$RUNNER_TEMP/477-focused-completion.log"
-          search_log="$RUNNER_TEMP/477-focused-native-search.log"
+          set -o pipefail
+          cargo check --locked --workspace --all-targets 2>&1 | tee "$RUNNER_TEMP/477-integration-production.log"
+      - name: Compile focused PostgreSQL-feature tests once
+        id: compile
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls --no-run 2>&1 | tee "$RUNNER_TEMP/477-integration-compile.log"
+      - name: Remaining nine and exact cohort diagnostics
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        env:
+          SEMON_BUILD_TIMING: "1"
+        shell: bash
+        run: |
           result=0
-          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch -- --exact --nocapture > "$completion_log" 2>&1 || result=$?
-          if ! grep -Fq 'running 1 test' "$completion_log"; then result=1; fi
-          if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$completion_log"; then result=1; fi
-          cargo test --locked -p semon-sessions --lib native_evidence::catalog_owner_tests::cold_catalog_search_ -- --nocapture > "$search_log" 2>&1 || result=$?
-          if ! grep -Fq 'running 24 tests' "$search_log"; then result=1; fi
-          if ! grep -Fq 'test result: ok. 24 passed; 0 failed;' "$search_log"; then result=1; fi
-          tail -n 40 "$completion_log"
-          tail -n 40 "$search_log"
+          n=0
+          for test in \
+            events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history \
+            query::tests::focused_tail_does_not_load_growing_session_busy_metadata \
+            query::tests::recovery_tests::recovery_stage_only_preimage_authenticates_before_inserting_current_grant \
+            viewer::tests::a_page_across_machines_never_waits_for_a_build \
+            viewer::tests::a_page_never_waits_for_a_build_only_the_api_refreshes \
+            viewer::tests::a_session_this_machine_has_is_left_out_of_a_received_one_not_refused \
+            viewer::tests::fifty_views_are_checked_by_the_pools_threads_alone \
+            viewer::tests::initial_catalog_page_precedes_global_native_observation \
+            events::store::tests::direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant \
+            storage::query::tests::observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget \
+            query::tests::recovery_tests::recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key \
+            query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement \
+            query::tests::selected_query_completion_fences_its_sources_without_coupling_unrelated_publications \
+            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews \
+            viewer::tests::concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_native_exact_owner_grant_and_payload \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt \
+            catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key \
+            events::store::configured::tests::configured_semantic_query_recipe_loader_rechecks_immutable_residence_and_authority \
+            events::store::tests::catalog_batch_complete_publisher_matches_row_wise_rows_feed_sources_slots_and_repairs \
+            events::store::tests::catalog_batch_fallbacks_preserve_row_wise_acceptance_and_duplicate_rollback \
+            storage::proof_codec::tests::cached_presentation_rechecks_each_entry_and_exact_root \
+            viewer::tests::on_invalidate_still_catches_a_change_nobody_announced; do
+            n=$((n+1))
+            case_log="$RUNNER_TEMP/477-integration-priority-$n.log"
+            case_result=0
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$case_log" 2>&1 || case_result=$?
+            tail -n 12 "$case_log"
+            if [ "$case_result" -ne 0 ]; then result=1; fi
+          done
           exit "$result"
-      - name: Focused correctness diagnostics (not full qualification)
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: remaining-exact-diagnostic
+          path: ${{ runner.temp }}/477-integration-priority-*.log
+      - name: Ordinary model withdrawal and cursor History parity
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::businessflow::pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite -- --exact --nocapture --test-threads=1 > "$RUNNER_TEMP/520-ordinary-withdrawal.log" 2>&1 || result=$?
+          tail -n 40 "$RUNNER_TEMP/520-ordinary-withdrawal.log"
+          exit "$result"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: ordinary-withdrawal-diagnostic
+          path: ${{ runner.temp }}/520-ordinary-withdrawal.log
+      - name: Original replacement fixtures and capture-free cursor History regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          for test in \
+            model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
+            catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
+            storage::catalog::history_composition_tests::catalog_cursor_current_clears_history_without_runtime_capture; do
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 || result=1
+          done
+          exit "$result"
+      - name: Cursor newline anomaly shrink and inode regressions on both adapters
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls native_cursor_newlines_anomalies_shrink_and_inode_restart -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/520-cursor-regressions.log"
+          grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/520-cursor-regressions.log"
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls native_cursor_snapshot_state_tamper_is_refused -- --nocapture --test-threads=1
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls native_cursor_append_ignores_receiver_evidence_and_keeps_read_bounds -- --nocapture --test-threads=1
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls events::tests::a_same_size_native_rewrite_does_not_reset_the_cursor -- --exact --nocapture --test-threads=1
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls events::tests::the_ledger_skips_appends_or_replaces -- --exact --nocapture --test-threads=1
+      - name: Native cursor append survives committed replay and History publication
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::staged_native_cursor_append_survives_index_restart_and_history_publication -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-native-append-replay.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-native-append-replay.log"
+      - name: Split-page sender context and semantic grant regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls model::tests::staged_cross_harness_child_header_keeps_claude_sender_spawn_turn -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/477-sender-context.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-sender-context.log"
+      - name: Cursor append positive composite identity regression
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::native_history::pg_cursor_append_qualifies_incomplete_composite_identity -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-positive-composite.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-positive-composite.log"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: exact-new-regressions
+          path: ${{ runner.temp }}/477-*.log
+      - name: Baseline 34 and Lane A B E exact focused cases
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
         shell: bash
         run: |
           result=0
@@ -105,6 +230,15 @@ jobs:
             model::tests::staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header \
             model::tests::partial_lineage_unsupported_recipes_remain_visible_and_block_eviction \
             model::tests::incomplete_original_history_with_current_lifecycle_stays_unavailable \
+            events::store::tests::direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant \
+            storage::query::tests::observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget \
+            query::tests::recovery_tests::recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key \
+            query::tests::recovery_tests::recovery_native_long_session_pages_and_tool_expansion_measurement \
+            query::tests::selected_query_completion_fences_its_sources_without_coupling_unrelated_publications \
+            catalog::tests::semantic_stage_retained_input_overflow_is_aggregated_without_current_overviews \
+            viewer::tests::concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_native_exact_owner_grant_and_payload \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt \
             catalog::tests::semantic_overview_retention_reads_only_the_admitted_namespace_for_a_shared_key \
             catalog::tests::semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group \
             catalog::tests::semantic_summary_overflow_refuses_a_singleton_publication_group \
@@ -120,50 +254,116 @@ jobs:
             events::store::configured::tests::domain52::presentation_capture_overflow::overflow_rejects_a_missing_exact_model_receipt \
             events::store::configured::tests::domain52::presentation_capture_overflow::one_oversized_physical_group_keeps_its_receipt_and_stays_pending \
             native_evidence::catalog_owner_tests::deferred_publication_record_keeps_native_producer_pending_in_same_epoch \
-            storage::sqlite::source_journal::tests::configured_catalog_pending_selector_respects_large_exclusion_union; do
+            storage::sqlite::source_journal::tests::configured_catalog_pending_selector_respects_large_exclusion_union \
+            catalog::tests::semantic_stage_retains_multisource_history_refs_across_recomposition \
+            storage::proof_codec::tests::presentation_manifest_requires_a_valid_catalog_generation \
+            catalog::tests::ordinary_empty_catalog_moves_current_receipt_to_history \
+            events::store::tests::ordinary_receipt_rejects_missing_or_duplicate_projections_without_mutation \
+            catalog::tests::semantic_stage_history_ref_budget_overflow_rolls_back_and_defers \
+            events::store::tests::ordinary_receipt_exact_replay_and_partial_or_mismatched_rows_are_atomic \
+            storage::postgres::source_journal::tests::pg_catalog_pending_selector_prioritizes_selected_and_excludes_before_fifo_limit \
+            storage::postgres::source_journal::tests::pg_catalog_pending_selector_accepts_maximum_queue_exclusions_without_writes \
+            source_change::append_plan_requires_a_well_formed_custody_generation; do
             case_number=$((case_number+1))
-            case_log="$RUNNER_TEMP/477-focused-$case_number.log"
+            case_log="$RUNNER_TEMP/477-integration-case-$case_number.log"
             case_result=0
-            cargo test --locked -p semon-sessions --lib "$test" -- --exact --nocapture > "$case_log" 2>&1 || case_result=$?
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$case_log" 2>&1 || case_result=$?
             if ! grep -Fq 'running 1 test' "$case_log"; then case_result=1; fi
             if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log"; then case_result=1; fi
-            echo "CASE number=$case_number name=$test expected=1 status=$case_result" >> "$RUNNER_TEMP/477-focused-summary.txt"
+            echo "CASE number=$case_number name=$test expected=1 status=$case_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
+            if [ "$case_result" -ne 0 ]; then tail -n 65 "$case_log"; result=1; fi
+          done
+          exit "$result"
+      - name: PostgreSQL withdrawal custody regression
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib --features postgres-test-tls storage::postgres::catalog_effects::tests::native_history::pg_withdrawal_preserves_current_and_older_original_custody -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/477-withdrawal-custody.log"
+          grep -Fq 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/477-withdrawal-custody.log"
+      - name: Native search History continuation and selector groups
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          group_number=0
+          for specification in \
+            native_evidence::catalog_owner_tests::cold_catalog_search_:24 \
+            storage::catalog::history_composition_tests:::8 \
+            storage::sqlite::history::verified_history_tests:::5 \
+            storage::catalog::history_composition_tests::catalog_cursor_:5 \
+            model::relation_stage::selector_metadata_tests:::2; do
+            group_number=$((group_number+1))
+            group="${specification%:*}"
+            expected="${specification##*:}"
+            group_log="$RUNNER_TEMP/477-integration-group-$group_number.log"
+            group_result=0
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$group" -- --nocapture --test-threads=1 > "$group_log" 2>&1 || group_result=$?
+            if ! grep -Fq "running $expected tests" "$group_log"; then group_result=1; fi
+            if ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$group_log"; then group_result=1; fi
+            echo "GROUP number=$group_number name=$group expected=$expected status=$group_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
+            tail -n 50 "$group_log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
+          done
+          exit "$result"
+      - name: Shared context integrity and released Lane D exact gates
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          case_number=0
+          for test in \
+            events::store::tests::ordinary_capture_budget_falls_back_and_replay_is_receiptless \
+            model::tests::pg_catalog_page_crosses_batch_boundary_with_tied_timestamps \
+            model::tests::pg_semantic_stage_empty_probe_resumes_without_mutation \
+            storage::postgres::semantic_stage::publication_refusal_tests::aggregate_and_count_only_refusals_remain_busy \
+            model::tests::pg_post_ingest_staged_publication_diagnoses_large_bidirectional_message_pages \
+            storage::postgres::source_journal::tests::pg_codex_header_search_projection_tracks_metadata_commit_and_delete; do
+            case_number=$((case_number+1))
+            case_log="$RUNNER_TEMP/477-integration-added-$case_number.log"
+            case_result=0
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$test" -- --exact --nocapture --test-threads=1 > "$case_log" 2>&1 || case_result=$?
+            if ! grep -Fq 'running 1 test' "$case_log"; then case_result=1; fi
+            if ! grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log"; then case_result=1; fi
+            echo "ADDED number=$case_number name=$test expected=1 status=$case_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
+            tail -n 40 "$case_log"
             if [ "$case_result" -ne 0 ]; then result=1; fi
           done
-          python3 - <<'PYSAFE'
-          import os
-          from pathlib import Path
-          root = Path(os.environ['RUNNER_TEMP'])
-          with (root / '477-focused-summary.txt').open('a') as out:
-              for path in sorted(root.glob('477-focused-*.log')):
-                  for line in path.open():
-                      if line.startswith(('semantic_relation_merge_structure ', 'semantic_relation_merge_refusal ', 'semantic_relation_record_refusal ', 'staged_first_missing_turn ', 'test result:')):
-                          out.write(path.name + ': ' + line[:1000])
-          PYSAFE
-          cat "$RUNNER_TEMP/477-focused-summary.txt"
           exit "$result"
-      - name: Append continuation proof acceptance and refusal
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+      - name: Released Lane D PostgreSQL search groups
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        shell: bash
+        run: |
+          result=0
+          group_number=0
+          for specification in \
+            storage::postgres::catalog_effects::tests::pg_catalog124_:5 \
+            storage::postgres::source_journal::tests::pg_catalog_search_:2; do
+            group_number=$((group_number+1))
+            group="${specification%:*}"
+            expected="${specification##*:}"
+            group_log="$RUNNER_TEMP/477-integration-d-group-$group_number.log"
+            group_result=0
+            cargo test --locked -p semon-sessions --lib --features postgres-test-tls "$group" -- --nocapture --test-threads=1 > "$group_log" 2>&1 || group_result=$?
+            if ! grep -Fq "running $expected tests" "$group_log"; then group_result=1; fi
+            if ! grep -Fq "test result: ok. $expected passed; 0 failed;" "$group_log"; then group_result=1; fi
+            echo "D_GROUP number=$group_number name=$group expected=$expected status=$group_result" | tee -a "$RUNNER_TEMP/477-integration-summary.txt"
+            tail -n 40 "$group_log"
+            if [ "$group_result" -ne 0 ]; then result=1; fi
+          done
+          exit "$result"
+      - name: Strict PostgreSQL feature Clippy
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
           set -o pipefail
-          proof_log="$RUNNER_TEMP/477-focused-continuation-proof.log"
-          plan_log="$RUNNER_TEMP/477-focused-append-plan.log"
-          cargo test --locked -p semon-sessions --lib storage::catalog::source_continuation_tests:: -- --nocapture 2>&1 | tee "$proof_log"
-          grep -F 'test result: ok. 4 passed; 0 failed;' "$proof_log"
-          cargo test --locked -p semon-sessions --lib source_change::append_plan_requires_a_well_formed_custody_generation -- --exact --nocapture 2>&1 | tee "$plan_log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$plan_log"
-      - name: Shared Claude selector metadata and event-read budgets
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          selector_log="$RUNNER_TEMP/477-focused-selector-budget.log"
-          cargo test --locked -p semon-sessions --lib model::relation_stage::selector_metadata_tests:: -- --nocapture 2>&1 | tee "$selector_log"
-          grep -F 'test result: ok. 2 passed; 0 failed;' "$selector_log"
-      - name: Retain focused correctness diagnostics
-        if: ${{ !cancelled() && steps.production.outcome == 'success' }}
+          cargo clippy --locked -p semon-sessions --all-targets --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/477-integration-clippy.log"
+      - name: Verify tested sources and lockfile remain exact
+        if: ${{ !cancelled() }}
+        run: git diff --exit-code
+      - name: Retain full integration evidence
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: 477-focused-correctness
-          path: ${{ runner.temp }}/477-focused-*
+          name: 477-integration-diagnostic
+          path: ${{ runner.temp }}/477-integration-*

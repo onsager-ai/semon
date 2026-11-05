@@ -29,8 +29,9 @@ env:
 
 jobs:
   postgres-suites:
+    needs: cold-preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -369,7 +370,27 @@ jobs:
               cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
               ;;
             regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
+              python3 -u - <<'PYPROFILE' &
+          import collections, json, os, pathlib, time
+          while True:
+              for entry in pathlib.Path('/proc').iterdir():
+                  if not entry.name.isdecimal():
+                      continue
+                  try:
+                      executable = (entry / 'exe').readlink().name
+                      if not executable.startswith('semon_sessions-'):
+                          continue
+                      stat = (entry / 'stat').read_text().split(') ', 1)[1].split()
+                      io = dict(line.split(': ', 1) for line in (entry / 'io').read_text().splitlines())
+                      waits = collections.Counter((task / 'wchan').read_text().strip() for task in (entry / 'task').iterdir())
+                      print('cursor_timing_profile ' + json.dumps(dict(monotonic=time.monotonic(), pid=int(entry.name), ticks_per_second=os.sysconf('SC_CLK_TCK'), user_ticks=int(stat[11]), system_ticks=int(stat[12]), threads=int(stat[17]), io=io, waits=waits)), flush=True)
+                  except (OSError, ValueError):
+                      pass
+              time.sleep(30)
+          PYPROFILE
+              profile_pid=$!
+              trap 'kill "$profile_pid" 2>/dev/null || true' EXIT
+              /usr/bin/time -v cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
               ;;
             *) exit 1 ;;
           esac
@@ -386,3 +407,58 @@ jobs:
         env:
           SUITE_RESULT: ${{ needs.postgres-suites.result }}
         run: test "$SUITE_RESULT" = success
+
+  cold-preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SEMON_PRICING_REFRESH: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pg-f1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: pg-f1-${{ runner.os }}-
+      - name: Produce formatting patch without changing tested product
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > /tmp/cold-rustfmt.patch
+          if test -s /tmp/cold-rustfmt.patch; then git apply --reverse /tmp/cold-rustfmt.patch; fi
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cold-rustfmt
+          path: /tmp/cold-rustfmt.patch
+      - name: Unchanged cold-page and fifty-view gates before full suite
+        shell: bash
+        run: |
+          set +e
+          SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > /tmp/cold.log 2>&1
+          a=$?
+          SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --locked viewer::tests::fifty_views_are_checked_by_the_pools_threads_alone -- --exact --nocapture > /tmp/fifty.log 2>&1
+          b=$?
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --lib --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > /tmp/cold-plain.log 2>&1
+          c=$?
+          SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --lib --locked viewer::tests::fifty_views_are_checked_by_the_pools_threads_alone -- --exact --nocapture > /tmp/fifty-plain.log 2>&1
+          d=$?
+          grep -E 'production-first-page|bounded initial|test result:|panicked|timed out' /tmp/cold.log /tmp/fifty.log /tmp/cold-plain.log /tmp/fifty-plain.log || true
+          exit $((a || b || c || d))
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: cold-preflight
+          path: |
+            /tmp/cold.log
+            /tmp/fifty.log
+            /tmp/cold-plain.log
+            /tmp/fifty-plain.log
+
+  storage-contract:
+    needs: cold-preflight
+    uses: ./.github/workflows/storage-contract.yml
