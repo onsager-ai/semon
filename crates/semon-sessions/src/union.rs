@@ -1754,7 +1754,10 @@ impl ViewerCore {
             .any(|(_, view)| view.catalog_observation_pending())
         {
             #[cfg(test)]
-            eprintln!("diag(identity) pending_after selected={}", selected.is_some());
+            eprintln!(
+                "diag(identity) pending_after selected={}",
+                selected.is_some()
+            );
             return Ok(None);
         }
         Ok(selected)
