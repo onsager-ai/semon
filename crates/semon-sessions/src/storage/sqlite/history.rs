@@ -198,11 +198,10 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
                 )
                 .map(|(recipe, _)| recipe)
             };
-            original.query_recipe = load().map_err(
-                |error: crate::storage::query::QueryRecipeLoadError| {
+            original.query_recipe =
+                load().map_err(|error: crate::storage::query::QueryRecipeLoadError| {
                     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
-                },
-            )?;
+                })?;
         }
         let row = &original;
         let key = &row.key;
