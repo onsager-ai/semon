@@ -676,10 +676,12 @@ impl NativeOwnership {
         let version: i64 = db
             .pragma_query_value(None, "schema_version", |r| r.get(0))
             .map_err(failed)?;
-        let cached: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)", [], |r| r.get(0)).map_err(failed)?;
+        let cached: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)").map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
         if cached {
             let layout: Option<bool> = db
-                .query_row("SELECT semon_native_layout(?1)", [version], |r| r.get(0))
+                .prepare_cached("SELECT semon_native_layout(?1)")
+                .map_err(failed)?
+                .query_row([version], |r| r.get(0))
                 .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
@@ -791,13 +793,14 @@ impl NativeOwnership {
         if !catalog_publication && search_stale {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        let bound: bool=db.query_row("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')",[],|r|r.get(0)).map_err(failed)?;
+        let bound: bool=db.prepare_cached("SELECT count(*)=9 AND sum(name='namespace' AND pk=1 AND [notnull]=1)=1 AND sum(name='operation_id' AND pk=2 AND [notnull]=1)=1 AND sum(name='request_digest' AND type='TEXT' AND [notnull]=1)=1 FROM pragma_table_info('storage_event_operations','main')").map_err(failed)?.query_row([],|r|r.get(0)).map_err(failed)?;
         if !bound {
             return Err(StorageError::NamespaceUpgradePending);
         }
         let (count_matches, all_owned): (bool, bool) = db
-            .query_row(
+            .prepare_cached(
                 "WITH expected(table_name) AS (VALUES (?2),(?3),(?4),(?5),(?6),(?7),(?8),(?9),(?10),(?11),(?12),(?13),(?14),(?15),(?16),(?17),(?18),(?19),(?20),(?21),(?22),(?23),(?24),(?25),(?26),(?27),(?28),(?29)), actual(table_name) AS (SELECT table_name FROM storage_event_tables WHERE namespace=?1 AND qualification=0) SELECT (SELECT count(*) FROM actual)=(SELECT count(*) FROM expected), NOT EXISTS(SELECT 1 FROM expected e WHERE NOT EXISTS(SELECT 1 FROM actual a WHERE a.table_name=e.table_name))",
+            ).map_err(failed)?.query_row(
                 rusqlite::params_from_iter(
                     std::iter::once(self.config.namespace.as_str())
                         .chain(TABLES.iter().copied())

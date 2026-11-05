@@ -474,8 +474,9 @@ pub(super) fn witness(
     if actual != *ledger {
         return Ok(None);
     }
-    let projection: Option<i64> = c.query_row(
+    let projection: Option<i64> = c.prepare_cached(
         "SELECT h.projection_id FROM native_tree_headers h JOIN native_tree_generations g USING(namespace,projection_id) JOIN native_usage_current u ON u.namespace=h.namespace AND u.source_path=h.source_path AND u.source_id=g.source_id JOIN native_usage_sources s ON s.namespace=g.namespace AND s.source_id=g.source_id WHERE h.namespace=semon_namespace() AND h.source_path=?1 AND h.file_id=?2 AND h.ledger=?3 AND g.receipt=h.ledger AND g.complete=1 AND g.version=3 AND s.parser_version=?4",
+    )?.query_row(
         params![path, file_id, header_ledger(ledger), CACHE_VERSION],
         |r| r.get(0),
     ).optional()?;
@@ -498,7 +499,7 @@ pub(super) fn witness(
             1 => writer.models(),
             _ => writer.tools(),
         }
-        let mut statement = c.prepare(scoped)?;
+        let mut statement = c.prepare_cached(scoped)?;
         let mut rows = statement.query([projection])?;
         while let Some(row) = rows.next()? {
             crate::selected_read::row(row, 64)?;
