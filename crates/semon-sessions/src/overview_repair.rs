@@ -1073,11 +1073,6 @@ pub fn repair_session_overview_with_control(
             .take()
             .map(|summary| summary.with_sources(sources))
             .transpose()?;
-        if row.query.is_some()
-            && crate::query_projection::SelectedRecipe::detached(&selected_preimage)
-        {
-            crate::query_projection::SelectedRecipe::detach(&mut row)?;
-        }
         repaired.push(row);
     }
     if !repaired.iter().any(|row| row.key == key) {
@@ -1167,7 +1162,6 @@ pub fn repair_session_overview_with_control(
                 owner,
                 &selected_preimage,
                 query,
-                row.query_recipe.as_ref(),
             )
             .map_err(failure)?;
         }
