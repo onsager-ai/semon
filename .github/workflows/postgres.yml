@@ -1,4 +1,4 @@
-name: PostgreSQL foundation
+name: Cold-path main and base comparison (diagnostic only)
 
 on:
   workflow_dispatch:
@@ -33,7 +33,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
+        suite: [regression-other]
+        target: [main, base]
     services:
       postgres:
         image: postgres:16
@@ -48,6 +49,8 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.target == 'main' && '8ec0a01c' || '9c33a3e4' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -355,37 +358,36 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
-      - name: Existing session regressions outside the focused PostgreSQL module
-        if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
-        # Disjoint name filters retain the complete feature-enabled suite and
-        # its integration tests within the unchanged 30-minute job deadline.
-        env:
-          REGRESSION_SUITE: ${{ matrix.suite }}
+      - name: Profile isolated same-fixture cold and fifty-view paths
         shell: bash
         run: |
-          args=(--skip storage::postgres)
-          case "$REGRESSION_SUITE" in
-            regression-catalog)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'catalog::tests::' -- "${args[@]}"
-              ;;
-            regression-events)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'events::' -- "${args[@]}" --skip 'catalog::tests::'
-              ;;
-            regression-query)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
-              ;;
-            regression-model)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'model::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'viewer::' --skip 'model::tests::append_resumed_build_matches_fresh_build_for_seeded_sequences'
-              ;;
-            regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::'
-              ;;
-            regression-seed-[0-3])
-              export SEMON_EQUIV_SHARD="${REGRESSION_SUITE##*-}"
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'model::tests::append_resumed_build_matches_fresh_build_for_seeded_sequences' -- --exact
-              ;;
-            *) exit 1 ;;
-          esac
+          set +e
+          for case in initial_catalog_page_precedes_global_native_observation fifty_views_are_checked_by_the_pools_threads_alone; do
+            SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --locked --features postgres-test-tls "viewer::tests::$case" -- --exact --nocapture > "$RUNNER_TEMP/profile-$case.log" 2>&1
+            echo "ISOLATED $case status=$?"
+            grep -E 'production-first-page|test result:|bounded initial|not within' "$RUNNER_TEMP/profile-$case.log" | tail -n 12
+          done
+      - name: Repeat unchanged full Other shard five times
+        shell: bash
+        run: |
+          set +e
+          failed=0
+          for repeat in 1 2 3 4 5; do
+            cargo test -p semon-sessions --locked --features postgres-test-tls -- --nocapture --skip 'storage::postgres' --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' > "$RUNNER_TEMP/load-$repeat.log" 2>&1
+            result=$?
+            echo "FULL_LOAD_REPEAT=$repeat status=$result"
+            grep -E 'production-first-page|^test viewer::tests::(initial_catalog_page_precedes_global_native_observation|fifty_views_are_checked_by_the_pools_threads_alone|on_invalidate_still_catches_a_change_nobody_announced|concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow)|test result:|bounded initial|not within|^    .*::' "$RUNNER_TEMP/load-$repeat.log" | tail -n 35
+            if test "$result" != 0; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Retain profile and repeat evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cold-main-base-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/profile-*.log
+            ${{ runner.temp }}/load-*.log
       - name: TLS service diagnostics
         if: failure()
         run: docker logs semon-pg-tls
