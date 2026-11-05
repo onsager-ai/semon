@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
+        suite: ["regression-other"]
     services:
       postgres:
         image: postgres:16
@@ -355,6 +355,22 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
+      - name: diag(designA) branch cold-page timing
+        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          SEMON_BUILD_TIMING: "1"
+        run: |
+          cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
+      - name: diag(main) same-runner cold-page timing
+        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          SEMON_BUILD_TIMING: "1"
+        run: |
+          git fetch --depth=1 origin main
+          git worktree add --detach "$RUNNER_TEMP/diag-main" FETCH_HEAD
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
       - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
         # Disjoint name filters retain the complete feature-enabled suite and
