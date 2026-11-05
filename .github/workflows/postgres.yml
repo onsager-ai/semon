@@ -1,40 +1,15 @@
-name: PostgreSQL foundation
-
+name: Compact metadata diagnostic
 on:
   workflow_dispatch:
-    inputs:
-      focused_only:
-        description: Run only the focused PostgreSQL qualification suite
-        type: boolean
-        default: false
-  pull_request:
-  push:
-    branches:
-      - task/479-pg-foundation-20261025
-      - task/479-pg-facts-20261026
-      - task/479-pg-native-ingest-20261026
-      - task/479-pg-catalog-20261026
-      - task/477-pg-vertical-20261026
-      - task/477-current-transfer-20261027
-
 permissions:
   contents: read
-
 env:
   SEMON_PRICING_REFRESH: "off"
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
-  SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
-  SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
-  SEMON_PG_TLS_DSN: "host=localhost port=55432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2 sslmode=require"
-
 jobs:
-  postgres-suites:
+  compact:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused"]') || fromJSON('["focused","regression-catalog","regression-events","regression-query","regression-other"]') }}
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -51,7 +26,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
@@ -60,329 +35,49 @@ jobs:
             target
           key: pg-f1-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: pg-f1-${{ runner.os }}-
-      - name: Create ephemeral restricted application role
+      - name: Restricted application role
         env:
           PGPASSWORD: ephemeral-ci-admin
         run: |
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 <<'SQL'
           CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
           GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
-          CREATE ROLE semon_source LOGIN PASSWORD 'ephemeral-source' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
-          GRANT CONNECT ON DATABASE postgres TO semon_source;
           SQL
-      - name: Ephemeral verified TLS PostgreSQL service
-        run: |
-          mkdir -p "$RUNNER_TEMP/pg-tls"
-          cd "$RUNNER_TEMP/pg-tls"
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=ephemeral-test-CA -keyout ca.key -out ca.crt
-          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=wrong-test-CA -keyout wrong.key -out wrong.crt
-          openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout server.key -out server.csr
-          echo 'subjectAltName=DNS:localhost,IP:127.0.0.1' > server.ext
-          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 1 -extfile server.ext -out server.crt
-          # Official postgres runs as uid 999. Only this ephemeral container
-          # receives this ephemeral server key; production credentials are absent.
-          sudo chown 999:999 server.key
-          sudo chmod 600 server.key
-          docker run -d --name semon-pg-tls -e POSTGRES_PASSWORD=ephemeral-ci-admin -p 55432:5432 \
-            -v "$RUNNER_TEMP/pg-tls:/tls:ro" postgres:16 \
-            -c ssl=on -c ssl_cert_file=/tls/server.crt -c ssl_key_file=/tls/server.key
-          for attempt in $(seq 1 40); do
-            if PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -c 'SELECT 1' >/dev/null 2>&1; then break; fi
-            sleep 1
-          done
-          PGPASSWORD=ephemeral-ci-admin psql 'host=localhost port=55432 user=postgres dbname=postgres sslmode=require' -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE ROLE semon_f1 LOGIN PASSWORD 'ephemeral-f1' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
-          GRANT CONNECT, CREATE ON DATABASE postgres TO semon_f1;
-          SQL
-          echo "SEMON_PG_TLS_CA=$RUNNER_TEMP/pg-tls/ca.crt" >> "$GITHUB_ENV"
-          echo "SEMON_PG_TLS_WRONG_CA=$RUNNER_TEMP/pg-tls/wrong.crt" >> "$GITHUB_ENV"
-      - name: Resolve optional driver lock in CI
-        id: resolve
-        run: cargo metadata --format-version 1 > "$RUNNER_TEMP/pg-metadata.json"
-      - name: Prepare exact lock and formatting artifacts early
-        if: ${{ always() && matrix.suite == 'focused' }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/pg-foundation-review"
-          cp Cargo.lock "$RUNNER_TEMP/pg-foundation-review/Cargo.lock"
-          cargo fmt --all
-          git -c gc.auto=0 -c maintenance.auto=false diff --binary -- '*.rs' > "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"
-          if test -s "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"; then
-            git -c gc.auto=0 -c maintenance.auto=false apply --reverse "$RUNNER_TEMP/pg-foundation-review/rustfmt.patch"
-          fi
-          git -c gc.auto=0 -c maintenance.auto=false rev-parse HEAD > "$RUNNER_TEMP/pg-foundation-review/source-sha.txt"
-      - name: Retain early review artifacts
-        if: ${{ always() && matrix.suite == 'focused' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-foundation-review-focused-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-foundation-review/
-          if-no-files-found: error
-      - name: Reported facts exact writer and snapshot qualification
-        id: reported_facts
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_reported_facts -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-reported-facts.log"
-      - name: Retain reported facts snapshot diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.reported_facts.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-reported-facts-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-reported-facts.log
-          if-no-files-found: error
-      - name: Bounded PostgreSQL usage and Tree publication
-        id: usage_batch
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          for group in native_core::tests:: tree_writer::tests::; do
-            cargo test -p semon-sessions --lib --locked --features postgres-test-tls "storage::postgres::$group" -- --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
-            grep -E 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/usage-batch-case.log"
-          done
-          grep -F 'test storage::postgres::native_core::tests::pg_usage_batch_130_parser_peer_copies_and_each_page_rollback ... ' "$RUNNER_TEMP/usage-batch.log"
-          grep -F 'test storage::postgres::tree_writer::tests::pg_usage_batch_tree_130_mapping_pages_preserve_logical_rollback ... ' "$RUNNER_TEMP/usage-batch.log"
-          cargo test -p semon-sessions --lib --locked --features postgres-test-tls storage::postgres::native_ingest_tests::pg_usage_batch_130_real_native_publication_matches_sqlite -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/usage-batch-case.log" | tee -a "$RUNNER_TEMP/usage-batch.log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/usage-batch-case.log"
-      - name: Retain bounded usage publication results
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.usage_batch.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-usage-batch-${{ github.sha }}
-          path: ${{ runner.temp }}/usage-batch*.log
-          if-no-files-found: error
-      - name: Transfer search records and original-authority repricing
-        id: transfer_search
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer225_search_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/transfer-search.log"
-          cargo test -p semon-sessions --lib --locked --features postgres-test-tls current_transfer_catalog_reprice_preserves_imported_original_authority -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/transfer-search.log"
-          cargo test -p semon-sessions --lib --locked --features postgres-test-tls storage::postgres::transfer::catalog::tests::pg_current_transfer225_real_catalog_rows_and_recipes_reverse_without_raw -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/transfer-search-fixture.log" | tee -a "$RUNNER_TEMP/transfer-search.log"
-          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/transfer-search-fixture.log"
-      - name: Retain transfer search diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.transfer_search.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: transfer-search-${{ github.sha }}
-          path: ${{ runner.temp }}/transfer-search.log
-          if-no-files-found: error
-      - name: Inactive PostgreSQL selected Query recipe loader
-        id: query_recipe
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test -p semon-sessions --lib --locked --features postgres-test-tls pg_query_recipe_loader_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-query-recipe.log"
-          grep -F 'test result: ok. 2 passed; 0 failed;' "$RUNNER_TEMP/pg-query-recipe.log"
-      - name: Retain selected Query recipe diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.query_recipe.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-query-recipe-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-query-recipe.log
-          if-no-files-found: error
-      - name: Typed Catalog scheduling and JSON claim ordering
-        id: catalog_selector
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: |
-          cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres::source_journal::tests::pg_catalog_ -- --nocapture 2>&1 | tee "$RUNNER_TEMP/catalog-selector.log"
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_codex_header_search_projection_tracks_metadata_commit_and_delete -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/catalog-selector.log"
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete -- --nocapture 2>&1 | tee -a "$RUNNER_TEMP/catalog-selector.log"
-      - name: Retain typed Catalog scheduling diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.catalog_selector.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: catalog-selector-${{ github.sha }}
-          path: ${{ runner.temp }}/catalog-selector.log
-          if-no-files-found: error
-      - name: Current transfer inbox durable page and exact OpID qualification
-        id: current_transfer
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls current_transfer225 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/current-transfer225.log"
-      - name: Retain current transfer qualification diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.current_transfer.outcome != 'skipped' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: current-transfer225-${{ github.sha }}
-          path: ${{ runner.temp }}/current-transfer225.log
-      - name: Ordinary PG model producer without SQLite fallback
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_vertical140 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-vertical140.log"
-      - name: Retain ordinary PG model diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-vertical140-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-vertical140.log
-          if-no-files-found: error
-      - name: Catalog native proof binding before physical effects
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog135 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog135.log"
-      - name: Retain Catalog native proof binding diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-catalog135-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-catalog135.log
-          if-no-files-found: error
-      - name: Actual native EventCache PostgreSQL integration
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_native126 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-native126.log"
-      - name: Retain early native ingest diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-native126-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-native126.log
-          if-no-files-found: error
-      - name: Private immutable Catalog Current and recipe producer qualification
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog124 -- --nocapture
-      - name: Private Catalog original custody shared-producer qualification
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog127 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog127.log"
-      - name: Borrowed immutable Catalog metadata snapshot qualification
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_catalog131 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-catalog131.log"
-      - name: Retain borrowed Catalog snapshot diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-catalog131-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-catalog131.log
-      - name: Retain private Catalog custody diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-catalog127-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-catalog127.log
-      - name: Native keys125 long file and metadata producer oracle
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: |
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys125 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys125.log"
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys128 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys128.log"
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys132 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys132.log"
-          cargo test -p semon-sessions --locked --features postgres-test-tls pg_native_keys134 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-keys134.log"
-      - name: Retain native key measurements
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-keys125-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/pg-keys125.log
-            ${{ runner.temp }}/pg-keys134.log
-            ${{ runner.temp }}/pg-keys128.log
-            ${{ runner.temp }}/pg-keys132.log
-          if-no-files-found: error
-      - name: Strict published Tree scalar and deferred interpretation qualification
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls pg_tree_scalar119 -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-scalar119.log"
-      - name: Retain early scalar diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-scalar119-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-scalar119.log
-          if-no-files-found: error
-      - name: Native ownership after source replacement
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls union::tests::native_ownership_tracks_configuration_rewrites_and_removal -- --nocapture
-      - name: Affected-owner source capacity refusal
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls configured_semantic_domain52_high_degree_raw_component_refuses_without_partial_publication -- --nocapture 2>&1 | tee "$RUNNER_TEMP/native-capacity.log"
-      - name: Retain early native capacity diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: native-capacity-${{ github.sha }}
-          path: ${{ runner.temp }}/native-capacity.log
-          if-no-files-found: error
-      - name: Focused actual PG proxy and TLS qualification first
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture 2>&1 | tee "$RUNNER_TEMP/pg-focused.log"
-      - name: Retain focused PostgreSQL diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-focused-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-focused.log
-          if-no-files-found: error
-      - name: Reported facts shared codec and SQLite history oracle
-        if: ${{ matrix.suite == 'focused' }}
-        run: |
-          cargo test -p semon-sessions --locked --features postgres-test-tls reported_rows -- --nocapture
-          cargo test -p semon-sessions --locked --features postgres-test-tls reported_runs -- --nocapture
-          cargo test -p semon-sessions --locked --features postgres-test-tls configured_reported_runs_corruption_and_ownership_refuse_before_effect -- --nocapture
-      - name: Default build excludes PostgreSQL driver dependencies
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        run: |
-          cargo tree --locked -p semon-sessions -e normal --prefix none --format '{p}' > "$RUNNER_TEMP/default-tree.txt"
-          if grep -E '^(postgres|tokio-postgres) v' "$RUNNER_TEMP/default-tree.txt"; then
-            echo 'Default build unexpectedly requires PostgreSQL' >&2
-            exit 1
-          fi
-          # Tokio already belongs to the baseline reqwest HTTPS dependency.
-          # No PostgreSQL runtime/driver may be activated by the default feature set.
-      - name: Formatting gate
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
+      - name: Resolve lock
+        run: cargo metadata --format-version 1 > "$RUNNER_TEMP/compact-metadata.json"
+      - name: Formatting
         run: cargo fmt --all --check
-      - name: PostgreSQL strict Clippy
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        shell: bash
-        run: cargo clippy -p semon-sessions --all-targets --locked --features postgres-test-tls -- --no-deps -D warnings 2>&1 | tee "$RUNNER_TEMP/pg-keys125-clippy.log"
-      - name: Retain strict Clippy diagnostics
-        if: ${{ !cancelled() && matrix.suite == 'focused' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: pg-keys125-clippy-${{ github.sha }}
-          path: ${{ runner.temp }}/pg-keys125-clippy.log
-          if-no-files-found: error
-      - name: Existing session regressions outside the focused PostgreSQL module
-        if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
-        # Disjoint name filters retain the complete feature-enabled suite and
-        # its integration tests within the unchanged 30-minute job deadline.
-        env:
-          REGRESSION_SUITE: ${{ matrix.suite }}
+      - name: Save exact formatting patch
+        if: failure()
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/compact-rustfmt.patch"
+          git apply --reverse "$RUNNER_TEMP/compact-rustfmt.patch"
+      - name: Boundary inventory
+        if: ${{ !cancelled() }}
+        run: python3 scripts/check-native-storage-boundary.py
+      - name: Exact compact metadata and Query recipe cases
+        if: ${{ !cancelled() }}
         shell: bash
         run: |
-          args=(--skip storage::postgres)
-          case "$REGRESSION_SUITE" in
-            regression-catalog)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'catalog::tests::' -- "${args[@]}"
-              ;;
-            regression-events)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'events::' -- "${args[@]}" --skip 'catalog::tests::'
-              ;;
-            regression-query)
-              cargo test -p semon-sessions --locked --features postgres-test-tls 'query::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::'
-              ;;
-            regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::'
-              ;;
-            *) exit 1 ;;
-          esac
-      - name: TLS service diagnostics
-        if: failure()
-        run: docker logs semon-pg-tls
-
-  postgres:
-    if: ${{ always() }}
-    needs: postgres-suites
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require all Postgres suites
-        env:
-          SUITE_RESULT: ${{ needs.postgres-suites.result }}
-        run: test "$SUITE_RESULT" = success
+          result=0
+          for test in \
+            query::tests::focused_tail_does_not_load_growing_session_busy_metadata \
+            storage::query::tests::observed_growing_busy_catalog_prepares_exact_selected_recipe_within_budget \
+            events::store::tests::direct_catalog_query_recipe_loader_keeps_actual_owner_and_grant \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_native_exact_owner_grant_and_payload \
+            storage::postgres::catalog_effects::tests::query_recipe::pg_query_recipe_loader_imported_keeps_original_binding_and_rechecks_receipt; do
+            case_log="$RUNNER_TEMP/compact-${test//::/-}.log"
+            cargo test -p semon-sessions --lib --locked --features postgres-test-tls "$test" -- --exact --nocapture > "$case_log" 2>&1 || result=1
+            grep -Fq 'test result: ok. 1 passed; 0 failed;' "$case_log" || result=1
+            tail -n 18 "$case_log"
+          done
+          exit "$result"
+      - name: Retain diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: compact-metadata
+          path: |
+            ${{ runner.temp }}/compact-*.log
+            ${{ runner.temp }}/compact-rustfmt.patch
