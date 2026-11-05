@@ -1,4 +1,4 @@
-name: Cursor standalone viewer timing
+name: Cursor main with product viewer fixtures
 
 on:
   workflow_dispatch:
@@ -10,13 +10,36 @@ env:
   SEMON_PRICING_REFRESH: "off"
 
 jobs:
-  product-viewer-timing:
+  main-product-fixtures-timing:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           ref: db9296188515bf0dc5e8941be75b55309de3ef91
+      - name: Capture exact product fixtures
+        run: cp crates/semon-sessions/src/viewer.rs "$RUNNER_TEMP/product-viewer.rs"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8ec0a01c0ede44edfe658ce26f230319d0fdce0f
+      - name: Use identical viewer fixtures on main
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          path = Path('crates/semon-sessions/src/viewer.rs')
+          source = path.read_text()
+          product = (Path(os.environ['RUNNER_TEMP']) / 'product-viewer.rs').read_text()
+          for name in ['fifty_views_are_checked_by_the_pools_threads_alone', 'initial_catalog_page_precedes_global_native_observation']:
+              marker = '    fn ' + name + '('
+              start = source.index(marker)
+              end = source.index('\n    }\n', start) + len('\n    }\n')
+              product_start = product.index(marker)
+              product_end = product.index('\n    }\n', product_start) + len('\n    }\n')
+              source = source[:start] + product[product_start:product_end] + source[end:]
+          path.write_text(source)
+          PY
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -24,9 +47,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cursor-product-timing-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cursor-main-product-fixtures-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: pg-f1-${{ runner.os }}-
-      - name: Compare unchanged viewer deadlines on product with default features
+      - name: Compare identical fixtures and deadlines on main
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/viewer-timing"
@@ -43,5 +66,5 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: product-viewer-timing
+          name: main-product-fixtures-timing
           path: ${{ runner.temp }}/viewer-timing/
