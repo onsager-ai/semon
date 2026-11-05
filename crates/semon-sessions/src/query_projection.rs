@@ -146,7 +146,11 @@ impl SelectedRecipe {
     /// compact metadata bound. Small observations retain their exact immutable
     /// staged receipt identity when an ordinary reader republishes them.
     pub(crate) fn compact_catalog(row: &mut CatalogRow) -> std::io::Result<()> {
-        if serde_json::to_vec(row).map_err(std::io::Error::other)?.len() >= 8192 {
+        if serde_json::to_vec(row)
+            .map_err(std::io::Error::other)?
+            .len()
+            >= 8192
+        {
             Self::detach(row)?;
         }
         Ok(())
