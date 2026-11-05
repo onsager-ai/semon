@@ -1304,15 +1304,6 @@ pub(crate) trait IndexStore: Send {
     fn semantic_rejection(&self) -> Option<&'static str> {
         None
     }
-    /// An exact completed request may recover its ACK without a new publication.
-    fn completed_semantic_catalog(
-        &mut self,
-        batch: &crate::model::relation_stage::Batch,
-        prepared: &crate::model::PreparedSources,
-    ) -> Result<Option<String>, StoreError> {
-        let _ = (batch, prepared);
-        Ok(None)
-    }
     fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,
@@ -2743,18 +2734,7 @@ impl EventCache {
         let _source_guard = match prepared.publication_guard(self) {
             Ok(guard) => guard,
             Err(error) if crate::model::relation_stage::source_generation_changed(&error) => {
-                // A completed replay qualifies its immutable request even after
-                // the source carrier moves; active publication still refuses.
-                let completed = self
-                    .store
-                    .as_mut()
-                    .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-                    .completed_semantic_catalog(batch, prepared)
-                    .map_err(|error| io::Error::other(error.to_string()))?;
-                return Ok(match completed {
-                    Some(generation) => (Outcome::Written, Some(generation)),
-                    None => (Outcome::Conflict, None),
-                });
+                return Ok((Outcome::Conflict, None));
             }
             Err(error) => return Err(error),
         };

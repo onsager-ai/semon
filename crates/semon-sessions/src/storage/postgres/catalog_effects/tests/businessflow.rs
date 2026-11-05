@@ -7705,7 +7705,7 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         EventCache::open_pg_native(pool.clone(), namespace.clone(), control.clone()).unwrap();
     let final_runtime = crate::native_evidence::query_runtime_generation(&facts_options).unwrap();
     final_catchup
-        .begin_semantic_stage(std::slice::from_ref(&composite_a), &final_runtime)
+        .begin_semantic_stage(&paths, &final_runtime)
         .unwrap();
     let (final_batch, final_model) = loop {
         let batch = final_catchup.semantic_batch(64).unwrap().unwrap();
