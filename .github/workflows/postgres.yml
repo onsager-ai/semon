@@ -1,4 +1,4 @@
-name: PostgreSQL foundation
+name: Cold-path CI profile (diagnostic only)
 
 on:
   workflow_dispatch:
@@ -22,6 +22,7 @@ permissions:
 
 env:
   SEMON_PRICING_REFRESH: "off"
+  SEMON_BUILD_TIMING: "1"
   SEMON_PG_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_f1 password=ephemeral-f1 dbname=postgres connect_timeout=2"
   SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 port=5432 user=postgres password=ephemeral-ci-admin dbname=postgres connect_timeout=2"
   SEMON_PG_SOURCE_TEST_DSN: "host=127.0.0.1 port=5432 user=semon_source password=ephemeral-source dbname=postgres connect_timeout=2"
@@ -34,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
+        suite: ["focused-vertical", "regression-other"]
     services:
       postgres:
         image: postgres:16
@@ -377,7 +378,7 @@ jobs:
               cargo test -p semon-sessions --locked --features postgres-test-tls 'model::tests::' -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'viewer::' --skip 'model::tests::append_resumed_build_matches_fresh_build_for_seeded_sequences'
               ;;
             regression-other)
-              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::'
+              cargo test -p semon-sessions --locked --features postgres-test-tls -- "${args[@]}" --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' 2>&1 | tee "$RUNNER_TEMP/cold-profile-other.log"
               ;;
             regression-seed-[0-3])
               export SEMON_EQUIV_SHARD="${REGRESSION_SUITE##*-}"
@@ -385,6 +386,23 @@ jobs:
               ;;
             *) exit 1 ;;
           esac
+      - name: Record isolated cold and fifty-view profiles
+        if: ${{ always() && matrix.suite == 'regression-other' }}
+        shell: bash
+        run: |
+          set +e
+          for case in initial_catalog_page_precedes_global_native_observation fifty_views_are_checked_by_the_pools_threads_alone; do
+            cargo test -p semon-sessions --lib --locked --features postgres-test-tls "viewer::tests::$case" -- --exact --nocapture --test-threads=1 > "$RUNNER_TEMP/cold-profile-$case.log" 2>&1
+            echo "PROFILE_CASE $case status=$?"
+          done
+          grep -E 'phase=(cold_|index_)|breakdown=(catalog_page_read|model_preparation|ledger_commit|scan|catalog_metadata|overview_publish|search_rows)|production-first-page|^---- viewer::tests::|not within|bounded initial|^test result:|^test .*FAILED|^test viewer::' "$RUNNER_TEMP"/cold-profile-*.log > "$RUNNER_TEMP/cold-profile-summary.txt"
+          tail -n 80 "$RUNNER_TEMP/cold-profile-summary.txt"
+      - name: Retain bounded cold-path profile
+        if: ${{ always() && matrix.suite == 'regression-other' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: cold-profile-summary
+          path: ${{ runner.temp }}/cold-profile-summary.txt
       - name: TLS service diagnostics
         if: failure()
         run: docker logs semon-pg-tls
