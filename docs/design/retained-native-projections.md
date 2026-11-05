@@ -165,7 +165,9 @@ This completes the existing staged path and retains outgoing owners through the
 ordinary custody publication; it does not fabricate a Facts admission withdrawal.
 The ordinary SQLite metadata audit records physically absent, ledgered sources
 through the existing removal writer after its physical observations, retaining
-its Source locks and read snapshot through the ledger comparison and write.
+its Source locks while comparing the observed Catalog head and ledgers in a
+fresh write transaction. A short audit page also establishes the end of its
+bounded source range without a second empty-page observation.
 PostgreSQL staging likewise consumes prepared physical absence with durable
 removal evidence; an unledgered missing path alone cannot authorize retirement.
 PostgreSQL Facts-admission withdrawals retain exact process-local Facts/path
