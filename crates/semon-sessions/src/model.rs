@@ -10311,7 +10311,10 @@ fn build_sources_inner(
         source_records.finish()?;
     }
     drop(source_records);
-    if let Some(catalog) = catalog {
+    if let Some(mut catalog) = catalog {
+        for row in &mut catalog {
+            crate::query_projection::SelectedRecipe::detach(row)?;
+        }
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog,
