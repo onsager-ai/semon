@@ -64,8 +64,9 @@ jobs:
               ('            for (row, output) in rows.iter().zip(&metadata) {', 'owner_reconciliation'),
               ('            transaction\n                .execute(\n                    "INSERT INTO main.meta(namespace,key,value) VALUES(?1,\'catalog_native_publication\',?2)', 'observation_grants'),
           ]:
+              needle='\n'+needle
               assert s.count(needle)==1, (label,s.count(needle))
-              s=s.replace(needle, '            stage("'+label+'", &transaction);\n'+needle)
+              s=s.replace(needle, '\n            stage("'+label+'", &transaction);\n'+needle)
           p.write_text(s)
           PROFILE
       - uses: dtolnay/rust-toolchain@stable
@@ -393,7 +394,7 @@ jobs:
           name: receipt-stage-isolated
           path: ${{ runner.temp }}/profile-*.log
       - name: Repeat unchanged full Other shard five times
-        if: always()
+        if: success()
         env:
           CARGO_FEATURES: ${{ matrix.target != 'main' && '--features postgres-test-tls' || '' }}
         shell: bash
