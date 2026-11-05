@@ -361,6 +361,7 @@ jobs:
         # its integration tests within the unchanged 30-minute job deadline.
         env:
           REGRESSION_SUITE: ${{ matrix.suite }}
+          SEMON_BUILD_TIMING: ${{ matrix.suite == 'regression-other' && '1' || '0' }}
         shell: bash
         run: |
           args=(--skip storage::postgres)
