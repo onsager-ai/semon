@@ -34,12 +34,12 @@ impl Relationships for Writer<'_, '_, '_> {
                 "DELETE FROM catalog_native_dependencies WHERE namespace=semon_namespace() AND source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')"
             }
         };
-        self.transaction.execute(sql, [path])?;
+        self.transaction.prepare_cached(sql)?.execute([path])?;
         Ok(())
     }
     fn put(&mut self, path: &str, harness: &str, id: &str) -> rusqlite::Result<()> {
         self.layout.ensure_current()?;
-        self.transaction.execute("INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)", params![path,harness,id])?;
+        self.transaction.prepare_cached("INSERT OR IGNORE INTO catalog_native_dependencies(namespace,source_path,harness,native_id) VALUES(semon_namespace(),?1,?2,?3)")?.execute(params![path,harness,id])?;
         Ok(())
     }
     fn finished(&mut self, group: RelationshipGroup) -> rusqlite::Result<()> {
@@ -191,10 +191,11 @@ impl Effects for Writer<'_, '_, '_> {
         let transaction = self.transaction;
         let measurements = &mut *self.measurements;
         let started = measurements.start();
-        transaction.execute(
-            "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
-            [archive_index_key(path)],
-        )?;
+        transaction
+            .prepare_cached(
+                "DELETE FROM main.meta WHERE namespace=semon_meta_scope(?1) AND key=?1",
+            )?
+            .execute([archive_index_key(path)])?;
         measurements.record("archive_metadata", started, 1);
         #[cfg(test)]
         configured::effect("archive_metadata")?;
@@ -229,10 +230,9 @@ impl Effects for Writer<'_, '_, '_> {
         let measurements = &mut *self.measurements;
         let started = measurements.start();
         let rows_before = started.map(|_| transaction.total_changes());
-        transaction.execute(
+        transaction.prepare_cached(
         "DELETE FROM session_source_mutations WHERE namespace=semon_namespace() AND source_path=?1",
-        [path],
-    )?;
+    )?.execute([path])?;
         measurements.record("mutation_retirement", started, 1);
         record_writer_rows(
             transaction,
