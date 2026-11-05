@@ -55,90 +55,10 @@ pub(crate) fn register(
     .map_err(failed)
 }
 
-/// Schema digests whose qualification already succeeded in this process.
-/// Qualification is a pure function of the schema text, so an exact digest
-/// match is reused across connections and transactions.
-pub(crate) struct QualifiedSchemas(std::sync::Mutex<std::collections::BTreeSet<[u8; 32]>>);
-
-impl QualifiedSchemas {
-    pub(crate) const fn new() -> Self {
-        Self(std::sync::Mutex::new(std::collections::BTreeSet::new()))
-    }
-}
-
-const QUALIFIED_SCHEMA_LIMIT: usize = 256;
-
-pub(crate) fn schema_qualified(cache: &QualifiedSchemas, digest: &[u8; 32]) -> bool {
-    cache.0.lock().is_ok_and(|set| set.contains(digest))
-}
-
-pub(crate) fn record_schema(cache: &QualifiedSchemas, digest: [u8; 32]) {
-    if let Ok(mut set) = cache.0.lock() {
-        if set.len() >= QUALIFIED_SCHEMA_LIMIT {
-            set.clear();
-        }
-        set.insert(digest);
-    }
-}
-
-/// Digest the main and temp schema text this connection resolves. `tables`
-/// limits main objects to those tables and temp objects to same-named views.
-pub(crate) fn schema_digest(
-    db: &Connection,
-    tables: Option<&str>,
-) -> Result<[u8; 32], StorageError> {
-    use sha2::{Digest, Sha256};
-    let mut statement = match tables {
-        None => db.prepare_cached("SELECT 'main',type,name,tbl_name,coalesce(sql,'') FROM main.sqlite_schema UNION ALL SELECT 'temp',type,name,tbl_name,coalesce(sql,'') FROM temp.sqlite_schema ORDER BY 1,2,3"),
-        Some(_) => db.prepare_cached("SELECT 'main',type,name,tbl_name,coalesce(sql,'') FROM main.sqlite_schema WHERE tbl_name IN (SELECT value FROM json_each(?1)) UNION ALL SELECT 'temp',type,name,tbl_name,coalesce(sql,'') FROM temp.sqlite_schema WHERE type='view' AND name IN (SELECT value FROM json_each(?1)) ORDER BY 1,2,3"),
-    }
-    .map_err(failed)?;
-    let mut rows = match tables {
-        None => statement.query([]),
-        Some(tables) => statement.query([tables]),
-    }
-    .map_err(failed)?;
-    let mut digest = Sha256::new();
-    while let Some(row) = rows.next().map_err(failed)? {
-        for column in 0..5 {
-            let text: String = row.get(column).map_err(failed)?;
-            digest.update((text.len() as u64).to_le_bytes());
-            digest.update(text.as_bytes());
-        }
-    }
-    Ok(digest.finalize().into())
-}
-
-static SCOPED_SCHEMAS: QualifiedSchemas = QualifiedSchemas::new();
-
-fn scoped_tables() -> &'static str {
-    static TABLES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    TABLES.get_or_init(|| {
-        serde_json::to_string(
-            &QUALIFIED_CATALOG_TABLES
-                .iter()
-                .chain(&["meta"])
-                .collect::<Vec<_>>(),
-        )
-        .expect("static table names serialize")
-    })
-}
-
 /// Every unqualified native SELECT resolves a connection-local view with an
 /// explicit namespace predicate. Indexed Catalog ranges use main plus the same
 /// predicate, retaining namespace-leading covering indexes.
 pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
-    // A connection whose qualified tables and created views exactly match an
-    // already scoped schema needs neither qualification nor view creation.
-    if schema_qualified(&SCOPED_SCHEMAS, &schema_digest(db, Some(scoped_tables()))?) {
-        return Ok(true);
-    }
-    scope_readers_uncached(db)?;
-    record_schema(&SCOPED_SCHEMAS, schema_digest(db, Some(scoped_tables()))?);
-    Ok(true)
-}
-
-fn scope_readers_uncached(db: &Connection) -> Result<bool, StorageError> {
     for table in QUALIFIED_CATALOG_TABLES {
         let current: bool = if *table == "session_catalog_changes" {
             // Revisions order the shared stream globally; namespace owns each
