@@ -843,12 +843,14 @@ impl NativeEvidence {
 
     /// Initialize the source index and publish a bounded cold catalog page.
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
-        if work.events.as_ref().is_some_and(|cache| {
-            cache.scoped_store_lost()
-                || (work.observed_catalog_generation.is_some()
-                    && cache.session_catalog_generation() != work.observed_catalog_generation)
-        }) {
+        if work.events.as_ref().is_some_and(EventCache::scoped_store_lost) {
             work.events = None;
+        }
+        if let Some(cache) = work.events.as_mut()
+            && work.observed_catalog_generation.is_some()
+            && cache.session_catalog_generation() != work.observed_catalog_generation
+        {
+            cache.invalidate_peer_files();
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");

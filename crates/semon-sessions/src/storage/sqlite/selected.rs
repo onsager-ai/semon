@@ -31,50 +31,48 @@ impl<'a> Context<'a> {
 }
 impl ContextLookup for Context<'_> {
     fn details(&self, key: &str, source: &str) -> io::Result<Option<(Option<String>, bool)>> {
-        if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='session_trace_headers')", [], |r|r.get::<_,bool>(0)).map_err(io::Error::other)? { return Ok(None); }
-        self.db.query_row(&self.sql("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_set(json_extract(metadata,'$.details'),'$.busy',json_extract(metadata,'$.busy'),'$.content_generation',json_extract(metadata,'$.content_generation')) ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2"), params![key,source], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
+        if !self.db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='session_trace_headers')").map_err(io::Error::other)?.query_row([], |r|r.get::<_,bool>(0)).map_err(io::Error::other)? { return Ok(None); }
+        self.db.prepare_cached(&self.sql("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_set(json_extract(metadata,'$.details'),'$.busy',json_extract(metadata,'$.busy'),'$.content_generation',json_extract(metadata,'$.content_generation')) ELSE NULL END,EXISTS(SELECT 1 FROM session_catalog c WHERE c.session_key=?1 AND c.lifecycle='current') FROM session_trace_headers WHERE session_key=?1 AND source_generation=?2")).map_err(io::Error::other)?.query_row(params![key,source], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
     }
     fn relative(&self, key: &str) -> io::Result<Option<(String, Option<CatalogObservationOwner>)>> {
-        self.db.query_row(&self.sql("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost'),'_status_catalog',json_set(COALESCE(h.metadata,c.metadata),'$.lifecycle',c.lifecycle)) ELSE NULL END,h.session_key IS NOT NULL FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1"), [key], |r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,bool>(1)?))).optional().map(|found| found.and_then(|(text, history)| text.map(|text| (text, Some(if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }))))).map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT CASE WHEN octet_length(COALESCE(h.metadata,c.metadata))<=1048576 THEN json_object('key',c.session_key,'name',json_extract(COALESCE(h.metadata,c.metadata),'$.name'),'harness',c.harness,'kind',COALESCE(json_extract(COALESCE(h.metadata,c.metadata),'$.presentation_kind'),json_extract(COALESCE(h.metadata,c.metadata),'$.kind')),'parent',json_extract(COALESCE(h.metadata,c.metadata),'$.parent'),'last',json_extract(COALESCE(h.metadata,c.metadata),'$.last'),'cost',json_extract(COALESCE(h.metadata,c.metadata),'$.cost'),'_status_catalog',json_set(COALESCE(h.metadata,c.metadata),'$.lifecycle',c.lifecycle)) ELSE NULL END,h.session_key IS NOT NULL FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1")).map_err(io::Error::other)?.query_row([key], |r| Ok((r.get::<_,Option<String>>(0)?,r.get::<_,bool>(1)?))).optional().map(|found| found.and_then(|(text, history)| text.map(|text| (text, Some(if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }))))).map_err(io::Error::other)
     }
     fn descendants(&self, key: &str) -> io::Result<Vec<String>> {
-        self.db.prepare(&self.sql("WITH RECURSIVE family(session_key) AS (VALUES(?1) UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.session_key LIMIT 101) SELECT session_key FROM family WHERE session_key!=?1")).map_err(io::Error::other)?.query_map([key], |r| r.get(0)).map_err(io::Error::other)?.collect::<rusqlite::Result<_>>().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("WITH RECURSIVE family(session_key) AS (VALUES(?1) UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.session_key LIMIT 101) SELECT session_key FROM family WHERE session_key!=?1")).map_err(io::Error::other)?.query_map([key], |r| r.get(0)).map_err(io::Error::other)?.collect::<rusqlite::Result<_>>().map_err(io::Error::other)
     }
     fn header(&self, key: &str) -> io::Result<Option<(String, bool)>> {
-        self.db.query_row(&self.sql("SELECT source_generation,COALESCE(json_extract(metadata,'$.relationships_incomplete'),0) FROM session_trace_headers WHERE session_key=?1"),[key],|r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT source_generation,COALESCE(json_extract(metadata,'$.relationships_incomplete'),0) FROM session_trace_headers WHERE session_key=?1")).map_err(io::Error::other)?.query_row([key],|r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
     }
     fn turn(&self, key: &str, id: &str) -> io::Result<Option<String>> {
-        self.db.query_row(&self.sql("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2"),params![key,id],|r|r.get(0)).optional().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_turns WHERE session_key=?1 AND turn_id=?2")).map_err(io::Error::other)?.query_row(params![key,id],|r|r.get(0)).optional().map_err(io::Error::other)
     }
     fn edge(&self, key: &str, id: &str) -> io::Result<Option<String>> {
-        self.db.query_row(&self.sql("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2"),params![key,id],|r|r.get(0)).optional().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM session_trace_edges WHERE session_key=?1 AND edge_id=?2")).map_err(io::Error::other)?.query_row(params![key,id],|r|r.get(0)).optional().map_err(io::Error::other)
     }
     fn target_turns(&self, key: &str, id: &str) -> io::Result<Vec<String>> {
-        self.db.prepare(&self.sql("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2")).map_err(io::Error::other)?.query_map(params![key,id], |r|r.get(0)).map_err(io::Error::other)?.collect::<rusqlite::Result<_>>().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT turn_id FROM session_trace_turns WHERE session_key=?1 AND start_id=?2 ORDER BY turn_id LIMIT 2")).map_err(io::Error::other)?.query_map(params![key,id], |r|r.get(0)).map_err(io::Error::other)?.collect::<rusqlite::Result<_>>().map_err(io::Error::other)
     }
     fn participant(&self, key: &str) -> io::Result<Option<String>> {
-        self.db.query_row(&self.sql("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'activity',json_extract(metadata,'$.details.activity'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1"),[key],|r|r.get(0)).optional().map(Option::flatten).map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT CASE WHEN octet_length(metadata)<=1048576 THEN json_object('name',json_extract(metadata,'$.name'),'harness',json_extract(metadata,'$.harness'),'model',json_extract(metadata,'$.model'),'kind',json_extract(metadata,'$.kind'),'state',json_extract(metadata,'$.state'),'start',json_extract(metadata,'$.start'),'last',json_extract(metadata,'$.last'),'calls',json_extract(metadata,'$.details.calls'),'usd',json_extract(metadata,'$.family_usd'),'activity',json_extract(metadata,'$.details.activity'),'live_observation',EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND lifecycle='current')) ELSE NULL END FROM session_trace_headers WHERE session_key=?1")).map_err(io::Error::other)?.query_row([key],|r|r.get(0)).optional().map(Option::flatten).map_err(io::Error::other)
     }
     fn preview_header(&self, key: &str) -> io::Result<Option<(String, Option<String>)>> {
-        self.db.query_row(&self.sql("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1"),[key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
+        self.db.prepare_cached(&self.sql("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1")).map_err(io::Error::other)?.query_row([key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
     }
     fn preview_catalog(&self, key: &str) -> io::Result<Option<String>> {
         let history = self
             .db
-            .query_row(
+            .prepare_cached(
                 &self.sql("SELECT metadata FROM session_history_catalog WHERE session_key=?1"),
-                [key],
-                |r| r.get(0),
             )
+            .map_err(io::Error::other)?
+            .query_row([key], |r| r.get(0))
             .optional()
             .map_err(io::Error::other)?;
         Ok(history.or(self
             .db
-            .query_row(
-                &self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1"),
-                [key],
-                |r| r.get(0),
-            )
+            .prepare_cached(&self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1"))
+            .map_err(io::Error::other)?
+            .query_row([key], |r| r.get(0))
             .optional()
             .map_err(io::Error::other)?))
     }
