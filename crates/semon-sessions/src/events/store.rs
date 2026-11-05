@@ -4581,7 +4581,8 @@ fn authored_storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
-    static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<String>>>> = OnceLock::new();
+    type Inventory = BTreeMap<(String, String), String>;
+    static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<Inventory>>>> = OnceLock::new();
     let mut inventory = INVENTORY
         .get_or_init(Mutex::default)
         .lock()
@@ -4592,24 +4593,32 @@ pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Resu
         for chunk in authored_storage_ddl() {
             reference.execute_batch(chunk)?;
         }
-        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger') ORDER BY type,name")?
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-            .map(|row| row.map(|(kind, name, sql)| format!("('{}','{}','{}')", kind.replace('\'', "''"), name.replace('\'', "''"), sql.replace('\'', "''"))))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        *inventory = Some(std::sync::Arc::new(format!(
-            "SELECT count(*)={} FROM main.sqlite_schema WHERE (type,name,sql) IN (VALUES {})",
-            objects.len(),
-            objects.join(",")
-        )));
+        let objects = reference.prepare("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?
+            .query_map([], |row| Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, String>(2)?)))?
+            .collect::<rusqlite::Result<Inventory>>()?;
+        *inventory = Some(std::sync::Arc::new(objects));
     }
-    let sql = inventory
+    let expected = inventory
         .as_ref()
         .cloned()
         .ok_or(rusqlite::Error::InvalidQuery)?;
     drop(inventory);
-    connection
-        .prepare_cached(sql.as_str())?
-        .query_row([], |row| row.get(0))
+    // Bind the authored definitions as data in Rust instead of compiling an
+    // SQL VALUES expression containing the entire schema on every connection.
+    // Every expected definition must still match exactly; extra objects retain
+    // the same acceptance as the original inventory query.
+    let mut statement = connection.prepare_cached("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?;
+    let mut rows = statement.query([])?;
+    let mut matched = 0;
+    while let Some(row) = rows.next()? {
+        let key = (row.get::<_, String>(0)?, row.get::<_, String>(1)?);
+        if let Some(definition) = expected.get(&key)
+            && row.get_ref(2)?.as_str()? == definition
+        {
+            matched += 1;
+        }
+    }
+    Ok(matched == expected.len())
 }
 
 fn parser_version(connection: &Connection) -> rusqlite::Result<Option<u32>> {

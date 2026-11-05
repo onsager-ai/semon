@@ -581,29 +581,26 @@ fn insert_proof_row(
         ],
     )
     .map_err(failed)?;
-    tx.prepare_cached(
-        "INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)",
-    )
-    .map_err(failed)?
-    .execute(
-        params![namespace, publication.id, row.key, row.presentation],
-    )
-    .map_err(failed)?;
+    tx.prepare_cached("INSERT INTO storage_proof_presentations VALUES(?1,?2,?3,?4)")
+        .map_err(failed)?
+        .execute(params![
+            namespace,
+            publication.id,
+            row.key,
+            row.presentation
+        ])
+        .map_err(failed)?;
     for source in &row.sources {
-        tx.prepare_cached(
-            "INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)",
-    )
-    .map_err(failed)?
-    .execute(
-            params![
+        tx.prepare_cached("INSERT INTO storage_proof_sources VALUES(?1,?2,?3,?4,?5)")
+            .map_err(failed)?
+            .execute(params![
                 namespace,
                 publication.id,
                 row.key,
                 source.path,
                 source.ledger
-            ],
-        )
-        .map_err(failed)?;
+            ])
+            .map_err(failed)?;
     }
     Ok(())
 }
@@ -629,18 +626,12 @@ fn publish_current_ref(
         "DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'",
     )
     .map_err(failed)?
-    .execute(
-        params![namespace, session_key],
-    )
+    .execute(params![namespace, session_key])
     .map_err(failed)?;
-    tx.prepare_cached(
-        "INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)",
-    )
-    .map_err(failed)?
-    .execute(
-        params![namespace, session_key, id],
-    )
-    .map_err(failed)?;
+    tx.prepare_cached("INSERT INTO storage_proof_refs VALUES(?1,?2,'current',?3)")
+        .map_err(failed)?
+        .execute(params![namespace, session_key, id])
+        .map_err(failed)?;
     // Exact History references are installed by the verified composer.
     // Reconstructing them from path/ledger matches would retain unrelated
     // generations and let imported proof sources acquire local authority.
