@@ -718,32 +718,70 @@ pub(super) fn note_catalog_audit_tx(
 
 /// Bounded metadata audit for writers without receiver custody proofs. No
 /// Event rows, transcript bytes or semantic session models are loaded here.
+pub(crate) struct CatalogSourceAudit {
+    config: crate::storage::StoreConfig,
+    runtime_binding: crate::storage::QueryRuntimeBinding,
+    journal: crate::storage::sqlite::source_journal::SourceJournal,
+    db: Connection,
+}
+
+#[cfg(test)]
 pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
     _runtime: &str,
 ) -> io::Result<Option<String>> {
-    let config = options
-        .source
-        .config(&options.cache)
-        .map_err(io::Error::other)?;
-    let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
-    let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
-        .runtime_binding()
-        .map_err(io::Error::other)?
-        .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
+    audit_catalog_sources_step(options, discovered, after, &mut None)
+}
+
+pub(crate) fn audit_catalog_sources_step(
+    options: &crate::Options,
+    discovered: &[crate::Input],
+    after: Option<&str>,
+    retained: &mut Option<CatalogSourceAudit>,
+) -> io::Result<Option<String>> {
+    if retained.is_none() {
+        let config = options
+            .source
+            .config(&options.cache)
+            .map_err(io::Error::other)?;
+        let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
+        let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
+            .runtime_binding()
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
+        let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+        let db = journal.connection().map_err(io::Error::other)?;
+        *retained = Some(CatalogSourceAudit {
+            config,
+            runtime_binding,
+            journal,
+            db,
+        });
+    }
+    let audit = retained.as_ref().expect("audit connection initialized");
+    let config = &audit.config;
+    let runtime_binding = &audit.runtime_binding;
+    let journal = &audit.journal;
+    let db = &audit.db;
+    // Warm only committed schema qualification. Each page still validates its
+    // mutable namespace/admission and schema cookie inside a fresh snapshot.
+    configured::NativeOwnership::validate_physical(db).map_err(io::Error::other)?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
-    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
-    let db = journal.connection().map_err(io::Error::other)?;
     let machine = crate::facts::MachineFacts::of(options);
     // Observe Raw metadata in a read snapshot. Acquire the write lock only
     // after all physical observations, when consuming the exact ledgers below.
     let tx =
-        Transaction::new_unchecked(&db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
+        Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
+    let generation_sql = "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'";
+    let generation: Option<String> = tx
+        .query_row(generation_sql, [], |row| row.get(0))
+        .optional()
+        .map_err(io::Error::other)?;
+    let mut observed_ledgers = std::collections::BTreeMap::new();
     let mut changed = std::collections::BTreeSet::new();
-    let mut absent_paths = std::collections::BTreeSet::new();
     let mut removed = Vec::new();
     let mut source_locks = Vec::new();
     for input in discovered {
@@ -758,7 +796,9 @@ pub(crate) fn audit_catalog_sources(
                 .with_extension("")
                 .with_extension("jsonl");
             let key = log.to_string_lossy().into_owned();
-            if let Some((_, ledger)) = ledger_row(&tx, &key).map_err(io::Error::other)? {
+            let recorded = ledger_row(&tx, &key).map_err(io::Error::other)?;
+            observed_ledgers.insert(key.clone(), recorded.clone());
+            if let Some((_, ledger)) = recorded {
                 let sidecar = read_claude_sidecar(
                     &mut tx
                         .prepare(native_metadata_value(&tx).map_err(io::Error::other)?)
@@ -779,13 +819,8 @@ pub(crate) fn audit_catalog_sources(
         let path = input.full_path(options);
         let key = path.to_string_lossy().into_owned();
         let observed = super::Stat::of(&path);
-        if observed
-            .as_ref()
-            .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
-        {
-            absent_paths.insert(key.clone());
-        }
         let recorded = ledger_row(&tx, &key).map_err(io::Error::other)?;
+        observed_ledgers.insert(key.clone(), recorded.clone());
         if match recorded.as_ref() {
             Some((_, ledger)) => observed
                 .ok()
@@ -837,14 +872,12 @@ pub(crate) fn audit_catalog_sources(
                 .as_ref()
                 .and_then(|query| query["runtime"].as_str());
             let recorded = ledger_row(&tx, &path).map_err(io::Error::other)?;
+            observed_ledgers.insert(path.clone(), recorded.clone());
             source_locks.push(crate::source_change::SourceLock::acquire(
                 options, &path, false,
             )?);
             let absent = fs::symlink_metadata(&path)
                 .is_err_and(|error| error.kind() == io::ErrorKind::NotFound);
-            if absent {
-                absent_paths.insert(path.clone());
-            }
             if absent && let Some((_, ledger)) = &recorded {
                 removed.push((path.clone(), Some(ledger.clone())));
             }
@@ -863,20 +896,45 @@ pub(crate) fn audit_catalog_sources(
             last = Some(path);
         }
     }
+    // Never upgrade the physical-observation snapshot into a writer: a peer
+    // commit makes that WAL snapshot unwritable (SQLITE_BUSY_SNAPSHOT). Reserve
+    // a fresh writer and consume only the exact Catalog and ledgers observed.
+    tx.commit().map_err(io::Error::other)?;
+    if changed.is_empty() && removed.is_empty() {
+        return Ok(last);
+    }
+    let tx =
+        Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    journal.validate(&tx).map_err(io::Error::other)?;
+    let current_generation: Option<String> = tx
+        .query_row(generation_sql, [], |row| row.get(0))
+        .optional()
+        .map_err(io::Error::other)?;
+    if current_generation != generation {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Catalog changed during source audit",
+        ));
+    }
+    for path in changed.iter().chain(removed.iter().map(|(path, _)| path)) {
+        if observed_ledgers.get(path) != Some(&ledger_row(&tx, path).map_err(io::Error::other)?) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Native ledger changed during source audit",
+            ));
+        }
+    }
     // These are real producer removals, qualified above under Source locks;
     // the existing writer preserves retained indexes and compares each ledger.
     remove_files_tx(&tx, &removed, config.namespace.as_str()).map_err(io::Error::other)?;
     for path in changed {
         if !removed.iter().any(|(removed, _)| removed == &path) {
-            // Discovery can have queued this path before its ordinary removal
-            // committed. Do not replace that durable negative evidence with a
-            // generic change after the ledger is gone. A present/reappeared
-            // file still follows the ordinary changed-source path.
-            if absent_paths.contains(&path) {
-                let removed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1 AND reason='removed')", [&path], |row| row.get(0)).map_err(io::Error::other)?;
-                if removed {
-                    continue;
-                }
+            // An existing claim already requires an ordinary producer to
+            // observe this source. Do not keep advancing that claim merely
+            // because several independent observers saw the same old ledger.
+            let pending: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE namespace=semon_namespace() AND source_path=?1)", [&path], |row| row.get(0)).map_err(io::Error::other)?;
+            if pending {
+                continue;
             }
             invalidate_bound_catalog_source(&tx, &path, "changed").map_err(io::Error::other)?;
         }

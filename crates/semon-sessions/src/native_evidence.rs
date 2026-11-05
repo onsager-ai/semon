@@ -858,6 +858,7 @@ impl NativeEvidence {
             work.events = None;
         }
         if work.events.is_none() {
+            work.catalog_store_stamp = None;
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
             work.events = Some(match &self.store_config {
                 Some(config) => EventCache::open_configured(config).map_err(io::Error::other),
@@ -1758,9 +1759,52 @@ impl NativeEvidence {
         now: i64,
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        let before = work
+            .events
+            .as_ref()
+            .filter(|cache| !cache.scoped_store_lost())
+            .map(EventCache::catalog_store_stamp)
+            .transpose()?
+            .flatten();
+        if before.is_some()
+            && before == work.catalog_store_stamp
+            && !work.pending_sources
+            && !work.tree_repair_pending
+            && work.cold_catalog.is_none()
+            && work.audit.is_none()
+            && self.audit_request.load(Ordering::Acquire) == work.audit_revision
+            && work
+                .catalog_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.changed(&self.options))
+            && work
+                .events
+                .as_ref()
+                .map(EventCache::catalog_store_stamp)
+                .transpose()?
+                .flatten()
+                == before
+        {
+            return Ok(true);
+        }
+        work.catalog_store_stamp = None;
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
             lock(&self.catalog_search).close();
+            let after = work
+                .events
+                .as_ref()
+                .map(EventCache::catalog_store_stamp)
+                .transpose()?
+                .flatten();
+            // Only own writes may advance during the completed observation.
+            // A peer commit requires another ordinary pass before reuse.
+            if before
+                .zip(after)
+                .is_some_and(|(before, after)| before.0 == after.0 && before.1 == after.1)
+            {
+                work.catalog_store_stamp = after;
+            }
         }
         Ok(complete && !work.tree_repair_pending)
     }
@@ -1905,11 +1949,11 @@ impl NativeEvidence {
                         .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                         .extend_sources(&self.options, &page.inputs);
                 }
-                let last = crate::events::store::audit_catalog_sources(
+                let last = crate::events::store::audit_catalog_sources_step(
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
-                    &self.query_runtime()?,
+                    &mut audit.sources,
                 )?;
                 if let Some(last) = last {
                     audit.after = last;
@@ -2320,6 +2364,7 @@ pub(crate) struct Work {
     pub(crate) catalog_snapshot: Option<Snapshot>,
     /// This owner's acknowledged shared publication, never a completeness proof.
     observed_catalog_generation: Option<String>,
+    catalog_store_stamp: Option<(i64, i64, u64)>,
     cold_catalog: Option<ColdCatalog>,
     pending_sources: bool,
     tree_repair_pending: bool,
@@ -2338,6 +2383,7 @@ struct CatalogAudit {
     checked: bool,
     started: bool,
     snapshot: Option<Snapshot>,
+    sources: Option<crate::events::store::CatalogSourceAudit>,
 }
 
 #[derive(Default)]
