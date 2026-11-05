@@ -194,8 +194,8 @@ impl History<'_, '_> {
             // already be absent; live reader admission is not transfer authority.
             let tx = self.effects.tx.borrow_mut();
             let ns = tx.namespace.as_str().as_bytes();
-            let saved = tx.driver.query_one("SELECT metadata,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.previous.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
-            let saved_row: CatalogRow = serde_json::from_slice(&saved.get::<_, Vec<u8>>(0))
+            let saved = tx.driver.query_one("SELECT CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END FROM semon_pg_native_catalog_rows WHERE namespace_digest=sha256($1::bytea) AND namespace=$1 AND generation=$2 AND key_digest=sha256($3::bytea) AND session_key=$3", &[&ns, &self.previous.as_bytes(), &key.as_bytes()]).map_err(sqlstate::error)?;
+            let saved_row: CatalogRow = serde_json::from_slice(&saved.get::<_, Option<Vec<u8>>>(0).ok_or(StorageError::Busy)?)
                 .map_err(|_| StorageError::ScopeChanged)?;
             if serde_json::to_value(&saved_row).map_err(|_| StorageError::ScopeChanged)?
                 != serde_json::to_value(supplied).map_err(|_| StorageError::ScopeChanged)?
