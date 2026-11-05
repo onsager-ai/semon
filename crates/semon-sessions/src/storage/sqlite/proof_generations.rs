@@ -83,10 +83,9 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
         }
         .ok_or(StorageError::Unavailable)?;
         let actual: Option<String> = db
-            .prepare_cached("SELECT sql FROM main.sqlite_schema WHERE type=?1 AND name=?2").map_err(failed)?.query_row(
-                params![kind.to_ascii_lowercase(), name],
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT sql FROM main.sqlite_schema WHERE type=?1 AND name=?2")
+            .map_err(failed)?
+            .query_row(params![kind.to_ascii_lowercase(), name], |r| r.get(0))
             .optional()
             .map_err(failed)?;
         let expected = format!("CREATE {kind} {rest}");
