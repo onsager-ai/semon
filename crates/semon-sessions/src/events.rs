@@ -1145,11 +1145,6 @@ pub(crate) trait IndexStore: Send {
 
     /// The committed catalog observed before a model build starts.
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError>;
-    /// Connection-local schema, external-commit and own-write clocks. A host
-    /// without an exact mutation clock uses ordinary observation instead.
-    fn catalog_store_stamp(&self) -> Result<Option<(i64, i64, u64)>, StoreError> {
-        Ok(None)
-    }
     /// Reload peer publication state on retained admitted connections. Other
     /// adapters keep their existing reopen path.
     fn refresh_peer_publication(&mut self) -> Result<bool, StoreError> {
@@ -3009,14 +3004,6 @@ impl EventCache {
             .session_catalog_generation()
             .ok()
             .flatten()
-    }
-
-    pub(crate) fn catalog_store_stamp(&self) -> io::Result<Option<(i64, i64, u64)>> {
-        self.store
-            .as_ref()
-            .map(|store| store.catalog_store_stamp().map_err(store_io_error))
-            .transpose()
-            .map(Option::flatten)
     }
 
     pub(crate) fn rebuild_catalog_search(&mut self, expected_generation: &str) -> io::Result<bool> {

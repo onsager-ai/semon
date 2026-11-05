@@ -248,9 +248,6 @@ impl IndexStore for ConfiguredIndex {
     fn session_catalog_generation(&self) -> Result<Option<String>, StoreError> {
         self.native.catalog_generation()
     }
-    fn catalog_store_stamp(&self) -> Result<Option<(i64, i64, u64)>, StoreError> {
-        self.native.catalog_store_stamp().map(Some)
-    }
     fn rebuild_catalog_search(&mut self, expected_generation: &str) -> Result<bool, StoreError> {
         self.native.rebuild_catalog_search(expected_generation)
     }

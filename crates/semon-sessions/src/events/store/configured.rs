@@ -1336,18 +1336,6 @@ impl Writer {
         .map_err(failure)
     }
 
-    pub(crate) fn catalog_store_stamp(&self) -> Result<(i64, i64, u64), StoreError> {
-        let schema = self
-            .connection
-            .pragma_query_value(None, "schema_version", |row| row.get(0))
-            .map_err(failure)?;
-        let external = self
-            .connection
-            .pragma_query_value(None, "data_version", |row| row.get(0))
-            .map_err(failure)?;
-        Ok((schema, external, self.connection.total_changes()))
-    }
-
     pub(crate) fn rebuild_catalog_search(
         &self,
         expected_generation: &str,
