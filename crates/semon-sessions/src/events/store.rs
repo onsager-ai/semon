@@ -718,52 +718,29 @@ pub(super) fn note_catalog_audit_tx(
 
 /// Bounded metadata audit for writers without receiver custody proofs. No
 /// Event rows, transcript bytes or semantic session models are loaded here.
-pub(crate) struct CatalogSourceAudit {
-    config: crate::storage::StoreConfig,
-    runtime_binding: crate::storage::QueryRuntimeBinding,
-    journal: crate::storage::sqlite::source_journal::SourceJournal,
-    db: Connection,
-}
-
 pub(crate) fn audit_catalog_sources(
     options: &crate::Options,
     discovered: &[crate::Input],
     after: Option<&str>,
-    retained: &mut Option<CatalogSourceAudit>,
+    _runtime: &str,
 ) -> io::Result<Option<String>> {
-    if retained.is_none() {
-        let config = options
-            .source
-            .config(&options.cache)
-            .map_err(io::Error::other)?;
-        let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
-        let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
-            .runtime_binding()
-            .map_err(io::Error::other)?
-            .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
-        let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
-        let db = journal.connection().map_err(io::Error::other)?;
-        *retained = Some(CatalogSourceAudit {
-            config,
-            runtime_binding,
-            journal,
-            db,
-        });
-    }
-    let audit = retained.as_ref().expect("audit connection initialized");
-    let config = &audit.config;
-    let runtime_binding = &audit.runtime_binding;
-    let journal = &audit.journal;
-    let db = &audit.db;
-    // Warm only committed schema qualification. Each page still validates its
-    // mutable namespace/admission and schema cookie inside a fresh snapshot.
-    configured::NativeOwnership::validate_physical(db).map_err(io::Error::other)?;
+    let config = options
+        .source
+        .config(&options.cache)
+        .map_err(io::Error::other)?;
+    let owner = configured::NativeOwnership::restore(&config).map_err(io::Error::other)?;
+    let runtime_binding = crate::storage::NativeReaderBinding::Semantic(owner.clone())
+        .runtime_binding()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
     let observations = crate::native_evidence::RuntimeObservations::new(options);
+    let journal = crate::storage::sqlite::source_journal::SourceJournal::owned(owner);
+    let db = journal.connection().map_err(io::Error::other)?;
     let machine = crate::facts::MachineFacts::of(options);
     // Observe Raw metadata in a read snapshot. Acquire the write lock only
     // after all physical observations, when consuming the exact ledgers below.
     let tx =
-        Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
+        Transaction::new_unchecked(&db, TransactionBehavior::Deferred).map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let generation_sql = "SELECT value FROM main.meta WHERE namespace=semon_meta_scope('catalog_generation') AND key='catalog_generation'";
     let generation: Option<String> = tx
@@ -839,6 +816,7 @@ pub(crate) fn audit_catalog_sources(
         }
     }
     let mut last = None;
+    let mut complete = after.is_none();
     if let Some(after) = after {
         let paths = {
             let mut statement = tx.prepare("SELECT s.source_path, CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path>?1 GROUP BY s.source_path ORDER BY s.source_path LIMIT 64").map_err(io::Error::other)?;
@@ -850,6 +828,7 @@ pub(crate) fn audit_catalog_sources(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(io::Error::other)?
         };
+        complete = paths.len() < 64;
         for (path, metadata) in paths {
             let row: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(io::Error::other)?;
@@ -891,10 +870,10 @@ pub(crate) fn audit_catalog_sources(
     // a fresh writer and consume only the exact Catalog and ledgers observed.
     tx.commit().map_err(io::Error::other)?;
     if changed.is_empty() && removed.is_empty() {
-        return Ok(last);
+        return Ok(if complete { None } else { last });
     }
-    let tx =
-        Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
     journal.validate(&tx).map_err(io::Error::other)?;
     let current_generation: Option<String> = tx
         .query_row(generation_sql, [], |row| row.get(0))
@@ -930,7 +909,7 @@ pub(crate) fn audit_catalog_sources(
         }
     }
     tx.commit().map_err(io::Error::other)?;
-    Ok(last)
+    Ok(if complete { None } else { last })
 }
 
 #[derive(Debug)]
