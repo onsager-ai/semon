@@ -495,6 +495,12 @@ fn validate_copied_usage(c: &Connection) -> rusqlite::Result<()> {
     if !peer_table || peer_index != expected_index {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    remember_copied_usage_layout(c, version)
+}
+
+// Exact authored DDL qualification can prime the same connection-local cache
+// without repeating the column, foreign-key and index probes above.
+fn remember_copied_usage_layout(c: &Connection, version: i64) -> rusqlite::Result<()> {
     // Do not cache an uncommitted schema cookie: rollback can reuse it for
     // a different DDL transaction. Existing committed decisions remain usable.
     if !c.is_autocommit() {
@@ -4610,9 +4616,9 @@ pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Resu
     drop(inventory);
     // Bind the authored definitions as data in Rust instead of compiling an
     // SQL VALUES expression containing the entire schema on every connection.
-    // Every expected definition must still match exactly; extra objects retain
-    // the same acceptance as the original inventory query.
-    let mut statement = connection.prepare_cached("SELECT type,name,sql FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?;
+    // Every expected definition must still match exactly. Stage shape
+    // qualification additionally refuses extra authored indexes on its tables.
+    let mut statement = connection.prepare_cached("SELECT type,name,sql,tbl_name FROM main.sqlite_schema WHERE sql IS NOT NULL AND type IN ('table','index','trigger')")?;
     let mut rows = statement.query([])?;
     let mut matched = 0;
     while let Some(row) = rows.next()? {
@@ -4621,6 +4627,10 @@ pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Resu
             && row.get_ref(2)?.as_str()? == definition
         {
             matched += 1;
+        } else if key.0 == "index"
+            && semantic_stage::STAGE_TABLES.contains(&row.get_ref(3)?.as_str()?)
+        {
+            return Ok(false);
         }
     }
     Ok(matched == expected.len())

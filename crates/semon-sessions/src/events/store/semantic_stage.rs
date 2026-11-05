@@ -302,6 +302,12 @@ pub(crate) fn validate_support(c: &Connection) -> rusqlite::Result<()> {
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
+    remember_support_layout(c, version)
+}
+
+/// Called after either the support probes or the complete exact authored DDL
+/// inventory (including rejection of extra stage indexes) has qualified.
+pub(super) fn remember_support_layout(c: &Connection, version: i64) -> rusqlite::Result<()> {
     // Cache only committed main-schema decisions. A rolled-back DDL cookie can
     // be reused; never pin its transient layout or any Source binding.
     if c.is_autocommit() {

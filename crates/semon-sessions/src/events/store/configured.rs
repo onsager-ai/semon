@@ -702,10 +702,11 @@ impl NativeOwnership {
         // changes. Preparing reads no rows and never repairs missing indexes.
         db.prepare("SELECT session_key,last_ms FROM main.session_catalog INDEXED BY session_catalog_current_order WHERE namespace=?1 AND lifecycle='current' ORDER BY last_ms DESC,session_key ASC LIMIT 0").map_err(failed)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
-        // Selected factories also rely on this connection-local cache being
-        // warm before their first copied-usage read.
-        validate_copied_usage(db).map_err(failed)?;
-        semantic_stage::stage_layout(db).map_err(failed)?;
+        // The exact inventory also proves copied-usage and support table
+        // shapes. Prime their committed layout caches for transaction writers
+        // and selected factories without probing those same shapes again.
+        remember_copied_usage_layout(db, version).map_err(failed)?;
+        semantic_stage::remember_support_layout(db, version).map_err(failed)?;
         // These guards are added with the admitted writer profile rather than
         // the authored base DDL. Qualify their static presence on schema-cookie
         // misses, after prepare_owned has created the operation table.
