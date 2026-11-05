@@ -167,6 +167,8 @@ pub(crate) fn read_page(
     admission: &mut Option<crate::catalog::CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let mut connection = binding.connection()?;
+    // Keep the bounded Catalog/proof statement working set across page rows.
+    connection.set_prepared_statement_cache_capacity(128);
     let transaction = connection.transaction()?;
     let reply = crate::catalog::read_page_snapshot_with_search(
         options,
@@ -365,8 +367,9 @@ pub(crate) fn runtime_source_cwds_by_path_if_current(
             return Ok(None);
         }
         let cwd: Option<String> = db
+            .prepare_cached("SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1")
+            .map_err(io::Error::other)?
             .query_row(
-                "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
                 [path.as_ref()],
                 |row| row.get(0),
             )
