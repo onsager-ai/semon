@@ -505,7 +505,11 @@ impl SourceJournal {
             .map_err(failed)?;
         let cached: bool = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_source_journal_layout' AND narg=1)").map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
         if cached {
-            let layout: Option<bool> = tx.prepare_cached("SELECT semon_source_journal_layout(?1)").map_err(failed)?.query_row([version], |r| r.get(0)).map_err(failed)?;
+            let layout: Option<bool> = tx
+                .prepare_cached("SELECT semon_source_journal_layout(?1)")
+                .map_err(failed)?
+                .query_row([version], |r| r.get(0))
+                .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
             }

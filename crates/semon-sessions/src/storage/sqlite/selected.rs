@@ -59,16 +59,20 @@ impl ContextLookup for Context<'_> {
         self.db.prepare_cached(&self.sql("SELECT source_generation,json_extract(metadata,'$.content_generation') FROM session_trace_headers WHERE session_key=?1")).map_err(io::Error::other)?.query_row([key],|r|Ok((r.get(0)?,r.get(1)?))).optional().map_err(io::Error::other)
     }
     fn preview_catalog(&self, key: &str) -> io::Result<Option<String>> {
-        let history = self.db.prepare_cached(&self.sql("SELECT metadata FROM session_history_catalog WHERE session_key=?1")).map_err(io::Error::other)?.query_row(
-                [key],
-                |r| r.get(0),
+        let history = self
+            .db
+            .prepare_cached(
+                &self.sql("SELECT metadata FROM session_history_catalog WHERE session_key=?1"),
             )
+            .map_err(io::Error::other)?
+            .query_row([key], |r| r.get(0))
             .optional()
             .map_err(io::Error::other)?;
-        Ok(history.or(self.db.prepare_cached(&self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1")).map_err(io::Error::other)?.query_row(
-                [key],
-                |r| r.get(0),
-            )
+        Ok(history.or(self
+            .db
+            .prepare_cached(&self.sql("SELECT metadata FROM session_catalog WHERE session_key=?1"))
+            .map_err(io::Error::other)?
+            .query_row([key], |r| r.get(0))
             .optional()
             .map_err(io::Error::other)?))
     }
