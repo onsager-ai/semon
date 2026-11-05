@@ -165,7 +165,7 @@ impl History<'_, '_> {
     }
     fn write_header(
         &self,
-        supplied: &CatalogRow,
+        key: &str,
         metadata: &str,
         header: Option<&OriginalHeader>,
         incomplete: bool,
@@ -174,7 +174,6 @@ impl History<'_, '_> {
         if metadata.len() > MAX || original.is_some_and(|value| value.len() > MAX) {
             return Err(StorageError::Busy);
         }
-        let key = &supplied.key;
         let empty = (String::new(), 0, None, 0);
         let (recipe, version, source, total) = header.unwrap_or(&empty);
         let source = source.as_ref().map(|value| value.as_bytes().to_vec());
@@ -182,26 +181,11 @@ impl History<'_, '_> {
         // Header columns mirror catalog_rows so retained history filters,
         // family traversal and keysets in SQL; the reader re-checks them
         // against the metadata.
-        let mut row: CatalogRow =
+        let row: CatalogRow =
             serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
-        if &row.key != key {
+        if row.key != key {
             return Err(StorageError::ScopeChanged);
         }
-        row.query_recipe = supplied.query_recipe.clone();
-        if row.query_recipe.is_none()
-            && row
-                .query
-                .as_ref()
-                .is_some_and(|query| query["selected"].get("digest").is_some())
-        {
-            let mut tx = self.effects.tx.borrow_mut();
-            snapshot::in_transaction(&mut tx, self.previous, |view| {
-                view.attach_query_recipe(&mut row, false).map(|_| ())
-            })?;
-        }
-        let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(&row)
-            .map_err(|_| StorageError::ScopeChanged)?
-            .map(String::into_bytes);
         let parent_key = row
             .parent
             .as_deref()
@@ -218,7 +202,6 @@ impl History<'_, '_> {
                 "total",
                 "incomplete",
                 "metadata",
-                "query_recipe",
                 "original_header",
                 "last_ms",
                 "harness",
@@ -238,7 +221,6 @@ impl History<'_, '_> {
                 total,
                 &incomplete,
                 &metadata.as_bytes(),
-                &query_recipe,
                 &original,
                 &row.last.unwrap_or(0),
                 &row.harness.as_bytes(),
@@ -389,7 +371,7 @@ impl OriginalHistoryStore for History<'_, '_> {
         for source in &row.sources {
             self.retain_source(row, source)?;
         }
-        self.write_header(row, metadata, header, !complete, Some(original_header))?;
+        self.write_header(&row.key, metadata, header, !complete, Some(original_header))?;
         let source_generation = crate::retention::source_generation(&row.sources)
             .map_err(|_| StorageError::ScopeChanged)?;
         {
@@ -593,12 +575,7 @@ impl CompositeHistoryStore for History<'_, '_> {
             Some(sources.to_owned()),
             texts.len() as i64,
         );
-        let row: CatalogRow =
-            serde_json::from_str(metadata).map_err(|_| StorageError::ScopeChanged)?;
-        if row.key != key {
-            return Err(StorageError::ScopeChanged);
-        }
-        self.write_header(&row, metadata, Some(&header), incomplete, None)?;
+        self.write_header(key, metadata, Some(&header), incomplete, None)?;
         for (slot, metadata) in texts.iter().enumerate() {
             self.put_slot(key, slot as i64, metadata)?;
         }

@@ -10117,9 +10117,6 @@ fn build_sources_inner(
             })));
         }
         BuildTarget::Catalog => {
-            for row in catalog.as_deref_mut().unwrap_or_default() {
-                crate::query_projection::SelectedRecipe::compact_catalog(row)?;
-            }
             let rows = catalog.as_deref().unwrap_or_default();
             let publication_started = std::time::Instant::now();
             let generation = cache.publish_catalog_projection_fenced(
@@ -10311,10 +10308,7 @@ fn build_sources_inner(
         source_records.finish()?;
     }
     drop(source_records);
-    if let Some(mut catalog) = catalog {
-        for row in &mut catalog {
-            crate::query_projection::SelectedRecipe::compact_catalog(row)?;
-        }
+    if let Some(catalog) = catalog {
         cache.publish_session_projection(
             &crate::slot_projection::Publication {
                 rows: &catalog,

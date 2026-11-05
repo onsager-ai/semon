@@ -3111,11 +3111,6 @@ impl SqliteStore {
             .map(json)
             .collect::<Result<_, _>>()
             .map_err(failure)?;
-        let query_recipes = rows
-            .iter()
-            .map(crate::query_projection::SelectedRecipe::publication_payload)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| StoreError::Data(error.to_string()))?;
         let batch_bytes = catalog_batch_bytes(rows, &metadata, writer);
         self.connection
             .busy_timeout(Duration::ZERO)
@@ -3124,12 +3119,7 @@ impl SqliteStore {
         let result = (|| {
             let metadata_bytes = metadata
                 .iter()
-                .zip(&query_recipes)
-                .try_fold(0usize, |total, (text, recipe)| {
-                    total
-                        .checked_add(text.len())?
-                        .checked_add(recipe.as_ref().map_or(0, String::len))
-                })
+                .try_fold(0usize, |total, text| total.checked_add(text.len()))
                 .ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
             let mut history_budget =
                 crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
@@ -3579,7 +3569,6 @@ impl SqliteStore {
                         None
                     };
                     for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
-                        let query_recipe = query_recipes[position].as_deref();
                         #[cfg(test)]
                         eprintln!(
                             "catalog_publication_probe stage=catalog_row_sources row_index={position}"
@@ -3640,12 +3629,6 @@ impl SqliteStore {
                             }
                             changed > 0
                         };
-                        if let Some(payload) = query_recipe {
-                            transaction.execute(
-                                "UPDATE main.session_catalog SET query_recipe=?1 WHERE namespace=semon_namespace() AND session_key=?2",
-                                params![payload, row.key],
-                            ).map_err(failure)?;
-                        }
                         if changed || previous_version.as_deref() != Some(&version) {
                             crate::storage::catalog::publish_current_sources_measured(
                                 &current_effects,
@@ -8772,12 +8755,12 @@ mod tests {
         use crate::storage::query::{QueryCatalogStore, QueryRecipeLoadError};
         use crate::storage::sqlite::proof_generations::query_recipe_observation;
         // The ordinary producer authors metadata, source witnesses and grants.
-        // The admitted fixture writer removes or corrupts only the payload
-        // cell; it never writes observation authority.
+        // Until its payload hook exists, the admitted fixture writer supplies
+        // only the matching payload cell; it never writes observation authority.
         let supply_payload = |store: &SqliteStore,
                               owner: CatalogObservationOwner,
                               metadata: &str,
-                              payload: Option<&str>| {
+                              payload: &str| {
             let mut db = crate::storage::sqlite::semantic::Stage::open(
                 crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config())
                     .unwrap(),
@@ -8829,12 +8812,6 @@ mod tests {
             options: options.clone(),
             binding: reader.clone(),
         };
-        supply_payload(
-            &store,
-            CatalogObservationOwner::Catalog,
-            &prepared.metadata,
-            None,
-        );
         assert!(matches!(
             port.selected_recipe(&original),
             Err(QueryRecipeLoadError::MissingPayload)
@@ -8844,7 +8821,7 @@ mod tests {
             &store,
             CatalogObservationOwner::Catalog,
             &prepared.metadata,
-            Some(&payload),
+            &payload,
         );
         assert_eq!(
             port.selected_recipe(&original).unwrap(),
@@ -8906,7 +8883,7 @@ mod tests {
             &store,
             CatalogObservationOwner::History,
             &history_metadata,
-            Some(&payload),
+            &payload,
         );
         assert_eq!(port.selected_recipe(&history).unwrap(), Some(expected));
         assert!(
@@ -8923,7 +8900,7 @@ mod tests {
             &store,
             CatalogObservationOwner::History,
             &history_metadata,
-            Some("{}"),
+            "{}",
         );
         assert!(matches!(
             port.selected_recipe(&history),
@@ -8933,7 +8910,7 @@ mod tests {
             &store,
             CatalogObservationOwner::History,
             &history_metadata,
-            Some(&payload),
+            &payload,
         );
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(store.owner.config()).unwrap(),
