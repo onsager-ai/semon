@@ -7292,9 +7292,7 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
     ];
     let mut full_cache = EventCache::open(&full_options.cache, &full_options.source).unwrap();
     let full = prepare_sources(&full_options, &mut full_cache, &full_inputs, NOW).unwrap();
-    let binding = crate::storage::local_navigation_binding(&home.options, "local").unwrap();
-    let db = binding.connection().unwrap();
-    let db = db.unchecked_transaction().unwrap();
+    let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let full_rows: BTreeMap<_, _> = full
         .rows
         .iter()
@@ -7310,19 +7308,12 @@ fn assert_staged_bidirectional_message_pages(rounds: i64) {
                     |row| row.get(0),
                 )
                 .unwrap();
-            let mut row = serde_json::from_str::<summary::CatalogRow>(&metadata).unwrap();
-            crate::storage::sqlite::proof_generations::attach_query_recipe(
-                &db,
-                &binding,
-                crate::storage::catalog::CatalogObservationOwner::Catalog,
-                &mut row,
-            )
-            .unwrap();
-            (owner, row)
+            (owner, serde_json::from_str::<Value>(&metadata).unwrap())
         })
         .collect();
-    let selected_origin = |row: &summary::CatalogRow, id: &str| {
-        crate::query_projection::SelectedRecipe::edges_for(row)
+    let selected_origin = |row: &Value, id: &str| {
+        row["query"]["selected"]["edges"]
+            .as_array()
             .and_then(|edges| edges.iter().find(|edge| edge["id"].as_str() == Some(id)))
             .map(|edge| edge["query_content"]["origin"].clone())
             .unwrap_or(Value::Null)
