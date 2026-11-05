@@ -78,19 +78,6 @@ pub(crate) fn take_save_diagnostic(namespace: &str) -> Option<SaveDiagnostic> {
         .remove(namespace)
 }
 
-// Detached recipes remain part of the exact owner's publication budget.
-#[cfg(test)]
-fn owner_row_bytes(row: &crate::model::summary::CatalogRow) -> usize {
-    serde_json::to_vec(row).map_or(0, |bytes| bytes.len())
-        + if crate::query_projection::SelectedRecipe::detached(row) {
-            row.query_recipe.as_ref().map_or(0, |recipe| {
-                serde_json::to_vec(recipe).map_or(0, |bytes| bytes.len())
-            })
-        } else {
-            0
-        }
-}
-
 #[cfg(test)]
 fn save_diagnostic(
     namespace: &str,
@@ -104,14 +91,14 @@ fn save_diagnostic(
         .context
         .endpoints
         .values()
-        .map(|endpoint| owner_row_bytes(&endpoint.row))
+        .map(|endpoint| serde_json::to_vec(&endpoint.row).map_or(0, |bytes| bytes.len()))
         .chain(
             stage
                 .context
                 .prior_owners
                 .values()
                 .chain(stage.context.retired_owners.iter())
-                .map(owner_row_bytes),
+                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
         )
         .max()
         .unwrap_or_default();
@@ -126,7 +113,7 @@ fn save_diagnostic(
                 .prior_owners
                 .values()
                 .chain(stage.context.retired_owners.iter())
-                .map(owner_row_bytes),
+                .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len())),
         )
         .max()
         .unwrap_or_default();
@@ -226,7 +213,7 @@ fn record_owner_sizes(namespace: &str, prepared: &PreparedSources, before: Stage
     let largest_owner_row_bytes = prepared
         .rows
         .iter()
-        .map(owner_row_bytes)
+        .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len()))
         .max()
         .unwrap_or_default();
     let model_witness_bytes = prepared
@@ -630,14 +617,7 @@ fn has_oversized_owner_row(prepared: &PreparedSources) -> Result<bool, StorageEr
             bytes: 0,
             exceeded: false,
         };
-        let serialized = serde_json::to_writer(&mut counter, row).and_then(|()| {
-            if crate::query_projection::SelectedRecipe::detached(row)
-                && let Some(recipe) = &row.query_recipe
-            {
-                serde_json::to_writer(&mut counter, recipe)?;
-            }
-            Ok(())
-        });
+        let serialized = serde_json::to_writer(&mut counter, row);
         if counter.exceeded || counter.bytes > MAX {
             return Ok(true);
         }
