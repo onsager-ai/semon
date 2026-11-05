@@ -13779,7 +13779,9 @@ fn replay(seed: u64) {
 #[test]
 fn append_resumed_build_matches_fresh_build_for_seeded_sequences() {
     let shard = std::env::var("SEMON_EQUIV_SHARD").ok().map(|value| {
-        let shard: u64 = value.parse().expect("SEMON_EQUIV_SHARD must be 0 through 3");
+        let shard: u64 = value
+            .parse()
+            .expect("SEMON_EQUIV_SHARD must be 0 through 3");
         assert!(shard < 4, "SEMON_EQUIV_SHARD must be 0 through 3");
         shard
     });
