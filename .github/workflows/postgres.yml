@@ -313,15 +313,9 @@ jobs:
         shell: bash
         run: |
           cargo test -p semon-sessions --locked --features postgres-test-tls storage::postgres -- --nocapture \
-            --skip pg_reported_facts --skip storage::postgres::native_core::tests:: \
-            --skip storage::postgres::tree_writer::tests:: --skip pg_usage_batch_130_real_native_publication_matches_sqlite \
-            --skip current_transfer225 --skip current_transfer_catalog_reprice_preserves_imported_original_authority \
-            --skip pg_query_recipe_loader_ --skip storage::postgres::source_journal::tests::pg_catalog_ \
-            --skip pg_codex_header_search_projection_tracks_metadata_commit_and_delete \
-            --skip pg_resolve_keeps_sibling_log_claim_atomic_with_exact_json_claim_delete \
+            --skip pg_reported_facts --skip current_transfer225 --skip pg_query_recipe_loader_ \
             --skip pg_vertical140 --skip pg_catalog135 --skip pg_native126 --skip pg_catalog124 \
-            --skip pg_catalog127 --skip pg_catalog131 --skip pg_native_keys125 --skip pg_native_keys128 \
-            --skip pg_native_keys132 --skip pg_native_keys134 --skip pg_tree_scalar119 \
+            --skip pg_catalog127 --skip pg_catalog131 --skip pg_tree_scalar119 \
             2>&1 | tee "$RUNNER_TEMP/pg-focused.log"
       - name: Retain focused PostgreSQL diagnostics
         if: ${{ !cancelled() && matrix.suite == 'focused-pg' && steps.resolve.outcome == 'success' }}
