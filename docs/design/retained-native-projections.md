@@ -123,11 +123,6 @@ publication refuses; an empty successor retains the prior owner's runtime, while
 an empty semantic publication retains its explicit stage global. PostgreSQL's
 existing 64-row request bound remains; larger SQLite full/Sources publications
 keep their existing behavior outside this PostgreSQL qualification.
-Ordinary Catalog observation stores the complete selected Query recipe in its
-separate payload cell and keeps only its owner/source-bound digest reference in
-Catalog metadata. Current, original History and immutable receipt cells retain
-that exact payload with their existing authorization and combined metadata bound.
-Staged semantic publication retains its existing inline recipe contract.
 The PostgreSQL producer prepares identity-and-activity-addressed dependency
 digests with its existing current Facts head, so ordinary reads use point keys
 without parsing whole Raw Facts. Immutable presentation manifests capture each
