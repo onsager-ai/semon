@@ -298,10 +298,9 @@ pub(super) fn write(
     ledger: &Ledger,
     summary: &Summary,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?.query_row(
-        [path],
-        |r| r.get(0),
-    )?;
+    let id: i64 = tx
+        .prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?
+        .query_row([path], |r| r.get(0))?;
     let source_id = native_usage::source(tx, path)?
         .ok_or(rusqlite::Error::InvalidQuery)?
         .0;
@@ -332,10 +331,9 @@ pub(super) fn bind_generation(
     ledger: &Ledger,
     projection_id: i64,
 ) -> rusqlite::Result<()> {
-    let id: i64 = tx.prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?.query_row(
-        [path],
-        |r| r.get(0),
-    )?;
+    let id: i64 = tx
+        .prepare_cached("SELECT file_id FROM files WHERE namespace=semon_namespace() AND path=?1")?
+        .query_row([path], |r| r.get(0))?;
     tx.prepare_cached("UPDATE native_tree_generations SET receipt=?2,complete=1 WHERE namespace=semon_namespace() AND projection_id=?1")?.execute(
         params![projection_id, header_ledger(ledger)],
     )?;

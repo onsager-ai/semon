@@ -5208,9 +5208,12 @@ fn write_tree_summary(
         if encoded.len() > NATIVE_METADATA_MAX {
             // Retain the source and current rows, but stop retrying a scalar
             // that cannot fit the compact projection budget.
-            transaction.prepare_cached(native_metadata_put(transaction)?)?.execute(
-                params![format!("native_tree_failure:{path}"), header_ledger(ledger)],
-            )?;
+            transaction
+                .prepare_cached(native_metadata_put(transaction)?)?
+                .execute(params![
+                    format!("native_tree_failure:{path}"),
+                    header_ledger(ledger)
+                ])?;
             transaction.prepare_cached("UPDATE native_tree_repairs SET state='blocked_metadata' WHERE namespace=semon_namespace() AND source_path=?1")?.execute(
                 [path],
             )?;
@@ -5219,9 +5222,9 @@ fn write_tree_summary(
         transaction
             .prepare_cached(native_metadata_put(transaction)?)?
             .execute(params![tree_summary_key(path), encoded])?;
-        transaction.prepare_cached(native_metadata_delete(transaction)?)?.execute(
-            [format!("native_tree_failure:{path}")],
-        )?;
+        transaction
+            .prepare_cached(native_metadata_delete(transaction)?)?
+            .execute([format!("native_tree_failure:{path}")])?;
     }
     Ok(())
 }

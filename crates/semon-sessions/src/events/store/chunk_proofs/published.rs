@@ -68,7 +68,9 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         "native_published_chunks_manifest:{}",
         crate::source_carrier::source_hash(path)
     );
-    let prior: Option<String> = tx.prepare_cached(native_metadata_value(tx)?)?.query_row( [&key], |r| r.get(0))
+    let prior: Option<String> = tx
+        .prepare_cached(native_metadata_value(tx)?)?
+        .query_row([&key], |r| r.get(0))
         .optional()?
         .flatten();
     let mut saved: BTreeSet<String> = prior
@@ -80,10 +82,9 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
     let mut collected = 0;
     for digest in saved.clone() {
         let retained = prefix(path, &digest);
-        let header: Option<String> = tx.prepare_cached(native_metadata_value(tx)?)?.query_row(
-                [format!("{retained}header")],
-                |r| r.get(0),
-            )
+        let header: Option<String> = tx
+            .prepare_cached(native_metadata_value(tx)?)?
+            .query_row([format!("{retained}header")], |r| r.get(0))
             .optional()?
             .flatten();
         let compatible = header.as_deref().is_some_and(|text| {
@@ -98,16 +99,17 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
         }
         collected += 1;
         for namespace in namespaces(&retained) {
-            tx.prepare_cached("DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2")?.execute(
-                params![&namespace, format!("{namespace}~")],
-            )?;
+            tx.prepare_cached(
+                "DELETE FROM main.meta WHERE namespace=semon_namespace() AND key>=?1 AND key<?2",
+            )?
+            .execute(params![&namespace, format!("{namespace}~")])?;
         }
         saved.remove(&digest);
     }
     let live = super::prefix(path);
-    let header: Option<String> = tx.prepare_cached(native_metadata_value(tx)?)?.query_row( [format!("{live}header")], |r| {
-            r.get(0)
-        })
+    let header: Option<String> = tx
+        .prepare_cached(native_metadata_value(tx)?)?
+        .query_row([format!("{live}header")], |r| r.get(0))
         .optional()?
         .flatten();
     if let Some(header) = header.and_then(|text| serde_json::from_str::<Header>(&text).ok()) {
@@ -124,16 +126,16 @@ pub(super) fn preserve(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()>
                     params![from, to, format!("{from}~")],
                 )?;
             }
-            tx.prepare_cached(native_metadata_put(tx)?)?.execute(
-                params![format!("{retained}source"), source.to_string()],
-            )?;
+            tx.prepare_cached(native_metadata_put(tx)?)?
+                .execute(params![format!("{retained}source"), source.to_string()])?;
             saved.insert(digest);
         }
     }
     if !saved.is_empty() || prior.is_some() {
         let encoded = json(&saved)?;
         if prior.as_deref() != Some(&encoded) {
-            tx.prepare_cached(native_metadata_put(tx)?)?.execute( params![key, encoded])?;
+            tx.prepare_cached(native_metadata_put(tx)?)?
+                .execute(params![key, encoded])?;
         }
     }
     Ok(())

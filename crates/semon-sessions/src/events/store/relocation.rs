@@ -161,7 +161,9 @@ pub(super) fn advance(
                 params![catalog_key(&old), encoded],
             )?;
         } else {
-            connection.prepare_cached(native_metadata_delete(connection)?)?.execute( [catalog_key(&old)])?;
+            connection
+                .prepare_cached(native_metadata_delete(connection)?)?
+                .execute([catalog_key(&old)])?;
         }
     }
     Ok(())
@@ -169,7 +171,9 @@ pub(super) fn advance(
 pub(super) fn acknowledge(connection: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let pending: bool = connection.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.catalog_relocation_candidates c JOIN main.session_catalog_invalidations i ON i.namespace=c.namespace AND (i.source_path=c.old_path OR i.source_path=c.new_path) WHERE c.namespace=semon_namespace() AND c.old_path=?1)")?.query_row([path],|row|row.get(0))?;
     if !pending {
-        connection.prepare_cached(native_metadata_delete(connection)?)?.execute( [catalog_key(path)])?;
+        connection
+            .prepare_cached(native_metadata_delete(connection)?)?
+            .execute([catalog_key(path)])?;
         connection.prepare_cached("DELETE FROM main.catalog_relocation_candidates WHERE namespace=semon_namespace() AND old_path=?1")?.execute(
             [path],
         )?;

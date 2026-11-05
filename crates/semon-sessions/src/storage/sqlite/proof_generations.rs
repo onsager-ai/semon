@@ -1429,10 +1429,11 @@ pub(crate) fn verified_publication_receipts(
 /// Add durable references before the existing proof-copy/collection algorithm.
 /// An absent S2 family is an unbound current profile, never a reader fallback.
 pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<String>> {
-    let present: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_proof_sources')")?.query_row(
-        [],
-        |r| r.get(0),
-    )?;
+    let present: bool = db
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_proof_sources')",
+        )?
+        .query_row([], |r| r.get(0))?;
     if !present {
         return Ok(Vec::new());
     }
@@ -2182,7 +2183,11 @@ fn authorize_immutable_observation(
     };
     let stage_grant = if record.admission == current.admission {
         let digest = proof_codec::digest(record.metadata.as_bytes());
-        db.prepare_cached("SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)").map_err(ObservationPreparationError::Sql)?.query_row(
+        db.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
+        )
+        .map_err(ObservationPreparationError::Sql)?
+        .query_row(
             params![
                 current.namespace.as_str(),
                 format!("catalog_native_observation:{digest}"),
