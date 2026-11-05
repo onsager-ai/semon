@@ -623,7 +623,13 @@ pub(super) fn preserve(
         },
         previous,
     };
-    if !catalog::preserve_rows(&store, publication.rows, &old)? {
+    let mut original = Vec::new();
+    for row in old {
+        if !store.preserve_withdrawn_composite(&row.key)? {
+            original.push(row);
+        }
+    }
+    if !catalog::preserve_rows(&store, publication.rows, &original)? {
         return Ok(false);
     }
     let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
