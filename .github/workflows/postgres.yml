@@ -35,6 +35,7 @@ jobs:
       matrix:
         suite: [regression-other]
         target: [main, base]
+        repeat: [1, 2, 3, 4, 5]
     services:
       postgres:
         image: postgres:16
@@ -50,7 +51,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: ${{ matrix.target == 'main' && '8ec0a01c' || '9c33a3e4' }}
+          ref: ${{ matrix.target == 'main' && '8ec0a01c0ede44edfe658ce26f230319d0fdce0f' || '9c33a3e450593d1b831fbf325a00e846351dff0a' }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -372,7 +373,7 @@ jobs:
         run: |
           set +e
           failed=0
-          for repeat in 1 2 3 4 5; do
+          for repeat in ${{ matrix.repeat }}; do
             cargo test -p semon-sessions --locked --features postgres-test-tls -- --nocapture --skip 'storage::postgres' --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' > "$RUNNER_TEMP/load-$repeat.log" 2>&1
             result=$?
             echo "FULL_LOAD_REPEAT=$repeat status=$result"
@@ -384,7 +385,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: cold-main-base-${{ matrix.target }}
+          name: cold-main-base-${{ matrix.target }}-${{ matrix.repeat }}
           path: |
             ${{ runner.temp }}/profile-*.log
             ${{ runner.temp }}/load-*.log
