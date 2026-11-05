@@ -849,6 +849,7 @@ pub(crate) fn audit_catalog_sources_step(
         }
     }
     let mut last = None;
+    let mut complete = after.is_none();
     if let Some(after) = after {
         let paths = {
             let mut statement = tx.prepare("SELECT s.source_path, CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s JOIN session_catalog c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.lifecycle='current' AND s.source_path>?1 GROUP BY s.source_path ORDER BY s.source_path LIMIT 64").map_err(io::Error::other)?;
@@ -860,6 +861,7 @@ pub(crate) fn audit_catalog_sources_step(
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(io::Error::other)?
         };
+        complete = paths.len() < 64;
         for (path, metadata) in paths {
             let row: crate::model::summary::CatalogRow =
                 serde_json::from_str(&metadata).map_err(io::Error::other)?;
@@ -901,7 +903,7 @@ pub(crate) fn audit_catalog_sources_step(
     // a fresh writer and consume only the exact Catalog and ledgers observed.
     tx.commit().map_err(io::Error::other)?;
     if changed.is_empty() && removed.is_empty() {
-        return Ok(last);
+        return Ok(if complete { None } else { last });
     }
     let tx =
         Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(io::Error::other)?;
@@ -940,7 +942,7 @@ pub(crate) fn audit_catalog_sources_step(
         }
     }
     tx.commit().map_err(io::Error::other)?;
-    Ok(last)
+    Ok(if complete { None } else { last })
 }
 
 #[derive(Debug)]
