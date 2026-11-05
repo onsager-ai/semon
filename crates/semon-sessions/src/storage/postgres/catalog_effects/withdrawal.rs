@@ -127,16 +127,15 @@ pub(in crate::storage::postgres) fn remove(
                 continue;
             }
             if row.parent.as_ref().is_some_and(|p| removed.contains(p))
-                || crate::query_projection::SelectedRecipe::edges_for(row)
-                    .is_some_and(|edges| {
-                        edges.iter().any(|e| {
-                            ["from", "to"].iter().any(|f| {
-                                e["query"][*f]
-                                    .as_str()
-                                    .is_some_and(|k| removed.iter().any(|r| r == k))
-                            })
+                || crate::query_projection::SelectedRecipe::edges_for(row).is_some_and(|edges| {
+                    edges.iter().any(|e| {
+                        ["from", "to"].iter().any(|f| {
+                            e["query"][*f]
+                                .as_str()
+                                .is_some_and(|k| removed.iter().any(|r| r == k))
                         })
                     })
+                })
             {
                 connected = true;
                 break;
