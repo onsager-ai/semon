@@ -1496,7 +1496,6 @@ fn recovery_history_helper_contract_updates_only_authorized_owner_for_reused_key
         crate::storage::catalog::CatalogObservationOwner::History,
         &history,
         &repaired_query,
-        history.query_recipe.as_ref(),
     )
     .unwrap();
     tx.commit().unwrap();

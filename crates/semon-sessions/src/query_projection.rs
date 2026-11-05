@@ -44,8 +44,9 @@ impl SelectedRecipe {
         })
     }
 
-    // Catalog reads authenticate the separate payload before these accessors
-    // inspect it. Small producer observations can still carry inline values.
+    // Ordinary producers still publish inline selected values while detached
+    // publication is inactive. Stored observations authenticate either shape
+    // before these accessors inspect inline values or an attached payload.
     pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
         row.query_recipe
             .as_ref()
@@ -100,6 +101,7 @@ impl SelectedRecipe {
 
     /// Replace selected result metadata with its exact publication reference.
     /// The caller publishes the returned bytes atomically with this row.
+    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
         let Some(recipe) = &row.query_recipe else {
             return Ok(None);
@@ -112,48 +114,6 @@ impl SelectedRecipe {
             .ok_or_else(|| std::io::Error::other("Selected Query observation unavailable"))?;
         query["selected"] = serde_json::to_value(reference).map_err(std::io::Error::other)?;
         Ok(Some(encoded))
-    }
-
-    /// Ordinary Catalog observations carry an exact reference to this cell.
-    pub(crate) fn publication_payload(row: &CatalogRow) -> std::io::Result<Option<String>> {
-        if !row.query.as_ref().is_some_and(|query| {
-            query["selected"].get("version").is_some() || query["selected"].get("digest").is_some()
-        }) {
-            return Ok(None);
-        }
-        let recipe = row
-            .query_recipe
-            .as_ref()
-            .ok_or_else(|| std::io::Error::other("Selected Query producer recipe unavailable"))?;
-        let payload = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
-        if row.query.as_ref().expect("selected reference")["selected"]
-            != serde_json::to_value(recipe.reference(row).map_err(std::io::Error::other)?)
-                .map_err(std::io::Error::other)?
-            || serde_json::to_vec(row)
-                .map_err(std::io::Error::other)?
-                .len()
-                + payload.len()
-                > crate::storage::proof_codec::METADATA_MAX
-        {
-            return Err(std::io::Error::other(
-                "Selected Query producer recipe changed",
-            ));
-        }
-        Ok(Some(payload))
-    }
-
-    /// Spill a growing ordinary observation before it reaches the existing
-    /// compact metadata bound. Small observations retain their exact immutable
-    /// staged receipt identity when an ordinary reader republishes them.
-    pub(crate) fn compact_catalog(row: &mut CatalogRow) -> std::io::Result<()> {
-        if serde_json::to_vec(row)
-            .map_err(std::io::Error::other)?
-            .len()
-            >= 8192
-        {
-            Self::detach(row)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn reference(&self, row: &CatalogRow) -> serde_json::Result<SelectedRecipeRef> {

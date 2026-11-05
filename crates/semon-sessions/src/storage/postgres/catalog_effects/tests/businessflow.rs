@@ -1622,29 +1622,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
                     "offset": source.offset,
                 })
             };
-            let mut target = context
-                .iter()
-                .find(|candidate| candidate.key == key)
-                .unwrap()
-                .clone();
-            let recipe_owner = if crate::history_projection::catalog(&diagnostic_tx, key)
-                .unwrap()
-                .is_some()
-            {
-                crate::storage::catalog::CatalogObservationOwner::History
-            } else {
-                crate::storage::catalog::CatalogObservationOwner::Catalog
-            };
-            crate::storage::sqlite::proof_generations::attach_query_recipe(
-                &diagnostic_tx,
-                &binding,
-                recipe_owner,
-                &mut target,
-            )
-            .expect("resolve the exact retained handoff recipe through its qualified owner");
+            let target = context.iter().find(|candidate| candidate.key == key).unwrap();
             let retained_parent_source = parent_source(&parent_history_after_withdrawal);
             let mut recipe_count = 0;
-            for edge in crate::query_projection::SelectedRecipe::edges_for(&target)
+            for edge in target
+                .query
+                .as_ref()
+                .and_then(|query| query["selected"]["edges"].as_array())
                 .into_iter()
                 .flatten()
             {
@@ -2480,7 +2464,8 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
         .find(|row| row.native_ids.iter().any(|id| id == "one"))
         .unwrap();
     let parent_path = claude_parent.to_str().unwrap();
-    let origin = crate::query_projection::SelectedRecipe::edges_for(parent_row)
+    let origin = parent_row.query.as_ref().unwrap()["selected"]["edges"]
+        .as_array()
         .unwrap()
         .iter()
         .find(|edge| {
@@ -4325,12 +4310,13 @@ fn pg_vertical140_ordinary_model_after_ingest_and_restart_without_sqlite() {
             &control,
             &continued_generation,
             |snapshot| {
-                let mut row = snapshot
+                let row = snapshot
                     .catalog(&related_key, false)?
                     .ok_or(StorageError::ScopeChanged)?;
-                snapshot.attach_query_recipe(&mut row, false)?;
-                let edges = crate::query_projection::SelectedRecipe::edges_for(&row)
-                    .ok_or(StorageError::ScopeChanged)?;
+                let edges =
+                    row.query.as_ref().ok_or(StorageError::ScopeChanged)?["selected"]["edges"]
+                        .as_array()
+                        .ok_or(StorageError::ScopeChanged)?;
                 let sources = edges
                     .iter()
                     .flat_map(|edge| {
