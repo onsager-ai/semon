@@ -44,9 +44,8 @@ impl SelectedRecipe {
         })
     }
 
-    // Ordinary producers still publish inline selected values while detached
-    // publication is inactive. Stored observations authenticate either shape
-    // before these accessors inspect inline values or an attached payload.
+    // Catalog reads authenticate the separate payload before these accessors
+    // inspect it. Small producer observations can still carry inline values.
     pub(crate) fn edges_for(row: &CatalogRow) -> Option<&Vec<Value>> {
         row.query_recipe
             .as_ref()
@@ -101,7 +100,6 @@ impl SelectedRecipe {
 
     /// Replace selected result metadata with its exact publication reference.
     /// The caller publishes the returned bytes atomically with this row.
-    #[allow(dead_code)] // Inactive until whole-cohort selected Query wiring is ready.
     pub(crate) fn detach(row: &mut CatalogRow) -> std::io::Result<Option<String>> {
         let Some(recipe) = &row.query_recipe else {
             return Ok(None);
@@ -116,15 +114,61 @@ impl SelectedRecipe {
         Ok(Some(encoded))
     }
 
+    /// Ordinary Catalog observations carry an exact reference to this cell.
+    pub(crate) fn publication_payload(row: &CatalogRow) -> std::io::Result<Option<String>> {
+        if !row.query.as_ref().is_some_and(|query| {
+            query["selected"].get("version").is_some() || query["selected"].get("digest").is_some()
+        }) {
+            return Ok(None);
+        }
+        let recipe = row
+            .query_recipe
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("Selected Query producer recipe unavailable"))?;
+        let payload = serde_json::to_string(recipe).map_err(std::io::Error::other)?;
+        if row.query.as_ref().expect("selected reference")["selected"]
+            != serde_json::to_value(recipe.reference(row).map_err(std::io::Error::other)?)
+                .map_err(std::io::Error::other)?
+            || serde_json::to_vec(row)
+                .map_err(std::io::Error::other)?
+                .len()
+                + payload.len()
+                > crate::storage::proof_codec::METADATA_MAX
+        {
+            return Err(std::io::Error::other(
+                "Selected Query producer recipe changed",
+            ));
+        }
+        Ok(Some(payload))
+    }
+
+    /// Spill a growing ordinary observation before it reaches the existing
+    /// compact metadata bound. Small observations retain their exact immutable
+    /// staged receipt identity when an ordinary reader republishes them.
+    pub(crate) fn compact_catalog(row: &mut CatalogRow) -> std::io::Result<()> {
+        if serde_json::to_vec(row)
+            .map_err(std::io::Error::other)?
+            .len()
+            >= 8192
+        {
+            Self::detach(row)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn reference(&self, row: &CatalogRow) -> serde_json::Result<SelectedRecipeRef> {
         let source = crate::retention::source_generation(&row.sources)?;
-        let bytes = serde_json::to_vec(&(
+        let mut value = serde_json::to_value((
             "selected-query-recipe-v1",
             &row.key,
             &row.harness,
             source,
             self,
         ))?;
+        // Ordinary and staged producers can insert equivalent object fields
+        // in different orders. References bind the complete JSON value.
+        value.sort_all_objects();
+        let bytes = serde_json::to_vec(&value)?;
         Ok(SelectedRecipeRef {
             version: 1,
             digest: format!("{:x}", Sha256::digest(bytes)),
@@ -177,6 +221,24 @@ mod selected_recipe_tests {
             turns: vec![json!({"id":"turn","query":{"at":100}})],
             edges: vec![json!({"id":"edge","query":{"from":"owner","to":"peer"}})],
         }
+    }
+
+    #[test]
+    fn recipe_reference_preserves_object_value_identity_across_producers() {
+        let row = row();
+        let first = recipe();
+        let mut second = first.clone();
+        second.edges[0]["query"] = json!({"to":"peer","from":"owner"});
+        assert_eq!(first, second);
+        assert_eq!(
+            first.reference(&row).unwrap(),
+            second.reference(&row).unwrap()
+        );
+        second.edges[0]["query"]["to"] = json!("other");
+        assert_ne!(
+            first.reference(&row).unwrap(),
+            second.reference(&row).unwrap()
+        );
     }
 
     #[test]

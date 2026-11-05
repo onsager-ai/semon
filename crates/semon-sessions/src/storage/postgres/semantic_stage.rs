@@ -622,6 +622,14 @@ fn has_oversized_owner_row(prepared: &PreparedSources) -> Result<bool, StorageEr
             return Ok(true);
         }
         serialized.map_err(|_| StorageError::Unavailable)?;
+        if crate::query_projection::SelectedRecipe::detached(row) {
+            let recipe = row.query_recipe.as_ref().ok_or(StorageError::ScopeChanged)?;
+            let serialized = serde_json::to_writer(&mut counter, recipe);
+            if counter.exceeded || counter.bytes > MAX {
+                return Ok(true);
+            }
+            serialized.map_err(|_| StorageError::Unavailable)?;
+        }
     }
     Ok(false)
 }

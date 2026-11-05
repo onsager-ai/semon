@@ -517,10 +517,13 @@ fn prepare_proof_publication(
             .map_err(|_| StorageError::Unavailable)?;
         // These values came directly from the model inputs in this owner
         // transaction. Production does not decode this freshly encoded row.
-        #[cfg(not(test))]
-        let query_recipe: Option<String> = None;
+        let query_recipe = crate::query_projection::SelectedRecipe::publication_payload(row)
+            .map_err(|_| StorageError::ScopeChanged)?;
         #[cfg(test)]
-        let query_recipe = prepared_query_recipe_for_test(row, &metadata)?;
+        let query_recipe = match query_recipe {
+            Some(payload) => Some(payload),
+            None => prepared_query_recipe_for_test(row, &metadata)?,
+        };
         let mut sources = row
             .sources
             .iter()
@@ -1953,7 +1956,7 @@ fn same_runtime_inputs(
 struct VerifiedObservation {
     binding: crate::storage::QueryRuntimeBinding,
     row: CatalogRow,
-    observations: Option<crate::storage::selected::PresentationObservations>,
+    observations: Option<std::sync::Arc<crate::storage::selected::PresentationObservations>>,
     record: proof_codec::GenerationRecord,
     presentation: String,
 }
@@ -2138,7 +2141,8 @@ fn authenticate_immutable_observation_with_cache(
             base,
             manifest,
             &record.proof,
-        ),
+        )
+        .map(|observations| observations.map(std::sync::Arc::new)),
     }
     .inspect_err(|_| diagnose_observation_refusal("immutable_presentation"))?;
     let original: CatalogRow =
@@ -2599,7 +2603,10 @@ pub(crate) fn observation_binding_with_observations(
     }
     #[cfg(test)]
     eprintln!("catalog_runtime_capture_selected origin=immutable");
-    Ok((original_binding, observations))
+    Ok((
+        original_binding,
+        std::sync::Arc::unwrap_or_clone(observations),
+    ))
 }
 
 /// Recover retained CWD inputs only from exact live ledgers or authenticated
@@ -3074,7 +3081,7 @@ pub(crate) fn attach_query_recipe(
     let current = reader.runtime_binding_at(db)?;
     let observation = query_recipe_observation(db, &current, owner, row)?;
     let (recipe, bytes) =
-        load_query_recipe_with_bytes(db, reader, &observation).map_err(|error| match error {
+        load_query_recipe_with_bytes(db, &current, &observation).map_err(|error| match error {
             Error::Storage(error) => error,
             _ => StorageError::ScopeChanged,
         })?;
@@ -3094,12 +3101,15 @@ pub(crate) fn load_query_recipe(
     Option<crate::query_projection::SelectedRecipe>,
     crate::storage::query::QueryRecipeLoadError,
 > {
-    load_query_recipe_with_bytes(db, reader, observation).map(|(recipe, _)| recipe)
+    let current = reader.runtime_binding_at(db)?;
+    load_query_recipe_with_bytes(db, &current, observation).map(|(recipe, _)| recipe)
 }
 
-fn load_query_recipe_with_bytes(
+/// Custody may use its already validated publication binding in the same
+/// transaction; readers obtain this binding from their admitted capability.
+pub(super) fn load_query_recipe_with_bytes(
     db: &Connection,
-    reader: &NativeReaderBinding,
+    current: &crate::storage::QueryRuntimeBinding,
     observation: &crate::storage::query::QueryRecipeObservation,
 ) -> Result<
     (Option<crate::query_projection::SelectedRecipe>, usize),
@@ -3108,8 +3118,7 @@ fn load_query_recipe_with_bytes(
     use crate::storage::query::{
         QueryRecipeLoadError as Error, QueryRecipeOwner, QueryRecipeResidence,
     };
-    let current = reader.runtime_binding_at(db)?;
-    if current != observation.destination {
+    if current != &observation.destination {
         return Err(Error::ObservationChanged);
     }
     let selected = observation.row();
@@ -3140,7 +3149,7 @@ fn load_query_recipe_with_bytes(
                 metadata.len() + payload.as_ref().map_or(0, String::len),
             )
             .map_err(|_| StorageError::Busy)?;
-            if metadata != observation.metadata || observation.original != current {
+            if metadata != observation.metadata || &observation.original != current {
                 return Err(Error::ObservationChanged);
             }
             let mut normalized = selected.clone();
@@ -3165,14 +3174,14 @@ fn load_query_recipe_with_bytes(
             .map_err(ObservationPreparationError::into_storage)?
             {
                 let verified =
-                    authenticate_immutable_observation(db, &current, selected, kind, &prefix)
+                    authenticate_immutable_observation(db, current, selected, kind, &prefix)
                         .map_err(ObservationPreparationError::into_storage)?;
                 // This token reads the native row's recipe, never the
                 // predecessor receipt's payload or original coordinates.
                 if verified.record.metadata == normalized
                     && verified.record.admission == current.admission
                 {
-                    authorize_immutable_observation(db, &current, selected, kind, false, &verified)
+                    authorize_immutable_observation(db, current, selected, kind, false, &verified)
                         .map_err(ObservationPreparationError::into_storage)?;
                 }
             }
@@ -3279,7 +3288,7 @@ fn load_query_recipe_with_bytes(
                 slots,
                 prefix,
             };
-            if proof_codec::observation_binding(record, &current, selected)? != observation.original
+            if proof_codec::observation_binding(record, current, selected)? != observation.original
             {
                 return Err(Error::ObservationChanged);
             }
@@ -3560,6 +3569,7 @@ pub(crate) fn publish_repaired_query_observation(
     owner: CatalogObservationOwner,
     selected: &CatalogRow,
     query: &serde_json::Value,
+    query_recipe: Option<&crate::query_projection::SelectedRecipe>,
 ) -> Result<(), StorageError> {
     let source_generation = crate::retention::source_generation(&selected.sources)
         .map_err(|_| StorageError::Unavailable)?;
@@ -3572,12 +3582,30 @@ pub(crate) fn publish_repaired_query_observation(
     }
     let mut repaired = selected.clone();
     repaired.query = Some(query.clone());
+    repaired.query_recipe = query_recipe.cloned();
+    let payload = if query_recipe.is_some() {
+        crate::query_projection::SelectedRecipe::publication_payload(&repaired)
+            .map_err(|_| StorageError::ScopeChanged)?
+    } else {
+        None
+    };
     let prepared = prepare_observation_update(db, current, owner, selected, &repaired, false)
         .map_err(ObservationPreparationError::into_storage)?;
     if selected.query.as_ref() == Some(query) {
         return Ok(());
     }
-    prepared.publish(db).map_err(failed)
+    prepared.publish(db).map_err(failed)?;
+    if let Some(payload) = payload {
+        db.execute(
+            &format!(
+                "UPDATE main.{} SET query_recipe=?3 WHERE namespace=?1 AND session_key=?2",
+                owner.table()
+            ),
+            params![current.namespace.as_str(), selected.key, payload],
+        )
+        .map_err(failed)?;
+    }
+    Ok(())
 }
 
 /// Cost publication cannot use an imported receipt to mint local authority.

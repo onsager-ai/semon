@@ -127,10 +127,7 @@ pub(in crate::storage::postgres) fn remove(
                 continue;
             }
             if row.parent.as_ref().is_some_and(|p| removed.contains(p))
-                || row
-                    .query
-                    .as_ref()
-                    .and_then(|q| q["selected"]["edges"].as_array())
+                || crate::query_projection::SelectedRecipe::edges_for(row)
                     .is_some_and(|edges| {
                         edges.iter().any(|e| {
                             ["from", "to"].iter().any(|f| {
@@ -321,8 +318,10 @@ fn owners(
         return Ok(None);
     }
     let mut page = Vec::new();
+    let mut metadata_bytes = 0usize;
     for row in rows {
         let bytes = row.get::<_, Option<Vec<u8>>>(2).ok_or(StorageError::Busy)?;
+        metadata_bytes += bytes.len();
         let value: CatalogRow =
             serde_json::from_slice(&bytes).map_err(|_| StorageError::ScopeChanged)?;
         if value.key.as_bytes() != row.get::<_, Vec<u8>>(1) {
@@ -330,5 +329,14 @@ fn owners(
         }
         page.push((row.get(0), value));
     }
+    super::snapshot::in_transaction(tx, previous, |snapshot| {
+        for (_, row) in &mut page {
+            metadata_bytes += snapshot.attach_query_recipe(row, false)?;
+            if metadata_bytes > crate::storage::proof_codec::METADATA_MAX {
+                return Err(StorageError::Busy);
+            }
+        }
+        Ok(())
+    })?;
     Ok(Some(page))
 }
