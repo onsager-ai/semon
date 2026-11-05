@@ -1905,11 +1905,11 @@ impl NativeEvidence {
                         .get_or_insert_with(|| Snapshot::sources(&self.options, &[]))
                         .extend_sources(&self.options, &page.inputs);
                 }
-                let last = crate::events::store::audit_catalog_sources(
+                let last = crate::events::store::audit_catalog_sources_step(
                     &self.options,
                     page.as_ref().map_or(&[], |page| page.inputs.as_slice()),
                     (!audit.checked).then_some(audit.after.as_str()),
-                    &self.query_runtime()?,
+                    &mut audit.sources,
                 )?;
                 if let Some(last) = last {
                     audit.after = last;
@@ -2338,6 +2338,7 @@ struct CatalogAudit {
     checked: bool,
     started: bool,
     snapshot: Option<Snapshot>,
+    sources: Option<crate::events::store::CatalogSourceAudit>,
 }
 
 #[derive(Default)]
