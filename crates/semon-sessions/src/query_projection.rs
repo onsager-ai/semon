@@ -230,9 +230,15 @@ mod selected_recipe_tests {
         let mut second = first.clone();
         second.edges[0]["query"] = json!({"to":"peer","from":"owner"});
         assert_eq!(first, second);
-        assert_eq!(first.reference(&row).unwrap(), second.reference(&row).unwrap());
+        assert_eq!(
+            first.reference(&row).unwrap(),
+            second.reference(&row).unwrap()
+        );
         second.edges[0]["query"]["to"] = json!("other");
-        assert_ne!(first.reference(&row).unwrap(), second.reference(&row).unwrap());
+        assert_ne!(
+            first.reference(&row).unwrap(),
+            second.reference(&row).unwrap()
+        );
     }
 
     #[test]
