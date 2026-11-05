@@ -169,9 +169,32 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
     ) -> rusqlite::Result<()> {
         #[cfg(test)]
         eprintln!("catalog_history_probe method=original_complete");
+        let mut original = row.clone();
+        if original.query_recipe.is_none()
+            && original
+                .query
+                .as_ref()
+                .is_some_and(|query| query["selected"].get("digest").is_some())
+        {
+            let payload: String = self.db.query_row(
+                "SELECT query_recipe FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND octet_length(metadata)+octet_length(query_recipe)<=1048576",
+                params![self.namespace, original.key],
+                |record| record.get(0),
+            )?;
+            original.query_recipe = Some(
+                crate::query_projection::SelectedRecipe::decode(&original, &payload)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+            );
+        }
+        let row = &original;
         let key = &row.key;
         let (activity, active) = crate::storage::query::history_activity(row);
         self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5)",params![self.namespace,key,metadata,activity,active])?;
+        if let Some(payload) = crate::query_projection::SelectedRecipe::publication_payload(row)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
+        {
+            self.db.execute("UPDATE main.session_history_catalog SET query_recipe=?1 WHERE namespace=?2 AND session_key=?3", params![payload,self.namespace,key])?;
+        }
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,?3) ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("history_original_header:{key}"),original_header])?;
         if let Some((generation, version, sources, total)) = header {
             self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7)",params![self.namespace,key,generation,sources.as_deref().unwrap_or_default(),version,total,!complete])?;
@@ -540,7 +563,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         let row: CatalogRow = serde_json::from_str(metadata)
             .map_err(<Self as crate::storage::catalog::CompositeHistoryStore>::data)?;
         let (activity, active) = crate::storage::query::history_activity(&row);
-        let metadata_changed = self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
+        let metadata_changed = self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_recipe=NULL,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
         if projection_changed > 0 {
             self.db.execute(
                 "DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2",
@@ -642,7 +665,7 @@ mod verified_history_tests {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE session_history_projections(namespace TEXT,session_key TEXT,generation TEXT,source_generation TEXT,version INTEGER,total INTEGER,incomplete INTEGER,PRIMARY KEY(namespace,session_key));
-             CREATE TABLE session_history_catalog(namespace TEXT,session_key TEXT,metadata TEXT,query_activity INTEGER,query_active INTEGER,PRIMARY KEY(namespace,session_key));
+             CREATE TABLE session_history_catalog(namespace TEXT,session_key TEXT,metadata TEXT,query_recipe TEXT,query_activity INTEGER,query_active INTEGER,PRIMARY KEY(namespace,session_key));
              CREATE TABLE session_history_slots(namespace TEXT,session_key TEXT,slot INTEGER,metadata TEXT,PRIMARY KEY(namespace,session_key,slot));
              CREATE TABLE meta(namespace TEXT,key TEXT,value TEXT,PRIMARY KEY(namespace,key));
              CREATE TABLE storage_proof_refs(namespace TEXT,session_key TEXT,kind TEXT,id TEXT,PRIMARY KEY(namespace,session_key,kind,id));
@@ -762,7 +785,7 @@ mod verified_history_tests {
         let owner = row("imported owner");
         let metadata = serde_json::to_string(&owner).unwrap();
         db.execute(
-            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,NULL,0)",
             rusqlite::params![namespace, owner.key, metadata],
         )
         .unwrap();
@@ -833,7 +856,7 @@ mod verified_history_tests {
         let metadata = serde_json::to_string(&owner).unwrap();
         let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
         db.execute(
-            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,NULL,0)",
             rusqlite::params![namespace, owner.key, metadata],
         )
         .unwrap();
@@ -911,7 +934,7 @@ mod verified_history_tests {
         let metadata = serde_json::to_string(&owner).unwrap();
         let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
         db.execute(
-            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,NULL,0)",
             rusqlite::params![namespace, owner.key, metadata],
         )
         .unwrap();
@@ -979,7 +1002,7 @@ mod verified_history_tests {
         let metadata = serde_json::to_string(&owner).unwrap();
         let digest = crate::storage::proof_codec::digest(metadata.as_bytes());
         db.execute(
-            "INSERT INTO session_history_catalog VALUES(?1,?2,?3,NULL,0)",
+            "INSERT INTO session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,NULL,0)",
             rusqlite::params![namespace, owner.key, metadata],
         )
         .unwrap();
