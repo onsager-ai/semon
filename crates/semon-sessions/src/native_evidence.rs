@@ -843,7 +843,11 @@ impl NativeEvidence {
 
     /// Initialize the source index and publish a bounded cold catalog page.
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
-        if work.events.as_ref().is_some_and(EventCache::scoped_store_lost) {
+        if work
+            .events
+            .as_ref()
+            .is_some_and(EventCache::scoped_store_lost)
+        {
             work.events = None;
         }
         if let Some(cache) = work.events.as_mut()
