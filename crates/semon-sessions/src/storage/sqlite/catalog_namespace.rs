@@ -59,6 +59,7 @@ pub(crate) fn register(
 /// explicit namespace predicate. Indexed Catalog ranges use main plus the same
 /// predicate, retaining namespace-leading covering indexes.
 pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
+    let _diag = crate::native_timing::Diag::new("scope_readers");
     for table in QUALIFIED_CATALOG_TABLES {
         let current: bool = if *table == "session_catalog_changes" {
             // Revisions order the shared stream globally; namespace owns each

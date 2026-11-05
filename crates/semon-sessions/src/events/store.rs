@@ -4664,6 +4664,7 @@ fn authored_storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
+    let _diag = crate::native_timing::Diag::new("inventory");
     type Inventory = BTreeMap<(String, String), String>;
     static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<Inventory>>>> = OnceLock::new();
     let mut inventory = INVENTORY

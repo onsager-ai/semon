@@ -584,6 +584,7 @@ pub(crate) fn validate_catalog_publication_profile(
     namespace: &crate::storage::LogicalSourceNamespace,
     admission: i64,
 ) -> Result<bool, StorageError> {
+    let _diag = crate::native_timing::Diag::new("profile");
     let profile: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.storage_semantic_profiles WHERE namespace=?1 AND admission=?2 AND recipe=?3)",params![namespace.as_str(),admission,semantic_recipe()],|r|r.get(0)).map_err(failed)?;
     if !profile {
         return Err(StorageError::NamespaceUpgradePending);
@@ -673,6 +674,7 @@ impl NativeOwnership {
     }
 
     pub(crate) fn validate_physical(db: &Connection) -> Result<(), StorageError> {
+        let _diag = crate::native_timing::Diag::new("physical");
         let version: i64 = db
             .pragma_query_value(None, "schema_version", |r| r.get(0))
             .map_err(failed)?;
@@ -780,6 +782,7 @@ impl NativeOwnership {
         db: &Connection,
         catalog_publication: bool,
     ) -> Result<bool, StorageError> {
+        let _diag = crate::native_timing::Diag::new("ready");
         #[cfg(test)]
         NATIVE_READY_VALIDATIONS.with(|count| count.set(count.get() + 1));
         self.validate(db)?;

@@ -1956,3 +1956,21 @@ mod tests {
         assert!(measurements.values.is_empty());
     }
 }
+
+// diag(cold-spans): temporary attribution, removed before acceptance.
+pub(crate) struct Diag(&'static str, Option<Instant>);
+impl Diag {
+    pub(crate) fn new(name: &'static str) -> Self {
+        Self(name, enabled().then(Instant::now))
+    }
+}
+impl Drop for Diag {
+    fn drop(&mut self) {
+        if let Some(start) = self.1 {
+            let us = start.elapsed().as_micros();
+            if us >= 1000 {
+                eprintln!("diag(span) name={} us={us}", self.0);
+            }
+        }
+    }
+}
