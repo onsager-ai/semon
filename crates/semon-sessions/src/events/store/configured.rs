@@ -688,15 +688,21 @@ impl NativeOwnership {
         if !current_objects_present(db).map_err(failed)? {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        validate_core(db)?;
-        validate_statement_layout(db).map_err(failed)?;
+        // Exact authored table/index/trigger definitions above already prove
+        // the core, metadata, trace, owner and copied-usage column/key/FK
+        // profiles. Retain the additional restrictions on *extra* indexes:
+        // the inventory intentionally permits unrelated schema objects.
+        for table in CORE_TABLES {
+            let bad_indexes: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_index_list(?1) i WHERE NOT EXISTS(SELECT 1 FROM pragma_index_info(i.name) WHERE seqno=0 AND name='namespace'))").map_err(failed)?.query_row([table], |r| r.get(0)).map_err(failed)?;
+            if bad_indexes {
+                return Err(StorageError::NamespaceUpgradePending);
+            }
+        }
         // Qualify the ordinary Current keyset read when the DDL cookie
         // changes. Preparing reads no rows and never repairs missing indexes.
         db.prepare("SELECT session_key,last_ms FROM main.session_catalog INDEXED BY session_catalog_current_order WHERE namespace=?1 AND lifecycle='current' ORDER BY last_ms DESC,session_key ASC LIMIT 0").map_err(failed)?;
-        crate::storage::sqlite::trace::validate(db)?;
         crate::storage::sqlite::semantic::validate_owners(db)?;
-        validate_copied_usage(db).map_err(failed)?;
-        semantic_stage::validate_support(db).map_err(failed)?;
+        semantic_stage::stage_layout(db).map_err(failed)?;
         // These guards are added with the admitted writer profile rather than
         // the authored base DDL. Qualify their static presence on schema-cookie
         // misses, after prepare_owned has created the operation table.
@@ -708,6 +714,9 @@ impl NativeOwnership {
             )
             .map_err(failed)?;
         if owner_ready {
+            let guards = db.prepare_cached("SELECT tbl_name,name FROM main.sqlite_schema WHERE type='trigger' AND name GLOB 'storage_owned_guard_*'").map_err(failed)?
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(failed)?
+                .collect::<rusqlite::Result<BTreeSet<_>>>().map_err(failed)?;
             for table in TABLES.iter().copied().chain([
                 "storage_event_tables",
                 "storage_event_operations",
@@ -715,9 +724,10 @@ impl NativeOwnership {
                 "catalog_backfill_sources",
                 "pricing_recompute_pending",
             ]) {
-                let guards: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN('storage_owned_guard_'||?1||'_INSERT','storage_owned_guard_'||?1||'_UPDATE','storage_owned_guard_'||?1||'_DELETE')", [table], |row| row.get(0)).map_err(failed)?;
-                if guards != 3 {
-                    return Err(StorageError::NamespaceUpgradePending);
+                for action in ["INSERT", "UPDATE", "DELETE"] {
+                    if !guards.contains(&(table.to_owned(), format!("storage_owned_guard_{table}_{action}"))) {
+                        return Err(StorageError::NamespaceUpgradePending);
+                    }
                 }
             }
         }
@@ -1032,6 +1042,9 @@ impl NativeOwnership {
         owner.validate(&tx)?;
         prepare_owned(&tx, &owner)?;
         crate::storage::sqlite::changes::initialize_source_floors(&tx, &config.namespace)?;
+        if catalog_publisher {
+            owner.validate_ready(&tx)?;
+        }
         tx.commit().map_err(|_| StorageError::CommitUncertain)?;
         Ok(owner)
     }
