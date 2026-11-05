@@ -1304,6 +1304,15 @@ pub(crate) trait IndexStore: Send {
     fn semantic_rejection(&self) -> Option<&'static str> {
         None
     }
+    /// An exact completed request may recover its ACK without a new publication.
+    fn completed_semantic_catalog(
+        &mut self,
+        batch: &crate::model::relation_stage::Batch,
+        prepared: &crate::model::PreparedSources,
+    ) -> Result<Option<String>, StoreError> {
+        let _ = (batch, prepared);
+        Ok(None)
+    }
     fn publish_semantic_catalog(
         &mut self,
         batch: &crate::model::relation_stage::Batch,
@@ -2731,19 +2740,32 @@ impl EventCache {
                 "native producer sources not durably observed",
             ));
         }
-        let _source_guard = match prepared.publication_guard(self) {
-            Ok(guard) => guard,
-            Err(error) if crate::model::relation_stage::source_generation_changed(&error) => {
-                return Ok((Outcome::Conflict, None));
-            }
-            Err(error) => return Err(error),
-        };
-        let result = self
+        let completed = self
             .store
             .as_mut()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
-            .publish_semantic_catalog(batch, prepared)
-            .map_err(|error| io::Error::other(error.to_string()));
+            .completed_semantic_catalog(batch, prepared)
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let _source_guard = if completed.is_some() {
+            None
+        } else {
+            match prepared.publication_guard(self) {
+                Ok(guard) => guard,
+                Err(error) if crate::model::relation_stage::source_generation_changed(&error) => {
+                    return Ok((Outcome::Conflict, None));
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let result = if let Some(generation) = completed {
+            Ok((Outcome::Written, Some(generation)))
+        } else {
+            self.store
+                .as_mut()
+                .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
+                .publish_semantic_catalog(batch, prepared)
+                .map_err(|error| io::Error::other(error.to_string()))
+        };
         #[cfg(test)]
         if let Err(error) = &result {
             diagnose_staged_method_refusal("publish_semantic_catalog", Some(batch.phase), error);

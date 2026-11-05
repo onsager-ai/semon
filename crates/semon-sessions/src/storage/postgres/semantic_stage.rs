@@ -1050,21 +1050,19 @@ pub(super) fn record(
     Ok(Outcome::Written)
 }
 
-pub(super) fn publish(
+/// Only an exact immutable completed request can bypass live source admission.
+pub(super) fn completed_publication(
     tx: &mut PgTxn<'_>,
     batch: &Batch,
     prepared: &PreparedSources,
-    lifecycle: Result<Option<publication::ValidatedLifecycle<'_>>, StorageError>,
-    withdrawals: Result<(), StorageError>,
-) -> Result<(Outcome, Option<String>), StorageError> {
-    let revision = lock(tx)?;
-    let witness = prepared
-        .staged_model_witness()
-        .map_err(|_| StorageError::ScopeChanged)?;
+) -> Result<Option<String>, StorageError> {
     if let Some(stage) = load_epoch(tx, false, Some(batch.epoch))?
         && !stage.active
         && stage.epoch == batch.epoch
     {
+        let witness = prepared
+            .staged_model_witness()
+            .map_err(|_| StorageError::ScopeChanged)?;
         // Replay qualifies the captured request, not today's acknowledged
         // journal/head. The model witness excludes claims and base generation.
         if stage.model.as_deref() != Some(&witness)
@@ -1081,8 +1079,25 @@ pub(super) fn publish(
         {
             return Err(StorageError::Conflict);
         }
-        return Ok((Outcome::Written, stage.acknowledgement));
+        return Ok(stage.acknowledgement);
     }
+    Ok(None)
+}
+
+pub(super) fn publish(
+    tx: &mut PgTxn<'_>,
+    batch: &Batch,
+    prepared: &PreparedSources,
+    lifecycle: Result<Option<publication::ValidatedLifecycle<'_>>, StorageError>,
+    withdrawals: Result<(), StorageError>,
+) -> Result<(Outcome, Option<String>), StorageError> {
+    let revision = lock(tx)?;
+    if let Some(generation) = completed_publication(tx, batch, prepared)? {
+        return Ok((Outcome::Written, Some(generation)));
+    }
+    let witness = prepared
+        .staged_model_witness()
+        .map_err(|_| StorageError::ScopeChanged)?;
     withdrawals?;
     let mut stage = checked(tx, batch)?;
     let lifecycle = lifecycle?;
