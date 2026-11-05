@@ -362,15 +362,18 @@ jobs:
           SEMON_BUILD_TIMING: "1"
         run: |
           cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
-      - name: diag(main) compare unchanged cold-page test
+      - name: diag(profile) sample cold-path CPU stacks
         if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
         continue-on-error: true
-        env:
-          SEMON_BUILD_TIMING: "1"
         run: |
-          git fetch --depth=1 origin main
-          git worktree add --detach "$RUNNER_TEMP/diag-main" FETCH_HEAD
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
+          sudo apt-get update -qq
+          sudo apt-get install -y linux-tools-common linux-tools-generic
+          profiler=$(find /usr/lib/linux-tools -name perf -type f | head -1)
+          sudo sysctl kernel.perf_event_paranoid=-1
+          binary=$(cargo test -p semon-sessions --locked --features postgres-test-tls --no-run --message-format=json 2>/dev/null | jq -r 'select(.reason=="compiler-artifact" and .target.name=="semon_sessions" and .profile.test==true) | .executable' | head -1)
+          "$profiler" record -F 499 --call-graph dwarf -o "$RUNNER_TEMP/diag-perf.data" -- "$binary" viewer::tests::initial_catalog_page_precedes_global_native_observation --exact --nocapture || true
+          "$profiler" report -i "$RUNNER_TEMP/diag-perf.data" --stdio --no-children --percent-limit 0.7 | head -100
+          "$profiler" report -i "$RUNNER_TEMP/diag-perf.data" --stdio --children --percent-limit 3 | head -180
       - name: diag(identity) received local-copy lookup
         if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
         continue-on-error: true
