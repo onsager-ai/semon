@@ -1,4 +1,4 @@
-name: Cursor baseline viewer timing
+name: Cursor standalone viewer timing
 
 on:
   workflow_dispatch:
@@ -10,13 +10,13 @@ env:
   SEMON_PRICING_REFRESH: "off"
 
 jobs:
-  main-viewer-timing:
+  product-viewer-timing:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 8ec0a01c0ede44edfe658ce26f230319d0fdce0f
+          ref: db9296188515bf0dc5e8941be75b55309de3ef91
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
@@ -24,9 +24,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cursor-main-timing-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cursor-product-timing-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: pg-f1-${{ runner.os }}-
-      - name: Compare unchanged viewer deadlines on main
+      - name: Compare unchanged viewer deadlines on product with default features
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/viewer-timing"
@@ -43,5 +43,5 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
-          name: main-viewer-timing
+          name: product-viewer-timing
           path: ${{ runner.temp }}/viewer-timing/
