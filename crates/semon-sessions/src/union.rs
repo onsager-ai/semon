@@ -1703,8 +1703,6 @@ impl ViewerCore {
                 continue;
             }
             if view.catalog_observation_pending() {
-                #[cfg(test)]
-                eprintln!("diag(identity) pending_before index={index}");
                 return Ok(None);
             }
             let source = if key.is_empty() { "local" } else { key };
@@ -1721,11 +1719,7 @@ impl ViewerCore {
                     }
                 }
                 Ok(None) => {}
-                Err(_error) => {
-                    #[cfg(test)]
-                    eprintln!("diag(identity) lookup_refused index={index} error={_error}");
-                    return Ok(None);
-                }
+                Err(_) => return Ok(None),
             }
         }
         // Literal native IDs win before interpreting a presentation alias.
@@ -1753,11 +1747,6 @@ impl ViewerCore {
             .take(selected_limit.max(self.droppable()).min(views.len()))
             .any(|(_, view)| view.catalog_observation_pending())
         {
-            #[cfg(test)]
-            eprintln!(
-                "diag(identity) pending_after selected={}",
-                selected.is_some()
-            );
             return Ok(None);
         }
         Ok(selected)

@@ -3979,7 +3979,6 @@ impl SqliteStore {
                             return Err(StoreError::Configured(error));
                         }
                     };
-                stage("diag(presentation_capture)", &transaction);
                 if let Some(captured) = captured {
                     let projection_witness = projections
                         .iter()
@@ -4023,7 +4022,6 @@ impl SqliteStore {
                         }
                         Err(error) => return Err(StoreError::Configured(error)),
                     };
-                    stage("diag(presentation_root)", &transaction);
                     if let Some(root) = root {
                         let receipt_publication =
                             crate::storage::sqlite::proof_generations::publish_ordinary(
@@ -4050,7 +4048,6 @@ impl SqliteStore {
                                 },
                                 root,
                             );
-                        stage("diag(receipt_publication)", &transaction);
                         match receipt_publication {
                             Ok(()) => {}
                             Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(
@@ -4664,7 +4661,6 @@ fn authored_storage_ddl() -> [&'static str; 22] {
 /// Comparing definitions also checks columns, keys, constraints and trigger
 /// bodies; an object with the right name alone cannot qualify a corrupt family.
 pub(crate) fn current_objects_present(connection: &Connection) -> rusqlite::Result<bool> {
-    let _diag = crate::native_timing::Diag::new("inventory");
     type Inventory = BTreeMap<(String, String), String>;
     static INVENTORY: OnceLock<Mutex<Option<std::sync::Arc<Inventory>>>> = OnceLock::new();
     let mut inventory = INVENTORY

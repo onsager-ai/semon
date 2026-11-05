@@ -39,7 +39,6 @@ impl PresentationCache {
         base: &str,
         manifest: &str,
     ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
-        let _diag = crate::native_timing::Diag::new("cached_observations");
         if self.root.as_ref().is_none_or(|root| {
             root.base != base || root.manifest != manifest || root.digest != record.proof
         }) {
@@ -165,7 +164,6 @@ pub(crate) fn validate_query_recipe_cell(
 }
 
 pub(crate) fn digest(bytes: &[u8]) -> String {
-    let _diag = crate::native_timing::Diag::new("digest");
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }

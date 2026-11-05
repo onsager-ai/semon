@@ -355,44 +355,6 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
-      - name: diag(cold-path) isolated producer timing
-        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          SEMON_BUILD_TIMING: "1"
-        run: |
-          cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture 2>&1 | tee "$RUNNER_TEMP/diag-cold.txt"
-      - name: diag(cold-spans) retain attribution immediately
-        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: diag-cold-spans
-          path: ${{ runner.temp }}/diag-cold.txt
-          if-no-files-found: error
-      - name: diag(profile) bounded CPU sample
-        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
-        continue-on-error: true
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y linux-tools-common linux-tools-generic
-          profiler=$(find /usr/lib/linux-tools* -name perf | head -1)
-          test -n "$profiler"
-          sudo sysctl kernel.perf_event_paranoid=-1
-          binary=$(cargo test -p semon-sessions --locked --features postgres-test-tls --no-run --message-format=json 2>/dev/null | jq -r 'select(.reason=="compiler-artifact" and .target.name=="semon_sessions" and .profile.test==true) | .executable' | head -1)
-          timeout --signal=INT --kill-after=5s 20s "$profiler" record -e cpu-clock -F 99 --call-graph dwarf,8192 -o "$RUNNER_TEMP/diag-perf.data" -- "$binary" viewer::tests::initial_catalog_page_precedes_global_native_observation --exact --nocapture || true
-          timeout 60s "$profiler" report -i "$RUNNER_TEMP/diag-perf.data" --stdio --no-inline --no-children --call-graph none --percent-limit 0.3 > "$RUNNER_TEMP/diag-cpu-self.txt" || true
-          timeout 60s "$profiler" report -i "$RUNNER_TEMP/diag-perf.data" --stdio --no-inline --children --call-graph none --percent-limit 1 > "$RUNNER_TEMP/diag-cpu-inclusive.txt" || true
-      - name: diag(profile) retain bounded CPU sample
-        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: diag-bounded-cpu
-          path: ${{ runner.temp }}/diag-cpu-*.txt
-          if-no-files-found: error
-      - name: diag(identity) received local-copy lookup
-        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
-        continue-on-error: true
-        run: cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::a_session_this_machine_has_is_left_out_of_a_received_one_not_refused -- --exact --nocapture
       - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
         # Disjoint name filters retain the complete feature-enabled suite and

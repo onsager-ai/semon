@@ -385,10 +385,6 @@ impl SourceJournal {
                 | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(failed)?;
-        // Like native store initialization, this policy belongs to every
-        // connection: SQLite does not persist synchronous in the database.
-        db.pragma_update(None, "synchronous", "NORMAL")
-            .map_err(failed)?;
         // A native cohort uses more statements than rusqlite's default cache
         // holds. Retain the bounded writer working set across source rows.
         db.set_prepared_statement_cache_capacity(256);
