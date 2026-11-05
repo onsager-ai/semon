@@ -367,12 +367,11 @@ pub(crate) fn runtime_source_cwds_by_path_if_current(
             return Ok(None);
         }
         let cwd: Option<String> = db
-            .prepare_cached("SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1")
-            .map_err(io::Error::other)?
-            .query_row(
-                [path.as_ref()],
-                |row| row.get(0),
+            .prepare_cached(
+                "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
             )
+            .map_err(io::Error::other)?
+            .query_row([path.as_ref()], |row| row.get(0))
             .map_err(io::Error::other)?;
         if cwds.insert(source.path.clone(), cwd).is_some() {
             return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));

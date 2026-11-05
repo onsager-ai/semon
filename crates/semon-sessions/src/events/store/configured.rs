@@ -678,7 +678,10 @@ impl NativeOwnership {
             .map_err(failed)?;
         let cached: bool = db.prepare_cached("SELECT EXISTS(SELECT 1 FROM pragma_function_list WHERE name='semon_native_layout' AND narg=1)").map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
         if cached {
-            let layout: Option<bool> = db.prepare_cached("SELECT semon_native_layout(?1)").map_err(failed)?.query_row([version], |r| r.get(0))
+            let layout: Option<bool> = db
+                .prepare_cached("SELECT semon_native_layout(?1)")
+                .map_err(failed)?
+                .query_row([version], |r| r.get(0))
                 .map_err(failed)?;
             if layout == Some(true) {
                 return Ok(());
@@ -819,10 +822,12 @@ impl NativeOwnership {
         if admission.generation != self.admission as u64 {
             return Err(StorageError::ScopeChanged);
         }
-        let epoch: String = db.prepare_cached("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'").map_err(failed)?.query_row(
-                [],
-                |r| r.get(0),
+        let epoch: String = db
+            .prepare_cached(
+                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
             )
+            .map_err(failed)?
+            .query_row([], |r| r.get(0))
             .map_err(failed)?;
         if self.config.expected_stream_epoch.as_deref() != Some(epoch.as_str()) {
             return Err(StorageError::ScopeChanged);
