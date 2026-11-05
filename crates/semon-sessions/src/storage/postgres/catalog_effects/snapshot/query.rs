@@ -54,15 +54,8 @@ pub(in crate::storage::postgres::catalog_effects) fn qualify_context_candidate(
     }
     let source_generation = crate::retention::source_generation(&row.sources)
         .map_err(|_| StorageError::ScopeChanged)?;
-    let query = row.query.as_ref().ok_or(StorageError::ScopeChanged)?;
-    if query["source_generation"] != source_generation
-        || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
-            .map_err(|_| StorageError::ScopeChanged)?
-    {
-        return Err(StorageError::ScopeChanged);
-    }
-    if snapshot
-        .row_runtime_binding_with_observations(row, Some(owner))
+    let (_, _, origin) = snapshot
+        .row_observation(row, Some(owner))
         .map_err(|error| {
             error
                 .get_ref()
@@ -70,8 +63,18 @@ pub(in crate::storage::postgres::catalog_effects) fn qualify_context_candidate(
                 .copied()
                 .unwrap_or(StorageError::Unavailable)
         })?
-        .is_none()
-    {
+        .ok_or(StorageError::ScopeChanged)?;
+    if let Some(query) = &row.query {
+        if query["source_generation"] != source_generation
+            || !crate::model::summary::query_observation_matches(query, &row.sources, false, None)
+                .map_err(|_| StorageError::ScopeChanged)?
+        {
+            return Err(StorageError::ScopeChanged);
+        }
+    } else if !history || !matches!(origin, observations::Origin::Composed) {
+        // Queryless composite context has its own exact-metadata runtime grant
+        // and authenticated predecessor receipts. Other owners need Query's
+        // captured source-generation observation as before.
         return Err(StorageError::ScopeChanged);
     }
     if history
