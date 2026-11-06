@@ -339,15 +339,245 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     }
     fn composed(
         &self,
-        _key: &str,
-        _generation: &str,
-        _sources: &str,
-        _metadata: &str,
-        _texts: &[String],
-        _incomplete: bool,
+        key: &str,
+        generation: &str,
+        sources: &str,
+        metadata: &str,
+        texts: &[String],
+        incomplete: bool,
     ) -> rusqlite::Result<()> {
-        Err(rusqlite::Error::InvalidQuery)
+        let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let changed = self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
+        let row: CatalogRow =
+            serde_json::from_str(metadata).map_err(<Self as CompositeHistoryStore>::data)?;
+        let (activity, active) = crate::storage::query::history_activity(&row);
+        self.db.execute("INSERT INTO main.session_history_catalog(namespace,session_key,metadata,query_activity,query_active) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(namespace,session_key) DO UPDATE SET metadata=excluded.metadata,query_recipe=NULL,query_activity=excluded.query_activity,query_active=excluded.query_active WHERE session_history_catalog.metadata != excluded.metadata",params![self.namespace,key,metadata,activity,active])?;
+        if changed > 0 {
+            self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
+            self.db.execute(
+                "DELETE FROM main.session_history_slots WHERE namespace=?1 AND session_key=?2",
+                params![self.namespace, key],
+            )?;
+            let mut put = self.db.prepare("INSERT INTO main.session_history_slots(namespace,session_key,slot,metadata) VALUES(?1,?2,?3,?4)")?;
+            for (slot, text) in texts.iter().enumerate() {
+                put.execute(params![
+                    self.namespace,
+                    key,
+                    i64::try_from(slot).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    text
+                ])?;
+            }
+        }
+        Ok(())
     }
+}
+
+/// Main's native custody recipe, evaluated inside the publisher's source CAS.
+/// Retained slots are qualified by their original source-generation header.
+/// Publication receipts are a separate contract owned by #478.
+pub(crate) fn publish_composition(
+    store: &OriginalHistory<'_>,
+    publication: &crate::slot_projection::Publication<'_>,
+) -> rusqlite::Result<()> {
+    use crate::slot_projection::{SavedSlot, VERSION};
+    use sha2::{Digest, Sha256};
+    use std::collections::{BTreeMap, BTreeSet};
+    let Some(projections) = publication.transcripts else {
+        return Ok(());
+    };
+    let rows: BTreeMap<_, _> = publication
+        .rows
+        .iter()
+        .map(|row| (row.key.as_str(), row))
+        .collect();
+    for projection in projections {
+        let Some(current) = rows.get(projection.key.as_str()).copied() else {
+            continue;
+        };
+        if store.original(&current.key)? {
+            continue;
+        }
+        let old = CompositeHistoryStore::previous(store, &current.key)?
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
+        if let Some(old) = old.as_ref().filter(|old| old.harness != current.harness) {
+            for source in &old.sources {
+                store.retain_source(old, source)?;
+            }
+            continue;
+        }
+        let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
+        let mut missing = BTreeMap::new();
+        for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
+            if !paths.contains(&source.path) && !store.relocated(source, &current.sources)? {
+                missing.insert(source.path.clone(), source.clone());
+            }
+        }
+        if missing.is_empty() {
+            store.clear(&current.key)?;
+            continue;
+        }
+        let mut history = current.clone();
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+        history.query = None;
+        history.query_recipe = None;
+        history.sources.extend(missing.values().cloned());
+        history.native_ids = history
+            .sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let old = old.as_ref().expect("missing sources require a prior owner");
+        for source in missing.values() {
+            store.retain_source(old, source)?;
+        }
+        let mut slots = projection.slots.clone();
+        let (history_slots, header) = store.previous_recipe(&current.key)?;
+        let qualified = header.as_ref().is_some_and(|(version, generation, _)| {
+            *version == VERSION
+                && generation.is_some()
+                && crate::retention::source_generation(&old.sources)
+                    .ok()
+                    .as_ref()
+                    == generation.as_ref()
+        });
+        let mut incomplete = true;
+        if qualified {
+            incomplete = header.is_some_and(|(_, _, incomplete)| incomplete);
+            let old_sources: BTreeMap<_, _> = old
+                .sources
+                .iter()
+                .map(|source| (&source.path, source))
+                .collect();
+            let current_sources: BTreeMap<_, _> = current
+                .sources
+                .iter()
+                .map(|source| (&source.path, source))
+                .collect();
+            for text in store.recipe_slots(&current.key, history_slots)? {
+                let slot: SavedSlot = match serde_json::from_str(&text) {
+                    Ok(slot) => slot,
+                    Err(_) => {
+                        incomplete = true;
+                        continue;
+                    }
+                };
+                let Some(file) = &slot.file else {
+                    continue;
+                };
+                if !missing.contains_key(&file.path) {
+                    if slot
+                        .source_paths()
+                        .iter()
+                        .any(|path| missing.contains_key(*path))
+                    {
+                        incomplete = true;
+                    }
+                    continue;
+                }
+                if slot.source_paths().iter().all(|path| {
+                    missing.contains_key(*path)
+                        || old_sources.get(*path) == current_sources.get(*path)
+                }) {
+                    let at = slot
+                        .t
+                        .and_then(|time| {
+                            slots
+                                .iter()
+                                .position(|current| current.t.is_some_and(|t| t > time))
+                        })
+                        .unwrap_or(slots.len());
+                    slots.insert(at, slot);
+                } else {
+                    incomplete = true;
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        slots.retain(|slot| seen.insert(slot.identity()));
+        let texts: Vec<String> = slots
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<_, _>>()
+            .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
+        let sources = crate::retention::source_generation(&history.sources)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let metadata = serde_json::to_string(&history)
+            .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
+        let generation = format!(
+            "{:x}",
+            Sha256::digest(
+                serde_json::to_vec(&(VERSION, &sources, &texts, incomplete))
+                    .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?
+            )
+        );
+        store.composed(
+            &current.key,
+            &generation,
+            &sources,
+            &metadata,
+            &texts,
+            incomplete,
+        )?;
+        if let Some(observations) = publication.observations {
+            let mut observed = observations.clone();
+            if observed.runtime_capture_for(&history).is_some() {
+                let capture = observed
+                    .runtime_capture_for(&history)
+                    .ok_or(rusqlite::Error::InvalidQuery)?;
+                super::proof_generations::native_history_observation_grant(
+                    store.db,
+                    store.namespace,
+                    &history.key,
+                    store.admission,
+                    store.stream.ok_or(rusqlite::Error::InvalidQuery)?,
+                    &metadata,
+                    &serde_json::to_string(&capture)
+                        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
+                )
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                continue;
+            }
+            let mut cwds = BTreeMap::new();
+            for source in &history.sources {
+                let cwd: Option<String> = store
+                    .db
+                    .query_row(
+                        "SELECT cwd FROM main.files WHERE namespace=?1 AND path=?2",
+                        params![store.namespace, source.path.to_string_lossy()],
+                        |row| row.get(0),
+                    )
+                    .optional()?
+                    .flatten();
+                if let Some(cwd) = cwd {
+                    cwds.insert(source.path.clone(), cwd);
+                }
+            }
+            let cwds = cwds.into_values().collect();
+            if let Ok(runtime) = observed.runtime_observation(&history, &cwds) {
+                observed
+                    .capture_runtime(&history, &cwds, runtime)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                let capture = observed
+                    .runtime_capture_for(&history)
+                    .ok_or(rusqlite::Error::InvalidQuery)?;
+                super::proof_generations::native_history_observation_grant(
+                    store.db,
+                    store.namespace,
+                    &history.key,
+                    store.admission,
+                    store.stream.ok_or(rusqlite::Error::InvalidQuery)?,
+                    &metadata,
+                    &serde_json::to_string(&capture)
+                        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
+                )
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistory<'_> {

@@ -15243,72 +15243,8 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
         }
     }
 
-    let mut normalized_history = history.clone();
-    normalized_history.lifecycle = summary::CatalogLifecycle::Current;
-    let owner_metadata = serde_json::to_string(&normalized_history).unwrap();
-    let owner_digest = crate::storage::proof_codec::digest(owner_metadata.as_bytes());
-    let (namespace, grant_digest, admission, stream, direct_capture): (
-        String,
-        String,
-        i64,
-        String,
-        Option<String>,
-    ) = connection
-        .query_row(
-            "SELECT namespace,metadata_digest,admission,stream,direct_capture FROM main.storage_catalog_native_observation_grants WHERE namespace=semon_namespace() AND session_key='root' AND owner_kind='history'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .unwrap();
-    assert_eq!(grant_digest, owner_digest);
-    assert!(
-        direct_capture.is_none(),
-        "exact History ownership has no direct capture"
-    );
-    let prefix = crate::retention::source_generation(&history.sources).unwrap();
-    let mut statement = connection
-        .prepare(
-            "SELECT g.id,g.publication FROM main.storage_proof_refs r JOIN main.storage_proof_generations g ON g.namespace=r.namespace AND g.id=r.id AND g.session_key=r.session_key JOIN main.storage_semantic_publications p ON p.namespace=g.namespace AND p.generation=g.publication AND p.proof_digest=g.proof AND p.admission=g.admission JOIN main.storage_proof_presentation_roots root ON root.namespace=p.namespace AND root.publication=p.generation AND root.digest=p.proof_digest JOIN main.storage_proof_presentations v ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key WHERE r.namespace=?1 AND r.session_key='root' AND r.kind='history' AND g.metadata=?2 AND g.prefix=?3 AND g.admission=?4 AND g.stream=?5 ORDER BY g.id LIMIT 2",
-        )
-        .unwrap();
-    let exact_receipts = statement
-        .query_map(
-            rusqlite::params![namespace, owner_metadata, prefix, admission, stream],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .unwrap()
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .unwrap();
-    assert_eq!(
-        exact_receipts.len(),
-        1,
-        "the fixture has one authenticated History receipt for the exact physical owner"
-    );
-    let grant = format!("{admission}:{stream}");
-    let stage_grant_key = format!("catalog_native_observation:{owner_digest}");
-    connection
-        .execute(
-            "DELETE FROM main.meta WHERE namespace=?1 AND key=?2",
-            rusqlite::params![namespace, stage_grant_key],
-        )
-        .unwrap();
-    let stage_grant: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.meta WHERE namespace=?1 AND key=?2 AND value=?3)",
-            rusqlite::params![namespace, stage_grant_key, grant],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!stage_grant, "the receipt-local meta grant is removed");
-    let transfer_grant: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM main.meta m JOIN main.meta a ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value WHERE m.namespace=?1 AND m.key='native_transfer_v1:publication:'||?2 AND a.value=?3)",
-            rusqlite::params![namespace, exact_receipts[0].1, grant],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(!transfer_grant, "the fixture has no transfer grant");
-
+    // Original native custody is carried by the source-qualified History header
+    // and saved slots. Ordinary publication no longer issues R3 receipts.
     let archive = Archive {
         bytes: original_source,
         calls: std::sync::atomic::AtomicUsize::new(0),
@@ -15338,80 +15274,6 @@ fn incomplete_original_history_with_current_lifecycle_stays_unavailable() {
             .any(|entry| entry["text"] == "original prompt")
     );
     assert!(archive.calls.load(Ordering::Relaxed) > 0);
-
-    let mut recomposed = history.clone();
-    recomposed.name.push_str(" recomposed");
-    let recomposed_history = serde_json::to_string(&recomposed).unwrap();
-    recomposed.lifecycle = summary::CatalogLifecycle::Current;
-    let recomposed_metadata = serde_json::to_string(&recomposed).unwrap();
-    let recomposed_digest = crate::storage::proof_codec::digest(recomposed_metadata.as_bytes());
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE main.session_history_catalog SET metadata=?1 WHERE namespace=?2 AND session_key='root'",
-                rusqlite::params![recomposed_history, namespace],
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        connection
-            .execute(
-                "UPDATE main.storage_catalog_native_observation_grants SET metadata_digest=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'",
-                rusqlite::params![recomposed_digest, namespace],
-            )
-            .unwrap(),
-        1
-    );
-    let calls_before_mismatch = archive.calls.load(Ordering::Relaxed);
-    assert_eq!(read_history().status, 503, "recomposed owner metadata");
-    assert_eq!(archive.calls.load(Ordering::Relaxed), calls_before_mismatch);
-
-    connection
-        .execute(
-            "UPDATE main.session_history_catalog SET metadata=?1 WHERE namespace=?2 AND session_key='root'",
-            rusqlite::params![history_metadata, namespace],
-        )
-        .unwrap();
-    connection
-        .execute(
-            "UPDATE main.storage_catalog_native_observation_grants SET metadata_digest=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'",
-            rusqlite::params![owner_digest, namespace],
-        )
-        .unwrap();
-    let invalid_stream = if stream == "0".repeat(64) {
-        "1".repeat(64)
-    } else {
-        "0".repeat(64)
-    };
-    for (column, invalid, original) in [
-        (
-            "admission",
-            rusqlite::types::Value::Integer(admission.checked_add(1).unwrap()),
-            rusqlite::types::Value::Integer(admission),
-        ),
-        (
-            "stream",
-            rusqlite::types::Value::Text(invalid_stream),
-            rusqlite::types::Value::Text(stream.clone()),
-        ),
-    ] {
-        let update = format!(
-            "UPDATE main.storage_catalog_native_observation_grants SET {column}=?1 WHERE namespace=?2 AND session_key='root' AND owner_kind='history'"
-        );
-        assert_eq!(
-            connection
-                .execute(&update, rusqlite::params![invalid, namespace])
-                .unwrap(),
-            1
-        );
-        let calls_before_mismatch = archive.calls.load(Ordering::Relaxed);
-        assert_eq!(read_history().status, 503, "mismatched {column} grant");
-        assert_eq!(archive.calls.load(Ordering::Relaxed), calls_before_mismatch);
-        connection
-            .execute(&update, rusqlite::params![original, namespace])
-            .unwrap();
-    }
 
     // PostgreSQL retains captured History metadata with its original lifecycle.
     // Exercise that shape while preserving SQLite's original-owner marker.
