@@ -82,13 +82,14 @@ committed schema cookie, not on every connection. PostgreSQL keeps its
 restricted-role row-level security. `scripts/check-native-storage-boundary.py`
 refuses a reintroduced guard family or retired capability flag.
 
-SQLite's first-page publication uses main's existing source/header custody path.
-It does not capture immutable presentations, issue ordinary publication receipts,
-or authenticate ordinary Catalog page observations through those receipts.
-Replacement custody still copies original slots before Current mutation; missing
-source composition qualifies the saved slots against their source-generation
-header inside the same namespace-bound publication transaction. Immutable Stage
-and transfer proof paths remain separately qualified pending the #478 follow-up.
+The current SQLite candidate removes ordinary immutable presentation capture,
+receipt issuance and receipt replay. Replacement custody copies original slots
+before Current mutation; missing-source composition qualifies saved slots against
+their source-generation header in the namespace-bound publication transaction.
+Existing Stage references are retained when their owner moves to History.
+Native observation grants and their page/selected-read validation remain active;
+removing these together with Stage proof publication is unfinished #478 separation.
+This candidate is not the completed main-topology #477 acceptance contract.
 
 Catalog publication requires the current owner and expected generation. There is
 no unbound writer/history/search mode, transaction snapshot fallback or old Catalog
@@ -227,13 +228,10 @@ qualification must prove the same lifecycle before backend acceptance.
 
 Each selected-presentation manifest binds the actual Catalog generation together
 with its presentation entries and shared observations under the existing joined
-digest. Ordinary publication receipt IDs may differ from that Catalog generation:
-leases and proof roots retain the receipt ID, while selected opening matches the
-captured witness generation to the authenticated manifest field.
-When an ordinary publication exceeds the bounded presentation capture or manifest
-budget, it commits without a receipt and emits a sanitized capture-budget
-diagnostic. Its readers use the existing receipt-less custody path; no exact
-receipt is inferred. Other publication and History retention bounds still apply.
+digest. Stage and imported selected opening match the captured witness generation
+to that authenticated manifest field. Ordinary native publication no longer issues
+such receipts or has a presentation-capture budget fallback. Native source proofs,
+original saved-slot custody and the existing History retention bounds still apply.
 
 The target GC API must bound pages, bytes and elapsed work per call, record a
 resumable cursor, recheck published and admitted-reader references before delete,
