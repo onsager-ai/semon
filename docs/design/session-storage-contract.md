@@ -82,6 +82,14 @@ committed schema cookie, not on every connection. PostgreSQL keeps its
 restricted-role row-level security. `scripts/check-native-storage-boundary.py`
 refuses a reintroduced guard family or retired capability flag.
 
+SQLite's first-page publication uses main's existing source/header custody path.
+It does not capture immutable presentations, issue ordinary publication receipts,
+or authenticate ordinary Catalog page observations through those receipts.
+Replacement custody still copies original slots before Current mutation; missing
+source composition qualifies the saved slots against their source-generation
+header inside the same namespace-bound publication transaction. Immutable Stage
+and transfer proof paths remain separately qualified pending the #478 follow-up.
+
 Catalog publication requires the current owner and expected generation. There is
 no unbound writer/history/search mode, transaction snapshot fallback or old Catalog
 assignment/import runtime. The obsolete assignment API has been removed. Fixtures
