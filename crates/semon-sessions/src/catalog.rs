@@ -9131,8 +9131,9 @@ mod tests {
             fixture.options.clone(),
             pool.clone(),
         );
-        let sources =
-            std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![&observer]));
+        let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![
+            &observer,
+        ]));
         let view = observer.shared_view();
         let _work = crate::viewer::lock(&view.evidence.work);
         let (sent, received) = std::sync::mpsc::channel();

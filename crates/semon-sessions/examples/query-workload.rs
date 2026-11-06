@@ -143,7 +143,9 @@ fn main() -> io::Result<()> {
     let cold_drain_ms = drain.elapsed().as_secs_f64() * 1000.;
     let cold_rss = rss_kib();
     let cold_heap = heap_bytes();
-    let sources = Arc::new(SessionSources::from_catalog_observers(observers.iter().collect()));
+    let sources = Arc::new(SessionSources::from_catalog_observers(
+        observers.iter().collect(),
+    ));
     let mut query = Query::from_sources(sources.clone());
     let mut samples = Vec::new();
     let mut bytes = 0;
