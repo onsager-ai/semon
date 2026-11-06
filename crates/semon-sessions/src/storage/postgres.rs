@@ -9,6 +9,8 @@ mod index;
 // The typed Catalog API is qualified independently before runtime adoption.
 #[allow(dead_code, reason = "Catalog runtime integration is pending")]
 mod catalog;
+#[allow(dead_code, reason = "custody runtime integration is pending")]
+mod custody;
 
 /// Current schema for host provisioning by a role separate from the application.
 /// It is installed once; existing/unsupported stores are never migrated here.

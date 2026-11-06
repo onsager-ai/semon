@@ -7,7 +7,8 @@ CREATE TABLE semon_projection.metadata (
 );
 CREATE TABLE semon_projection.namespaces (
     namespace text PRIMARY KEY,
-    epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0)
+    epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0),
+    custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
 CREATE TABLE semon_projection.ledgers (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
@@ -84,6 +85,53 @@ CREATE TABLE semon_projection.proof_nodes (
     PRIMARY KEY (namespace,path,generation,level,ordinal),
     FOREIGN KEY (namespace,path,generation) REFERENCES semon_projection.proofs(namespace,path,generation) ON DELETE CASCADE
 );
+CREATE TABLE semon_projection.reported_facts (
+    namespace text PRIMARY KEY REFERENCES semon_projection.namespaces(namespace),
+    revision bigint NOT NULL CHECK (revision >= 0),
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576)
+);
+CREATE TABLE semon_projection.checkpoints (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    checkpoint_key text NOT NULL CHECK (octet_length(checkpoint_key) BETWEEN 1 AND 4096),
+    revision bigint NOT NULL CHECK (revision >= 0),
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY (namespace,checkpoint_key)
+);
+CREATE TABLE semon_projection.change_heads (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    read_scope text NOT NULL CHECK (read_scope IN ('current','retained_history')),
+    head bigint NOT NULL CHECK (head >= 0),
+    floor bigint NOT NULL CHECK (floor >= 0 AND floor <= head),
+    PRIMARY KEY (namespace,read_scope)
+);
+CREATE TABLE semon_projection.changes (
+    namespace text NOT NULL,
+    read_scope text NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    session_key text NOT NULL CHECK (octet_length(session_key) BETWEEN 1 AND 4096),
+    PRIMARY KEY (namespace,read_scope,revision),
+    FOREIGN KEY (namespace,read_scope) REFERENCES semon_projection.change_heads(namespace,read_scope)
+);
+ALTER TABLE semon_projection.reported_facts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.reported_facts FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.reported_facts
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.checkpoints ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.checkpoints FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.checkpoints
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.change_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.change_heads FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.change_heads
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.changes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.changes FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.changes
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.catalog_heads (
     namespace text PRIMARY KEY REFERENCES semon_projection.namespaces(namespace),
     generation text NOT NULL

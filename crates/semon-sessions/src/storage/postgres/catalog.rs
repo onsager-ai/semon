@@ -200,6 +200,9 @@ impl PgProjectionTransaction<'_> {
                 ).await.map_err(backend)?;
             }
         }
+        for row in publication.rows {
+            self.catalog_changed(namespace, &row.key).await?;
+        }
         self.tx.execute(
             "INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT(namespace) DO UPDATE SET generation=excluded.generation",
             &[&namespace.binding(), &generation],
@@ -462,6 +465,7 @@ impl PgProjectionTransaction<'_> {
         for owner in &owners {
             let key: &str = owner.get(0);
             self.preserve_history(namespace, key).await?;
+            self.catalog_changed(namespace, key).await?;
             self.tx.execute("UPDATE semon_projection.catalog SET lifecycle='retained' WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
         }
         self.tx
