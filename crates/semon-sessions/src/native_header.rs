@@ -106,7 +106,7 @@ mod tests {
         }
         fn proof(&self) -> crate::SessionSourceProof {
             crate::session_source_proof(
-                &self.options,
+                &self.options, "",
                 "codex",
                 "sessions/2026/09/24/rollout-file.jsonl",
             )
@@ -209,7 +209,7 @@ mod tests {
                 !crate::source_event_index_retained(&home.options, &proof, &home.ready()).unwrap()
             );
             assert_eq!(
-                crate::retain_source_event_index(&home.options, &proof, &home.ready()),
+                crate::retain_source_event_index(&home.options, "", &proof, &home.ready()),
                 Err(crate::CatalogIdentityError::ScopeChanged)
             );
             let parsed = crate::events::PARSED.with(std::cell::Cell::get);
@@ -293,7 +293,7 @@ mod tests {
         assert_eq!(home.query(), expected);
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
         assert_eq!(
-            crate::retain_source_event_index(&home.options, &home.proof(), &home.ready()),
+            crate::retain_source_event_index(&home.options, "", &home.proof(), &home.ready()),
             Err(crate::CatalogIdentityError::ScopeChanged)
         );
         assert_eq!(fs::read(&home.path).unwrap(), original);
@@ -324,7 +324,7 @@ mod tests {
         home.query();
         let proof = home.proof();
         let ready = home.ready();
-        crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
         assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         let archive_key = format!("archive_event_index:{}", home.path.display());
         let header_key = format!("native_codex_header:{}", home.path.display());
@@ -385,7 +385,7 @@ mod tests {
             Err(crate::CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&home.options, &proof, &ready),
+            crate::retain_source_event_index(&home.options, "", &proof, &ready),
             Err(crate::CatalogIdentityError::Unavailable)
         );
         assert_eq!(

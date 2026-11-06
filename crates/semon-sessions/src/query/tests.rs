@@ -2376,7 +2376,7 @@ fn run_ids_come_from_the_allowlist_and_nothing_else() {
 #[test]
 fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
     let home = with_runs();
-    let facts = crate::local_facts(&home.options).unwrap();
+    let facts = crate::local_facts(&home.options, "").unwrap();
     let run = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
         pairs
             .iter()

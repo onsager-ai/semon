@@ -26,6 +26,7 @@ pub(crate) struct NativeEvidence {
     /// database to it and refuses a database bound to another namespace.
     /// Only test constructions observe a database without a host namespace.
     namespace: Option<crate::storage::Namespace>,
+    configuration_error: Option<crate::storage::StorageError>,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
@@ -235,8 +236,8 @@ impl SessionSources {
             machines
                 .into_iter()
                 .map(|(key, options)| {
-                    let namespace = source_namespace(&key);
-                    (key, NativeEvidence::for_source(namespace, options))
+                    let evidence = NativeEvidence::for_source_key(&key, options);
+                    (key, evidence)
                 })
                 .collect(),
         )
@@ -449,8 +450,8 @@ impl SessionSources {
 
 /// The namespace of a host's source key. Keys are configured source names,
 /// so one that is no namespace is a host configuration error.
-pub(crate) fn source_namespace(key: &str) -> crate::storage::Namespace {
-    crate::storage::Namespace::new(key).expect("source key is a storage namespace")
+pub(crate) fn source_namespace(key: &str) -> Result<crate::storage::Namespace, crate::storage::StorageError> {
+    crate::storage::Namespace::new(key)
 }
 
 impl NativeEvidence {
@@ -466,10 +467,22 @@ impl NativeEvidence {
         Self::construct(Some(namespace), options)
     }
 
+    pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
+        match source_namespace(key) {
+            Ok(namespace) => Self::for_source(namespace, options),
+            Err(error) => {
+                let mut evidence = Self::construct(None, options);
+                Arc::get_mut(&mut evidence).unwrap().configuration_error = Some(error);
+                evidence
+            }
+        }
+    }
+
     fn construct(namespace: Option<crate::storage::Namespace>, options: Options) -> Arc<Self> {
         Arc::new(Self {
             options,
             namespace,
+            configuration_error: None,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
@@ -657,6 +670,7 @@ impl NativeEvidence {
 
     /// Open main's single scoped writer, bound to the host's namespace.
     pub(crate) fn open_index(&self) -> io::Result<EventCache> {
+        self.validate_configuration()?;
         match &self.namespace {
             Some(namespace) => crate::storage::sqlite::open_index(&self.options, namespace)
                 .map_err(io::Error::other),
@@ -665,7 +679,15 @@ impl NativeEvidence {
     }
 
     /// Initialize the source index and publish a bounded cold catalog page.
+    pub(crate) fn validate_configuration(&self) -> io::Result<()> {
+        match &self.configuration_error {
+            Some(error) => Err(io::Error::new(io::ErrorKind::InvalidInput, error.clone())),
+            None => Ok(()),
+        }
+    }
+
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        self.validate_configuration()?;
         if work
             .events
             .as_ref()
@@ -2735,7 +2757,7 @@ mod catalog_owner_tests {
         };
         let runtime_path = runtime.full_path(&evidence.options);
         let intent =
-            crate::SessionSourceWrite::begin(&evidence.options, &runtime, None, 0).unwrap();
+            crate::SessionSourceWrite::begin(&evidence.options, "", &runtime, None, 0).unwrap();
         fs::write(
             &runtime_path,
             r#"{"sessionId":"selected","name":"pending runtime"}"#,
@@ -3477,7 +3499,7 @@ mod catalog_owner_tests {
             path: "projects/project/parent/subagents/agent-child.meta.json".into(),
         };
         let sidecar_path = sidecar.full_path(&options);
-        let intent = crate::SessionSourceWrite::begin(&options, &sidecar, None, 0).unwrap();
+        let intent = crate::SessionSourceWrite::begin(&options, "", &sidecar, None, 0).unwrap();
         fs::write(
             &sidecar_path,
             r#"{"description":"first-sidecar-label","toolUseId":"first-launch"}"#,

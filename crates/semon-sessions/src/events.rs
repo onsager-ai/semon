@@ -9364,7 +9364,7 @@ mod tests {
             for _ in 0..5 {
                 let from = fs::metadata(&path).unwrap().len();
                 let intent =
-                    crate::SessionSourceWrite::begin(&options, &input, Some(generation), from)
+                    crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from)
                         .unwrap();
                 let lock_key = crate::source_change::lock_key(&options, &input);
                 let lock_path = options
@@ -9410,7 +9410,7 @@ mod tests {
             // A crash between Raw fsync and evidence commit withdraws trust.
             let from = fs::metadata(&path).unwrap().len();
             let intent =
-                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+                crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from).unwrap();
             let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
             writer.write_all(append.as_bytes()).unwrap();
             writer.sync_all().unwrap();
@@ -9424,7 +9424,7 @@ mod tests {
             // Corrupt continuation words cannot bless the previous prefix.
             let from = fs::metadata(&path).unwrap().len();
             let intent =
-                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+                crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from).unwrap();
             writer.write_all(append.as_bytes()).unwrap();
             writer.sync_all().unwrap();
             intent.complete(from + append.len() as u64).unwrap();

@@ -1250,6 +1250,7 @@ fn enqueue_dependency_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusql
 
 pub(crate) fn enqueue_facts(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     before: &crate::Facts,
     after: &crate::Facts,
     push_driven: bool,
@@ -1258,6 +1259,7 @@ pub(crate) fn enqueue_facts(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let global = before.hostname != after.hostname
         || before.home != after.home
         || before.offline_since != after.offline_since;
@@ -1553,6 +1555,7 @@ fn resume_runtime_input_tx(
 
 pub(crate) fn begin_source_write(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
     let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
@@ -1560,6 +1563,7 @@ pub(crate) fn begin_source_write(
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let previous = read_append_evidence(&tx, &path).map_err(io::Error::other)?;
     #[cfg(test)]
     if let Some(hook) = BEFORE_SOURCE_INVALIDATION.with(|hook| hook.borrow_mut().take()) {
@@ -1617,6 +1621,7 @@ pub(crate) fn begin_source_write(
 
 pub(crate) fn complete_source_write(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     input: &crate::Input,
     revision: i64,
     evidence: Option<&crate::source_change::AppendEvidence>,
@@ -1626,6 +1631,7 @@ pub(crate) fn complete_source_write(
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let actual: Option<i64> = tx
         .query_row(
             "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
@@ -7064,13 +7070,13 @@ mod tests {
                 .unwrap()
         }));
         drop(initial);
-        let proof = crate::session_source_proof(&options, "codex", relative)
+        let proof = crate::session_source_proof(&options, "", "codex", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&options, "codex", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
         fs::remove_file(original).unwrap();
         let replacement = options
             .claude_home
@@ -8626,13 +8632,13 @@ mod tests {
             let key = "native-cx-01";
             let old = old_rows.iter().find(|row| row.key == key).unwrap();
             let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
-            let proof = crate::session_source_proof(&options, "codex", relative)
+            let proof = crate::session_source_proof(&options, "", "codex", relative)
                 .unwrap()
                 .unwrap();
             let ready = crate::source_projection_ready(&options, "codex", relative)
                 .unwrap()
                 .unwrap();
-            crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+            crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
             let original =
                 Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
             let original_recipes = catalog_recipes(&original, "session_slots", key);
@@ -8751,13 +8757,13 @@ mod tests {
             }));
             evidence.retire();
             drop(evidence);
-            let proof = crate::session_source_proof(&options, "codex", relative)
+            let proof = crate::session_source_proof(&options, "", "codex", relative)
                 .unwrap()
                 .unwrap();
             let ready = crate::source_projection_ready(&options, "codex", relative)
                 .unwrap()
                 .unwrap();
-            crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+            crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
             let original =
                 Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
             let expected = catalog_recipes(&original, "session_slots", key);
@@ -8961,13 +8967,13 @@ mod tests {
             2,
             "real native clear marker must establish complete owner closure"
         );
-        let proof = crate::session_source_proof(&options, "claude", relative)
+        let proof = crate::session_source_proof(&options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
         let seed = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         let original_recipes = catalog_recipes(&seed, "session_slots", &old.key)
             .into_iter()
@@ -10424,7 +10430,7 @@ mod tests {
                 proc_root: root.join("proc"),
                 ..crate::Options::default()
             };
-            let error = crate::local_facts(&options).unwrap_err();
+            let error = crate::local_facts(&options, "").unwrap_err();
             assert!(error.to_string().contains(reason), "{name}: {error}");
             unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();

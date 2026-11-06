@@ -94,6 +94,22 @@ pub(crate) fn projection_mismatch(
     Ok(None)
 }
 
+/// Bind a custody writer through the connection that performs its mutation.
+/// Call within its write transaction, before any custody changes.
+pub(crate) fn bind_connection(
+    connection: &Connection,
+    namespace: &Namespace,
+) -> Result<(), StorageError> {
+    qualify(connection, namespace)?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO meta(key,value) VALUES('storage_namespace',?1)",
+            [namespace.binding()],
+        )
+        .map_err(backend)?;
+    qualify(connection, namespace)
+}
+
 /// Bind the writer's database to `namespace` through its own connection, or
 /// refuse a database bound to another namespace before any index write.
 pub(crate) fn bind(cache: &mut EventCache, namespace: &Namespace) -> Result<(), StorageError> {

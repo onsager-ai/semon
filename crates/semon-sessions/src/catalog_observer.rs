@@ -23,8 +23,7 @@ impl SessionCatalogObserver {
 
     /// Hosts may share their existing bounded refresh pool across observers.
     pub fn with_pool(source_key: &str, options: Options, pool: Arc<RefreshPool>) -> Self {
-        let namespace = crate::native_evidence::source_namespace(source_key);
-        let view = MachineView::for_source(namespace, options);
+        let view = MachineView::for_source_key(source_key, options);
         view.set_pool(pool);
         view.set_refresh(Refresh::OnInvalidate);
         Self {

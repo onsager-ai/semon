@@ -530,7 +530,7 @@ mod tests {
                         .len(),
                     64
                 );
-                let nodes = crate::collect(&home.options).unwrap();
+                let nodes = crate::collect(&home.options, "").unwrap();
                 assert_eq!(nodes[0].state, expected);
                 assert_eq!(nodes[0].pid, Some(42));
                 let saved: String = home.db().query_row("SELECT json_extract(metadata,'$.query.rows.owner.summary.turn_lifecycle.phase') FROM session_catalog WHERE session_key='owner'", [], |row|row.get(0)).unwrap();
@@ -640,13 +640,13 @@ mod tests {
         let observed = home.query();
         assert_eq!(observed["alive"], true);
         let relative = "sessions/2026/09/24/rollout-owner.jsonl";
-        let proof = crate::session_source_proof(&home.options, "codex", relative)
+        let proof = crate::session_source_proof(&home.options, "", "codex", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&home.options, "codex", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
         fs::remove_file(&home.path).unwrap();
         // The current Query list may expose a writer-only stub. Retained
         // outcomes belong to the explicitly authorized history projection.

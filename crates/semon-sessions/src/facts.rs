@@ -145,8 +145,8 @@ impl Facts {
 /// Index; repositories are
 /// found by walking up from each one to a `.git` (a linked worktree resolves
 /// to the repository it was made from).
-pub fn local_facts(options: &Options) -> io::Result<Facts> {
-    let mut source = FactsSource::new(options);
+pub fn local_facts(options: &Options, source_key: &str) -> io::Result<Facts> {
+    let mut source = FactsSource::new(options, source_key);
     let facts = source.facts()?;
     source.flush()?;
     Ok(facts)
@@ -162,10 +162,17 @@ pub struct FactsSource {
 
 impl FactsSource {
     /// Opens the event index once for repeated facts collection.
-    pub fn new(options: &crate::Options) -> Self {
+    pub fn new(options: &crate::Options, source_key: &str) -> Self {
         Self {
             options: options.clone(),
-            cache: EventCache::open(&options.cache),
+            cache: crate::storage::Namespace::new(source_key)
+                .map_err(|error| error.to_string())
+                .and_then(|namespace| {
+                    let mut cache = EventCache::open(&options.cache)?;
+                    crate::storage::sqlite::bind(&mut cache, &namespace)
+                        .map_err(|error| error.to_string())?;
+                    Ok(cache)
+                }),
             dirty: false,
         }
     }
@@ -694,7 +701,7 @@ mod tests {
         fs::create_dir_all(&options.claude_home).unwrap();
         fs::create_dir_all(&options.codex_home).unwrap();
         crate::events::CACHE_READS.with(|reads| reads.set(0));
-        let mut source = FactsSource::new(&options);
+        let mut source = FactsSource::new(&options, "");
         let first = source.facts().unwrap();
         let second = source.facts().unwrap();
         assert_eq!(first, second);
@@ -747,7 +754,7 @@ mod tests {
         )
         .unwrap();
 
-        let facts = local_facts(&options).unwrap();
+        let facts = local_facts(&options, "").unwrap();
         assert_eq!(facts.reported_runs.len(), 1);
         let serialized = serde_json::to_string(&facts).unwrap();
         for secret in [
@@ -797,7 +804,7 @@ mod tests {
                 .to_string(),
         )
         .unwrap();
-        let facts = local_facts(&options).unwrap();
+        let facts = local_facts(&options, "").unwrap();
         let ids: BTreeSet<&str> = facts
             .reported_runs
             .iter()
@@ -810,7 +817,7 @@ mod tests {
             serde_json::json!({"projects":{"/p":{"lastSessionId":"second-run","lastStartTime":2000,"lastCost":0.5}}}).to_string(),
         )
         .unwrap();
-        let next = local_facts(&options).unwrap();
+        let next = local_facts(&options, "").unwrap();
         assert_eq!(
             next.reported_runs
                 .iter()
@@ -820,7 +827,7 @@ mod tests {
         );
         // Neither run remains in the live file; both come from persisted snapshots.
         fs::write(&options.claude_json, r#"{"projects":{}}"#).unwrap();
-        let again = local_facts(&options).unwrap();
+        let again = local_facts(&options, "").unwrap();
         assert_eq!(again.reported_runs.len(), 2);
         for (id, start, cost) in [("first-run", 1000, 0.25), ("second-run", 2000, 0.5)] {
             let run = again

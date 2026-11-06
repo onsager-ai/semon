@@ -760,8 +760,9 @@ fn has_live_process(node: &Node) -> bool {
 }
 
 /// Collects a read-only, metadata-only session tree and writes the metadata cache.
-pub fn collect(options: &Options) -> io::Result<Vec<Node>> {
-    let mut cache = events::EventCache::open_scoped(&options.cache).map_err(io::Error::other)?;
+pub fn collect(options: &Options, source_key: &str) -> io::Result<Vec<Node>> {
+    let namespace = storage::Namespace::new(source_key).map_err(io::Error::other)?;
+    let mut cache = storage::sqlite::open_index(options, &namespace).map_err(io::Error::other)?;
     collect_with_index(options, &mut cache)
 }
 
@@ -1503,7 +1504,7 @@ mod native_home_tests {
             all: true,
             ..Options::default()
         };
-        let nodes = collect(&options).unwrap();
+        let nodes = collect(&options, "").unwrap();
         assert!(
             nodes
                 .iter()

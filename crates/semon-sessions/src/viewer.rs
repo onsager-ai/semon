@@ -830,9 +830,8 @@ impl MachineView {
         Self::from_evidence(NativeEvidence::new(options))
     }
 
-    /// A view of one configured source, producing into its namespace.
-    pub(crate) fn for_source(namespace: crate::storage::Namespace, options: Options) -> Arc<Self> {
-        Self::from_evidence(NativeEvidence::for_source(namespace, options))
+    pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
+        Self::from_evidence(NativeEvidence::for_source_key(key, options))
     }
 
     /// Attach Viewer production to an existing native owner without a second
@@ -5151,7 +5150,7 @@ mod tests {
     fn two_machines_with_one_hostname_stay_two_and_offline_facts_say_so() {
         let (first, second) = (machine("twin", "lane-1"), machine("twin", "lane-2"));
         let facts = second.root.join("facts.json");
-        let mut recorded = crate::local_facts(&second.options)
+        let mut recorded = crate::local_facts(&second.options, "")
             .unwrap()
             .offline(1_790_000_000_000);
         recorded.hostname = "twin".into();

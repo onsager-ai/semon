@@ -5348,7 +5348,7 @@ fn copy_with_facts(home: &Home) -> (Home, Options) {
         fs::create_dir_all(to.parent().unwrap()).unwrap();
         fs::copy(input.full_path(&home.options), to).unwrap();
     }
-    let facts = crate::local_facts(&home.options).unwrap();
+    let facts = crate::local_facts(&home.options, "").unwrap();
     let path = copy.root.join("facts.json");
     crate::write_facts(&path, &facts).unwrap();
     options.facts = Some(path);
@@ -5601,7 +5601,7 @@ fn reported_cost_checks_keep_overwritten_runs_and_drop_account_values() {
     ] {
         assert!(!served.contains(secret));
     }
-    let facts = crate::local_facts(&home.options).unwrap();
+    let facts = crate::local_facts(&home.options, "").unwrap();
     let facts_json = serde_json::to_string(&facts).unwrap();
     assert_eq!(facts.reported_runs.len(), 2);
     assert!(!facts_json.contains("fixture-model@example.invalid"));
@@ -5622,7 +5622,7 @@ fn recorded_codex_selection_distinguishes_absent_and_empty_without_pruning() {
         .join("codex/sessions/2026/09/24/rollout-retained.jsonl");
     let bytes = fs::read(&source).unwrap();
     let path = home.root.join("facts.json");
-    let mut facts = crate::local_facts(&home.options).unwrap();
+    let mut facts = crate::local_facts(&home.options, "").unwrap();
     facts.codex_rollouts = None;
     crate::write_facts(&path, &facts).unwrap();
     let mut options = home.options.clone();
@@ -6069,7 +6069,7 @@ fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_
         ancestor.sessions["child"].parent.as_deref(),
         Some("ancestor")
     );
-    let captured = crate::local_facts(&home.options).unwrap();
+    let captured = crate::local_facts(&home.options, "").unwrap();
     assert_eq!(captured.process_ancestors[&4242], vec![10]);
     home.write(
         "proc/4242/environ",
@@ -6084,7 +6084,7 @@ fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_
         explicit.sessions["child"].parent_source.as_deref(),
         Some("environment")
     );
-    let captured = crate::local_facts(&home.options).unwrap();
+    let captured = crate::local_facts(&home.options, "").unwrap();
     assert_eq!(
         captured.runs[&4242],
         BTreeMap::from([("SEMON_PARENT".into(), "codex:explicit".into())])
@@ -6214,7 +6214,7 @@ fn a_general_marker_overrides_environment_and_native_parent_and_cycles_stay_unli
     );
     assert!(built.sessions["cycle-a"].parent.is_none());
     assert!(built.sessions["cycle-b"].parent.is_none());
-    let tree = crate::collect(&options).unwrap();
+    let tree = crate::collect(&options, "").unwrap();
     let marked = tree.iter().find(|node| node.id == "marked").unwrap();
     assert!(
         marked.children.iter().any(
@@ -9922,7 +9922,7 @@ fn unsupported_portable_path_preserves_native_tree_and_refuses_lossy_query_alias
         cache: home.root.join("tree-index.json"),
         ..home.options.clone()
     };
-    let tree = crate::collect(&tree_options).unwrap();
+    let tree = crate::collect(&tree_options, "").unwrap();
     assert_eq!(tree[0].id, "root");
     assert_eq!(tree[0].last_activity.as_deref(), Some(ts(0, 0).as_str()));
     let query = || {
@@ -9955,7 +9955,7 @@ fn unsupported_portable_path_preserves_native_tree_and_refuses_lossy_query_alias
     let original = fs::read(&exact_source).unwrap();
     assert!(query().is_err());
     assert_eq!(fs::read(&exact_source).unwrap(), original);
-    assert_eq!(crate::collect(&tree_options).unwrap()[0].id, "root");
+    assert_eq!(crate::collect(&tree_options, "").unwrap()[0].id, "root");
 }
 
 #[test]
@@ -11051,7 +11051,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
         ..Default::default()
     };
     home.options.facts = Some(home.root.join("facts.json"));
-    let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+    let intent = crate::SessionFactsWrite::begin(&home.options, "", &facts).unwrap();
     crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
@@ -11092,7 +11092,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             let path = input.full_path(&home.options);
             let from = fs::metadata(&path).unwrap().len();
             let intent =
-                crate::SessionSourceWrite::begin(&home.options, input, None, from).unwrap();
+                crate::SessionSourceWrite::begin(&home.options, "", input, None, from).unwrap();
             let line = format!(
                 "{}\n",
                 codex_reply(ts(14, 3), "Synthetic persisted backlog update")
@@ -11103,7 +11103,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
             intent.complete(from + line.len() as u64).unwrap();
             facts.codex_locks.insert("ack-root".into(), 42);
             facts.proc_starts.insert(42, 100);
-            let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&home.options, "", &facts).unwrap();
             crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             injected = true;
@@ -11169,7 +11169,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
         ..Default::default()
     };
     home.options.facts = Some(home.root.join("facts.json"));
-    let intent = crate::SessionFactsWrite::begin(&home.options, &facts).unwrap();
+    let intent = crate::SessionFactsWrite::begin(&home.options, "", &facts).unwrap();
     crate::write_facts(home.options.facts.as_ref().unwrap(), &facts).unwrap();
     intent.complete().unwrap();
     let runtime = crate::native_evidence::query_runtime_generation(&home.options).unwrap();
@@ -11305,7 +11305,7 @@ fn semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch() {
         path: relative.clone(),
     };
     let from = fs::metadata(&old_source.path).unwrap().len();
-    let intent = crate::SessionSourceWrite::begin(&home.options, &input, None, from).unwrap();
+    let intent = crate::SessionSourceWrite::begin(&home.options, "", &input, None, from).unwrap();
     let line = format!(
         "{}\n",
         codex_reply(
@@ -11414,7 +11414,7 @@ fn semantic_unannounced_mutation_after_ack_rejects_original_native_generation() 
     .unwrap();
     original.reader().verify_all().unwrap();
     assert!(
-        crate::session_source_proof(&home.options, "codex", &relative)
+        crate::session_source_proof(&home.options, "", "codex", &relative)
             .unwrap()
             .is_some()
     );
@@ -11457,7 +11457,7 @@ fn semantic_unannounced_mutation_after_ack_rejects_original_native_generation() 
     assert_eq!(crate::catalog::source_state(&old_source), "stale");
     assert!(
         matches!(
-            crate::session_source_proof(&home.options, "codex", &relative),
+            crate::session_source_proof(&home.options, "", "codex", &relative),
             Err(crate::CatalogIdentityError::Unavailable) | Ok(None)
         ),
         "native control/archive source proof accepted changed original generation"
@@ -11788,13 +11788,13 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
         );
         drop(old_db);
         let retained = if retain {
-            let proof = crate::session_source_proof(&home.options, "codex", &old_relative)
+            let proof = crate::session_source_proof(&home.options, "", "codex", &old_relative)
                 .unwrap()
                 .unwrap();
             let ready = crate::source_projection_ready(&home.options, "codex", &old_relative)
                 .unwrap()
                 .unwrap();
-            crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+            crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
             assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
             let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
             let archive_key = format!(
@@ -12070,13 +12070,13 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     };
     drain(&home.options);
     let relative = format!("sessions/2026/09/24/rollout-{native}.jsonl");
-    let proof = crate::session_source_proof(&home.options, "codex", &relative)
+    let proof = crate::session_source_proof(&home.options, "", "codex", &relative)
         .unwrap()
         .unwrap();
     let ready = crate::source_projection_ready(&home.options, "codex", &relative)
         .unwrap()
         .unwrap();
-    crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+    crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
     let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
     let marker_key = format!(
         "archive_event_index:{}",

@@ -294,7 +294,7 @@ impl ReceivedMachines {
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
             let intent =
-                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), &facts)?;
+                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), name, &facts)?;
             crate::write_facts(&copy, &facts)?;
             intent.complete()
         };

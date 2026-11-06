@@ -63,9 +63,12 @@ pub struct SessionSourceProof {
 /// The host must validate the source identity again while copying its bytes.
 pub fn session_source_proof(
     options: &Options,
+    source_key: &str,
     root: &str,
     path: &str,
 ) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    let namespace = crate::storage::Namespace::new(source_key)
+        .map_err(|_| CatalogIdentityError::InvalidArguments)?;
     use CatalogIdentityError::{InvalidArguments, Unavailable};
     if !crate::is_input_path(root, path) || path.len() > 4096 {
         return Err(InvalidArguments);
@@ -100,6 +103,7 @@ pub fn session_source_proof(
         connection.busy_timeout(Duration::from_millis(100))?;
         let transaction = connection.transaction()?;
         crate::events::store::require_current(&transaction)?;
+        crate::storage::sqlite::qualify(&transaction, &namespace)?;
         let encoded: Option<(String, Option<String>)> = transaction.query_row(
             "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
             [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -1998,7 +2002,7 @@ mod tests {
             } else {
                 facts.codex_locks.remove("unrelated-running-thread");
             }
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             if evidence
@@ -2028,7 +2032,7 @@ mod tests {
             let path = fixture.options.codex_home.join(&relative);
             let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
             facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
@@ -2065,7 +2069,7 @@ mod tests {
                 facts.codex_locks.insert("affected".into(), 42);
                 facts.proc_starts.insert(42, 7);
             }
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let dirty: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s JOIN session_catalog_invalidations i USING(source_path) WHERE i.revision IS NOT s.claim)", [], |r| r.get(0)).unwrap();
@@ -2602,7 +2606,7 @@ mod tests {
         }
         drop(file);
         native_refresh(&fixture);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -2615,7 +2619,7 @@ mod tests {
             "fixture includes event and token metadata"
         );
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let marker: String = connection
             .query_row(
@@ -2659,13 +2663,13 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let mut statement = connection
             .prepare("SELECT key,value FROM meta WHERE key GLOB 'native_source_chunks:*'")
@@ -2696,7 +2700,7 @@ mod tests {
                 .unwrap();
             assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
             assert_eq!(
-                crate::retain_source_event_index(&fixture.options, &proof, &ready),
+                crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
                 Err(CatalogIdentityError::ScopeChanged)
             );
             connection
@@ -2715,13 +2719,13 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let key = format!("native_parent_marker:{}", path.display());
         let encoded: String = connection
@@ -2738,7 +2742,7 @@ mod tests {
             .unwrap();
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         connection
@@ -2779,7 +2783,7 @@ mod tests {
             Err(CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         // A writable producer now discards obsolete derived contracts; these
@@ -2814,19 +2818,19 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         use std::io::Write;
         writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"user","uuid":"new-prefix","message":{"role":"user","content":"new generation"}})).unwrap();
         native_refresh(&fixture);
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -2853,13 +2857,13 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let key = format!(
             "native_launch_calls:{:x}:header",
@@ -2879,7 +2883,7 @@ mod tests {
             .unwrap();
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         connection
@@ -2916,7 +2920,7 @@ mod tests {
             Err(CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         // A writable producer now discards obsolete derived contracts; these
@@ -2951,7 +2955,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -2960,13 +2964,13 @@ mod tests {
         let mut changed = proof.clone();
         changed.ino = changed.ino.wrapping_add(1);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &changed, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &changed, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let mut changed = ready.clone();
         changed.projection_generation = "0".repeat(64);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &changed),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &changed),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let mut changed = proof.clone();
@@ -2974,12 +2978,12 @@ mod tests {
         let mut projection = ready.clone();
         projection.source = changed.source.clone();
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &changed, &projection),
+            crate::retain_source_event_index(&fixture.options, "", &changed, &projection),
             Err(CatalogIdentityError::InvalidArguments)
         );
         let missing = Fixture::new();
         assert_eq!(
-            crate::retain_source_event_index(&missing.options, &proof, &ready),
+            crate::retain_source_event_index(&missing.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         assert!(!EventCache::path(&missing.options.cache).exists());
@@ -2991,7 +2995,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -3002,7 +3006,7 @@ mod tests {
             .execute("UPDATE files SET pending='malformed'", [])
             .unwrap();
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         connection
@@ -3013,7 +3017,7 @@ mod tests {
             .unwrap();
         let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
@@ -3772,19 +3776,19 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(100);
         let path = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", path)
+        let proof = session_source_proof(&fixture.options, "", "claude", path)
             .unwrap()
             .unwrap();
         assert_eq!(proof.source.native_id, "session-00000");
         assert_eq!(proof.source.offset, proof.size);
         assert_eq!(proof.freshness.state, "cached");
         assert!(
-            session_source_proof(&fixture.options, "claude", "projects/project/missing.jsonl")
+            session_source_proof(&fixture.options, "", "claude", "projects/project/missing.jsonl")
                 .unwrap()
                 .is_none()
         );
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", "../bad.jsonl"),
+            session_source_proof(&fixture.options, "", "claude", "../bad.jsonl"),
             Err(CatalogIdentityError::InvalidArguments)
         );
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -3799,7 +3803,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", path),
+            session_source_proof(&fixture.options, "", "claude", path),
             Err(CatalogIdentityError::Unavailable)
         );
         connection
@@ -3810,7 +3814,7 @@ mod tests {
             .unwrap();
         fs::remove_file(fixture.options.facts.as_ref().unwrap()).unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", path),
+            session_source_proof(&fixture.options, "", "claude", path),
             Err(CatalogIdentityError::Unavailable)
         );
     }
@@ -3875,7 +3879,7 @@ mod tests {
         fs::write(&native, &bytes).unwrap();
         fixture.publish_existing();
         let proof =
-            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
+            session_source_proof(&fixture.options, "", "claude", "projects/project/partial.jsonl")
                 .unwrap()
                 .unwrap();
         assert_eq!(proof.source.offset, complete.len() as u64);
@@ -3889,7 +3893,7 @@ mod tests {
         fs::write(&replacement, &bytes).unwrap();
         fs::rename(replacement, native).unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
+            session_source_proof(&fixture.options, "", "claude", "projects/project/partial.jsonl"),
             Err(CatalogIdentityError::Unavailable)
         );
     }
@@ -3909,7 +3913,7 @@ mod tests {
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             SQL_STEPS.with(|value| value.set(0));
             let proof = session_source_proof(
-                &fixture.options,
+                &fixture.options, "",
                 "claude",
                 "projects/project/session-00000.jsonl",
             )
@@ -3922,7 +3926,7 @@ mod tests {
                 let start = std::time::Instant::now();
                 assert!(
                     session_source_proof(
-                        &fixture.options,
+                        &fixture.options, "",
                         "claude",
                         "projects/project/session-00000.jsonl"
                     )
@@ -5167,8 +5171,8 @@ mod tests {
             db.execute_batch(change).unwrap();
             drop(db);
             let original = fs::read(&path).unwrap();
-            assert!(crate::collect(&fixture.options).is_err());
-            assert!(crate::local_facts(&fixture.options).is_err());
+            assert!(crate::collect(&fixture.options, "").is_err());
+            assert!(crate::local_facts(&fixture.options, "").is_err());
             assert_eq!(fixture.body("").0, 503);
             assert_eq!(
                 crate::session_transcript_range(
@@ -7604,7 +7608,7 @@ mod tests {
                     writeln!(fs::OpenOptions::new().append(true).open(&new).unwrap(),"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic appended response"}]}})).unwrap();
                 }
                 facts.codex_rollouts = Some(BTreeSet::from([to.to_owned()]));
-                let intent = SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+                let intent = SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
                 crate::write_facts(facts_path, &facts).unwrap();
                 intent.complete().unwrap();
                 crate::invalidate_session_sources(
@@ -7736,7 +7740,7 @@ mod tests {
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
         facts.hostname = "updated-after-publication".into();
-        let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+        let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
         crate::write_facts(facts_path, &facts).unwrap();
         intent.complete().unwrap();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -7776,7 +7780,7 @@ mod tests {
             path: "projects/project/selected.jsonl".into(),
         };
         let intent = crate::SessionSourceWrite::begin(
-            &fixture.options,
+            &fixture.options, "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -7863,7 +7867,7 @@ mod tests {
         fs::create_dir_all(new.parent().unwrap()).unwrap();
         fs::rename(&old, &new).unwrap();
         facts.codex_rollouts = Some(BTreeSet::from([archived.to_owned()]));
-        let intent = SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+        let intent = SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
         crate::write_facts(facts_path, &facts).unwrap();
         intent.complete().unwrap();
         db.execute_batch("CREATE TRIGGER reject_move BEFORE UPDATE ON session_catalog BEGIN SELECT RAISE(ABORT,'injected publication failure'); END;").unwrap();
@@ -7903,7 +7907,7 @@ mod tests {
             path: archived.into(),
         };
         let intent = SessionSourceWrite::begin(
-            &fixture.options,
+            &fixture.options, "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -7975,7 +7979,7 @@ mod tests {
                 observed_at: 1,
                 freshness: "fresh".into(),
             });
-            let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             write.complete().unwrap();
             fixture.publish_existing();
@@ -8014,7 +8018,7 @@ mod tests {
                         );
                     }
                 }
-                let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+                let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
                 crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
                 write.complete().unwrap();
                 let before = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -8050,7 +8054,7 @@ mod tests {
             facts.mirror_sequence = Some(123);
             facts.mirror_observation_id = Some("heartbeat".into());
             facts.native_names[0].observed_at = 2;
-            let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             write.complete().unwrap();
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -8079,7 +8083,7 @@ mod tests {
         };
         let from = fs::metadata(&path).unwrap().len();
         let intent = crate::SessionSourceWrite::begin(
-            &fixture.options,
+            &fixture.options, "",
             &input,
             Some("1".repeat(32).as_str()),
             from,
@@ -8221,7 +8225,7 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             for phase in 0..3 {
                 let intent =
-                    crate::SessionSourceWrite::begin(&fixture.options, &input, None, 0).unwrap();
+                    crate::SessionSourceWrite::begin(&fixture.options, "", &input, None, 0).unwrap();
                 fs::write(&path,json!({"sessionId":if phase==0 {"selected-a"} else {"selected-b"},"name":format!("runtime-{phase}")}).to_string()).unwrap();
                 if phase == 1 {
                     drop(intent); // Raw committed, process lost before Index intent completion.
@@ -8451,7 +8455,7 @@ mod tests {
                 path: "projects/project/cleared.jsonl".into(),
             };
             let intent = crate::SessionSourceWrite::begin(
-                &fixture.options,
+                &fixture.options, "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 0,
@@ -8637,7 +8641,7 @@ mod tests {
             };
             let from = fs::metadata(&path).unwrap().len();
             let intent = crate::SessionSourceWrite::begin(
-                &fixture.options,
+                &fixture.options, "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 from,
