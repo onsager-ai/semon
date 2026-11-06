@@ -325,6 +325,7 @@ pub(crate) struct AdmittedSnapshot<'a, 'b>(
     Option<crate::storage::QueryRuntimeBinding>,
     crate::storage::QueryRuntimeBinding,
     std::cell::OnceCell<crate::native_evidence::RuntimeObservations>,
+    std::cell::RefCell<crate::storage::proof_codec::PresentationCache>,
 );
 
 /// Metadata from the caller's validated snapshot, never an Options-derived
@@ -421,6 +422,7 @@ pub(crate) fn admitted_snapshot<'a, 'b>(
         binding.runtime_binding()?,
         binding.runtime_binding_at(transaction)?,
         std::cell::OnceCell::new(),
+        std::cell::RefCell::default(),
     ))
 }
 
@@ -432,28 +434,109 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         owner: CatalogObservationOwner,
         runtime: &str,
     ) -> io::Result<Option<String>> {
-        let _ = (owner, runtime);
-        let mut cwds = std::collections::BTreeSet::new();
-        for source in &row.sources {
-            let cwd: Option<String> = self
-                .0
-                .query_row(
-                    "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
-                    [source.path.to_string_lossy().as_ref()],
-                    |record| record.get(0),
+        let diagnose = |stage: &'static str, error: &io::Error| {
+            if cfg!(test) || crate::native_timing::enabled() {
+                eprintln!(
+                    "catalog_runtime_refused stage={stage} error_kind={:?} storage_error={:?}",
+                    error.kind(),
+                    error
+                        .get_ref()
+                        .and_then(|error| error.downcast_ref::<crate::storage::StorageError>())
+                );
+            }
+        };
+        match runtime_source_cwds_if_current(self.0, &row.sources)
+            .inspect_err(|error| diagnose("current_source_cwds", error))?
+        {
+            Some(cwds) => {
+                let binding = super::proof_generations::observation_binding_for_catalog_page(
+                    self.0, &self.2, row, owner, &self.4,
                 )
-                .optional()
+                .map_err(io::Error::other)
+                .inspect_err(|error| diagnose("current_row_binding", error))?;
+                let scoped = self
+                    .3
+                    .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                    .scope(row, &cwds)
+                    .inspect_err(|error| diagnose("current_scope", error))?;
+                binding
+                    .witness(&scoped)
+                    .inspect_err(|error| diagnose("current_runtime_witness", error))
+                    .map(Some)
+            }
+            None => {
+                let (binding, observations) =
+                    super::proof_generations::observation_binding_with_observations(
+                        self.0, &self.2, row, owner,
+                    )
+                    .map_err(io::Error::other)
+                    .inspect_err(|error| diagnose("captured_observation_binding", error))?;
+                if let Some(cwds) = super::proof_generations::retained_runtime_source_cwds(
+                    self.0,
+                    &binding,
+                    row,
+                    owner,
+                    &observations,
+                )
                 .map_err(io::Error::other)?
-                .flatten();
-            if let Some(cwd) = cwd {
-                cwds.insert(cwd);
+                {
+                    let scoped = self
+                        .3
+                        .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+                        .scope(row, &cwds)?;
+                    let current = binding.witness(&scoped)?;
+                    let captured = observations.runtime_for(row).ok_or_else(|| {
+                        io::Error::other(crate::storage::StorageError::ScopeChanged)
+                    })?;
+                    if current != captured {
+                        return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+                    }
+                    return Ok(Some(captured));
+                }
+                let captured = observations
+                    .runtime_for(row)
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))
+                    .inspect_err(|error| {
+                        let stage = if observations.runtime.is_none() {
+                            "captured_global_runtime"
+                        } else {
+                            "captured_row_runtime"
+                        };
+                        diagnose(stage, error);
+                    })?;
+                let captured_global = observations
+                    .runtime
+                    .as_deref()
+                    .ok_or_else(|| io::Error::other(crate::storage::StorageError::ScopeChanged))
+                    .inspect_err(|error| diagnose("captured_global_runtime", error))?;
+                // A changed Index source ledger may make the captured CWD scope
+                // unavailable. Retain the row observation only while the live
+                // global input still matches this publication's bound witness.
+                let current_global = binding
+                    .witness(runtime)
+                    .inspect_err(|error| diagnose("captured_current_global_witness", error))?;
+                if current_global != captured_global {
+                    #[cfg(test)]
+                    eprintln!(
+                        "catalog_runtime_capture_comparison raw_matches={} captured_binding_matches={}",
+                        observations.source_runtime.as_deref() == Some(runtime),
+                        observations
+                            .source_runtime
+                            .as_deref()
+                            .and_then(|raw| binding.witness(raw).ok())
+                            .as_deref()
+                            == Some(captured_global)
+                    );
+                    if cfg!(test) || crate::native_timing::enabled() {
+                        eprintln!(
+                            "catalog_runtime_refused stage=captured_global_equality error_class=scope_changed equal=false"
+                        );
+                    }
+                    return Err(io::Error::other(crate::storage::StorageError::ScopeChanged));
+                }
+                Ok(Some(captured))
             }
         }
-        let scoped = self
-            .3
-            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
-            .scope(row, &cwds)?;
-        self.2.witness(&scoped).map(Some)
     }
     fn runtime_binding(&self) -> Option<crate::storage::QueryRuntimeBinding> {
         self.1.clone()
@@ -462,14 +545,19 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         &self,
         row: &CatalogRow,
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
-        if super::proof_generations::imported_catalog(self.0, &self.2).map_err(io::Error::other)? {
+        if super::proof_generations::imported_catalog(self.0, &self.2).map_err(io::Error::other)?
+            || row
+                .query
+                .as_ref()
+                .and_then(|query| query["runtime"].as_str())
+                .is_some_and(|saved| saved.starts_with("source-runtime-v1:"))
+        {
             return super::proof_generations::observation_binding(self.0, &self.2, row)
                 .map(Some)
                 .map_err(io::Error::other);
         }
         Ok(self.runtime_binding())
     }
-
     fn facts_authority<'a>(
         &'a self,
         path: &std::path::Path,

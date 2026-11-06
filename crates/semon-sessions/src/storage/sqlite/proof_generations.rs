@@ -280,13 +280,6 @@ pub(crate) fn publish(
     Ok(())
 }
 
-/// Publish an ordinary Catalog receipt. Immutable rows are inserted only for a
-/// fresh receipt; a byte exact receipt replay still reapplies local Current
-/// custody so later mutable owner reconciliation remains authoritative.
-
-/// Authenticate a retry against the currently owned immutable receipt. Captured
-/// context comes from that receipt: a retry must not observe a new live context.
-
 fn prepare_proof_publication(
     namespace: &str,
     admission: u64,

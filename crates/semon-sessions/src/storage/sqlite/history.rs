@@ -418,6 +418,7 @@ pub(crate) fn publish_composition(
             continue;
         }
         let mut history = current.clone();
+        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
         history.query = None;
         history.query_recipe = None;
         history.sources.extend(missing.values().cloned());
@@ -520,6 +521,23 @@ pub(crate) fn publish_composition(
             &texts,
             incomplete,
         )?;
+        if let Some(observations) = publication.observations {
+            let mut cwds = BTreeMap::new();
+            for source in &history.sources {
+                let cwd: Option<String> = store.db.query_row("SELECT cwd FROM main.files WHERE namespace=?1 AND path=?2", params![store.namespace,source.path.to_string_lossy()], |row| row.get(0)).optional()?.flatten();
+                if let Some(cwd) = cwd { cwds.insert(source.path.clone(), cwd); }
+            }
+            let mut observed = observations.clone();
+            let cwds = cwds.into_values().collect();
+            if let Ok(runtime) = observed.runtime_observation(&history, &cwds) {
+                observed.capture_runtime(&history, &cwds, runtime).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                let capture = observed.runtime_capture_for(&history).ok_or(rusqlite::Error::InvalidQuery)?;
+                super::proof_generations::native_history_observation_grant(
+                    store.db,store.namespace,&history.key,store.admission,store.stream.ok_or(rusqlite::Error::InvalidQuery)?,&metadata,
+                    &serde_json::to_string(&capture).map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
+                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+            }
+        }
     }
     Ok(())
 }
