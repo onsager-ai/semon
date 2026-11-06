@@ -328,12 +328,15 @@ impl DirtyRows {
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct FileIndex {
+    #[serde(skip)]
     pub(crate) dirty_rows: Option<DirtyRows>,
     /// Only this parse batch; durable facts and identities stay in the Event Index.
+    #[serde(skip)]
     pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
+    #[serde(skip)]
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
     pub(crate) handoff_index: Option<crate::native_handoff::Index>,
@@ -341,13 +344,16 @@ pub(crate) struct FileIndex {
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     /// A subagent sidecar has its own generation, separate from the native log.
     pub(crate) claude_sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
+    #[serde(skip)]
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
     /// Kept apart from `events` so they can't change how events collapse or
     /// turns split.
+    #[serde(skip)]
     pub(crate) extras: Vec<Event>,
     /// Harness signals indexed for analysis, never shown in the transcript.
+    #[serde(skip)]
     pub(crate) signals: Vec<Signal>,
     /// Tool calls still waiting for a result: call id -> event index.
     pub(crate) pending: BTreeMap<String, usize>,
@@ -383,7 +389,7 @@ pub(crate) struct FileIndex {
 /// A harness signal that isn't a transcript event: indexed for analysis only,
 /// never shown in the transcript. Content-free like the rest of the cache:
 /// `n` holds only a short enum-like tag, never log text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Signal {
     pub(crate) k: SignalKind,
     /// Byte offset of the line.
@@ -2780,6 +2786,28 @@ pub(crate) fn crate_id_for_relocation(path: &Path) -> Option<String> {
     crate::codex_native_id_prefix(path, Stat::of(path).ok()?.size)
         .ok()
         .flatten()
+}
+
+/// Reuse the native parser with an explicitly supplied PostgreSQL index base.
+/// No local store is attached, and no SQLite pathname is resolved.
+#[cfg(feature = "postgres")]
+pub(crate) fn scan_postgres_file(
+    path: &Path,
+    harness: &str,
+    previous: Option<(Ledger, FileIndex)>,
+) -> io::Result<(Ledger, FileIndex, bool)> {
+    let loaded = Loaded {
+        files: previous.into_iter().map(|(ledger, index)| {
+            (path.to_string_lossy().into_owned(), ledger, index)
+        }).collect(),
+        ..Loaded::default()
+    };
+    let mut cache = EventCache::from_loaded(loaded);
+    let index = scan_file(path, harness, &mut cache, &mut false)?;
+    let ledger = cache.files.get(path.to_string_lossy().as_ref())
+        .ok_or_else(|| io::Error::other("native parser ledger unavailable"))?.ledger.clone();
+    let append = !cache.replaced.contains(path.to_string_lossy().as_ref());
+    Ok((ledger, (*index).clone(), append))
 }
 
 pub(crate) fn scan_file(

@@ -5,6 +5,8 @@
 use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
+mod index;
+
 /// Current schema for host provisioning by a role separate from the application.
 /// It is installed once; existing/unsupported stores are never migrated here.
 pub fn schema() -> String {
@@ -21,7 +23,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 
 fn stamp() -> String {
     format!(
-        "semon-session-store/1 backend=postgres schema=1 parser={} projector={}",
+        "semon-session-store/1 backend=postgres schema=2 parser={} projector={}",
         crate::events::CACHE_VERSION,
         crate::model::summary::CATALOG_VERSION
     )
