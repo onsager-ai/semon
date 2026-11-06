@@ -3378,9 +3378,15 @@ impl SqliteStore {
             }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
-            let metadata_bytes = metadata.iter().zip(&query_recipes).try_fold(0usize, |total, (text, recipe)| {
-                total.checked_add(text.len())?.checked_add(recipe.as_ref().map_or(0, String::len))
-            }).ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
+            let metadata_bytes = metadata
+                .iter()
+                .zip(&query_recipes)
+                .try_fold(0usize, |total, (text, recipe)| {
+                    total
+                        .checked_add(text.len())?
+                        .checked_add(recipe.as_ref().map_or(0, String::len))
+                })
+                .ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
             let mut history_budget =
                 crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
             for row in rows.iter().chain(withdrawn.iter()) {
