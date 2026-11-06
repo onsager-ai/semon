@@ -47,6 +47,21 @@ impl PgProjectionTransaction<'_> {
         expected_generation: Option<&str>,
     ) -> Result<Option<String>, StorageError> {
         ensure(&self.namespace, namespace)?;
+        self.tx.batch_execute("SAVEPOINT catalog_publication").await.map_err(backend)?;
+        let result = self.publish_catalog_inner(namespace, publication, expected_generation).await;
+        if !matches!(result, Ok(Some(_))) {
+            self.tx.batch_execute("ROLLBACK TO SAVEPOINT catalog_publication").await.map_err(backend)?;
+        }
+        self.tx.batch_execute("RELEASE SAVEPOINT catalog_publication").await.map_err(backend)?;
+        result
+    }
+
+    async fn publish_catalog_inner(
+        &self,
+        namespace: &Namespace,
+        publication: &Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> Result<Option<String>, StorageError> {
         if publication.rows.is_empty() || publication.rows.len() > 64 {
             return Err(StorageError::Backend(
                 "catalog component budget exceeded".into(),
@@ -152,7 +167,8 @@ impl PgProjectionTransaction<'_> {
             }
         }
         let mut hash = Sha256::new();
-        hash.update(expected_generation.unwrap_or_default());
+        let previous_generation = expected_generation.unwrap_or_default();
+        hash.update(previous_generation);
         hash.update(serde_json::to_vec(&encoded).map_err(backend)?);
         hash.update(serde_json::to_vec(&recipes).map_err(backend)?);
         let generation = format!("{:x}", hash.finalize());
@@ -214,6 +230,13 @@ impl PgProjectionTransaction<'_> {
     /// Capture outgoing History and its recipes in the same transaction as
     /// replacement or withdrawal. History never checks a newer Raw ledger.
     async fn preserve_history(&self, namespace: &Namespace, key: &str) -> Result<(), StorageError> {
+        let conflicting: bool = self.tx.query_one(
+            "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog h JOIN semon_projection.catalog c USING(namespace,session_key) WHERE h.namespace=$1 AND h.session_key=$2 AND h.metadata<>c.metadata)",
+            &[&namespace.binding(), &key],
+        ).await.map_err(backend)?.get(0);
+        if conflicting {
+            return Err(backend("composite History publication is unavailable"));
+        }
         self.tx.execute(
             "INSERT INTO semon_projection.history_catalog SELECT * FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2 ON CONFLICT(namespace,session_key) DO NOTHING",
             &[&namespace.binding(), &key],
@@ -390,7 +413,7 @@ impl PgProjectionTransaction<'_> {
             return Err(backend("selected recipe generation mismatch"));
         }
         let records = self.tx.query(
-            &format!("SELECT slot,metadata FROM semon_projection.{slots} WHERE namespace=$1 AND session_key=$2 AND slot>=$3 AND slot<$4 AND octet_length(metadata)<=$5 ORDER BY slot"),
+            &format!("SELECT slot,CASE WHEN scanned_bytes<=$5 THEN metadata END FROM (SELECT slot,metadata,sum(octet_length(metadata)) OVER (ORDER BY slot) AS scanned_bytes FROM semon_projection.{slots} WHERE namespace=$1 AND session_key=$2 AND slot>=$3 AND slot<$4) page ORDER BY slot"),
             &[&namespace.binding(), &key, &number(after as u64)?, &number(after.saturating_add(limit) as u64)?, &(MAX_METADATA as i32)],
         ).await.map_err(backend)?;
         if records.len() != total.saturating_sub(after).min(limit) {
@@ -399,7 +422,8 @@ impl PgProjectionTransaction<'_> {
         let mut decoded = Vec::new();
         let mut bytes = 0;
         for (index, record) in records.iter().enumerate() {
-            let text: &str = record.get(1);
+            let text: Option<&str> = record.get(1);
+            let text = text.ok_or_else(|| backend("selected recipe byte budget exceeded"))?;
             bytes += text.len();
             if bytes > MAX_METADATA || record.get::<_, i64>(0) != number((after + index) as u64)? {
                 return Err(backend("selected recipe budget or sequence mismatch"));
@@ -427,6 +451,21 @@ impl PgProjectionTransaction<'_> {
         expected: ProjectionTag,
     ) -> Result<bool, StorageError> {
         ensure(&self.namespace, namespace)?;
+        self.tx.batch_execute("SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+        let result = self.withdraw_source_inner(namespace, path, expected).await;
+        if !matches!(result, Ok(true)) {
+            self.tx.batch_execute("ROLLBACK TO SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+        }
+        self.tx.batch_execute("RELEASE SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+        result
+    }
+
+    async fn withdraw_source_inner(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+        expected: ProjectionTag,
+    ) -> Result<bool, StorageError> {
         self.tx
             .query_one(
                 "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",

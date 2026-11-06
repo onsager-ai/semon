@@ -11,13 +11,22 @@ pub(crate) struct SearchPage {
 }
 
 impl PgProjectionTransaction<'_> {
-    pub(super) async fn publish_search(&self, namespace: &Namespace, row: &CatalogRow) -> Result<(), StorageError> {
+    pub(super) async fn publish_search(
+        &self,
+        namespace: &Namespace,
+        row: &CatalogRow,
+    ) -> Result<(), StorageError> {
         for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
-            let selected = self.catalog_row(namespace, &row.key, scope).await?.ok_or_else(|| backend("search publication identity unavailable"))?;
+            let selected = self
+                .catalog_row(namespace, &row.key, scope)
+                .await?
+                .ok_or_else(|| backend("search publication identity unavailable"))?;
             let fields = catalog_search::fields(&selected);
             let encoded = serde_json::to_string(&fields).map_err(backend)?;
             let grams: Vec<_> = catalog_search::grams(&fields).into_iter().collect();
-            if encoded.len() > 8192 || grams.len() > 1024 { return Err(backend("metadata search document budget exceeded")) }
+            if encoded.len() > 8192 || grams.len() > 1024 {
+                return Err(backend("metadata search document budget exceeded"));
+            }
             let scope = catalog_search::scope_key(scope);
             self.tx.execute("DELETE FROM semon_projection.search_postings WHERE namespace=$1 AND session_key=$2 AND read_scope=$3", &[&namespace.binding(), &row.key, &scope]).await.map_err(backend)?;
             self.tx.execute("INSERT INTO semon_projection.search_postings(namespace,session_key,read_scope,gram,last_ms) SELECT $1,$2,$3,g,$4 FROM unnest($5::text[]) g", &[&namespace.binding(), &row.key, &scope, &row.last.unwrap_or(0), &grams]).await.map_err(backend)?;
@@ -34,8 +43,12 @@ impl PgProjectionTransaction<'_> {
         limit: usize,
     ) -> Result<SearchPage, StorageError> {
         ensure(&self.namespace, namespace)?;
-        if !(1..=100).contains(&limit) { return Err(backend("invalid search limit")) }
-        let query = catalog_search::normalize_query(query).filter(|query| !query.is_empty()).ok_or_else(|| backend("invalid metadata query"))?;
+        if !(1..=100).contains(&limit) {
+            return Err(backend("invalid search limit"));
+        }
+        let query = catalog_search::normalize_query(query)
+            .filter(|query| !query.is_empty())
+            .ok_or_else(|| backend("invalid metadata query"))?;
         let anchor: String = query.chars().take(3).collect();
         let (last, key) = after.unwrap_or((i64::MAX, ""));
         let postings = self.tx.query(
@@ -49,16 +62,42 @@ impl PgProjectionTransaction<'_> {
         for posting in postings.iter().take(catalog_search::MAX_CANDIDATES) {
             let key: String = posting.get(0);
             let last: i64 = posting.get(1);
-            let row = self.catalog_row(namespace, &key, scope).await?.ok_or_else(|| backend("search candidate unavailable"))?;
+            let row = self
+                .catalog_row(namespace, &key, scope)
+                .await?
+                .ok_or_else(|| backend("search candidate unavailable"))?;
             bytes += serde_json::to_vec(&row).map_err(backend)?.len();
-            if bytes > catalog_search::MAX_SCAN_BYTES { return Ok(SearchPage { rows, next: checked.or(Some((last, key))), partial: true, candidates }) }
-            let matches = catalog_search::fields(&row).iter().any(|field| field.contains(&query));
-            if matches && rows.len() == limit { return Ok(SearchPage { rows, next: checked, partial: false, candidates }) }
+            if bytes > catalog_search::MAX_SCAN_BYTES {
+                return Ok(SearchPage {
+                    rows,
+                    next: checked.or(Some((last, key))),
+                    partial: true,
+                    candidates,
+                });
+            }
+            let matches = catalog_search::fields(&row)
+                .iter()
+                .any(|field| field.contains(&query));
+            if matches && rows.len() == limit {
+                return Ok(SearchPage {
+                    rows,
+                    next: checked,
+                    partial: false,
+                    candidates,
+                });
+            }
             candidates += 1;
             checked = Some((last, key));
-            if matches { rows.push(row); }
+            if matches {
+                rows.push(row);
+            }
         }
         let partial = postings.len() > catalog_search::MAX_CANDIDATES;
-        Ok(SearchPage { rows, next: if partial { checked } else { None }, partial, candidates })
+        Ok(SearchPage {
+            rows,
+            next: if partial { checked } else { None },
+            partial,
+            candidates,
+        })
     }
 }

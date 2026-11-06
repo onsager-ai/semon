@@ -121,12 +121,27 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert_eq!(page.rows.len(), 1);
     assert_eq!(page.generation, generation);
     assert!(page.next.is_none());
-    let found = tx.search_catalog(&namespace, CatalogReadScope::Current, "SYNTHETIC", None, 10).await.unwrap();
+    let found = tx
+        .search_catalog(&namespace, CatalogReadScope::Current, "SYNTHETIC", None, 10)
+        .await
+        .unwrap();
     assert_eq!(found.rows.len(), 1);
     assert_eq!(found.candidates, 1);
     assert!(!found.partial);
     assert!(found.next.is_none());
-    assert!(tx.search_catalog(&namespace, CatalogReadScope::Current, "private body", None, 10).await.unwrap().rows.is_empty());
+    assert!(
+        tx.search_catalog(
+            &namespace,
+            CatalogReadScope::Current,
+            "private body",
+            None,
+            10
+        )
+        .await
+        .unwrap()
+        .rows
+        .is_empty()
+    );
     eprintln!(
         "postgres-typed-catalog-cold-first-page-us={}",
         start.elapsed().as_micros()
@@ -256,8 +271,27 @@ pub(super) async fn lifecycle(dsn: &str) {
         .unwrap()
         .unwrap();
     assert_eq!(history.sources, row.sources);
-    assert_eq!(tx.search_catalog(&namespace, CatalogReadScope::RetainedHistory, "synthetic", None, 10).await.unwrap().rows.len(), 1);
-    assert!(tx.search_catalog(&namespace, CatalogReadScope::Current, "synthetic", None, 10).await.unwrap().rows.is_empty());
+    assert_eq!(
+        tx.search_catalog(
+            &namespace,
+            CatalogReadScope::RetainedHistory,
+            "synthetic",
+            None,
+            10
+        )
+        .await
+        .unwrap()
+        .rows
+        .len(),
+        1
+    );
+    assert!(
+        tx.search_catalog(&namespace, CatalogReadScope::Current, "synthetic", None, 10)
+            .await
+            .unwrap()
+            .rows
+            .is_empty()
+    );
     let (_, history_total, history_slots) = tx
         .recipe_page(
             &namespace,
