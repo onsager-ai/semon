@@ -8,6 +8,8 @@ impl PgProjectionStore {
     /// native producer. Hosts retain source custody across this operation and
     /// call it outside their request executor because native parsing blocks.
     /// A changed Catalog or source refuses publication; the caller rescans Raw.
+    /// The host must supply the complete relationship component. Cohorts with
+    /// unresolved cross-component lineage are not qualified by this API.
     /// This does not discover unrelated sources or open a SQLite session store.
     pub async fn publish_sources(
         &mut self,
@@ -99,6 +101,13 @@ impl PgProjectionStore {
             if tx.ledger(namespace, path).await?.map(|tag| tag.epoch) != *epoch {
                 return Ok(None);
             }
+        }
+        let keys = prepared.rows.iter().map(|row| row.key.as_str()).collect::<BTreeSet<_>>();
+        if !prepared.lineage_dependencies.is_empty()
+            || prepared.rows.iter().any(|row| row.parent.as_deref().is_some_and(|parent| !keys.contains(parent)))
+            || prepared.rows.iter().filter_map(|row| row.trace.as_ref()).any(|trace| !trace.closed_over(&keys))
+        {
+            return Err(backend("native cohort requires complete relationship closure"));
         }
         let generation = tx
             .publish_catalog(
