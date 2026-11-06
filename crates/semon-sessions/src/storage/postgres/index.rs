@@ -245,7 +245,7 @@ impl PgProjectionTransaction<'_> {
         ).await.map_err(backend)?;
         let lengths = [index.events.len(), index.extras.len(), index.signals.len()];
         self.tx.execute(
-            "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3 WHEN 1 THEN $4 ELSE $5 END",
+            "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3::bigint WHEN 1 THEN $4::bigint ELSE $5::bigint END",
             &[&namespace.binding(), &path, &number(lengths[0] as u64)?, &number(lengths[1] as u64)?, &number(lengths[2] as u64)?],
         ).await.map_err(backend)?;
         let mut kinds = Vec::with_capacity(records.len());
