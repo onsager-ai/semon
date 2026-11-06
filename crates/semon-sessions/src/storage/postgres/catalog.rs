@@ -425,7 +425,7 @@ impl PgProjectionTransaction<'_> {
         }
         let records = self.tx.query(
             &format!("SELECT slot,CASE WHEN scanned_bytes<=$5 THEN metadata END FROM (SELECT slot,metadata,sum(octet_length(metadata)) OVER (ORDER BY slot) AS scanned_bytes FROM semon_projection.{slots} WHERE namespace=$1 AND session_key=$2 AND slot>=$3 AND slot<$4) page ORDER BY slot"),
-            &[&namespace.binding(), &key, &number(after as u64)?, &number(after.saturating_add(limit) as u64)?, &(MAX_METADATA as i32)],
+            &[&namespace.binding(), &key, &number(after as u64)?, &number(after.saturating_add(limit) as u64)?, &(MAX_METADATA as i64)],
         ).await.map_err(backend)?;
         if records.len() != total.saturating_sub(after).min(limit) {
             return Err(backend("selected recipe sequence gap"));
