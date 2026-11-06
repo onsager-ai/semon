@@ -395,11 +395,13 @@ fn catalog_selection_read(
     };
     let reply = match snapshot {
         Some(snapshot) => {
-            read_page_snapshot(options, source_key, &request, snapshot, false, &mut None)
+            let namespace =
+                crate::storage::Namespace::new(source_key).map_err(|_| InvalidArguments)?;
+            read_page_snapshot(options, &namespace, &request, snapshot, false, &mut None)
+                .map_err(|_| Unavailable)?
         }
-        None => read_page(options, source_key, &request, None),
-    }
-    .map_err(|_| Unavailable)?;
+        None => crate::storage::catalog_page(options, source_key, &request, None),
+    };
     let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
     match reply.status {
         404 => return Ok(None),
@@ -972,15 +974,7 @@ pub(crate) fn page_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
-    match read_page(options, machine, &request, on_search) {
-        Ok(reply) => reply,
-        Err(_) => error(
-            503,
-            "catalog_unavailable",
-            "The session catalog is unavailable. Retry after the background observation completes.",
-            true,
-        ),
-    }
+    crate::storage::catalog_page(options, machine, &request, on_search)
 }
 
 /// Whether a normal first Catalog page can read the current persisted
@@ -1032,9 +1026,10 @@ pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
     Ok(true)
 }
 
-fn read_page(
+/// The SQLite snapshot behind the storage port's Catalog reader.
+pub(crate) fn read_page(
     options: &Options,
-    machine: &str,
+    namespace: &crate::storage::Namespace,
     request: &Request,
     on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
@@ -1047,7 +1042,7 @@ fn read_page(
     let mut admission = None;
     let reply = read_page_snapshot(
         options,
-        machine,
+        namespace,
         request,
         &transaction,
         on_search.is_some(),
@@ -1066,13 +1061,15 @@ fn read_page(
 
 fn read_page_snapshot(
     options: &Options,
-    machine: &str,
+    namespace: &crate::storage::Namespace,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
     admit_search: bool,
     admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
+    crate::storage::sqlite::qualify(transaction, namespace)?;
+    let machine = namespace.as_str();
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
             || cursor.machine != machine
@@ -1184,6 +1181,16 @@ fn read_page_snapshot(
     } else {
         (rows(transaction, request)?, None, None)
     };
+    // Each Current unit's projection tag must still describe its Raw source;
+    // the producer's invalidation rebuilds a mismatched unit from Raw.
+    if crate::storage::sqlite::projection_mismatch(transaction, &selected)?.is_some() {
+        return Ok(error(
+            503,
+            "projection_stale",
+            "A session projection no longer matches its native source. Retry after it is rebuilt.",
+            true,
+        ));
+    }
     let mut partial_history = std::collections::BTreeSet::new();
     for row in &selected {
         if transaction.query_row(

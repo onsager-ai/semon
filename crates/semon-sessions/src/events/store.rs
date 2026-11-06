@@ -244,9 +244,9 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: older owned indexes rebuild together. Version 34 adds the
-// matching NOCASE scheduling indexes; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 34;
+// Contract fence: older owned indexes rebuild together. Version 35 adds the
+// per-database storage version stamp; current stores do not run storage DDL.
+pub(crate) const SCHEMA_VERSION: i64 = 35;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -2684,6 +2684,31 @@ impl IndexStore for SqliteStore {
     ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
         self.write_runs(runs, stamp).map_err(failure)
     }
+
+    fn bind_storage_namespace(&mut self, namespace: &str) -> Result<String, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        require_current_sql(&transaction).map_err(failure)?;
+        let (stamp, bound) = crate::storage::sqlite::binding(&transaction).map_err(failure)?;
+        if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
+            return Err(StoreError::Failed(
+                "unsupported session store: version stamp".into(),
+            ));
+        }
+        if let Some(bound) = bound {
+            return Ok(bound);
+        }
+        transaction
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('storage_namespace',?1)",
+                [namespace],
+            )
+            .map_err(failure)?;
+        transaction.commit().map_err(failure)?;
+        Ok(namespace.to_owned())
+    }
 }
 
 /// Source observation work survives a process restart. The journal contains
@@ -4841,8 +4866,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     transaction.execute_batch(ddl)?;
                 }
                 transaction.execute(
-                    "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
-                    [CACHE_VERSION.to_string()],
+                    "INSERT INTO meta(key,value) VALUES('cache_version',?1),('storage_stamp',?2)",
+                    [CACHE_VERSION.to_string(), crate::storage::sqlite::stamp()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 initialized = true;
@@ -5584,6 +5609,11 @@ fn gap(what: &str) -> rusqlite::Error {
 }
 
 // ---- Reading -------------------------------------------------------------------------------
+
+/// The committed ledger of one source path, for projection tag checks.
+pub(crate) fn committed_ledger(connection: &Connection, path: &str) -> rusqlite::Result<Option<Ledger>> {
+    Ok(ledger_row(connection, path)?.map(|(_, ledger)| ledger))
+}
 
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection

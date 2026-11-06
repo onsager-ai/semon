@@ -122,6 +122,7 @@ mod source_carrier;
 mod source_chunks;
 mod source_reader;
 pub use selected_read::SelectedReadControl;
+mod storage;
 mod tx;
 pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};
 mod union;

@@ -1289,6 +1289,11 @@ pub(crate) trait IndexStore: Send {
         runs: &[crate::facts::ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError>;
+
+    /// Bind an unbound database to the logical `namespace` in one writer
+    /// transaction and return the namespace it is bound to afterwards. A
+    /// database already bound to another namespace is returned unchanged.
+    fn bind_storage_namespace(&mut self, namespace: &str) -> Result<String, StoreError>;
 }
 
 /// One file's index in memory, and the ledger it was read at.
@@ -2167,6 +2172,16 @@ impl EventCache {
             // A failed cache publication never changes the serving snapshot.
             let _ = store.save_session_descriptions(&descriptions);
         }
+    }
+
+    /// See [`IndexStore::bind_storage_namespace`]; it uses the writer's own
+    /// connection, so binding adds no second writer.
+    pub(crate) fn bind_storage_namespace(&mut self, namespace: &str) -> io::Result<String> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("session index store unavailable"))?
+            .bind_storage_namespace(namespace)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn session_catalog_generation(&self) -> Option<String> {
