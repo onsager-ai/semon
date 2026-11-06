@@ -684,3 +684,88 @@ fn storage_same_inode_rewrite_past_the_published_boundary_is_refused_then_rebuil
     let (status, body) = read(&store, &na, &na).unwrap();
     assert_eq!(status, 200, "{body}");
 }
+
+#[test]
+fn storage_withdrawal_during_a_failed_publication_keeps_history_in_custody() {
+    let root = root();
+    native(&root.0, "kept", "kept prompt");
+    let withdrawn = native(&root.0, "withdrawn", "withdrawn prompt");
+    let a = source(&root.0, "a");
+    let na = namespace("machine-a");
+    let store = SqliteSessionStore::new([(na.clone(), a.clone())]);
+    produce(&na, &a).unwrap();
+    let page = |query: &str| -> Value {
+        let reply = store
+            .reader(&na)
+            .unwrap()
+            .page(&na, &request(query), None)
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        serde_json::from_slice(&reply.body).unwrap()
+    };
+    let native_ids = |page: &Value| -> Vec<Value> {
+        let mut ids: Vec<_> = page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["native_ids"].clone())
+            .collect();
+        ids.sort_by_key(Value::to_string);
+        ids
+    };
+    assert_eq!(
+        native_ids(&page("limit=10")),
+        [json!(["kept"]), json!(["withdrawn"])]
+    );
+    let connection = database(&a);
+    let catalog = || -> Vec<(String, String, String)> {
+        connection
+            .prepare("SELECT session_key,lifecycle,metadata FROM session_catalog ORDER BY session_key")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    let published = catalog();
+
+    // Raw is withdrawn while a publication fails partway through its
+    // transaction: nothing it wrote survives and the History is unchanged.
+    fs::remove_file(&withdrawn).unwrap();
+    connection
+        .execute_batch("CREATE TRIGGER interrupt_publication BEFORE UPDATE ON session_catalog BEGIN SELECT RAISE(ABORT,'injected publication failure'); END;")
+        .unwrap();
+    let evidence = crate::native_evidence::NativeEvidence::for_source(na.clone(), a.clone());
+    evidence.request_metadata_audit();
+    let mut work = crate::viewer::lock(&evidence.work);
+    let failed = (0..64).any(|_| {
+        evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .is_err()
+    });
+    drop(work);
+    evidence.retire();
+    assert!(failed, "the injected publication failure was never reached");
+    assert_eq!(catalog(), published);
+
+    // The next publication hands the withdrawn session's History to custody:
+    // it leaves Current and stays readable as retained History.
+    connection
+        .execute_batch("DROP TRIGGER interrupt_publication")
+        .unwrap();
+    produce(&na, &a).unwrap();
+    assert_eq!(native_ids(&page("limit=10")), [json!(["kept"])]);
+    let history = page("scope=retained_history&limit=10");
+    assert_eq!(
+        native_ids(&history),
+        [json!(["kept"]), json!(["withdrawn"])]
+    );
+    let retained = history["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["native_ids"] == json!(["withdrawn"]))
+        .unwrap();
+    assert_eq!(retained["lifecycle"], "retained", "{retained}");
+    assert_eq!(bound(&a).as_deref(), Some("machine-a"));
+}
