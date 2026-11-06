@@ -484,6 +484,25 @@ impl CostBuild {
         }
     }
 
+    /// Finish a single native usage fact. Read the priced cache component before
+    /// `finish` fills absent categories with zero for presentation. A missing
+    /// output rate can make list cost unknown while cache-read cost stays known.
+    #[allow(
+        dead_code,
+        reason = "Activity publication is a separate follow-up slice"
+    )]
+    pub(crate) fn finish_step(self, cache_read: u64) -> (Option<f64>, Option<f64>) {
+        let carry = if cache_read == 0 {
+            Some(0.0)
+        } else {
+            self.models
+                .values()
+                .next()
+                .and_then(|model| model.usd_by_kind.get("cache_read").copied())
+        };
+        (self.finish().usd, carry)
+    }
+
     pub(crate) fn finish(self) -> Cost {
         let by_model = self
             .models
