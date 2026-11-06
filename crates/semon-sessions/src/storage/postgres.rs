@@ -33,23 +33,44 @@ impl PgProjectionStore {
             &[],
         ).await.map_err(backend)?;
         if role.get::<_, bool>(0) || role.get::<_, bool>(1) || role.get::<_, bool>(2) {
-            return Err(StorageError::Backend("PostgreSQL requires a restricted non-owner role".into()));
+            return Err(StorageError::Backend(
+                "PostgreSQL requires a restricted non-owner role".into(),
+            ));
         }
         Ok(Self { client, namespace })
     }
 
-    pub async fn begin(&mut self, namespace: &Namespace) -> Result<PgProjectionTransaction<'_>, StorageError> {
+    pub async fn begin(
+        &mut self,
+        namespace: &Namespace,
+    ) -> Result<PgProjectionTransaction<'_>, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let tx = self.client.build_transaction()
+        let tx = self
+            .client
+            .build_transaction()
             .isolation_level(IsolationLevel::RepeatableRead)
-            .start().await.map_err(backend)?;
+            .start()
+            .await
+            .map_err(backend)?;
         tx.query_one("SELECT set_config('semon.namespace',$1,true),set_config('statement_timeout','5000',true),set_config('lock_timeout','1000',true)", &[&namespace.binding()]).await.map_err(backend)?;
         tx.execute("INSERT INTO semon_projection.namespaces(namespace,stamp) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &stamp()]).await.map_err(backend)?;
-        let found: String = tx.query_one("SELECT stamp FROM semon_projection.namespaces WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?.get(0);
+        let found: String = tx
+            .query_one(
+                "SELECT stamp FROM semon_projection.namespaces WHERE namespace=$1",
+                &[&namespace.binding()],
+            )
+            .await
+            .map_err(backend)?
+            .get(0);
         if found != stamp() {
-            return Err(StorageError::Unsupported("unsupported PostgreSQL projection stamp".into()));
+            return Err(StorageError::Unsupported(
+                "unsupported PostgreSQL projection stamp".into(),
+            ));
         }
-        Ok(PgProjectionTransaction { tx, namespace: namespace.clone() })
+        Ok(PgProjectionTransaction {
+            tx,
+            namespace: namespace.clone(),
+        })
     }
 }
 
@@ -59,12 +80,15 @@ pub struct PgProjectionTransaction<'a> {
 }
 
 fn number(value: u64) -> Result<i64, StorageError> {
-    i64::try_from(value).map_err(|_| StorageError::Backend("projection integer exceeds PostgreSQL bigint".into()))
+    i64::try_from(value)
+        .map_err(|_| StorageError::Backend("projection integer exceeds PostgreSQL bigint".into()))
 }
 
 fn decode(row: &tokio_postgres::Row) -> Result<ProjectionTag, StorageError> {
     let digest = |index| -> Result<[u8; 32], StorageError> {
-        row.try_get::<_, Vec<u8>>(index).map_err(backend)?.try_into()
+        row.try_get::<_, Vec<u8>>(index)
+            .map_err(backend)?
+            .try_into()
             .map_err(|_| StorageError::Unsupported("invalid projection digest".into()))
     };
     Ok(ProjectionTag {
@@ -79,7 +103,11 @@ fn decode(row: &tokio_postgres::Row) -> Result<ProjectionTag, StorageError> {
 }
 
 impl PgProjectionTransaction<'_> {
-    pub async fn ledger(&self, namespace: &Namespace, path: &str) -> Result<Option<ProjectionTag>, StorageError> {
+    pub async fn ledger(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+    ) -> Result<Option<ProjectionTag>, StorageError> {
         ensure(&self.namespace, namespace)?;
         self.tx.query_opt("SELECT dev,ino,consumed,prefix,tail,epoch,projector FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &path]).await.map_err(backend)?.as_ref().map(decode).transpose()
     }
@@ -87,11 +115,26 @@ impl PgProjectionTransaction<'_> {
     /// Ledger CAS and epoch allocation are one transaction. An append preserves
     /// its epoch; a replacement gets a new namespace-wide epoch. A conflicting
     /// caller must roll back and rescan Raw rather than acknowledge its range.
-    pub async fn write_ledger(&self, namespace: &Namespace, path: &str, expected: Option<ProjectionTag>, mut next: ProjectionTag, append: bool) -> Result<Option<ProjectionTag>, StorageError> {
+    pub async fn write_ledger(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+        expected: Option<ProjectionTag>,
+        mut next: ProjectionTag,
+        append: bool,
+    ) -> Result<Option<ProjectionTag>, StorageError> {
         ensure(&self.namespace, namespace)?;
-        self.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+        self.tx
+            .query_one(
+                "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                &[&namespace.binding()],
+            )
+            .await
+            .map_err(backend)?;
         let actual = self.ledger(namespace, path).await?;
-        if actual != expected { return Ok(None); }
+        if actual != expected {
+            return Ok(None);
+        }
         next.epoch = match actual.filter(|_| append) {
             Some(previous) if previous.check(&next) == TagCheck::Advanced => previous.epoch,
             Some(previous) if previous == next => previous.epoch,
@@ -103,21 +146,34 @@ impl PgProjectionTransaction<'_> {
 
     /// A unit is readable only while its exact published tag agrees with the
     /// committed ledger in this snapshot. Raw proof checks remain independent.
-    pub async fn publish_tag(&self, namespace: &Namespace, key: &str, path: &str, tag: ProjectionTag) -> Result<(), StorageError> {
+    pub async fn publish_tag(
+        &self,
+        namespace: &Namespace,
+        key: &str,
+        path: &str,
+        tag: ProjectionTag,
+    ) -> Result<(), StorageError> {
         ensure(&self.namespace, namespace)?;
-        if self.ledger(namespace,path).await? != Some(tag) {
+        if self.ledger(namespace, path).await? != Some(tag) {
             return Err(StorageError::Backend("projection_stale".into()));
         }
         self.tx.execute("INSERT INTO semon_projection.units(namespace,unit_key,path,dev,ino,consumed,prefix,tail,epoch,projector) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(namespace,unit_key,path) DO UPDATE SET dev=excluded.dev,ino=excluded.ino,consumed=excluded.consumed,prefix=excluded.prefix,tail=excluded.tail,epoch=excluded.epoch,projector=excluded.projector", &[&namespace.binding(),&key,&path,&(tag.dev as i64),&(tag.ino as i64),&number(tag.offset)?,&&tag.prefix_sha256[..],&&tag.tail_sha256[..],&tag.epoch,&(tag.projector as i32)]).await.map_err(backend)?;
         Ok(())
     }
 
-    pub async fn check_tag(&self, namespace: &Namespace, key: &str, path: &str) -> Result<Option<TagCheck>, StorageError> {
+    pub async fn check_tag(
+        &self,
+        namespace: &Namespace,
+        key: &str,
+        path: &str,
+    ) -> Result<Option<TagCheck>, StorageError> {
         ensure(&self.namespace, namespace)?;
         let row = self.tx.query_opt("SELECT dev,ino,consumed,prefix,tail,epoch,projector FROM semon_projection.units WHERE namespace=$1 AND unit_key=$2 AND path=$3", &[&namespace.binding(),&key,&path]).await.map_err(backend)?;
-        let Some(row) = row else { return Ok(None); };
+        let Some(row) = row else {
+            return Ok(None);
+        };
         let published = decode(&row)?;
-        Ok(Some(match self.ledger(namespace,path).await? {
+        Ok(Some(match self.ledger(namespace, path).await? {
             Some(committed) => published.check(&committed),
             None => TagCheck::Mismatch("missing_ledger"),
         }))

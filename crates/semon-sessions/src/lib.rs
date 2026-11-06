@@ -124,9 +124,11 @@ mod source_reader;
 pub use selected_read::SelectedReadControl;
 mod storage;
 #[cfg(feature = "postgres")]
-pub use storage::{Namespace as SessionNamespace, ProjectionTag, StorageError, TagCheck};
+pub use storage::postgres::{
+    PgProjectionStore, PgProjectionTransaction, SCHEMA as POSTGRES_PROJECTION_SCHEMA,
+};
 #[cfg(feature = "postgres")]
-pub use storage::postgres::{PgProjectionStore, PgProjectionTransaction, SCHEMA as POSTGRES_PROJECTION_SCHEMA};
+pub use storage::{Namespace as SessionNamespace, ProjectionTag, StorageError, TagCheck};
 mod tx;
 pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSourceReader};
 mod union;

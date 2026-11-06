@@ -171,7 +171,8 @@ fn storage_invalid_host_keys_return_errors_before_opening_an_index() {
     let root = root();
     for key in ["invalid\0source".to_owned(), "x".repeat(4097)] {
         let options = source(&root.0, if key.contains('\0') { "nul" } else { "long" });
-        let evidence = crate::native_evidence::NativeEvidence::for_source_key(&key, options.clone());
+        let evidence =
+            crate::native_evidence::NativeEvidence::for_source_key(&key, options.clone());
         let error = match evidence.open_index() {
             Ok(_) => panic!("invalid namespace opened an index"),
             Err(error) => error,
@@ -193,7 +194,11 @@ fn storage_custody_writers_and_proofs_refuse_another_namespace_without_changes()
     let owner = namespace("owner");
     produce(&owner, &options).unwrap();
     let before = database(&options)
-        .query_row("SELECT COUNT(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0))
+        .query_row(
+            "SELECT COUNT(*) FROM session_catalog_invalidations",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
         .unwrap();
     let input = crate::inputs(&options).unwrap().remove(0);
     assert!(crate::SessionSourceWrite::begin(&options, "other", &input, None, 0).is_err());
@@ -201,12 +206,25 @@ fn storage_custody_writers_and_proofs_refuse_another_namespace_without_changes()
     assert!(crate::collect(&options, "other").is_err());
     assert!(crate::FactsSource::new(&options, "other").facts().is_err());
     assert!(crate::session_source_proof(&options, "other", "claude", &input.path).is_err());
-    let proof = crate::session_source_proof(&options, "owner", "claude", &input.path).unwrap().unwrap();
-    let ready = crate::source_projection_ready(&options, "claude", &input.path).unwrap().unwrap();
+    let proof = crate::session_source_proof(&options, "owner", "claude", &input.path)
+        .unwrap()
+        .unwrap();
+    let ready = crate::source_projection_ready(&options, "claude", &input.path)
+        .unwrap()
+        .unwrap();
     assert!(crate::retain_source_event_index(&options, "other", &proof, &ready).is_err());
     assert!(!crate::source_event_index_retained(&options, &proof, &ready).unwrap());
     assert_eq!(bound(&options).as_deref(), Some("owner"));
-    assert_eq!(database(&options).query_row("SELECT COUNT(*) FROM session_catalog_invalidations", [], |row| row.get::<_, i64>(0)).unwrap(), before);
+    assert_eq!(
+        database(&options)
+            .query_row(
+                "SELECT COUNT(*) FROM session_catalog_invalidations",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        before
+    );
 }
 
 #[test]

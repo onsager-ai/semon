@@ -9,9 +9,9 @@
 //! partial effect. Each database carries one version stamp, and each Catalog
 //! unit carries a [`ProjectionTag`] that readers check against the committed
 //! ledger before serving it.
-pub(crate) mod sqlite;
 #[cfg(feature = "postgres")]
 pub(crate) mod postgres;
+pub(crate) mod sqlite;
 
 #[cfg(test)]
 mod conformance;
