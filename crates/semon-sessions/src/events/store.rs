@@ -3378,10 +3378,13 @@ impl SqliteStore {
             }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
+            let metadata_bytes = metadata.iter().zip(&query_recipes).try_fold(0usize, |total, (text, recipe)| {
+                total.checked_add(text.len())?.checked_add(recipe.as_ref().map_or(0, String::len))
+            }).ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
             let mut history_budget =
-                crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+                crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
             for row in rows.iter().chain(withdrawn.iter()) {
-                crate::storage::sqlite::proof_generations::retain_current_refs_for_unowned_history(
+                match crate::storage::sqlite::proof_generations::retain_current_refs_for_unowned_history(
                     &transaction,
                     owner.config().namespace.as_str(),
                     &row.key,
@@ -3392,15 +3395,11 @@ impl SqliteStore {
                         .as_deref()
                         .ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
                     &mut history_budget,
-                )
-                .map_err(|error| match error {
-                    crate::storage::sqlite::proof_generations::PublicationError::Storage(error) => {
-                        StoreError::Configured(error)
-                    }
-                    crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow => {
-                        StoreError::Configured(StorageError::HistoryRetentionBounds)
-                    }
-                })?;
+                ) {
+                    Ok(()) => {}
+                    Err(crate::storage::sqlite::proof_generations::PublicationError::Storage(error)) => return Err(StoreError::Configured(error)),
+                    Err(crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow) => return Ok(Outcome::Deferred),
+                }
             }
             crate::storage::sqlite::history::publish_composition(&history, publication)
                 .map_err(failure)?;
