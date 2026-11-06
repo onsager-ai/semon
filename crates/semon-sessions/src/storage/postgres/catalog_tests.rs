@@ -121,6 +121,12 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert_eq!(page.rows.len(), 1);
     assert_eq!(page.generation, generation);
     assert!(page.next.is_none());
+    let found = tx.search_catalog(&namespace, CatalogReadScope::Current, "SYNTHETIC", None, 10).await.unwrap();
+    assert_eq!(found.rows.len(), 1);
+    assert_eq!(found.candidates, 1);
+    assert!(!found.partial);
+    assert!(found.next.is_none());
+    assert!(tx.search_catalog(&namespace, CatalogReadScope::Current, "private body", None, 10).await.unwrap().rows.is_empty());
     eprintln!(
         "postgres-typed-catalog-cold-first-page-us={}",
         start.elapsed().as_micros()
@@ -130,11 +136,22 @@ pub(super) async fn lifecycle(dsn: &str) {
         .await
         .unwrap();
     assert_eq!(total, 1);
-    let facts = crate::Facts { version: crate::FACTS_VERSION, hostname: "reported-machine".into(), ..Default::default() };
+    let facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "reported-machine".into(),
+        ..Default::default()
+    };
     assert!(tx.write_facts(&namespace, None, 1, &facts).await.unwrap());
     assert!(!tx.write_facts(&namespace, None, 2, &facts).await.unwrap());
-    assert!(tx.write_checkpoint(&namespace, "source-claim", None, 1, "prepared").await.unwrap());
-    let changes = tx.catalog_changes(&namespace, CatalogReadScope::Current, None, 0, 10).await.unwrap();
+    assert!(
+        tx.write_checkpoint(&namespace, "source-claim", None, 1, "prepared")
+            .await
+            .unwrap()
+    );
+    let changes = tx
+        .catalog_changes(&namespace, CatalogReadScope::Current, None, 0, 10)
+        .await
+        .unwrap();
     assert!(changes.caught_up);
     assert_eq!(changes.changes.len(), 1);
     let stream_epoch = changes.stream_epoch;
@@ -158,13 +175,30 @@ pub(super) async fn lifecycle(dsn: &str) {
     .await
     .unwrap();
     let tx = store.begin(&namespace).await.unwrap();
-    assert_eq!(tx.reported_facts(&namespace).await.unwrap(), Some((1, facts.clone())));
-    assert_eq!(tx.checkpoint(&namespace, "source-claim").await.unwrap(), Some((1, "prepared".into())));
-    assert!(!tx.write_checkpoint(&namespace, "source-claim", None, 2, "stale").await.unwrap());
-    assert!(tx.write_checkpoint(&namespace, "source-claim", Some(1), 2, "uncommitted").await.unwrap());
+    assert_eq!(
+        tx.reported_facts(&namespace).await.unwrap(),
+        Some((1, facts.clone()))
+    );
+    assert_eq!(
+        tx.checkpoint(&namespace, "source-claim").await.unwrap(),
+        Some((1, "prepared".into()))
+    );
+    assert!(
+        !tx.write_checkpoint(&namespace, "source-claim", None, 2, "stale")
+            .await
+            .unwrap()
+    );
+    assert!(
+        tx.write_checkpoint(&namespace, "source-claim", Some(1), 2, "uncommitted")
+            .await
+            .unwrap()
+    );
     drop(tx);
     let tx = store.begin(&namespace).await.unwrap();
-    assert_eq!(tx.checkpoint(&namespace, "source-claim").await.unwrap(), Some((1, "prepared".into())));
+    assert_eq!(
+        tx.checkpoint(&namespace, "source-claim").await.unwrap(),
+        Some((1, "prepared".into()))
+    );
     assert_eq!(
         tx.recipe_page(
             &namespace,
@@ -222,6 +256,8 @@ pub(super) async fn lifecycle(dsn: &str) {
         .unwrap()
         .unwrap();
     assert_eq!(history.sources, row.sources);
+    assert_eq!(tx.search_catalog(&namespace, CatalogReadScope::RetainedHistory, "synthetic", None, 10).await.unwrap().rows.len(), 1);
+    assert!(tx.search_catalog(&namespace, CatalogReadScope::Current, "synthetic", None, 10).await.unwrap().rows.is_empty());
     let (_, history_total, history_slots) = tx
         .recipe_page(
             &namespace,
@@ -238,11 +274,30 @@ pub(super) async fn lifecycle(dsn: &str) {
         serde_json::to_value(&history_slots).unwrap(),
         serde_json::to_value(&slots).unwrap()
     );
-    let changes = tx.catalog_changes(&namespace, CatalogReadScope::Current, Some(&stream_epoch), 1, 10).await.unwrap();
+    let changes = tx
+        .catalog_changes(
+            &namespace,
+            CatalogReadScope::Current,
+            Some(&stream_epoch),
+            1,
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.head, 2);
     assert!(changes.caught_up);
-    assert!(tx.catalog_changes(&namespace, CatalogReadScope::Current, Some("foreign epoch"), 1, 10).await.is_err());
+    assert!(
+        tx.catalog_changes(
+            &namespace,
+            CatalogReadScope::Current,
+            Some("foreign epoch"),
+            1,
+            10
+        )
+        .await
+        .is_err()
+    );
     assert!(
         tx.proof_block(&namespace, path.to_str().unwrap(), first, 0)
             .await
@@ -266,7 +321,12 @@ pub(super) async fn lifecycle(dsn: &str) {
     .unwrap();
     let tx = store.begin(&foreign).await.unwrap();
     assert!(tx.reported_facts(&foreign).await.unwrap().is_none());
-    assert!(tx.checkpoint(&foreign, "source-claim").await.unwrap().is_none());
+    assert!(
+        tx.checkpoint(&foreign, "source-claim")
+            .await
+            .unwrap()
+            .is_none()
+    );
     assert!(tx.write_facts(&namespace, None, 1, &facts).await.is_err());
     assert!(
         tx.catalog_row(&foreign, &row.key, CatalogReadScope::RetainedHistory)

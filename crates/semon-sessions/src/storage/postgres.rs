@@ -11,6 +11,8 @@ mod index;
 mod catalog;
 #[allow(dead_code, reason = "custody runtime integration is pending")]
 mod custody;
+#[allow(dead_code, reason = "search runtime integration is pending")]
+mod search;
 
 /// Current schema for host provisioning by a role separate from the application.
 /// It is installed once; existing/unsupported stores are never migrated here.

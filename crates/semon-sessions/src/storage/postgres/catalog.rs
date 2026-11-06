@@ -201,6 +201,7 @@ impl PgProjectionTransaction<'_> {
             }
         }
         for row in publication.rows {
+            self.publish_search(namespace, row).await?;
             self.catalog_changed(namespace, &row.key).await?;
         }
         self.tx.execute(

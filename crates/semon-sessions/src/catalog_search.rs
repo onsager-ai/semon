@@ -104,7 +104,7 @@ pub(crate) fn normalize_query(value: &str) -> Option<String> {
     Some(value.trim().to_lowercase())
 }
 
-fn grams(fields: &[String]) -> BTreeSet<String> {
+pub(crate) fn grams(fields: &[String]) -> BTreeSet<String> {
     let mut result = BTreeSet::new();
     for field in fields {
         let chars: Vec<_> = field.chars().collect();
@@ -117,7 +117,7 @@ fn grams(fields: &[String]) -> BTreeSet<String> {
     result
 }
 
-fn fields(row: &CatalogRow) -> Vec<String> {
+pub(crate) fn fields(row: &CatalogRow) -> Vec<String> {
     [
         Some(row.name.as_str()),
         Some(row.key.as_str()),

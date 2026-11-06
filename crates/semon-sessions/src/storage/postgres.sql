@@ -149,6 +149,21 @@ CREATE TABLE semon_projection.catalog (
 );
 CREATE INDEX catalog_current_order ON semon_projection.catalog(namespace,last_ms DESC,session_key) WHERE lifecycle='current';
 CREATE INDEX catalog_history_order ON semon_projection.catalog(namespace,last_ms DESC,session_key);
+CREATE TABLE semon_projection.search_postings (
+    namespace text NOT NULL,
+    session_key text NOT NULL,
+    read_scope text NOT NULL CHECK (read_scope IN ('current','retained_history')),
+    gram text NOT NULL,
+    last_ms bigint NOT NULL,
+    PRIMARY KEY (namespace,session_key,read_scope,gram),
+    FOREIGN KEY (namespace,session_key) REFERENCES semon_projection.catalog(namespace,session_key)
+);
+CREATE INDEX search_posting_order ON semon_projection.search_postings(namespace,read_scope,gram,last_ms DESC,session_key);
+ALTER TABLE semon_projection.search_postings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.search_postings FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.search_postings
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.recipe_heads (
     namespace text NOT NULL,
     session_key text NOT NULL,
