@@ -338,15 +338,21 @@ fn storage_projection_tag_mismatches_are_refused_and_rebuilt_from_raw() {
     let stale = |change: &str, restore: &str| {
         connection.execute(change, [key]).unwrap();
         let (status, body) = read(&store, &na, &na).unwrap();
-        assert_eq!((status, &body["error"]["code"]), (503, &json!("projection_stale")), "{change}");
+        assert_eq!(
+            (status, &body["error"]["code"]),
+            (503, &json!("projection_stale")),
+            "{change}"
+        );
         assert_eq!(body["error"]["retryable"], true);
         connection.execute(restore, [key]).unwrap();
         assert_eq!(summary(read(&store, &na, &na)), served, "{restore}");
     };
     let prefix: Vec<u8> = connection
-        .query_row("SELECT head_sha256 FROM files WHERE path=?1", [key], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT head_sha256 FROM files WHERE path=?1",
+            [key],
+            |row| row.get(0),
+        )
         .unwrap();
     // An altered consumed prefix at the published boundary.
     connection
@@ -356,7 +362,10 @@ fn storage_projection_tag_mismatches_are_refused_and_rebuilt_from_raw() {
         )
         .unwrap();
     let (status, body) = read(&store, &na, &na).unwrap();
-    assert_eq!((status, &body["error"]["code"]), (503, &json!("projection_stale")));
+    assert_eq!(
+        (status, &body["error"]["code"]),
+        (503, &json!("projection_stale"))
+    );
     connection
         .execute(
             "UPDATE files SET head_sha256=?2 WHERE path=?1",
@@ -364,29 +373,41 @@ fn storage_projection_tag_mismatches_are_refused_and_rebuilt_from_raw() {
         )
         .unwrap();
     assert_eq!(summary(read(&store, &na, &na)), served);
-    // A different Raw identity, and a ledger shorter than the publication.
+    // A ledger shorter than the publication, at the same or another Raw
+    // identity.
     stale(
-        "UPDATE files SET ino=ino+1 WHERE path=?1",
-        "UPDATE files SET ino=ino-1 WHERE path=?1",
+        "UPDATE files SET ino=ino+1,resume_at=resume_at-1 WHERE path=?1",
+        "UPDATE files SET ino=ino-1,resume_at=resume_at+1 WHERE path=?1",
     );
+    // A content-identical copy at another Raw identity is the same prefix.
+    connection
+        .execute("UPDATE files SET ino=ino+1 WHERE path=?1", [key])
+        .unwrap();
+    assert_eq!(summary(read(&store, &na, &na)), served);
+    connection
+        .execute("UPDATE files SET ino=ino-1 WHERE path=?1", [key])
+        .unwrap();
     stale(
         "UPDATE files SET resume_at=resume_at-1 WHERE path=?1",
         "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
     );
     // An append-only ledger advance keeps the published prefix readable.
     connection
-        .execute("UPDATE files SET resume_at=resume_at+1 WHERE path=?1", [key])
+        .execute(
+            "UPDATE files SET resume_at=resume_at+1 WHERE path=?1",
+            [key],
+        )
         .unwrap();
     assert_eq!(read(&store, &na, &na).unwrap().0, 200);
     connection
-        .execute("UPDATE files SET resume_at=resume_at-1 WHERE path=?1", [key])
+        .execute(
+            "UPDATE files SET resume_at=resume_at-1 WHERE path=?1",
+            [key],
+        )
         .unwrap();
     // A unit from another projector version is refused with its database.
     connection
-        .execute(
-            "UPDATE meta SET value='0' WHERE key='catalog_version'",
-            [],
-        )
+        .execute("UPDATE meta SET value='0' WHERE key='catalog_version'", [])
         .unwrap();
     assert!(!matches!(read(&store, &na, &na), Ok((200, _))));
     connection
@@ -445,10 +466,22 @@ fn storage_projection_tag_check_classifies_raw_prefix_and_projector() {
         ..tag
     };
     assert_eq!(tag.check(&advanced), TagCheck::Advanced);
+    let copied = ProjectionTag { ino: 9, ..advanced };
+    assert_eq!(tag.check(&copied), TagCheck::Relocated);
+    assert_eq!(
+        tag.check(&ProjectionTag { dev: 9, ..tag }),
+        TagCheck::Current
+    );
     for (committed, reason) in [
-        (ProjectionTag { ino: 9, ..tag }, "raw_identity"),
-        (ProjectionTag { dev: 9, ..tag }, "raw_identity"),
         (ProjectionTag { offset: 9, ..tag }, "consumed_prefix"),
+        (
+            ProjectionTag {
+                ino: 9,
+                offset: 9,
+                ..tag
+            },
+            "consumed_prefix",
+        ),
         (
             ProjectionTag {
                 prefix_sha256: [0; 32],

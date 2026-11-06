@@ -5611,7 +5611,10 @@ fn gap(what: &str) -> rusqlite::Error {
 // ---- Reading -------------------------------------------------------------------------------
 
 /// The committed ledger of one source path, for projection tag checks.
-pub(crate) fn committed_ledger(connection: &Connection, path: &str) -> rusqlite::Result<Option<Ledger>> {
+pub(crate) fn committed_ledger(
+    connection: &Connection,
+    path: &str,
+) -> rusqlite::Result<Option<Ledger>> {
     Ok(ledger_row(connection, path)?.map(|(_, ledger)| ledger))
 }
 

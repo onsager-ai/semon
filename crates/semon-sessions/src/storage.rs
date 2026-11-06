@@ -117,6 +117,10 @@ pub(crate) enum TagCheck {
     /// The ledger appended to the same Raw identity; the published prefix
     /// remains a readable selected prefix while the producer republishes.
     Advanced,
+    /// The ledger moved on at another Raw identity (for example a copied
+    /// file). Whether the published prefix survives is a byte question: a
+    /// selected read's byte proof qualifies it against the native bytes.
+    Relocated,
     /// The unit no longer describes its Raw source and must not be served.
     Mismatch(&'static str),
 }
@@ -144,24 +148,25 @@ impl ProjectionTag {
         }
     }
 
-    /// Compare this stored tag with the tag of the committed ledger.
+    /// Compare this stored tag with the tag of the committed ledger. The
+    /// consumed-prefix digest decides at the published boundary; a content
+    /// identical copy at another Raw identity is still the same prefix.
     pub(crate) fn check(&self, committed: &Self) -> TagCheck {
+        let digests = (self.prefix_sha256, self.tail_sha256);
         if self.projector != committed.projector {
             TagCheck::Mismatch("projector_version")
-        } else if (self.dev, self.ino) != (committed.dev, committed.ino) {
-            TagCheck::Mismatch("raw_identity")
         } else if committed.offset < self.offset {
             TagCheck::Mismatch("consumed_prefix")
         } else if committed.offset == self.offset {
-            if (self.prefix_sha256, self.tail_sha256)
-                == (committed.prefix_sha256, committed.tail_sha256)
-            {
+            if digests == (committed.prefix_sha256, committed.tail_sha256) {
                 TagCheck::Current
             } else {
                 TagCheck::Mismatch("consumed_prefix")
             }
-        } else {
+        } else if (self.dev, self.ino) == (committed.dev, committed.ino) {
             TagCheck::Advanced
+        } else {
+            TagCheck::Relocated
         }
     }
 }
@@ -172,7 +177,10 @@ pub(crate) type OnSearch<'a> = Option<&'a mut dyn FnMut(CatalogSearchAdmission) 
 /// A backend holding one database per placed namespace.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "slice 2 routes the producer through the write capabilities")
+    allow(
+        dead_code,
+        reason = "slice 2 routes the producer through the write capabilities"
+    )
 )]
 pub(crate) trait SessionStore {
     /// A read capability. Opening it performs no I/O; each read qualifies the
@@ -191,7 +199,10 @@ pub(crate) trait SessionStore {
 /// a selected identity a page with `sid`; all read one snapshot.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "slice 2 routes the producer through the write capabilities")
+    allow(
+        dead_code,
+        reason = "slice 2 routes the producer through the write capabilities"
+    )
 )]
 pub(crate) trait CatalogRead {
     fn namespace(&self) -> &Namespace;
@@ -206,7 +217,10 @@ pub(crate) trait CatalogRead {
 /// Event index and consumed-prefix ledger writes.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "slice 2 routes the producer through the write capabilities")
+    allow(
+        dead_code,
+        reason = "slice 2 routes the producer through the write capabilities"
+    )
 )]
 pub(crate) trait IndexWrite {
     fn namespace(&self) -> &Namespace;
@@ -223,7 +237,10 @@ pub(crate) trait IndexWrite {
 /// Source-validated Catalog publication.
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "slice 2 routes the producer through the write capabilities")
+    allow(
+        dead_code,
+        reason = "slice 2 routes the producer through the write capabilities"
+    )
 )]
 pub(crate) trait CatalogPublish {
     fn namespace(&self) -> &Namespace;

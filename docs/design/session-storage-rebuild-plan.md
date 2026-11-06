@@ -54,10 +54,14 @@ Scope:
   SHA-256) that main's ledger and byte-proof checks qualify against native
   bytes; the projector version is the database's Catalog version. Readers
   check every Current unit on a page against the ledger in the same snapshot.
-  A different Raw identity, a shortened ledger or an altered prefix at the
-  same boundary refuses the read with a retryable `projection_stale` result;
-  the producer's invalidation then rebuilds the unit from Raw. An append-only
-  advance of the ledger keeps the published prefix readable.
+  A ledger shorter than the publication, an altered prefix at the published
+  boundary or another projector version refuses the read with a retryable
+  `projection_stale` result; the producer's invalidation then rebuilds the
+  unit from Raw. An append-only advance of the ledger keeps the published
+  prefix readable. A content-identical copy at another Raw identity is the
+  same prefix; when the ledger has moved past the boundary at another
+  identity, the selected read's byte proof qualifies the prefix against the
+  native bytes, as on main.
 - The viewer, union, Query and bookmark readers call the port.
 
 Acceptance checks:
@@ -66,9 +70,9 @@ Acceptance checks:
 - New conformance tests in `storage::conformance`: namespace collision
   between two sources observing the same native path, wrong-namespace refusal
   with no partial success, capability separation, reopen keeps the binding,
-  version stamp refusal, and tag refusal for an altered prefix, a changed Raw
-  identity, a shortened ledger and a wrong projector version; an append-only
-  advance stays readable.
+  version stamp refusal, and tag refusal for an altered prefix, a shortened
+  ledger and a wrong projector version; an append-only advance and a
+  content-identical copy stay readable; an in-place Raw rewrite is rebuilt.
 - One same-runner timing run against main: isolated first page for
   unrelated=0/256/2048 and the full-suite first page.
 

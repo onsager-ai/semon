@@ -3412,7 +3412,9 @@ mod tests {
         assert!(!path.exists());
         // A replacement observed at the same path and offsets cannot borrow
         // the old publication's private recipes, even before its new overview
-        // is published. Reject before issuing any provider reads.
+        // is published. Reject before issuing any provider reads: the
+        // published unit's projection tag no longer matches the committed
+        // ledger, so the Catalog identity read itself refuses it.
         db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.sources[0].prefix_sha256',json(?1)) WHERE session_key='home'", [json!(vec![9;32]).to_string()]).unwrap();
         assert_eq!(
             crate::session_home_details_with_mode(
@@ -3423,7 +3425,7 @@ mod tests {
                 crate::SessionSourceReadMode::ProviderOnly
             )
             .status,
-            409
+            503
         );
     }
 

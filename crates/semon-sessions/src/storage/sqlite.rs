@@ -31,7 +31,9 @@ pub(crate) fn stamp() -> String {
 }
 
 /// The database's stamp and namespace binding, read in the caller's snapshot.
-pub(crate) fn binding(connection: &Connection) -> rusqlite::Result<(Option<String>, Option<String>)> {
+pub(crate) fn binding(
+    connection: &Connection,
+) -> rusqlite::Result<(Option<String>, Option<String>)> {
     connection
         .prepare_cached(
             "SELECT (SELECT value FROM meta WHERE key='storage_stamp'),(SELECT value FROM meta WHERE key='storage_namespace')",
