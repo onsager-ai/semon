@@ -6,6 +6,7 @@ use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 mod index;
+mod producer;
 // The typed Catalog API is qualified independently before runtime adoption.
 #[allow(dead_code, reason = "Catalog runtime integration is pending")]
 mod catalog;

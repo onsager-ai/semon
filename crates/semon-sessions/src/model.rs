@@ -7877,11 +7877,19 @@ fn build_sources_inner(
         "runtime_observations",
         1,
         if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) {
-            crate::native_evidence::RuntimeObservations::for_publication_measured(
-                options,
-                &query_runtime,
-                &mut measurements,
-            )
+            if cache.projection_only() {
+                crate::native_evidence::RuntimeObservations::projection_publication_measured(
+                    options,
+                    &query_runtime,
+                    &mut measurements,
+                )
+            } else {
+                crate::native_evidence::RuntimeObservations::for_publication_measured(
+                    options,
+                    &query_runtime,
+                    &mut measurements,
+                )
+            }
         } else {
             crate::native_evidence::RuntimeObservations::new_measured(options, &mut measurements)
                 .into_scoped()

@@ -1,5 +1,7 @@
 #[path = "postgres/catalog_tests.rs"]
 mod catalog_tests;
+#[path = "postgres/producer_tests.rs"]
+mod producer_tests;
 
 use super::super::{
     Namespace, ProjectionTag, StorageError, TagCheck,
@@ -557,6 +559,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     pg_native_index_lifecycle(&dsn).await;
     pg_sanitized_native_indexes(&dsn).await;
     catalog_tests::lifecycle(&dsn).await;
+    producer_tests::lifecycle(&dsn).await;
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
     assert_eq!(

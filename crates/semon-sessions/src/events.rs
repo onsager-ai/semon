@@ -1319,6 +1319,9 @@ pub(crate) struct EventCache {
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
     scoped: bool,
+    /// Claims captured by a non-SQLite producer with its normalized indexes.
+    #[cfg(feature = "postgres")]
+    projection_claims: Option<Vec<(String, Option<i64>)>>,
     retention_base: Vec<(String, Option<Ledger>)>,
     /// Source fences for the lazy producer, independently of legacy reopen state.
     lock_cache: Option<PathBuf>,
@@ -1456,6 +1459,29 @@ impl EventCache {
         native_ids: &BTreeSet<String>,
     ) -> rusqlite::Result<Self> {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
+    }
+
+    /// Request-local native derivation over a PostgreSQL snapshot. All durable
+    /// writes remain with the PostgreSQL producer; this cache owns no SQL store.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn from_projection(
+        files: Vec<(String, Ledger, FileIndex)>,
+        claims: Vec<(String, Option<i64>)>,
+    ) -> Self {
+        let mut cache = Self::from_loaded(Loaded {
+            files,
+            ..Loaded::default()
+        });
+        cache.projection_claims = Some(claims);
+        cache
+    }
+
+    pub(crate) fn projection_only(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.projection_claims.is_some() {
+            return true;
+        }
+        false
     }
 
     pub(crate) fn selected_index(&self, path: &Path) -> Option<Arc<FileIndex>> {
@@ -1844,6 +1870,17 @@ impl EventCache {
         &self,
         paths: &[String],
     ) -> io::Result<Vec<(String, Option<i64>)>> {
+        #[cfg(feature = "postgres")]
+        if let Some(claims) = &self.projection_claims {
+            return paths
+                .iter()
+                .map(|path| {
+                    claims.iter().find(|(saved, _)| saved == path).cloned().ok_or_else(|| {
+                        io::Error::other("projection source was not captured")
+                    })
+                })
+                .collect();
+        }
         self.store
             .as_ref()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
