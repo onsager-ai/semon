@@ -178,6 +178,10 @@ pub(crate) struct Cost {
     pub(crate) pricing_fingerprint: String,
     pub(crate) usd: Option<f64>,
     pub(crate) unpriced_models: Vec<String>,
+    #[serde(default)]
+    pub(crate) priced_tokens: u64,
+    #[serde(default)]
+    pub(crate) unpriced_tokens: u64,
     pub(crate) split_unknown_messages: u64,
     pub(crate) by_model: BTreeMap<String, ModelCost>,
     pub(crate) by_day: BTreeMap<String, f64>,
@@ -212,6 +216,8 @@ impl Default for Cost {
             pricing_fingerprint: snapshot().fingerprint.clone(),
             usd: Some(0.0),
             unpriced_models: Vec::new(),
+            priced_tokens: 0,
+            unpriced_tokens: 0,
             split_unknown_messages: 0,
             by_model: BTreeMap::new(),
             by_day: BTreeMap::new(),
@@ -245,6 +251,10 @@ pub(crate) struct CostBuild {
     table: Option<std::sync::Arc<EffectiveTable>>,
     usd: f64,
     has_unpriced: bool,
+    #[serde(default)]
+    priced_tokens: u64,
+    #[serde(default)]
+    unpriced_tokens: u64,
     split_unknown_messages: u64,
     pub(crate) models: BTreeMap<String, ModelCostBuild>,
     pub(crate) unpriced_models: BTreeSet<String>,
@@ -275,7 +285,11 @@ impl CostBuild {
         if self.pricing_fingerprint != table.fingerprint {
             return None;
         }
-        table.price_for(provider, model)
+        if model.contains('/') {
+            table.routed_price(model)
+        } else {
+            table.price_for(provider, model)
+        }
     }
 
     pub(crate) fn message(&mut self, message: &MessageUsage) {
@@ -310,6 +324,8 @@ impl CostBuild {
         }
         self.usd += other.usd;
         self.has_unpriced |= other.has_unpriced;
+        self.priced_tokens += other.priced_tokens;
+        self.unpriced_tokens += other.unpriced_tokens;
         self.split_unknown_messages += other.split_unknown_messages;
         self.unpriced_models
             .extend(other.unpriced_models.iter().cloned());
@@ -451,10 +467,12 @@ impl CostBuild {
                 .map(|rate| tokens as f64 * rate / 1_000_000.0)
                 .filter(|v| v.is_finite());
             if let Some(amount) = amount {
+                self.priced_tokens += tokens;
                 *model_cost.usd_by_kind.entry(kind).or_default() += amount;
                 model_cost.usd += amount;
                 entry_usd += amount;
             } else {
+                self.unpriced_tokens += tokens;
                 has_unpriced = true;
             }
         }
@@ -525,6 +543,8 @@ impl CostBuild {
             pricing_fingerprint: self.pricing_fingerprint,
             usd: (!self.has_unpriced).then_some(self.usd),
             unpriced_models: self.unpriced_models.into_iter().collect(),
+            priced_tokens: self.priced_tokens,
+            unpriced_tokens: self.unpriced_tokens,
             split_unknown_messages: self.split_unknown_messages,
             by_model,
             by_day: self.by_day,
@@ -656,6 +676,39 @@ mod tests {
                 split_unknown: false,
             },
         }
+    }
+
+    #[test]
+    fn routed_models_and_token_coverage() {
+        let plain_anthropic = calculate_cost(&[usage("claude-opus-5-5", 100, 20, 0, 0, 0)], &[]);
+        for model in [
+            "gateway/route/claude-opus-5-5",
+            "gateway/route/claude-opus-5-5[1m]",
+        ] {
+            let routed = calculate_cost(&[usage(model, 100, 20, 0, 0, 0)], &[]);
+            assert_eq!(routed.usd, plain_anthropic.usd);
+            assert_eq!((routed.priced_tokens, routed.unpriced_tokens), (120, 0));
+        }
+        let event = CodexUsageEvent {
+            model: "gpt-6.1-sol".into(),
+            tokens: ModelTokens {
+                input: 100,
+                output: 20,
+                ..Default::default()
+            },
+            timestamp: None,
+        };
+        let native = calculate_cost(&[], &[event]);
+        let routed = calculate_cost(&[usage("gateway/route/gpt-6.1-sol", 100, 20, 0, 0, 0)], &[]);
+        assert_eq!(routed.usd, native.usd);
+        assert_eq!((routed.priced_tokens, routed.unpriced_tokens), (120, 0));
+        let unknown = calculate_cost(
+            &[usage("gateway/route/gpt-6.1-terra", 100, 20, 0, 0, 0)],
+            &[],
+        );
+        assert_eq!(unknown.usd, None);
+        assert_eq!((unknown.priced_tokens, unknown.unpriced_tokens), (0, 120));
+        assert_eq!(unknown.unpriced_models, ["gateway/route/gpt-6.1-terra"]);
     }
 
     #[test]

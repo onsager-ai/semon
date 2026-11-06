@@ -37,7 +37,19 @@ pub(crate) struct EffectiveTable {
     providers: BTreeMap<String, BTreeMap<String, Row>>,
 }
 
+// Bump when model alias or provider resolution rules change.
+const LOOKUP_RULES_VERSION: u32 = 2;
+
 impl EffectiveTable {
+    pub(crate) fn routed_price(&self, id: &str) -> Option<Price> {
+        let (_, native) = id.rsplit_once('/')?;
+        let mut matches = PROVIDERS
+            .iter()
+            .filter_map(|provider| self.price_for(provider, native));
+        let price = matches.next()?;
+        matches.next().is_none().then_some(price)
+    }
+
     pub(crate) fn price_for(&self, provider: &str, id: &str) -> Option<Price> {
         let rows = self.providers.get(provider)?;
         rows.get(id)
@@ -64,7 +76,10 @@ impl EffectiveTable {
         }
         self.fingerprint = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&fingerprint_rows)?)
+            Sha256::digest(serde_json::to_vec(&(
+                LOOKUP_RULES_VERSION,
+                fingerprint_rows
+            ))?)
         );
         Ok(())
     }

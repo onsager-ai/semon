@@ -22,11 +22,12 @@ persistence failures retain the previous effective table. Fetches have a
 16 MiB streaming response limit. A normalized cache is fsynced and atomically
 renamed in its directory before it becomes active.
 
-Only native `anthropic` and `openai` identities enter the table. Claude usage
-selects Anthropic, and Codex selects OpenAI. Lookup uses the exact model ID first,
-then the existing dated/bracketed native alias within that provider. Newly
-listed IDs do not require a release. A model is never substituted with another
-model family or provider. Both providers and at least two explicitly priced
+Only native `anthropic` and `openai` identities enter the table. For plain IDs,
+Claude usage selects Anthropic and Codex selects OpenAI. For a routed ID with
+slash-separated segments, lookup uses the final segment in the provider tables;
+exact IDs and the existing dated/bracketed native aliases are accepted. The
+match must belong to exactly one provider. Lookup never substitutes another
+model or family. Newly listed IDs do not require a release. Both providers and at least two explicitly priced
 models per provider must be present in an update. Nonnumeric, negative or
 nonfinite values in mapped fields and invalid context boundaries reject the
 entire v1 update with provider/model/field context. Unknown cost keys and
@@ -83,7 +84,11 @@ unavailable category makes the total unknown, never free.
 
 ## Retained derived costs
 
-Every newly computed cost records its pricing fingerprint. A separate producer
+Every newly computed cost records its pricing fingerprint, which includes an
+explicit lookup-rules version as well as effective table contents. Increment that
+version when alias or provider resolution changes so retained costs are repriced.
+Coverage counts tokens with known rates and tokens without rates separately;
+web-search requests are not tokens. A separate producer
 revisits admitted SQLite indexes in the background. Its cursor and partial
 accumulator live in the existing `meta` table and survive restart. Normalized
 Codex `native_usage_facts` are replayed in batches of 128 accepted model facts;
