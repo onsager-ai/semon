@@ -57,7 +57,7 @@ export interface CatalogTranscriptPage {
   api: 1;
   identity: CatalogSessionIdentity;
   session: CatalogSession;
-  projection: { version: 5; generation: string; errorsGeneration: string; total: number };
+  projection: { version: 6; generation: string; errorsGeneration: string; total: number };
   range: { first: number; end: number; next: number | null };
   entries: CatalogTranscriptEntry[];
   freshness: { state: CatalogFreshness };
@@ -174,7 +174,7 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     state = object(row.freshness).state;
   if (
     row.api !== 1 ||
-    projection.version !== 5 ||
+    projection.version !== 6 ||
     !/^[0-9a-f]{64}$/i.test(generation) ||
     !/^[0-9a-f]{64}$/i.test(errorsGeneration) ||
     session.key !== identity.catalog_key ||
@@ -224,7 +224,7 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     api: 1,
     identity,
     session,
-    projection: { version: 5, generation, errorsGeneration, total },
+    projection: { version: 6, generation, errorsGeneration, total },
     range: { first, end, next },
     entries,
     freshness: { state },
