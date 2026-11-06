@@ -620,7 +620,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "29");
+        assert_eq!(version, crate::events::CACHE_VERSION.to_string());
         let replacement = home.path.with_extension("replacement");
         fs::write(
             &replacement,
