@@ -82,7 +82,42 @@ async fn observation(
     )
 }
 
+async fn replacement(dsn: &str) {
+    let root = crate::storage::conformance::root();
+    let path = crate::storage::conformance::native(&root.0, "pg-catalog", &"original synthetic ".repeat(1024));
+    let namespace = Namespace::new("catalog-replacement").unwrap();
+    let mut store = PgProjectionStore::new(crate::storage::conformance::postgres::connect(dsn).await, namespace.clone()).await.unwrap();
+    let first = store.index_source(&namespace, &path, "claude").await.unwrap();
+    let (row, projection) = observation(&mut store, &namespace, &path).await;
+    let tx = store.begin(&namespace).await.unwrap();
+    let generation = tx.publish_catalog(&namespace, &Publication { rows: std::slice::from_ref(&row), transcripts: Some(std::slice::from_ref(&projection)) }, None).await.unwrap().unwrap();
+    let (recipes, _, _) = tx.recipe_page(&namespace, &row.key, CatalogReadScope::Current, None, 0, 10).await.unwrap();
+    tx.commit(&namespace).await.unwrap();
+    crate::storage::conformance::native(&root.0, "pg-catalog", "short replacement");
+    let replaced = store.index_source(&namespace, &path, "claude").await.unwrap();
+    assert!(replaced.offset < first.offset);
+    assert!(replaced.epoch > first.epoch);
+    let tx = store.begin(&namespace).await.unwrap();
+    for scope in [CatalogReadScope::Current, CatalogReadScope::RetainedHistory] {
+        assert!(tx.catalog_row(&namespace, &row.key, scope).await.is_err());
+    }
+    tx.commit(&namespace).await.unwrap();
+    let (next, next_projection) = observation(&mut store, &namespace, &path).await;
+    let tx = store.begin(&namespace).await.unwrap();
+    let next_generation = tx.publish_catalog(&namespace, &Publication { rows: std::slice::from_ref(&next), transcripts: Some(std::slice::from_ref(&next_projection)) }, Some(&generation)).await.unwrap().unwrap();
+    assert_eq!(tx.catalog_row(&namespace, &row.key, CatalogReadScope::Current).await.unwrap().unwrap().sources, next.sources);
+    assert_eq!(tx.catalog_row(&namespace, &row.key, CatalogReadScope::RetainedHistory).await.unwrap().unwrap().sources, row.sources);
+    assert_eq!(tx.recipe_page(&namespace, &row.key, CatalogReadScope::RetainedHistory, Some(&recipes), 0, 10).await.unwrap().2[0].offset, projection.slots[0].offset);
+    // A second outgoing observation needs composite History. Until that port is
+    // implemented, refusal keeps both the original custody and Current intact.
+    assert!(!tx.withdraw_source(&namespace, path.to_str().unwrap(), replaced).await.unwrap());
+    assert_eq!(tx.catalog_generation(&namespace).await.unwrap(), Some(next_generation));
+    assert_eq!(tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap(), Some(replaced));
+    tx.commit(&namespace).await.unwrap();
+}
+
 pub(super) async fn lifecycle(dsn: &str) {
+    replacement(dsn).await;
     use std::io::Write;
     let root = crate::storage::conformance::root();
     let path = crate::storage::conformance::native(&root.0, "pg-catalog", "synthetic body");

@@ -243,13 +243,11 @@ impl PgProjectionTransaction<'_> {
             "INSERT INTO semon_projection.files(namespace,path,ledger,metadata) VALUES($1,$2,$3,$4) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,metadata=excluded.metadata",
             &[&namespace.binding(), &path, &encoded_ledger, &metadata],
         ).await.map_err(backend)?;
-        self.tx
-            .execute(
-                "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2",
-                &[&namespace.binding(), &path],
-            )
-            .await
-            .map_err(backend)?;
+        let lengths = [index.events.len(), index.extras.len(), index.signals.len()];
+        self.tx.execute(
+            "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3 WHEN 1 THEN $4 ELSE $5 END",
+            &[&namespace.binding(), &path, &number(lengths[0] as u64)?, &number(lengths[1] as u64)?, &number(lengths[2] as u64)?],
+        ).await.map_err(backend)?;
         let mut kinds = Vec::with_capacity(records.len());
         let mut ordinals = Vec::with_capacity(records.len());
         let mut values = Vec::with_capacity(records.len());
@@ -259,7 +257,7 @@ impl PgProjectionTransaction<'_> {
             values.push(record);
         }
         self.tx.execute(
-            "INSERT INTO semon_projection.records(namespace,path,kind,ordinal,record) SELECT $1,$2,r.* FROM unnest($3::smallint[],$4::bigint[],$5::text[]) r",
+            "INSERT INTO semon_projection.records(namespace,path,kind,ordinal,record) SELECT $1,$2,r.* FROM unnest($3::smallint[],$4::bigint[],$5::text[]) r ON CONFLICT(namespace,path,kind,ordinal) DO UPDATE SET record=excluded.record WHERE semon_projection.records.record IS DISTINCT FROM excluded.record",
             &[&namespace.binding(), &path, &kinds, &ordinals, &values],
         ).await.map_err(backend)?;
         let version = generation(tag);
