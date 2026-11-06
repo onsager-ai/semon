@@ -2950,11 +2950,8 @@ mod tests {
             .unwrap()
         {}
         drop(work);
-        let reply = crate::session_catalog_page(
-            view.options(),
-            &view.evidence.source_key(),
-            "limit=100",
-        );
+        let reply =
+            crate::session_catalog_page(view.options(), &view.evidence.source_key(), "limit=100");
         assert_eq!(
             reply.status,
             200,

@@ -720,7 +720,9 @@ fn storage_withdrawal_during_a_failed_publication_keeps_history_in_custody() {
     let connection = database(&a);
     let catalog = || -> Vec<(String, String, String)> {
         connection
-            .prepare("SELECT session_key,lifecycle,metadata FROM session_catalog ORDER BY session_key")
+            .prepare(
+                "SELECT session_key,lifecycle,metadata FROM session_catalog ORDER BY session_key",
+            )
             .unwrap()
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
