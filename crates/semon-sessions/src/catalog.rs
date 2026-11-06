@@ -1465,7 +1465,7 @@ pub(crate) async fn postgres_page(
             request.q.as_ref().map(|_| crate::catalog_search::Report {
                 partial: found.partial,
                 candidates: found.candidates,
-                index_complete: true,
+                index_complete: false,
             }),
         )
     };
@@ -1500,7 +1500,12 @@ pub(crate) async fn postgres_page(
                 let input = crate::native_evidence::catalog_input(&source.path, options)
                     .ok_or_else(|| io::Error::other("Catalog source outside configured roots"))?;
                 if tx.raw_write_pending(namespace, &input).await? {
-                    return Ok(error(503, "projection_stale", "A native source write is pending.", true));
+                    return Ok(error(
+                        503,
+                        "projection_stale",
+                        "A native source write is pending.",
+                        true,
+                    ));
                 }
             }
         }
@@ -1528,7 +1533,9 @@ pub(crate) async fn postgres_page(
         PresentedPage {
             generation,
             observed_at: None,
-            completeness: "complete".into(),
+            // Explicit cohorts do not establish complete machine membership or
+            // global lineage ownership. Startup discovery has not adopted PG.
+            completeness: "partial".into(),
             selected,
             next,
             details: None,

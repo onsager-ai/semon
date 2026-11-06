@@ -1,5 +1,5 @@
 //! PostgreSQL projection transaction foundation. This is not yet a selectable
-//! native session backend: producer, recipes and selected reads still need ports.
+//! native session backend: startup, discovery and Query adoption remain pending.
 //! Hosts inject a connected restricted-role client; this module reads no secrets
 //! and opens no local database. Schema ownership belongs to the provisioning role.
 use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
