@@ -33,7 +33,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: ${{ github.event_name == 'workflow_dispatch' && inputs.focused_only && fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates"]') || fromJSON('["focused-early","focused-transfer","focused-vertical","focused-native","focused-pg","focused-gates","regression-catalog","regression-events","regression-query","regression-model","regression-other","regression-seed-0","regression-seed-1","regression-seed-2","regression-seed-3"]') }}
+        suite: ["regression-other"] # Timing diagnostic only; full qualification remains on -33.
     services:
       postgres:
         image: postgres:16
@@ -355,6 +355,35 @@ jobs:
           name: pg-keys125-clippy-${{ github.sha }}
           path: ${{ runner.temp }}/pg-keys125-clippy.log
           if-no-files-found: error
+      - name: Diagnostic same-runner first-page comparison with main
+        if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
+        env:
+          SEMON_BUILD_TIMING: "1"
+        shell: bash
+        run: |
+          set -o pipefail
+          result=0
+          cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/narrow-isolated.log" 2>&1 || result=$?
+          git fetch --depth=1 origin main
+          git worktree add --detach "$RUNNER_TEMP/diag-main" FETCH_HEAD
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/main-isolated.log" 2>&1 || result=$?
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' --nocapture > "$RUNNER_TEMP/main-full.log" 2>&1 || result=$?
+          cargo test -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' --nocapture > "$RUNNER_TEMP/narrow-full.log" 2>&1 || result=$?
+          for timing_log in narrow-isolated main-isolated main-full narrow-full; do
+            echo "measurement=$timing_log"
+            grep -E 'production-first-page|bounded initial page took|bounded cold page|phase=(index_open|cold_component|cold_total) |test result:|^failures:' "$RUNNER_TEMP/$timing_log.log" || true
+          done
+          exit "$result"
+      - name: Retain same-runner timing logs
+        if: ${{ always() && matrix.suite == 'regression-other' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: phase3c-same-runner-timing
+          path: |
+            ${{ runner.temp }}/narrow-isolated.log
+            ${{ runner.temp }}/main-isolated.log
+            ${{ runner.temp }}/main-full.log
+            ${{ runner.temp }}/narrow-full.log
       - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
         # Disjoint name filters retain the complete feature-enabled suite and
