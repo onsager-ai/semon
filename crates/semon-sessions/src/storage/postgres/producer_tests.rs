@@ -16,7 +16,7 @@ impl crate::SessionSourceReader for NativeReader {
         let bytes = std::fs::read(&self.path)?;
         if reference.offset != self.source.offset || reference.prefix_sha256 != self.source.prefix_sha256
             || expected.is_some_and(|expected| expected != generation)
-            || bytes.len() as u64 < reference.offset
+            || (bytes.len() as u64) < reference.offset
             || <[u8; 32]>::from(Sha256::digest(&bytes[..reference.offset as usize])) != self.proof
             || offset >= reference.offset || max > crate::SESSION_SOURCE_CHUNK_MAX
         { return Err(invalid()); }
