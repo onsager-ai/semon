@@ -81,7 +81,7 @@ fn wait_for_catalog_read(
         view.wait_until_initial_catalog(deadline)
             .map_err(|_| catalog_unavailable())?;
     } else {
-        match crate::session_catalog_page_ready(view.options()) {
+        match view.evidence.storage.page_ready() {
             // A native page may still hold its source Work fence here. Serve
             // a published generation without waiting; cold reads request the
             // ordinary coalesced producer and keep the existing retry path.
@@ -1428,6 +1428,17 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
+        #[cfg(feature = "postgres")]
+        if view.evidence.storage.is_postgres() {
+            if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                return reply;
+            }
+            return match path {
+                "/api/sessions" => view.evidence.storage.page(key, &request.expect("Catalog request"), None),
+                "/api/session-transcript" => view.evidence.storage.transcript(key, query, None),
+                _ => crate::catalog::error(503, "capability_unavailable", "This session operation is not yet available on PostgreSQL.", false),
+            };
+        }
         let mut refresh_error = None;
         let mut reply = match path {
             "/api/session-locate" => {
@@ -1580,16 +1591,14 @@ impl ViewerCore {
                         admission.paths,
                     )
                 };
-                crate::catalog::page_with_gate(
-                    view.options(),
+                refresh_error = Some(match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                    Ok(error) => error,
+                    Err(reply) => return reply,
+                });
+                epoch.set(Some(view.evidence.catalog_search_epoch()));
+                view.evidence.storage.page(
                     key,
-                    request.expect("catalog route parsed request"),
-                    || {
-                        refresh_error =
-                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                        epoch.set(Some(view.evidence.catalog_search_epoch()));
-                        Ok(())
-                    },
+                    &request.expect("catalog route parsed request"),
                     Some(&mut on_search),
                 )
             }

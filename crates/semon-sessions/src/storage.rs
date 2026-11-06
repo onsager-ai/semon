@@ -12,6 +12,7 @@
 #[cfg(feature = "postgres")]
 pub(crate) mod postgres;
 pub(crate) mod sqlite;
+pub(crate) mod runtime;
 
 #[cfg(test)]
 mod conformance;

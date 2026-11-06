@@ -25,8 +25,7 @@ pub(crate) struct NativeEvidence {
     /// The source namespace its host configured. The producer binds its
     /// database to it and refuses a database bound to another namespace.
     /// Only test constructions observe a database without a host namespace.
-    namespace: Option<crate::storage::Namespace>,
-    configuration_error: Option<crate::storage::StorageError>,
+    pub(crate) storage: crate::storage::runtime::RuntimeStore,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
@@ -264,7 +263,7 @@ impl SessionSources {
         sources
     }
 
-    fn from_evidence(machines: Vec<(String, Arc<NativeEvidence>)>) -> Self {
+    pub(crate) fn from_evidence(machines: Vec<(String, Arc<NativeEvidence>)>) -> Self {
         let local = machines.len() == 1 && machines[0].0.is_empty();
         let inventory = crate::SessionSourceInventory::new(machines.iter().map(|(key, _)| {
             let key = if local {
@@ -448,14 +447,6 @@ impl SessionSources {
     }
 }
 
-/// The namespace of a host's source key. Keys are configured source names,
-/// so one that is no namespace is a host configuration error.
-pub(crate) fn source_namespace(
-    key: &str,
-) -> Result<crate::storage::Namespace, crate::storage::StorageError> {
-    crate::storage::Namespace::new(key)
-}
-
 impl NativeEvidence {
     /// A producer without a host namespace, for tests that observe one
     /// database directly; it neither binds nor checks a binding.
@@ -465,26 +456,26 @@ impl NativeEvidence {
     }
 
     /// Construction is lazy: no source, cache or refresh worker is opened.
+    #[cfg(test)]
     pub(crate) fn for_source(namespace: crate::storage::Namespace, options: Options) -> Arc<Self> {
         Self::construct(Some(namespace), options)
     }
 
     pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
-        match source_namespace(key) {
-            Ok(namespace) => Self::for_source(namespace, options),
-            Err(error) => {
-                let mut evidence = Self::construct(None, options);
-                Arc::get_mut(&mut evidence).unwrap().configuration_error = Some(error);
-                evidence
-            }
-        }
+        let storage = crate::storage::runtime::RuntimeStore::for_source(&options, key);
+        Self::with_storage(options, storage)
     }
 
+    #[cfg(test)]
     fn construct(namespace: Option<crate::storage::Namespace>, options: Options) -> Arc<Self> {
+        let storage = crate::storage::runtime::RuntimeStore::sqlite(&options, namespace);
+        Self::with_storage(options, storage)
+    }
+
+    pub(crate) fn with_storage(options: Options, storage: crate::storage::runtime::RuntimeStore) -> Arc<Self> {
         Arc::new(Self {
             options,
-            namespace,
-            configuration_error: None,
+            storage,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
@@ -656,36 +647,26 @@ impl NativeEvidence {
     /// The source key this producer was configured under, in tests.
     #[cfg(test)]
     pub(crate) fn source_key(&self) -> String {
-        self.namespace
-            .as_ref()
+        self.storage.namespace()
             .map_or_else(String::new, |namespace| namespace.as_str().to_owned())
     }
 
     /// The key a test reads this producer's database under.
     #[cfg(test)]
     pub(crate) fn read_key(&self) -> String {
-        self.namespace
-            .as_ref()
+        self.storage.namespace()
             .map_or("local", |namespace| namespace.binding())
             .to_owned()
     }
 
     /// Open main's single scoped writer, bound to the host's namespace.
     pub(crate) fn open_index(&self) -> io::Result<EventCache> {
-        self.validate_configuration()?;
-        match &self.namespace {
-            Some(namespace) => crate::storage::sqlite::open_index(&self.options, namespace)
-                .map_err(io::Error::other),
-            None => EventCache::open_scoped(&self.options.cache).map_err(io::Error::other),
-        }
+        self.storage.open_index()
     }
 
     /// Initialize the source index and publish a bounded cold catalog page.
     pub(crate) fn validate_configuration(&self) -> io::Result<()> {
-        match &self.configuration_error {
-            Some(error) => Err(io::Error::new(io::ErrorKind::InvalidInput, error.clone())),
-            None => Ok(()),
-        }
+        self.storage.validate()
     }
 
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
@@ -702,18 +683,7 @@ impl NativeEvidence {
             work.events = Some(match self.open_index() {
                 Ok(cache) => cache,
                 Err(error) if self.catalog_demand.load(Ordering::Relaxed) => return Err(error),
-                Err(_) => {
-                    let mut cache =
-                        EventCache::open(&self.options.cache).map_err(io::Error::other)?;
-                    // An in-memory index for this run has nothing durable to bind.
-                    if let Some(namespace) = &self.namespace
-                        && cache.persistent()
-                    {
-                        crate::storage::sqlite::bind(&mut cache, namespace)
-                            .map_err(io::Error::other)?;
-                    }
-                    cache
-                }
+                Err(_) => self.storage.open_native_index()?,
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");
@@ -1413,6 +1383,17 @@ impl NativeEvidence {
         now: i64,
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            let mut before_build = before_build;
+            before_build()?;
+            let discovery = work.postgres_discovery.get_or_insert_with(Default::default);
+            let page = discovery.next(&self.options, 64, 512)?;
+            if !page.inputs.is_empty() {
+                self.storage.publish_sources(&page.inputs)?;
+            }
+            return Ok(page.complete);
+        }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
             lock(&self.catalog_search).close();
@@ -1853,6 +1834,14 @@ impl NativeEvidence {
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            self.validate_configuration()?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "native query source is closed"));
+            }
+            return self.storage.query(now).map(Arc::new);
+        }
         let retained = || {
             self.closed.load(Ordering::Acquire).then(|| {
                 read_lock(&self.query)
@@ -1919,6 +1908,8 @@ fn write_lock<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// The single native source index and producer state shared by supported readers.
 #[derive(Default)]
 pub(crate) struct Work {
+    #[cfg(feature = "postgres")]
+    postgres_discovery: Option<crate::inputs::Discovery>,
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,

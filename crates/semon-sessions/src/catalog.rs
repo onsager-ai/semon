@@ -1004,6 +1004,10 @@ pub(crate) fn page_with_gate(
 /// Missing, blank or unpublished stores return `false`; invalid, unsupported and
 /// I/O failures propagate. This check does not admit or start an observer.
 pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
+    crate::storage::runtime::RuntimeStore::sqlite(options, None).page_ready()
+}
+
+pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
     let path = EventCache::path(&options.cache);
     match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(false),

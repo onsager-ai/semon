@@ -9,6 +9,7 @@ mod index;
 mod producer;
 mod raw;
 mod selected;
+mod runtime;
 pub use raw::{PgRawGeneration, PgRawIntent};
 // The typed Catalog API is qualified independently before runtime adoption.
 #[allow(dead_code, reason = "Catalog runtime integration is pending")]

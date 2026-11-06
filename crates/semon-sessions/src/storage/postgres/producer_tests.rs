@@ -4,10 +4,10 @@ use crate::{
 };
 
 #[cfg(target_os = "linux")]
-struct SqliteOpenWatch(std::os::fd::OwnedFd);
+pub(super) struct SqliteOpenWatch(std::os::fd::OwnedFd);
 #[cfg(target_os = "linux")]
 impl SqliteOpenWatch {
-    fn new(options: &crate::Options) -> Self {
+    pub(super) fn new(options: &crate::Options) -> Self {
         use std::os::fd::{AsRawFd, FromRawFd};
         let path = crate::events::EventCache::path(&options.cache);
         // A real readable SQLite sentinel detects hidden read-only opens too.
@@ -34,7 +34,7 @@ impl SqliteOpenWatch {
         );
         Self(fd)
     }
-    fn assert_untouched(self, options: &crate::Options) {
+    pub(super) fn assert_untouched(self, options: &crate::Options) {
         use std::os::fd::AsRawFd;
         let mut events = [0u8; 4096];
         let read =

@@ -6,6 +6,8 @@ mod producer_tests;
 mod raw_tests;
 #[path = "postgres/read_tests.rs"]
 mod read_tests;
+#[path = "postgres/runtime_tests.rs"]
+mod runtime_tests;
 
 use super::super::{
     Namespace, ProjectionTag, StorageError, TagCheck,
@@ -566,6 +568,12 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     producer_tests::lifecycle(&dsn).await;
     raw_tests::lifecycle(&dsn).await;
     read_tests::filters_and_continuation(&dsn).await;
+    let runtime_dsn = dsn.clone();
+    let runtime_probe = std::thread::spawn(move || runtime_tests::lifecycle(&runtime_dsn));
+    while !runtime_probe.is_finished() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    runtime_probe.join().unwrap();
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
     assert_eq!(

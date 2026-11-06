@@ -1103,7 +1103,11 @@ impl MachineView {
     pub(crate) fn note_catalog_interest(&self) -> io::Result<()> {
         self.evidence.validate_configuration()?;
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
-        let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
+        let pending = if self.evidence.storage.is_postgres() {
+            true
+        } else {
+            crate::events::store::catalog_work_pending(&self.evidence.options)?
+        };
         self.note_read_with(Kind::Catalog, pending)
     }
 
@@ -1137,7 +1141,7 @@ impl MachineView {
                     "session catalog source is closed",
                 ));
             }
-            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
+            let ready = self.evidence.storage.page_ready()?;
             let now = Instant::now();
             if now >= deadline {
                 return Err(io::Error::new(
