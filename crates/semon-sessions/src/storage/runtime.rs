@@ -235,7 +235,11 @@ impl RuntimeStore {
 
     #[cfg(feature = "postgres")]
     pub(crate) fn publish_sources(&self, inputs: &[crate::Input]) -> io::Result<()> {
-        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace").clone();
+        let namespace = self
+            .namespace
+            .as_ref()
+            .expect("PostgreSQL namespace")
+            .clone();
         self.publish_for(&namespace, inputs)
     }
 
