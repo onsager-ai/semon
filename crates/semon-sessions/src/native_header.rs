@@ -413,7 +413,7 @@ mod tests {
             1
         );
         assert_eq!(
-            crate::session_catalog_history_identity(&home.options, "machine", "run")
+            crate::session_catalog_history_identity(&home.options, "local", "run")
                 .unwrap()
                 .unwrap()
                 .source_refs[0]
