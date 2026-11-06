@@ -3836,6 +3836,16 @@ impl Stage {
                     refuse(PUBLICATION_GROUP_BUDGET)
                 }
             })?;
+            for row in &prepared.rows {
+                let projection_generation: Option<String> = tx.query_row(
+                    "SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                    params![ns, row.key], |saved| saved.get(0),
+                ).optional().map_err(error)?;
+                super::projection_tags::publish(
+                    &tx, ns, row, crate::storage::catalog::CatalogObservationOwner::Catalog,
+                    projection_generation.as_deref().unwrap_or_default(), prepared.presentation_observations(),
+                ).map_err(StoreError::Configured)?;
+            }
             for metadata in &metadata {
                 super::proof_generations::native_observation_grant(
                     &tx,

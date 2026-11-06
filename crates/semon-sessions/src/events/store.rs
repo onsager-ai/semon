@@ -3878,39 +3878,17 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let mut grant_owners = std::collections::BTreeSet::new();
-            grant_owners.extend(rows.iter().map(|row| row.key.clone()));
-            grant_owners.extend(affected.iter().cloned());
-            grant_owners.extend(withdrawn.iter().map(|row| row.key.clone()));
-            #[cfg(test)]
-            eprintln!("catalog_publication_probe stage=grant_reconciliation");
-            for key in grant_owners {
-                crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    &key,
-                    owner.admission(),
-                    stream,
-                )
-                .map_err(StoreError::Configured)?;
-            }
-            for (row, output) in rows.iter().zip(&metadata) {
-                #[cfg(test)]
-                eprintln!("catalog_publication_probe stage=observation_grant");
-                crate::storage::sqlite::proof_generations::native_catalog_observation_grant(
-                    &transaction,
-                    owner.config().namespace.as_str(),
-                    &row.key,
-                    owner.admission(),
-                    stream,
-                    output,
-                    if semantic.is_none() {
-                        publication.observations
-                    } else {
-                        None
-                    },
-                )
-                .map_err(StoreError::Configured)?;
+            for row in rows {
+                let projection_generation: Option<String> = transaction.query_row(
+                    "SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
+                    params![owner.config().namespace.as_str(), row.key], |saved| saved.get(0),
+                ).optional().map_err(failure)?;
+                crate::storage::sqlite::projection_tags::publish(
+                    &transaction, owner.config().namespace.as_str(), row,
+                    crate::storage::catalog::CatalogObservationOwner::Catalog,
+                    projection_generation.as_deref().unwrap_or_default(),
+                    publication.observations,
+                ).map_err(StoreError::Configured)?;
             }
             transaction
                 .execute(

@@ -221,6 +221,8 @@ impl OriginalHistoryStore for OriginalHistory<'_> {
             params![self.namespace, format!("history_transfer:{key}")],
         )?;
         self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value",params![self.namespace,format!("overview_needed:{key}")])?;
+        super::projection_tags::retain(self.db, self.namespace, row)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }
@@ -527,17 +529,11 @@ pub(crate) fn publish_composition(
                 let capture = observed
                     .runtime_capture_for(&history)
                     .ok_or(rusqlite::Error::InvalidQuery)?;
-                super::proof_generations::native_history_observation_grant(
-                    store.db,
-                    store.namespace,
-                    &history.key,
-                    store.admission,
-                    store.stream.ok_or(rusqlite::Error::InvalidQuery)?,
-                    &metadata,
-                    &serde_json::to_string(&capture)
-                        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                super::projection_tags::publish(
+                    store.db, store.namespace, &history,
+                    crate::storage::catalog::CatalogObservationOwner::History,
+                    &generation, Some(&capture),
+                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
                 continue;
             }
             let mut cwds = BTreeMap::new();
@@ -563,17 +559,11 @@ pub(crate) fn publish_composition(
                 let capture = observed
                     .runtime_capture_for(&history)
                     .ok_or(rusqlite::Error::InvalidQuery)?;
-                super::proof_generations::native_history_observation_grant(
-                    store.db,
-                    store.namespace,
-                    &history.key,
-                    store.admission,
-                    store.stream.ok_or(rusqlite::Error::InvalidQuery)?,
-                    &metadata,
-                    &serde_json::to_string(&capture)
-                        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                super::projection_tags::publish(
+                    store.db, store.namespace, &history,
+                    crate::storage::catalog::CatalogObservationOwner::History,
+                    &generation, Some(&capture),
+                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             }
         }
     }

@@ -43,6 +43,7 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON sto
 
 pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     db.execute_batch(SCHEMA).map_err(failed)?;
+    db.execute_batch(super::projection_tags::SCHEMA).map_err(failed)?;
     validate(db)
 }
 
@@ -54,6 +55,7 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
     // internal semicolon; keep the complete body when comparing sqlite_schema.
     for statement in SCHEMA
         .lines()
+        .chain(super::projection_tags::SCHEMA.lines())
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
@@ -2107,220 +2109,46 @@ pub(crate) fn observation_binding_with_observations(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     owner: CatalogObservationOwner,
-) -> Result<
-    (
-        crate::storage::QueryRuntimeBinding,
-        crate::storage::selected::PresentationObservations,
-    ),
-    StorageError,
-> {
-    let (reference_kind, owner_kind) = match owner {
-        CatalogObservationOwner::Catalog => ("current", "catalog"),
-        CatalogObservationOwner::History => ("history", "history"),
-    };
-    let mut normalized = selected.clone();
-    normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let prefix = crate::retention::source_generation(&selected.sources)
-        .map_err(|_| StorageError::Unavailable)?;
-    let selected_metadata =
-        serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
-    let selected_digest = proof_codec::digest(selected_metadata.as_bytes());
-    let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-    let imported = imported_catalog(db, current)?;
-    let exact_semantic_owner = if imported {
-        false
-    } else {
-        exact_immutable_observation_owner(
-            db,
-            current.namespace.as_str(),
-            &selected.key,
-            reference_kind,
-            admission,
-            &current.stream_epoch,
-            &selected_metadata,
-        )?
-    };
-    let direct_grant = db
-        .query_row(
-            "SELECT CASE WHEN ?7=0 AND ?8=0 AND octet_length(direct_capture)<=8388608 THEN direct_capture END,?7=0 AND ?8=0 AND direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6",
-            params![
-                current.namespace.as_str(),
-                selected.key,
-                owner_kind,
-                selected_digest,
-                admission,
-                current.stream_epoch,
-                imported,
-                exact_semantic_owner
-            ],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, bool>(1)?)),
-        )
-        .optional()
-        .map_err(failed)?;
-    let exact_owner_grant = direct_grant.is_some();
-    let proof_candidate = if imported {
-        false
-    } else {
-        immutable_observation_candidate(
-            db,
-            current.namespace.as_str(),
-            &selected.key,
-            reference_kind,
-            &prefix,
-            &current.stream_epoch,
-            &selected_metadata,
-        )
-        .map_err(ObservationPreparationError::into_storage)?
-    };
-    #[cfg(test)]
-    eprintln!(
-        "catalog_runtime_capture_selection owner={owner_kind} imported={imported} exact_semantic_owner={exact_semantic_owner} proof_candidate={proof_candidate} exact_owner_grant={exact_owner_grant} direct_capture_present={}",
-        direct_grant
-            .as_ref()
-            .is_some_and(|(capture, _)| capture.is_some())
-    );
-    if !proof_candidate
-        && let Some(observations) =
-            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
-                .inspect_err(|_| diagnose_observation_refusal("direct_capture"))?
-    {
-        #[cfg(test)]
-        eprintln!("catalog_runtime_capture_selected origin=direct_without_proof");
-        return Ok((current.clone(), observations));
-    }
-    let verified =
-        authenticate_immutable_observation(db, current, selected, reference_kind, &prefix)
-            .map_err(ObservationPreparationError::into_storage)?;
-    // A composed or receipt-less owner can retain an older same-prefix receipt
-    // for custody. Its exact grant and capture authorize only the selected row;
-    // do not borrow that grant to read the predecessor's observations.
-    if !exact_semantic_owner
-        && let Some(direct) =
-            direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
-                .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
-    {
-        return Ok((current.clone(), direct));
-    }
-    authorize_immutable_observation(db, current, selected, reference_kind, false, &verified)
-        .map_err(ObservationPreparationError::into_storage)?;
-    let original = verified.row;
-    let original_binding = verified.binding;
-    let observations = verified
-        .observations
-        .ok_or(StorageError::ScopeChanged)
-        .inspect_err(|_| diagnose_observation_refusal("immutable_observations_present"))?;
-    let original_runtime = observations
-        .runtime_for(&original)
-        .ok_or(StorageError::ScopeChanged)
-        .inspect_err(|_| diagnose_observation_refusal("immutable_original_row_runtime"))?;
-    normalized.lifecycle = original.lifecycle;
-    let exact_original_metadata = serde_json::to_value(&original)
-        .map_err(|_| StorageError::Unavailable)?
-        == serde_json::to_value(&normalized).map_err(|_| StorageError::Unavailable)?;
-    if !exact_original_metadata && !exact_owner_grant {
-        diagnose_observation_refusal("selected_metadata_or_exact_owner_grant");
-        return Err(StorageError::ScopeChanged);
-    }
-    let selected_runtime = observations.runtime_for(selected);
-    if selected_runtime.as_deref() != Some(original_runtime.as_str()) {
-        if !exact_original_metadata
-            && exact_owner_grant
-            && let Some(direct) =
-                direct_capture_for_row(current, selected, imported, direct_grant.as_ref())
-                    .inspect_err(|_| diagnose_observation_refusal("selected_direct_capture"))?
-        {
-            #[cfg(test)]
-            eprintln!("catalog_runtime_capture_selected origin=direct_selected_row");
-            return Ok((current.clone(), direct));
-        }
-        diagnose_observation_refusal("selected_row_runtime_equality");
-        return Err(StorageError::ScopeChanged);
-    }
-    if !imported {
-        match direct_capture_for_row(current, selected, imported, direct_grant.as_ref()) {
-            Ok(Some(direct)) if !same_runtime_inputs(&direct, &observations, selected) => {
-                #[cfg(test)]
-                eprintln!("catalog_runtime_capture_selected origin=direct_changed_inputs");
-                return Ok((current.clone(), direct));
-            }
-            Err(StorageError::Busy) => return Err(StorageError::Busy),
-            _result => {
-                #[cfg(test)]
-                eprintln!(
-                    "catalog_runtime_capture_direct_validation valid={} capture_present={} error={:?}",
-                    matches!(&_result, Ok(Some(_))),
-                    direct_grant
-                        .as_ref()
-                        .is_some_and(|(capture, _)| capture.is_some()),
-                    _result.as_ref().err()
-                );
-            }
-        }
-    }
-    #[cfg(test)]
-    eprintln!("catalog_runtime_capture_selected origin=immutable");
-    Ok((original_binding, observations))
+) -> Result<(crate::storage::QueryRuntimeBinding, crate::storage::selected::PresentationObservations), StorageError> {
+    let observations = super::projection_tags::check(db, current, selected, owner)?
+        .ok_or(StorageError::ScopeChanged)?;
+    Ok((current.clone(), observations))
 }
 
 /// Recover retained CWD inputs only from exact live ledgers or authenticated
 /// local receipts. The resulting set must match the selected owner's capture.
 pub(crate) fn retained_runtime_source_cwds(
     db: &Connection,
-    current: &crate::storage::QueryRuntimeBinding,
+    _current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     owner: CatalogObservationOwner,
     observations: &crate::storage::selected::PresentationObservations,
 ) -> Result<Option<std::collections::BTreeSet<String>>, StorageError> {
-    let metadata = serde_json::to_string(selected).map_err(|_| StorageError::Unavailable)?;
-    let mut budget =
-        crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata.len());
-    let receipts = verified_publication_receipts(
-        db,
-        PublicationReceiptRequest {
-            namespace: current.namespace.as_str(),
-            session_key: &selected.key,
-            stream: &current.stream_epoch,
-            publication_admission: current.admission,
-            previous: selected,
-            exact_owner_metadata: &metadata,
-            kind: match owner {
-                CatalogObservationOwner::Catalog => PublicationReceiptRef::Current,
-                CatalogObservationOwner::History => PublicationReceiptRef::History,
-            },
-        },
-        &mut budget,
-    )?
-    .ok_or(StorageError::HistoryRetentionBounds)?;
+    let table = match owner { CatalogObservationOwner::Catalog => "session_slots", CatalogObservationOwner::History => "session_history_slots" };
     let mut cwds = std::collections::BTreeSet::new();
     for source in &selected.sources {
-        if let Some(current) =
-            super::catalog::runtime_source_cwds_by_path_if_current(db, std::slice::from_ref(source))
-                .map_err(|_| StorageError::Unavailable)?
-        {
+        if let Some(current) = super::catalog::runtime_source_cwds_by_path_if_current(db, std::slice::from_ref(source)).map_err(|_| StorageError::Unavailable)? {
             cwds.extend(current.into_values().flatten());
             continue;
         }
+        let mut statement = db.prepare_cached(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY slot LIMIT 65")).map_err(failed)?;
+        let slots = statement.query_map([&selected.key], |row| row.get::<_,String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
+        if slots.len() > 64 { return Err(StorageError::HistoryRetentionBounds); }
         let mut saved = None;
-        for receipt in &receipts {
-            if receipt.sources.contains(source)
-                && let Some(cwd) = receipt.cwds.get(&source.path)
-            {
-                if saved.as_ref().is_some_and(|prior| prior != cwd) {
-                    return Err(StorageError::ScopeChanged);
+        for text in slots {
+            let slot: crate::slot_projection::SavedSlot = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+            for (path,cwd) in slot.source_cwds() {
+                if path == &source.path {
+                    let cwd = cwd.map(str::to_owned);
+                    if saved.as_ref().is_some_and(|prior| prior != &cwd) { return Err(StorageError::ScopeChanged); }
+                    saved = Some(cwd);
                 }
-                saved = Some(cwd.clone());
             }
         }
-        let Some(saved) = saved else {
-            return Ok(None);
-        };
+        let Some(saved) = saved else { return Ok(None); };
         cwds.extend(saved);
     }
-    if observations.runtime_cwd_fingerprint_for(&selected.sources)
-        != Some(crate::native_evidence::runtime::cwd_fingerprint(&cwds).as_str())
-    {
-        return Err(StorageError::ScopeChanged);
-    }
+    if observations.runtime_cwd_fingerprint_for(&selected.sources) != Some(crate::native_evidence::runtime::cwd_fingerprint(&cwds).as_str()) { return Err(StorageError::ScopeChanged); }
     Ok(Some(cwds))
 }
 
@@ -2365,329 +2193,23 @@ fn observation_authority_for_owner_with_cache(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     physical_owner: Option<CatalogObservationOwner>,
-    local_only: bool,
-    cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
-) -> Result<
-    (
-        crate::storage::QueryRuntimeBinding,
-        crate::storage::query::QueryRecipeResidence,
-    ),
-    ObservationPreparationError,
-> {
-    let ns = current.namespace.as_str();
-    let owner_kind = physical_owner.map(CatalogObservationOwner::kind);
-    let proof_kind = physical_owner.map(|owner| match owner {
-        CatalogObservationOwner::Catalog => "current",
-        CatalogObservationOwner::History => "history",
-    });
-    let grant = format!("{}:{}", current.admission, current.stream_epoch);
-    let mut metadata = selected.clone();
-    metadata.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let current_metadata =
-        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?;
-    metadata.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-    let retained_metadata = if physical_owner.is_some()
-        || selected.lifecycle == crate::model::summary::CatalogLifecycle::Current
-    {
-        current_metadata.clone()
-    } else {
-        serde_json::to_string(&metadata).map_err(|_| StorageError::Unavailable)?
+    _local_only: bool,
+    _cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
+) -> Result<(crate::storage::QueryRuntimeBinding, crate::storage::query::QueryRecipeResidence), ObservationPreparationError> {
+    let owner = if let Some(owner) = physical_owner { owner } else {
+        let history: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3)", params![current.namespace.as_str(), selected.key, serde_json::to_string(selected).map_err(|_| StorageError::Unavailable)?], |row| row.get(0)).map_err(ObservationPreparationError::Sql)?;
+        if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }
     };
-    let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-    for (retained, original) in [(false, &current_metadata), (true, &retained_metadata)] {
-        if (physical_owner.is_some()
-            || selected.lifecycle == crate::model::summary::CatalogLifecycle::Current)
-            && retained
-        {
-            continue;
-        }
-        let native: Option<(String, Option<String>, bool)> = db.prepare_cached("SELECT owner_kind,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind IN('catalog','history') AND metadata_digest=?3 AND admission=?4 AND stream=?5 AND (?6 IS NULL OR owner_kind=?6) ORDER BY owner_kind LIMIT 1").map_err(ObservationPreparationError::Sql)?.query_row(
-                params![
-                    ns,
-                    selected.key,
-                    proof_codec::digest(original.as_bytes()),
-                    admission,
-                    current.stream_epoch,
-                    owner_kind
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(ObservationPreparationError::Sql)?;
-        if let Some((native, capture, oversized)) = native {
-            let reference_kind = proof_kind.unwrap_or(match selected.lifecycle {
-                crate::model::summary::CatalogLifecycle::Current => "current",
-                crate::model::summary::CatalogLifecycle::Retained => "history",
-            });
-            let prefix = crate::retention::source_generation(&selected.sources)
-                .map_err(|_| StorageError::Unavailable)?;
-            if immutable_observation_candidate(
-                db,
-                ns,
-                &selected.key,
-                reference_kind,
-                &prefix,
-                &current.stream_epoch,
-                &current_metadata,
-            )? {
-                let verified = authenticate_immutable_observation_with_cache(
-                    db,
-                    current,
-                    selected,
-                    reference_kind,
-                    &prefix,
-                    cache,
-                )?;
-                // A different owner needs its own authenticated capture. A
-                // metadata digest alone cannot lend authority to a receipt.
-                if (verified.record.metadata == *original
-                    && verified.record.admission == current.admission)
-                    || direct_capture_for_row(
-                        current,
-                        selected,
-                        imported_catalog(db, current)?,
-                        Some(&(capture, oversized)),
-                    )?
-                    .is_none()
-                {
-                    authorize_immutable_observation(
-                        db,
-                        current,
-                        selected,
-                        reference_kind,
-                        local_only,
-                        &verified,
-                    )?;
-                }
-            }
-            let metadata_digest = proof_codec::digest(original.as_bytes());
-            let residence = match native.as_str() {
-                "catalog" => {
-                    crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest }
-                }
-                "history" => {
-                    crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest }
-                }
-                _ => return Err(StorageError::ScopeChanged.into()),
-            };
-            return Ok((current.clone(), residence));
-        }
-    }
-    let current_digest = proof_codec::digest(current_metadata.as_bytes());
-    let retained_digest = proof_codec::digest(retained_metadata.as_bytes());
-    if cfg!(test) || crate::native_timing::enabled() {
-        // Observe at most the two owner slots after ordinary authority missed.
-        // This diagnostic never supplies authority or changes its outcome.
-        let slots = db
-            .prepare_cached(
-                "SELECT owner_kind='catalog',metadata_digest IN (?3,?4),admission=?5,stream=?6 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 ORDER BY owner_kind LIMIT 2",
-            )
-            .and_then(|mut statement| {
-                let slots = statement.query_map(
-                    params![
-                        ns,
-                        selected.key,
-                        current_digest,
-                        retained_digest,
-                        admission,
-                        current.stream_epoch
-                    ],
-                    |row| {
-                        Ok((
-                            row.get::<_, bool>(0)?,
-                            row.get::<_, bool>(1)?,
-                            row.get::<_, bool>(2)?,
-                            row.get::<_, bool>(3)?,
-                        ))
-                    },
-                )?;
-                slots.collect::<rusqlite::Result<Vec<_>>>()
-            });
-        match slots {
-            Ok(slots) => {
-                for (catalog, owner) in [(true, "catalog"), (false, "history")] {
-                    let slot = slots.iter().find(|slot| slot.0 == catalog);
-                    let present = slot.is_some();
-                    let digest_match = slot.is_some_and(|slot| slot.1);
-                    let admission_match = slot.is_some_and(|slot| slot.2);
-                    let stream_match = slot.is_some_and(|slot| slot.3);
-                    eprintln!(
-                        "semon sessions native: observation_direct_grant_miss owner={owner} present={present} digest_match={digest_match} admission_match={admission_match} stream_match={stream_match}"
-                    );
-                }
-            }
-            Err(_) => {
-                eprintln!("semon sessions native: observation_direct_grant_diagnostic=unavailable");
-            }
-        }
-        let current_row = observation_row_metadata(db, ns, &selected.key, false);
-        let history_row = observation_row_metadata(db, ns, &selected.key, true);
-        log_observation_row_comparison(
-            "selected_current_equal",
-            current_row
-                .as_ref()
-                .and_then(|row| observation_row_comparison(selected, row)),
-        );
-        log_observation_row_comparison(
-            "selected_history_equal",
-            history_row
-                .as_ref()
-                .and_then(|row| observation_row_comparison(selected, row)),
-        );
-    }
-    // Stage grants hash the exact metadata and bind its admission/stream. The
-    // joined immutable presentation root is checked below against g.metadata.
-    let mut statement = db
-        .prepare_cached(
-            "SELECT DISTINCT g.id,g.publication,g.proof,g.admission,g.stream,
-                CASE WHEN octet_length(g.metadata)<=1048576 THEN g.metadata END,
-                CASE WHEN octet_length(g.slots)<=1048576 THEN g.slots END,
-                g.prefix,r.base,
-                CASE WHEN octet_length(r.manifest)<=1048576 THEN r.manifest END,
-                CASE WHEN octet_length(v.metadata)<=8388608 THEN v.metadata END,
-                ((NOT ?11 AND EXISTS(
-                    SELECT 1 FROM main.meta m JOIN main.meta a
-                      ON a.namespace=m.namespace AND a.key='native_transfer_v1:catalog-owner:'||m.value
-                    WHERE m.namespace=f.namespace
-                      AND m.key='native_transfer_v1:publication:'||g.publication
-                      AND a.value=?3
-                )) OR (
-                    g.admission=?8 AND g.stream=?9 AND EXISTS(
-                        SELECT 1 FROM main.meta m
-                        WHERE m.namespace=f.namespace
-                          AND m.key='catalog_native_observation:'||(CASE WHEN g.metadata=?4 THEN ?6 ELSE ?7 END)
-                          AND m.value=?3
-                    ))
-                ),f.kind
-             FROM storage_proof_refs f
-             JOIN storage_proof_generations g
-               ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key
-             JOIN storage_semantic_publications p
-               ON p.namespace=g.namespace AND p.generation=g.publication
-              AND p.proof_digest=g.proof AND p.admission=g.admission
-             JOIN storage_proof_presentation_roots r
-               ON r.namespace=p.namespace AND r.publication=p.generation AND r.digest=p.proof_digest
-             JOIN storage_proof_presentations v
-               ON v.namespace=g.namespace AND v.id=g.id AND v.session_key=g.session_key
-             WHERE f.namespace=?1 AND f.session_key=?2 AND g.metadata IN (?4,?5)
-               AND (?10 IS NULL OR f.kind=?10)
-             ORDER BY g.id LIMIT 1",
-        )
-        .map_err(ObservationPreparationError::Sql)?;
-    let values = statement
-        .query_map(
-            params![
-                ns,
-                selected.key,
-                grant,
-                current_metadata,
-                retained_metadata,
-                current_digest,
-                retained_digest,
-                admission,
-                current.stream_epoch,
-                proof_kind,
-                local_only
-            ],
-            |r| {
-                for column in [5, 6, 9, 10] {
-                    if matches!(r.get_ref(column)?, rusqlite::types::ValueRef::Null) {
-                        return Ok(Err(StorageError::HistoryRetentionBounds));
-                    }
-                }
-                let admission = u64::try_from(r.get::<_, i64>(3)?).map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        3,
-                        rusqlite::types::Type::Integer,
-                        Box::new(error),
-                    )
-                })?;
-                Ok(Ok((
-                    proof_codec::GenerationRecord {
-                        namespace: ns.to_owned(),
-                        id: ProofGenerationId(r.get(0)?),
-                        session_key: selected.key.clone(),
-                        publication: r.get(1)?,
-                        proof: r.get(2)?,
-                        admission,
-                        stream: r.get(4)?,
-                        metadata: r.get(5)?,
-                        slots: r.get(6)?,
-                        prefix: r.get(7)?,
-                    },
-                    r.get::<_, String>(8)?,
-                    r.get::<_, String>(9)?,
-                    r.get::<_, String>(10)?,
-                    r.get::<_, bool>(11)?,
-                    r.get::<_, String>(12)?,
-                )))
-            },
-        )
-        .map_err(ObservationPreparationError::Sql)?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(ObservationPreparationError::Sql)?
-        .into_iter()
-        .collect::<Result<Vec<_>, StorageError>>()?;
-    let (record, base, manifest, presentation, granted, reference_kind) = values
-        .into_iter()
-        .next()
-        .ok_or(StorageError::ScopeChanged)
-        .inspect_err(|_| {
-            if crate::native_timing::enabled() {
-                eprintln!(
-                    "semon sessions native: observation_stage_refused boundary=candidate_absent"
-                );
-            }
-        })?;
-    if !granted {
-        if crate::native_timing::enabled() {
-            eprintln!("semon sessions native: observation_stage_refused boundary=grant_mismatch");
-        }
-        return Err(StorageError::ScopeChanged.into());
-    }
-    crate::selected_read::charge(
-        64,
-        record.metadata.len() + record.slots.len() + manifest.len() + presentation.len(),
-    )
-    .map_err(|_| StorageError::Busy)?;
-    proof_codec::verify_presentation_digest(&base, &manifest, &record.proof).inspect_err(|_| {
-        if crate::native_timing::enabled() {
-            eprintln!(
-                "semon sessions native: observation_stage_refused boundary=presentation_digest"
-            );
-        }
-    })?;
-    proof_codec::verify_presentation_entry(
-        &selected.key,
-        &record.metadata,
-        &record.slots,
-        &presentation,
-        &manifest,
-    )
-    .inspect_err(|_| {
-        if crate::native_timing::enabled() {
-            eprintln!(
-                "semon sessions native: observation_stage_refused boundary=presentation_entry"
-            );
-        }
-    })?;
-    let residence = crate::storage::query::QueryRecipeResidence::Immutable {
-        owner: match reference_kind.as_str() {
-            "current" => crate::storage::query::QueryRecipeOwner::Catalog,
-            "history" => crate::storage::query::QueryRecipeOwner::History,
-            _ => return Err(StorageError::ScopeChanged.into()),
-        },
-        generation: record.id.clone(),
-        publication: record.publication.clone(),
+    super::projection_tags::check(db, current, selected, owner)?;
+    let mut row = selected.clone();
+    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
+    let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
+    let metadata_digest = proof_codec::digest(metadata.as_bytes());
+    let residence = match owner {
+        CatalogObservationOwner::Catalog => crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest },
+        CatalogObservationOwner::History => crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest },
     };
-    proof_codec::observation_binding(record, current, selected)
-        .inspect_err(|_| {
-            if crate::native_timing::enabled() {
-                eprintln!("semon sessions native: observation_stage_refused boundary=decoded_row");
-            }
-        })
-        .map(|binding| (binding, residence))
-        .map_err(ObservationPreparationError::Evidence)
+    Ok((current.clone(), residence))
 }
 
 /// Issue a token only after the selected physical row and its existing grant or
@@ -2781,11 +2303,11 @@ pub(super) fn load_query_recipe_with_bytes(
     let payload = match &observation.residence {
         QueryRecipeResidence::NativeCatalog { metadata_digest }
         | QueryRecipeResidence::NativeHistory { metadata_digest } => {
-            let (owner, kind) = match &observation.residence {
+            let owner = match &observation.residence {
                 QueryRecipeResidence::NativeCatalog { .. } => {
-                    (CatalogObservationOwner::Catalog, "current")
+                    CatalogObservationOwner::Catalog
                 }
-                _ => (CatalogObservationOwner::History, "history"),
+                _ => CatalogObservationOwner::History,
             };
             let cells: Option<(Option<String>, Option<String>, bool)> = db.query_row(
                 &format!("SELECT CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN metadata END,CASE WHEN octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 THEN query_recipe END,octet_length(metadata)+coalesce(octet_length(query_recipe),0)<=1048576 FROM main.{} WHERE namespace=?1 AND session_key=?2", owner.table()),
@@ -2812,40 +2334,7 @@ pub(super) fn load_query_recipe_with_bytes(
             if proof_codec::digest(normalized.as_bytes()) != *metadata_digest {
                 return Err(Error::ObservationChanged);
             }
-            let prefix = crate::retention::source_generation(&selected.sources)
-                .map_err(|_| Error::CorruptPayload)?;
-            // Preserve immutable-corruption refusal ahead of mutable authority.
-            if immutable_observation_candidate(
-                db,
-                namespace,
-                &selected.key,
-                kind,
-                &prefix,
-                &current.stream_epoch,
-                &normalized,
-            )
-            .map_err(ObservationPreparationError::into_storage)?
-            {
-                let verified =
-                    authenticate_immutable_observation(db, current, selected, kind, &prefix)
-                        .map_err(ObservationPreparationError::into_storage)?;
-                // This token reads the native row's recipe, never the
-                // predecessor receipt's payload or original coordinates.
-                if verified.record.metadata == normalized
-                    && verified.record.admission == current.admission
-                {
-                    authorize_immutable_observation(db, current, selected, kind, false, &verified)
-                        .map_err(ObservationPreparationError::into_storage)?;
-                }
-            }
-            let granted: bool = db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?6)",
-                params![namespace, selected.key, owner.kind(), metadata_digest, current_admission, current.stream_epoch],
-                |row| row.get(0),
-            ).map_err(failed)?;
-            if !granted {
-                return Err(Error::ObservationChanged);
-            }
+            super::projection_tags::check(db, current, selected, owner)?;
             payload
         }
         QueryRecipeResidence::Immutable {
