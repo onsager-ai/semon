@@ -235,6 +235,24 @@ impl RuntimeStore {
 
     #[cfg(feature = "postgres")]
     pub(crate) fn publish_sources(&self, inputs: &[crate::Input]) -> io::Result<()> {
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace").clone();
+        self.publish_for(&namespace, inputs)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn publish_for(
+        &self,
+        namespace: &Namespace,
+        inputs: &[crate::Input],
+    ) -> io::Result<()> {
+        self.validate()?;
+        super::ensure(
+            self.namespace
+                .as_ref()
+                .ok_or_else(|| io::Error::other("missing namespace"))?,
+            namespace,
+        )
+        .map_err(io::Error::other)?;
         let postgres = self
             .postgres
             .as_ref()
@@ -243,7 +261,6 @@ impl RuntimeStore {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Postgres { runtime, store } = &mut *postgres;
-        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
         runtime
             .block_on(store.publish_sources(namespace, &self.options, inputs))
             .map_err(io::Error::other)?

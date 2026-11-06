@@ -22,6 +22,25 @@ pub(super) fn lifecycle(dsn: &str) {
     .unwrap();
     #[cfg(target_os = "linux")]
     let watch = super::producer_tests::SqliteOpenWatch::new(&options);
+    let foreign_root = crate::storage::conformance::root();
+    let foreign_options = crate::storage::conformance::source(&foreign_root.0, "foreign-runtime");
+    crate::storage::conformance::native(
+        &foreign_root.0,
+        "foreign-session",
+        "foreign namespace source",
+    );
+    let foreign_store = RuntimeStore::postgres(
+        &foreign_options,
+        Namespace::new("foreign-runtime").unwrap(),
+        dsn,
+    )
+    .unwrap();
+    foreign_store
+        .publish_sources(&[crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/project/foreign-session.jsonl".into(),
+        }])
+        .unwrap();
     let namespace = Namespace::new("injected-runtime").unwrap();
     let storage = RuntimeStore::postgres(&options, namespace.clone(), dsn).unwrap();
     let evidence = NativeEvidence::with_storage(options.clone(), storage);
@@ -44,6 +63,13 @@ pub(super) fn lifecycle(dsn: &str) {
         page.body.len()
     );
     let body: Value = serde_json::from_slice(&page.body).unwrap();
+    assert!(
+        body["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["key"] != "foreign-session")
+    );
     let key = body["items"][0]["key"].as_str().unwrap();
     let transcript = core.respond(
         "GET",
@@ -99,6 +125,18 @@ pub(super) fn lifecycle(dsn: &str) {
         None,
     );
     assert_eq!(foreign.status, 503);
+    assert!(
+        evidence
+            .storage
+            .publish_for(
+                &Namespace::new("foreign-runtime").unwrap(),
+                &[crate::Input {
+                    root: crate::InputRoot::Claude,
+                    path: "projects/project/foreign-session.jsonl".into(),
+                }],
+            )
+            .is_err()
+    );
     assert_eq!(
         core.respond(
             "GET",

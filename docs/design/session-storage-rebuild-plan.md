@@ -258,14 +258,42 @@ PostgreSQL session backend yet.
   This remains host API qualification, not end-to-end startup mode. The shared-producer-to-Catalog-response measurement
   is separate from ViewerCore startup and must not be called the PostgreSQL
   viewer cold first-page number.
-- Still required: explicit startup backend configuration and `SessionStore`
-  runtime adoption by NativeEvidence, ViewerCore, Query, discovery, host custody
-  callers and remaining direct readers. No PostgreSQL startup option is exposed
-  while those paths still require SQLite. Complete search coverage, composite
-  Current/History merging, selected details/causal context/fields/annotations,
-  proof-generation collection and bounded delta preparation remain pending.
-  Full shared lifecycle conformance, full-pipeline RLS/no-hidden-SQLite
-  qualification and a PostgreSQL viewer cold first-page timing remain pending.
+- Part 5 runtime checkpoint: a source-owned `RuntimeStore` now owns namespace
+  validation, SQLite writer opening and native-index fallback, page readiness,
+  ViewerCore Catalog dispatch, and selected SQLite snapshot opening. SQLite keeps
+  the existing single writer and selected snapshot/proof lifetime. A private,
+  test-only PostgreSQL injection supplies the same NativeEvidence and ViewerCore
+  owners with a source-owned reactor; it serves Catalog, a source-backed selected
+  transcript, and ordinary Query through PostgreSQL indexes. The shared native
+  Query derivation also bypasses SQLite runtime observations for this path.
+- The injected producer advances bounded native discovery (64 inputs / 512
+  entries), retaining refused cohorts for retry. It does not yet reconcile
+  cross-cohort lineage, removals, empty-source publication or latest-first cold
+  discovery. Native Query currently discovers and indexes its complete input set;
+  bounded incremental preparation remains pending. Native source locks span
+  PostgreSQL producer and Query derivation. The selected local reader loads
+  current proof generations and refuses an older selected prefix; lazy retained
+  prefix proof reads remain pending. Unported ViewerCore and focused/Catalog
+  Query operations refuse before any SQLite access.
+- CI's private-injection runtime probe uses the sanitized Codex parser fixture,
+  ViewerCore Catalog and transcript routes, ordinary Query listing, foreign-source
+  read/write refusal, and the inotify SQLite sentinel. PostgreSQL conformance and
+  strict feature Clippy passed at `866cb6a22` (run 42311367916). The first-page
+  sample at the preceding runtime checkpoint was 70.1 ms (run 42310636276).
+  This measures real ViewerCore with private backend injection; it is not yet
+  qualification or timing of selectable startup configuration.
+- Still required: explicit startup backend configuration; complete runtime
+  adoption by focused/Catalog Query, native resolution, union generation and
+  host custody callers (`SessionSourceWrite`, `SessionFactsWrite`, retention,
+  collect/FactsSource); the remaining direct readers; and complete discovery
+  reconciliation. `NativeEvidence::Work` still owns SQLite-specific EventCache
+  producer state, so the handle is an adoption step rather than a completed
+  backend-neutral runtime. No PostgreSQL startup option is exposed while these
+  paths require SQLite. Complete search coverage, composite Current/History
+  merging, selected details/causal context/fields/annotations, proof-generation
+  collection and bounded delta preparation remain pending. Full shared lifecycle
+  conformance and full-pipeline startup RLS/no-hidden-SQLite qualification remain
+  pending.
 
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is
