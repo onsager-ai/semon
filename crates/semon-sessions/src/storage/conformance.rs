@@ -178,6 +178,12 @@ fn storage_invalid_host_keys_return_errors_before_opening_an_index() {
             Err(error) => error,
         };
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let observer = crate::SessionCatalogObserver::new(&key, options.clone());
+        assert_eq!(
+            observer.demand().unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        observer.close();
         assert!(!EventCache::path(&options.cache).exists());
         assert!(crate::collect(&options, &key).is_err());
         let mut facts = crate::FactsSource::new(&options, &key);

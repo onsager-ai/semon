@@ -1093,6 +1093,7 @@ impl MachineView {
     /// Demand for the persisted metadata catalog must not synchronously load
     /// all event indices just because this process has no shown model yet.
     pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         self.note_read(Kind::Catalog)
     }
@@ -1100,6 +1101,7 @@ impl MachineView {
     /// An already qualified persisted read needs updates after invalidation,
     /// without starting a cold producer merely because this owner is new.
     pub(crate) fn note_catalog_interest(&self) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
         self.note_read_with(Kind::Catalog, pending)
@@ -1125,6 +1127,7 @@ impl MachineView {
         deadline: Instant,
         mut pool: Option<Arc<RefreshPool>>,
     ) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         let mut state = lock(&self.live.state);
         let mut demanded = false;
         loop {
