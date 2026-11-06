@@ -242,6 +242,18 @@ pub(crate) fn apply_observations(
         .map(|compact| (compact.position.source.clone(), compact.position.offset))
         .collect();
     classify::classify_reads(&mut observations, &compactions);
+    let mut exact = BTreeMap::new();
+    let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+    for (index, step) in activity.steps.iter().enumerate() {
+        exact.insert(step.id.clone(), index);
+        sources
+            .entry(step.position.source.clone())
+            .or_default()
+            .push((step.position.offset, index));
+    }
+    for offsets in sources.values_mut() {
+        offsets.sort_unstable();
+    }
     for row in observations {
         activity.facts.extend(
             row.observation
@@ -251,23 +263,17 @@ pub(crate) fn apply_observations(
                 .map(|change| classify::fact(&row, change)),
         );
         let owner = if let Some(id) = &row.observation.step_id {
-            activity.steps.iter().position(|step| &step.id == id)
+            exact.get(id).copied()
         } else {
-            let mut preceding: Vec<_> = activity
-                .steps
-                .iter()
-                .enumerate()
-                .filter(|(_, step)| step.position.source == row.position.source)
-                .collect();
-            preceding.sort_by_key(|(_, step)| step.position.offset);
-            let next =
-                preceding.partition_point(|(_, step)| step.position.offset < row.position.offset);
-            // Native response usage is emitted after its call. This association
-            // never becomes an exact response identity on a change fact.
-            preceding
-                .get(next)
-                .or_else(|| preceding.last())
-                .map(|(n, _)| *n)
+            sources.get(&row.position.source).and_then(|offsets| {
+                let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
+                // Response usage follows its calls. This association never
+                // becomes an exact response identity on a change fact.
+                offsets
+                    .get(next)
+                    .or_else(|| offsets.last())
+                    .map(|(_, index)| *index)
+            })
         };
         if let Some(owner) = owner {
             let step = &mut activity.steps[owner];

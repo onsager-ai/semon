@@ -171,10 +171,8 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
                 }
                 '<' | '>' | '(' | ')' | '{' | '}' => return None,
                 ';' | '\n' | '&' | '|' => {
-                    if c == '&' || c == '|' {
-                        if chars.next() != Some(c) {
-                            return None;
-                        }
+                    if (c == '&' || c == '|') && chars.next() != Some(c) {
+                        return None;
                     }
                     if word_started {
                         words.push(std::mem::take(&mut word));
@@ -361,10 +359,11 @@ fn decode(
     match value {
         Value::String(text) => {
             *budget = budget.checked_sub(text.len())?;
-            if envelopes && matches!(text.trim_start().chars().next(), Some('{' | '[' | '"')) {
-                if let Ok(nested) = serde_json::from_str::<Value>(text) {
-                    return decode(&nested, depth + 1, budget, result, formatter, envelopes);
-                }
+            if envelopes
+                && matches!(text.trim_start().chars().next(), Some('{' | '[' | '"'))
+                && let Ok(nested) = serde_json::from_str::<Value>(text)
+            {
+                return decode(&nested, depth + 1, budget, result, formatter, envelopes);
             }
             // Use the existing strict native formatter recognizer. Output body
             // lines cannot forge an exit status in the header.
@@ -719,9 +718,15 @@ pub(crate) fn capture(
         for (block, item) in items.iter().enumerate() {
             match field(item, "type") {
                 Some("tool_use") => {
-                    if let Some(event) = index.events.iter().position(|event| {
-                        event.o == offset && event.b == block as u32 && event.k == Kind::Tool
-                    }) {
+                    if let Some(event) = index
+                        .events
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .take_while(|(_, event)| event.o == offset)
+                        .find(|(_, event)| event.b == block as u32 && event.k == Kind::Tool)
+                        .map(|(index, _)| index)
+                    {
                         let step = record
                             .pointer("/message/id")
                             .and_then(Value::as_str)
@@ -757,7 +762,11 @@ pub(crate) fn capture(
                 if let Some(event) = index
                     .events
                     .iter()
-                    .position(|event| event.o == offset && event.k == Kind::Tool)
+                    .enumerate()
+                    .rev()
+                    .take_while(|(_, event)| event.o == offset)
+                    .find(|(_, event)| event.k == Kind::Tool)
+                    .map(|(index, _)| index)
                 {
                     let name = field(payload, "name").unwrap_or("shell");
                     // Only existing straight-line code-mode decoding can prove a
@@ -783,8 +792,8 @@ pub(crate) fn capture(
                     );
                     observation.formatter = index.events[event].native_direct_call
                         || (name == "exec" && !input.is_null());
-                    observation.envelopes = name != "exec" || !input.is_null();
-                    if !observation.envelopes {
+                    observation.envelopes = true;
+                    if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
                     }
                     index
@@ -842,15 +851,23 @@ pub(crate) fn classify_reads(
     observations.sort_by(|a, b| a.position.cmp(&b.position));
     let mut histories: BTreeMap<String, BTreeMap<String, (Option<u64>, u64)>> = BTreeMap::new();
     let mut uncertain_until: BTreeMap<String, u64> = BTreeMap::new();
+    let mut compact_offsets: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    for (source, offset) in compactions {
+        compact_offsets.entry(source).or_default().push(*offset);
+    }
+    for offsets in compact_offsets.values_mut() {
+        offsets.sort_unstable();
+    }
     for row in observations {
         let reads = histories.entry(row.position.source.clone()).or_default();
-        let latest = compactions
-            .iter()
-            .filter(|(source, offset)| {
-                *source == row.position.source && *offset < row.position.offset
-            })
-            .map(|(_, offset)| *offset)
-            .max();
+        let latest = compact_offsets
+            .get(row.position.source.as_str())
+            .and_then(|offsets| {
+                offsets
+                    .partition_point(|offset| *offset < row.position.offset)
+                    .checked_sub(1)
+                    .map(|index| offsets[index])
+            });
         let observation = &mut row.observation;
         // Agent calls and search tools can mutate arbitrary paths. An unfinished
         // mutator also blocks reads that overlap it, even after another read.

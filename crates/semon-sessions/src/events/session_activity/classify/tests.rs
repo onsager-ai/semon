@@ -514,3 +514,30 @@ fn scanner_capture_resolves_exact_ids_and_retains_no_bodies() {
             .contains("activity_observation")
     );
 }
+
+#[test]
+fn codex_custom_exec_nested_wait_is_captured_without_command_guessing() {
+    let mut index = FileIndex::default();
+    let records = [
+        json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"wait-call","name":"exec","input":"console.log(await tools.wait_agent({ids:['synthetic']}))"}}),
+        json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"wait-call","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":json!({"output":json!({"type":"CollabAgentToolCall","tool":"wait","started_at_ms":20,"completed_at_ms":7_200_020}).to_string()}).to_string()}]}}),
+    ];
+    for (offset, record) in records.iter().enumerate() {
+        crate::events::codex(&mut index, record, offset as u64 * 100);
+        capture(
+            &mut index,
+            "codex",
+            record,
+            offset as u64 * 100,
+            &serde_json::to_vec(record).unwrap(),
+        );
+    }
+    let observation = index.events[0].activity_observation.as_ref().unwrap();
+    assert_eq!(observation.waste, Some(WasteKind::OrchestrationWait));
+    assert_eq!(
+        observation.wait.as_ref().unwrap().completed_at_ms,
+        7_200_020
+    );
+    assert!(observation.step_id.is_none());
+    assert_eq!(observation.commands, [Command::Unknown]);
+}
