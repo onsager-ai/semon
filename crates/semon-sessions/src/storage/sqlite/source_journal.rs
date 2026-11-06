@@ -400,23 +400,13 @@ impl SourceJournal {
         )
         .map_err(failed)?;
         // This typed, admitted source-observation producer is itself the
-        // writer authority for its fenced source tables.  Configured callers
-        // do not carry NativeOwnership, but their writes are still subject to
-        // the existing namespace and epoch checks in `validate` below.
-        db.create_scalar_function(
-            "semon_event_writer",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(1_i64),
-        )
-        .map_err(failed)?;
+        // writer authority for its source tables: every statement binds its
+        // namespace explicitly, and `validate` rechecks admission and epoch.
         let rollback_clock = self.rollback_clock.clone();
         db.rollback_hook(Some(move || {
             rollback_clock.fetch_add(1, Ordering::Relaxed);
         }))
         .map_err(failed)?;
-        register_backfill_writer(&db, false)?;
         Ok(db)
     }
 
@@ -519,26 +509,6 @@ impl SourceJournal {
         if actual.as_deref() != Some(expected.trim_end_matches(';')) {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        for table in ["source_observation_receipts", "source_observation_intents"] {
-            for (action, predicate) in [
-                ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-                (
-                    "UPDATE",
-                    "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-                ),
-                ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-            ] {
-                let name = format!("storage_source_guard_{table}_{action}");
-                let expected = format!(
-                    "CREATE TRIGGER {name} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END"
-                );
-                let actual: Option<String> = tx.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", params![name,table], |r|r.get(0)).optional().map_err(failed)?;
-                if actual.as_deref() != Some(expected.as_str()) {
-                    return Err(StorageError::NamespaceUpgradePending);
-                }
-            }
-        }
-        catalog_namespace::validate_guard(tx, "storage_source_journal")?;
         // A rolled-back DDL cookie can be reused for a different layout.
         // Cache only committed schema, never mutable journal or owner rows.
         if tx.is_autocommit() {
@@ -1211,7 +1181,6 @@ impl SourceObservationStore for SourceJournal {
             tx.commit().map_err(|_| StorageError::CommitUncertain)?;
             return Ok(SourceMutationReceipt::Conflict);
         }
-        register_backfill_writer(&tx, true)?;
         tx.execute_batch("INSERT OR REPLACE INTO meta(namespace,key,value) VALUES(semon_meta_scope('catalog_backfill_state'),'catalog_backfill_state','complete'),(semon_meta_scope('catalog_completeness'),'catalog_completeness','complete'),(semon_meta_scope('search_backfill_complete'),'search_backfill_complete','1'); DELETE FROM meta WHERE namespace=semon_meta_scope('catalog_recovery_reason') AND key='catalog_recovery_reason';").map_err(failed)?;
         let updated = tx
             .execute(
@@ -1235,9 +1204,7 @@ pub(crate) fn enroll(db: &Connection, config: &StoreConfig) -> Result<(), Storag
     db.execute_batch(crate::events::store::SOURCE_OBSERVATION_RECEIPTS_SCHEMA)
         .map_err(failed)?;
     qualify_operation_tables(db)?;
-    qualify_backfill_metadata(db)?;
     db.execute_batch(JOURNAL_SCHEMA).map_err(failed)?;
-    catalog_namespace::guard(db, "storage_source_journal")?;
     db.execute("INSERT INTO storage_source_journal SELECT ?1,coalesce(max(revision),0),NULL,?2 FROM main.session_catalog_invalidations WHERE namespace=?1", params![config.namespace.as_str(),SOURCE_JOURNAL_QUALIFICATION_VERSION]).map_err(failed)?;
     Ok(())
 }
@@ -1257,70 +1224,11 @@ fn phase_failed(phase: &'static str, error: rusqlite::Error) -> StorageError {
     failed(diagnose_sql(phase, error))
 }
 
-pub(crate) fn register_backfill_writer(db: &Connection, enabled: bool) -> Result<(), StorageError> {
-    db.create_scalar_function(
-        "semon_source_backfill_writer",
-        0,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-        move |_| Ok(i64::from(enabled)),
-    )
-    .map_err(failed)
-}
-
-/// The admitted metadata profile has no Catalog consumer
-/// yet. Qualify only the four backfill completion keys for this typed producer;
-/// all other metadata writes retain the admission fence. Native ownership's
-/// independently installed metadata guards are never removed or rewritten.
-fn qualify_backfill_metadata(db: &Connection) -> Result<(), StorageError> {
-    let fences: Vec<String> = db.prepare("SELECT name FROM main.sqlite_schema WHERE type='trigger' AND tbl_name='meta' AND name GLOB 'storage_namespace_fence_*' ORDER BY name LIMIT 4").map_err(failed)?
-        .query_map([], |row| row.get(0)).map_err(failed)?
-        .collect::<rusqlite::Result<_>>().map_err(failed)?;
-    if fences.is_empty() {
-        return Ok(());
-    }
-    if fences.len() != 3 {
-        return Err(StorageError::NamespaceUpgradePending);
-    }
-    for name in fences {
-        let (action, rows): (&str, &[&str]) = if name.ends_with("_INSERT") {
-            ("INSERT", &["NEW"])
-        } else if name.ends_with("_UPDATE") {
-            ("UPDATE", &["OLD", "NEW"])
-        } else if name.ends_with("_DELETE") {
-            ("DELETE", &["OLD"])
-        } else {
-            return Err(StorageError::NamespaceUpgradePending);
-        };
-        let mut predicate = "semon_source_backfill_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_namespaces WHERE namespace=semon_namespace())".to_owned();
-        for row in rows {
-            predicate.push_str(&format!(" OR {row}.key NOT IN ('catalog_backfill_state','catalog_completeness','search_backfill_complete','catalog_recovery_reason')"));
-            predicate.push_str(&format!(
-                " OR {row}.namespace IS NOT semon_meta_scope({row}.key)"
-            ));
-        }
-        let quoted = name.replace('"', "\"\"");
-        db.execute_batch(&format!("DROP TRIGGER \"{quoted}\"; CREATE TRIGGER \"{quoted}\" BEFORE {action} ON meta WHEN {predicate} BEGIN SELECT RAISE(ABORT,'source backfill metadata refused'); END;")).map_err(failed)?;
-    }
-    Ok(())
-}
-
 /// Admission fences every existing table, including the already namespaced
 /// operation journal. Replace only these two families' unconditional fences
 /// after admission/epoch validation, under the same preparation writer lock.
 fn qualify_operation_tables(db: &Connection) -> Result<(), StorageError> {
     for table in ["source_observation_receipts", "source_observation_intents"] {
-        // Install the scoped replacement before removing any admission fence.
-        for (action, predicate) in [
-            ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-            (
-                "UPDATE",
-                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-            ),
-            ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-        ] {
-            db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS storage_source_guard_{table}_{action} BEFORE {action} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'source operation namespace refused'); END;")).map_err(failed)?;
-        }
         let fences: Vec<String> = db.prepare("SELECT name FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name GLOB 'storage_namespace_fence_*' ORDER BY name LIMIT 4").map_err(failed)?
             .query_map([table], |row| row.get(0)).map_err(failed)?
             .collect::<rusqlite::Result<_>>().map_err(failed)?;
@@ -2778,25 +2686,13 @@ mod tests {
             store.claims(&["locked".into()]).unwrap(),
             vec![("locked".into(), None)]
         );
-        // Test-owned coordinate replacement: bypass only this fixture's epoch
-        // fence. The already-open semantic writer must validate again.
-        let names:Vec<String>=db.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name='meta' AND sql LIKE '%BEFORE UPDATE%'").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
-        assert_eq!(names.len(), 1);
-        let guard: String = db
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE type='trigger' AND name=?1",
-                [&names[0]],
-                |row| row.get(0),
-            )
-            .unwrap();
-        db.execute_batch(&format!("DROP TRIGGER \"{}\"", names[0]))
-            .unwrap();
+        // Test-owned coordinate replacement outside every port. The
+        // already-open semantic writer must validate the live epoch again.
         db.execute(
-            "UPDATE meta SET value=?1 WHERE key='catalog_changes_epoch'",
+            "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='catalog_changes_epoch'",
             ["f".repeat(64)],
         )
         .unwrap();
-        db.execute_batch(&guard).unwrap();
         let next_epoch = vec!["new-epoch".into()];
         assert_eq!(
             store.discover(

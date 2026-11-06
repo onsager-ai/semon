@@ -517,13 +517,6 @@ pub(super) fn connection(config: &StoreConfig) -> Result<Connection, StorageErro
     let db = SourceJournal(config.clone()).connection()?;
     db.pragma_update(None, "foreign_keys", true)
         .map_err(failed)?;
-    db.create_scalar_function(
-        "semon_event_writer",
-        0,
-        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-        |_| Ok(1_i64),
-    )
-    .map_err(failed)?;
     // Qualify the committed physical layout before taking a writer reservation.
     // Admission, epoch and mutable writer qualification are rechecked in the tx.
     NativeOwnership::validate_physical(&db)?;
@@ -615,6 +608,45 @@ pub(crate) fn validate_catalog_publication_profile(
     )
 }
 
+/// Database file identity (path, device, inode), its random stream epoch and
+/// committed schema cookie. A layout qualified under one identity is reused
+/// by every later connection to the same database in this process.
+type LayoutIdentity = (String, u64, u64, String, i64);
+
+static QUALIFIED_LAYOUTS: std::sync::Mutex<BTreeSet<LayoutIdentity>> =
+    std::sync::Mutex::new(BTreeSet::new());
+const QUALIFIED_LAYOUT_LIMIT: usize = 256;
+
+fn layout_identity(db: &Connection, version: i64) -> Result<Option<LayoutIdentity>, StorageError> {
+    let Some(path) = db.path().filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    #[cfg(unix)]
+    let (device, inode) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (device, inode) = {
+        let _ = metadata;
+        return Ok(None);
+    };
+    let epoch: Option<String> = db
+        .prepare_cached("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'")
+        .map_err(failed)?
+        .query_row([], |r| r.get(0))
+        .optional()
+        .map_err(failed)?;
+    Ok(epoch.map(|epoch| (path.to_owned(), device, inode, epoch, version)))
+}
+
+/// Schema-level guard trigger families retired from the current SQLite
+/// contract. Enforcement lives in the namespace-bound port types.
+pub(crate) const LEGACY_GUARD_TRIGGERS: &str = "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='trigger' AND (name GLOB 'storage_owned_guard_*' OR name GLOB 'storage_semantic_guard_*' OR name GLOB 'storage_source_guard_*' OR name GLOB 'storage_event_guard_*' OR name GLOB 'storage_event_scope_*' OR name GLOB 'storage_catalog_guard_*' OR name GLOB 'storage_private_unported_*'))";
+
 /// Private primitive writer authority. Database flags cannot manufacture it;
 /// public configuration always uses the sole-Source admission path.
 #[derive(Clone, Debug)]
@@ -685,6 +717,47 @@ impl NativeOwnership {
                 return Ok(());
             }
         }
+        // The layout is a pure function of committed schema. Qualify it once
+        // per database identity and schema cookie, not once per connection.
+        let identity = layout_identity(db, version)?;
+        let qualified = identity.as_ref().is_some_and(|identity| {
+            QUALIFIED_LAYOUTS
+                .lock()
+                .is_ok_and(|layouts| layouts.contains(identity))
+        });
+        if !qualified {
+            Self::qualify_physical(db)?;
+        }
+        // Match the existing copied-usage/support layout caches: never retain
+        // an uncommitted cookie, which rollback could reuse for different DDL.
+        if db.is_autocommit() {
+            if qualified {
+                warm_copied_usage_layout(db, version).map_err(failed)?;
+            }
+            db.create_scalar_function(
+                "semon_native_layout",
+                1,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                move |context| {
+                    let observed: i64 = context.get(0)?;
+                    Ok((observed == version).then_some(true))
+                },
+            )
+            .map_err(failed)?;
+            if !qualified
+                && let Some(identity) = identity
+                && let Ok(mut layouts) = QUALIFIED_LAYOUTS.lock()
+            {
+                if layouts.len() >= QUALIFIED_LAYOUT_LIMIT {
+                    layouts.clear();
+                }
+                layouts.insert(identity);
+            }
+        }
+        Ok(())
+    }
+
+    fn qualify_physical(db: &Connection) -> Result<(), StorageError> {
         if !current_objects_present(db).map_err(failed)? {
             return Err(StorageError::NamespaceUpgradePending);
         }
@@ -706,50 +779,12 @@ impl NativeOwnership {
         // warm before their first copied-usage read.
         validate_copied_usage(db).map_err(failed)?;
         semantic_stage::stage_layout(db).map_err(failed)?;
-        // These guards are added with the admitted writer profile rather than
-        // the authored base DDL. Qualify their static presence on schema-cookie
-        // misses, after prepare_owned has created the operation table.
-        let owner_ready: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='storage_event_operations')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(failed)?;
-        if owner_ready {
-            let guards = db.prepare_cached("SELECT tbl_name,name FROM main.sqlite_schema WHERE type='trigger' AND name GLOB 'storage_owned_guard_*'").map_err(failed)?
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(failed)?
-                .collect::<rusqlite::Result<BTreeSet<_>>>().map_err(failed)?;
-            for table in TABLES.iter().copied().chain([
-                "storage_event_tables",
-                "storage_event_operations",
-                "session_catalog_invalidations",
-                "catalog_backfill_sources",
-                "pricing_recompute_pending",
-            ]) {
-                for action in ["INSERT", "UPDATE", "DELETE"] {
-                    if !guards.contains(&(
-                        table.to_owned(),
-                        format!("storage_owned_guard_{table}_{action}"),
-                    )) {
-                        return Err(StorageError::NamespaceUpgradePending);
-                    }
-                }
-            }
-        }
-        // Match the existing copied-usage/support layout caches: never retain
-        // an uncommitted cookie, which rollback could reuse for different DDL.
-        if db.is_autocommit() {
-            db.create_scalar_function(
-                "semon_native_layout",
-                1,
-                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                move |context| {
-                    let observed: i64 = context.get(0)?;
-                    Ok((observed == version).then_some(true))
-                },
-            )
-            .map_err(failed)?;
+        // Namespace and writer authority belong to the typed ports. A store
+        // still carrying the earlier schema-level guard families is an
+        // unsupported Semon layout: refuse it rather than adopt its triggers.
+        let legacy_guards: bool = db.prepare_cached(LEGACY_GUARD_TRIGGERS).map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
+        if legacy_guards {
+            return Err(StorageError::NamespaceUpgradePending);
         }
         Ok(())
     }
@@ -973,64 +1008,6 @@ impl NativeOwnership {
             }
             tx.execute_batch(crate::storage::sqlite::namespace::REGISTRY_SCHEMA)
                 .map_err(failed)?;
-            let tables=tx.prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'storage_%' ORDER BY name LIMIT 129").map_err(failed)?.query_map([],|r|r.get::<_,String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-            if tables.len() > 128 {
-                return Err(StorageError::NamespaceUpgradePending);
-            }
-            for (index, table) in tables.iter().enumerate() {
-                if TABLES.contains(&table.as_str())
-                    || semantic_stage::STAGE_TABLES.contains(&table.as_str())
-                    || [
-                        "session_catalog_invalidations",
-                        "catalog_backfill_sources",
-                        "pricing_recompute_pending",
-                        // prepare_owned installs their namespace/writer guards.
-                        "source_observation_intents",
-                        "source_observation_receipts",
-                    ]
-                    .contains(&table.as_str())
-                {
-                    continue;
-                }
-                // Unported consumers remain fenced. The complete scoped trace
-                // family is writable only by the fenced semantic publisher.
-                for operation in ["INSERT", "UPDATE", "DELETE"] {
-                    let condition = if [
-                        "session_catalog",
-                        "session_catalog_sources",
-                        "session_catalog_changes",
-                        "session_history_catalog",
-                        "session_history_projections",
-                        "session_history_slots",
-                        "session_history_slot_parts",
-                        "session_slot_projections",
-                        "session_slots",
-                        "session_search_coverage",
-                        "session_search_documents",
-                        "session_search_memberships",
-                        "session_search_counts",
-                        "session_overview",
-                        "session_trace_headers",
-                        "session_trace_turns",
-                        "session_trace_edges",
-                        "session_trace_bookmarks",
-                    ]
-                    .contains(&table.as_str())
-                    {
-                        let scope = match operation {
-                            "UPDATE" => {
-                                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"
-                            }
-                            "DELETE" => "OLD.namespace IS NOT semon_namespace()",
-                            _ => "NEW.namespace IS NOT semon_namespace()",
-                        };
-                        format!("WHEN semon_semantic_publisher()<>1 OR {scope}")
-                    } else {
-                        String::new()
-                    };
-                    tx.execute_batch(&format!("CREATE TRIGGER storage_private_unported_{index}_{operation} BEFORE {operation} ON \"{}\" {condition} BEGIN SELECT RAISE(ABORT,'private native family unported'); END;",table.replace('"',"\"\""))).map_err(failed)?;
-                }
-            }
         }
         tx.execute("INSERT INTO storage_namespaces(namespace,admission_generation,admitted_at,format_version,writer_qualification) SELECT ?1,coalesce(max(admission_generation),0)+1,?2,1,0 FROM storage_namespaces WHERE true ON CONFLICT(namespace) DO NOTHING", params![config.namespace.as_str(),crate::model::now_ms()]).map_err(failed)?;
         let admission = tx
@@ -1068,48 +1045,6 @@ fn prepare_owned(tx: &Connection, owner: &NativeOwnership) -> Result<(), Storage
 CREATE TABLE IF NOT EXISTS storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);
 CREATE INDEX IF NOT EXISTS storage_ns_source_pending ON session_catalog_invalidations(namespace,revision,source_path);").map_err(failed)?;
-    for table in TABLES.iter().copied().chain([
-        "storage_event_tables",
-        "storage_event_operations",
-        "session_catalog_invalidations",
-        "catalog_backfill_sources",
-        "pricing_recompute_pending",
-    ]) {
-        for (operation, predicate) in [
-            ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-            (
-                "UPDATE",
-                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-            ),
-            ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-        ] {
-            let predicate = if table == "meta" {
-                match operation {
-                    "INSERT" => "NEW.namespace IS NOT semon_meta_scope(NEW.key)",
-                    "UPDATE" => {
-                        "OLD.namespace IS NOT semon_meta_scope(OLD.key) OR NEW.namespace IS NOT semon_meta_scope(NEW.key)"
-                    }
-                    "DELETE" => "OLD.namespace IS NOT semon_meta_scope(OLD.key)",
-                    _ => unreachable!(),
-                }
-            } else {
-                predicate
-            };
-            let metadata = if table == "meta" {
-                // The fenced SourceJournal backfill completion owns its two
-                // completion keys; other Catalog keys stay publisher-only.
-                let rows: &[&str] = match operation {
-                    "UPDATE" => &["OLD", "NEW"],
-                    "DELETE" => &["OLD"],
-                    _ => &["NEW"],
-                };
-                rows.iter().map(|row|format!(" OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*' OR (semon_source_backfill_writer()=1 AND {row}.key IN('catalog_completeness','search_backfill_complete')) OR (semon_semantic_publisher()=1 AND ({row}.key IN('catalog_changes_floor_current','catalog_changes_floor_retained_history','pricing_recompute_target','pricing_recompute_v2','pricing_recompute_completed','catalog_generation','catalog_version','catalog_publication_epoch','catalog_native_publication','catalog_observed_at','catalog_completeness','catalog_semantic_gc','catalog_semantic_group_admission','semantic_listing_generation','slot_projection_catalog_generation','overview_generation','search_version','search_backfill_complete','search_generation_current','search_generation_retained_history','search_incomplete_current','search_incomplete_retained_history') OR {row}.key GLOB 'history_transfer:*' OR {row}.key GLOB 'history_original_header:*' OR {row}.key GLOB 'overview_needed:*' OR (length({row}.key)=91 AND substr({row}.key,1,27) IN('catalog_native_publication:','catalog_native_observation:') AND substr({row}.key,28) NOT GLOB '*[^0-9a-f]*'))))")).collect::<String>()
-            } else {
-                String::new()
-            };
-            tx.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS storage_owned_guard_{table}_{operation} BEFORE {operation} ON {table} WHEN semon_event_writer()<>1 OR {predicate}{metadata} BEGIN SELECT RAISE(ABORT,'private native ownership refused'); END;")).map_err(failed)?;
-        }
-    }
     for table in TABLES.iter().copied().chain(["pricing_recompute_pending"]) {
         tx.execute(
             "INSERT OR IGNORE INTO storage_event_tables VALUES(?1,?2,0)",
@@ -1144,12 +1079,6 @@ pub(super) fn validate(db: &Connection, config: &StoreConfig) -> Result<(), Stor
         .map_err(failed)?;
     if count != TABLES.len() as i64 {
         return Err(StorageError::NamespaceUpgradePending);
-    }
-    for table in TABLES {
-        let guards: i64 = db.query_row("SELECT count(*) FROM main.sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name IN ('storage_event_guard_'||?1||'_INSERT','storage_event_guard_'||?1||'_UPDATE','storage_event_guard_'||?1||'_DELETE')", [table], |r| r.get(0)).map_err(failed)?;
-        if guards != 3 {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
     }
     Ok(())
 }
@@ -1217,18 +1146,6 @@ pub(crate) fn prepare(config: &StoreConfig) -> Result<(), StorageError> {
     tx.execute_batch("CREATE TABLE storage_event_tables(namespace TEXT NOT NULL,table_name TEXT NOT NULL,qualification INTEGER NOT NULL CHECK(qualification IN(0,1)),PRIMARY KEY(namespace,table_name)) STRICT, WITHOUT ROWID;
 CREATE TABLE storage_event_operations(namespace TEXT NOT NULL,operation_id TEXT NOT NULL,source_path TEXT NOT NULL,request_digest TEXT NOT NULL CHECK(length(request_digest)=64),base TEXT NOT NULL,observed_revision INTEGER,target TEXT,consumed_bytes INTEGER,state TEXT NOT NULL CHECK(state IN('intent','complete')),PRIMARY KEY(namespace,operation_id)) STRICT, WITHOUT ROWID;
 CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,source_path,base,observed_revision,state);").map_err(failed)?;
-    for table in ["storage_event_tables", "storage_event_operations"] {
-        for operation in ["INSERT", "UPDATE", "DELETE"] {
-            let predicate = match operation {
-                "UPDATE" => {
-                    "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"
-                }
-                "DELETE" => "OLD.namespace IS NOT semon_namespace()",
-                _ => "NEW.namespace IS NOT semon_namespace()",
-            };
-            tx.execute_batch(&format!("CREATE TRIGGER storage_event_scope_{table}_{operation} BEFORE {operation} ON {table} WHEN semon_event_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'event operation namespace refused'); END;")).map_err(failed)?;
-        }
-    }
     for table in TABLES {
         let fences: Vec<String> = tx.prepare("SELECT name FROM sqlite_schema WHERE type='trigger' AND tbl_name=?1 AND name GLOB 'storage_namespace_fence_*' ORDER BY name LIMIT 4").map_err(failed)?
             .query_map([table], |r| r.get(0)).map_err(failed)?.collect::<rusqlite::Result<_>>().map_err(failed)?;
@@ -1248,26 +1165,6 @@ CREATE INDEX storage_event_reconcile ON storage_event_operations(namespace,sourc
             ],
         )
         .map_err(failed)?;
-        for operation in ["INSERT", "UPDATE", "DELETE"] {
-            let metadata = if *table == "meta" {
-                // Native source metadata and the admitted SourceJournal's
-                // backfill/recovery cursor belong to the Event writer.
-                // Validate both rows on UPDATE, including the source scope.
-                let rows: &[&str] = match operation {
-                    "UPDATE" => &["OLD", "NEW"],
-                    "DELETE" => &["OLD"],
-                    _ => &["NEW"],
-                };
-                rows.iter().map(|row| format!(" OR {row}.namespace IS NOT semon_namespace() OR NOT ({row}.key IN('claude_json_stamp','catalog_push_driven','catalog_observed_at','catalog_backfill_state','catalog_recovery_after','catalog_recovery_reason') OR {row}.key='slot_upgrade_selected' OR {row}.key GLOB 'native_*' OR {row}.key GLOB 'archive_event_index:*')")).collect::<String>()
-            } else {
-                match operation {
-                    "UPDATE" => " OR OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()".to_owned(),
-                    "DELETE" => " OR OLD.namespace IS NOT semon_namespace()".to_owned(),
-                    _ => " OR NEW.namespace IS NOT semon_namespace()".to_owned(),
-                }
-            };
-            tx.execute_batch(&format!("CREATE TRIGGER storage_event_guard_{table}_{operation} BEFORE {operation} ON \"{table}\" WHEN semon_event_writer()<>1 OR (SELECT count(*) FROM storage_namespaces)<>1 OR NOT EXISTS(SELECT 1 FROM storage_event_tables WHERE namespace=semon_namespace() AND table_name='{table}' AND qualification IN(0,1)){metadata} BEGIN SELECT RAISE(ABORT,'configured event writer refused'); END;")).map_err(failed)?;
-        }
     }
     tx.commit().map_err(|_| StorageError::CommitUncertain)
 }
@@ -2939,46 +2836,25 @@ mod tests {
     }
 
     #[test]
-    fn prepared_old_connection_cannot_write_after_event_guard_installation() {
+    fn foreign_namespace_writer_is_refused_by_the_port_without_mutation() {
+        // Writer authority is the typed, admitted port rather than schema
+        // triggers: a foreign or stale binding is refused before any write.
         let f = Fixture::unbound("configured-events");
-        let old = f.db();
-        // Prepare against the admission fences before the native owner
-        // installs its owned guards. SQLite must requalify this warm statement.
-        let mut old_write = old
-            .prepare("UPDATE files SET title='old-writer' WHERE path=?1")
-            .unwrap();
-        let mut old_metadata = old
-            .prepare("UPDATE meta SET value='old-writer' WHERE key GLOB 'native_tree_summary:*'")
-            .unwrap();
         NativeOwnership::admit(&f.config).unwrap();
         let mut writer = f.native_cache();
         writer.ingest(&"a".repeat(64), &f.raw, "codex").unwrap();
+        drop(writer);
         let before = f.state();
-        let summaries: i64 = f
-            .db()
-            .query_row(
-                "SELECT count(*) FROM meta WHERE key GLOB 'native_tree_summary:*'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert!(summaries > 0, "the metadata fence must protect real rows");
-        assert!(old_write.execute([f.raw.to_str().unwrap()]).is_err());
-        assert!(old_metadata.execute([]).is_err());
         let mut foreign = f.config.clone();
         foreign.namespace = LogicalSourceNamespace::new("foreign").unwrap();
-        let refused = connection(&foreign)
-            .unwrap()
-            .execute(
-                "UPDATE meta SET value='foreign-writer' WHERE key GLOB 'native_tree_summary:*'",
-                [],
-            )
-            .unwrap_err();
-        assert_eq!(
-            refused.sqlite_error_code(),
-            Some(ErrorCode::ConstraintViolation)
-        );
-        assert_eq!(f.state(), before);
+        for _ in 0..2 {
+            assert!(matches!(
+                foreign.native_events(),
+                Err(StorageError::NamespaceMismatch)
+            ));
+            assert!(NativeOwnership::restore(&foreign).is_err());
+            assert_eq!(f.state(), before);
+        }
         assert_eq!(
             crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
             0
@@ -3136,15 +3012,6 @@ mod tests {
         let seed_as = |namespace: &str| {
             let namespace = crate::storage::LogicalSourceNamespace::new(namespace).unwrap();
             crate::storage::sqlite::catalog_namespace::register(&db, &namespace).unwrap();
-            for function in ["semon_event_writer", "semon_semantic_writer"] {
-                db.create_scalar_function(
-                    function,
-                    0,
-                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                    |_| Ok(1_i64),
-                )
-                .unwrap();
-            }
         };
         let path = f.raw.to_string_lossy();
         seed_as("foreign");
@@ -3223,17 +3090,6 @@ mod tests {
                 .replayed
         );
         assert_eq!(f.state(), committed);
-        let wrong = connection(&f.config).unwrap();
-        assert!(
-            wrong
-                .execute(
-                    "DELETE FROM catalog_native_dependencies WHERE namespace='foreign'",
-                    []
-                )
-                .is_err()
-        );
-        assert!(wrong.execute("UPDATE session_source_mutations SET evidence='wrong' WHERE namespace='foreign'", []).is_err());
-        assert_eq!(foreign(&f.db()), before);
         assert_eq!(
             crate::storage::sqlite::namespace::WRITER_QUALIFICATION_VERSION,
             0
@@ -7342,9 +7198,11 @@ mod tests {
             "catalog_native_dependencies",
             "session_source_mutations",
         ] {
+            // Retired schema-level guards are an unsupported Semon layout:
+            // the ports refuse it instead of adopting or repairing it.
             let f = Fixture::new();
             f.db()
-                .execute_batch(&format!("DROP TRIGGER storage_owned_guard_{table}_UPDATE;"))
+                .execute_batch(&format!("CREATE TRIGGER storage_owned_guard_{table}_UPDATE BEFORE UPDATE ON {table} BEGIN SELECT 1; END;"))
                 .unwrap();
             let before = f.state();
             assert!(NativeOwnership::restore(&f.config).is_err(), "{table}");
@@ -7420,19 +7278,15 @@ mod tests {
         writer.connection.execute("UPDATE storage_event_tables SET table_name='files' WHERE namespace=semon_namespace() AND table_name='unowned'", []).unwrap();
         assert!(writer.ledger(&path).unwrap().is_none());
 
-        let guards = connection(&f.config).unwrap();
-        let update_guard: String = guards
-            .query_row(
-                "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name='storage_owned_guard_files_UPDATE'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        guards
-            .execute_batch("DROP TRIGGER storage_owned_guard_files_UPDATE")
+        // A committed retired guard family invalidates the cached layout.
+        let other = f.db();
+        other
+            .execute_batch("CREATE TRIGGER storage_owned_guard_files_UPDATE BEFORE UPDATE ON files BEGIN SELECT 1; END;")
             .unwrap();
         assert!(writer.ledger(&path).is_err());
-        guards.execute_batch(&update_guard).unwrap();
+        other
+            .execute_batch("DROP TRIGGER storage_owned_guard_files_UPDATE")
+            .unwrap();
         assert!(writer.ledger(&path).unwrap().is_none());
 
         let committed_cookie: i64 = writer
@@ -7440,7 +7294,7 @@ mod tests {
             .pragma_query_value(None, "schema_version", |row| row.get(0))
             .unwrap();
         let tx = writer.connection.transaction().unwrap();
-        tx.execute_batch("DROP TRIGGER storage_owned_guard_files_INSERT")
+        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_INSERT BEFORE INSERT ON files BEGIN SELECT 1; END;")
             .unwrap();
         let dropped_cookie: i64 = tx
             .pragma_query_value(None, "schema_version", |row| row.get(0))
@@ -7466,7 +7320,7 @@ mod tests {
         tx.rollback().unwrap();
 
         let tx = writer.connection.transaction().unwrap();
-        tx.execute_batch("DROP TRIGGER storage_owned_guard_files_DELETE")
+        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_DELETE BEFORE DELETE ON files BEGIN SELECT 1; END;")
             .unwrap();
         assert_eq!(
             tx.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
@@ -7538,20 +7392,6 @@ mod tests {
             stale.native_events(),
             Err(StorageError::ScopeChanged)
         ));
-        assert!(
-            f.db()
-                .execute("UPDATE files SET title='unbound'", [])
-                .is_err()
-        );
-        assert!(
-            connection(&f.config)
-                .unwrap()
-                .execute(
-                    "UPDATE meta SET value='forged' WHERE key='catalog_changes_epoch'",
-                    []
-                )
-                .is_err()
-        );
         let custody: String = f
             .db()
             .query_row(
@@ -7562,16 +7402,7 @@ mod tests {
             .unwrap();
         assert_eq!(custody, "preserve-verbatim");
         // Already-open configured writers also reject a replaced epoch.
-        let db = connection(&f.config).unwrap();
-        let guard: String = db
-            .query_row(
-                "SELECT sql FROM sqlite_schema WHERE name='storage_owned_guard_meta_UPDATE'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        db.execute_batch("DROP TRIGGER storage_owned_guard_meta_UPDATE; UPDATE meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE namespace='' AND key='catalog_changes_epoch';").unwrap();
-        db.execute_batch(&guard).unwrap();
+        f.db().execute_batch("UPDATE main.meta SET value='0000000000000000000000000000000000000000000000000000000000000000' WHERE namespace='' AND key='catalog_changes_epoch';").unwrap();
         assert_eq!(
             restarted.ingest(&"a".repeat(64), &f.raw, "codex"),
             Err(StorageError::ScopeChanged)
@@ -8945,9 +8776,7 @@ mod tests {
             )
             .unwrap();
             for name in [
-                "semon_semantic_writer",
                 "semon_semantic_publisher",
-                "semon_event_writer",
             ] {
                 db.create_scalar_function(
                     name,
@@ -12330,15 +12159,6 @@ mod tests {
             cache.finish_semantic_stage(first.epoch).unwrap();
             let _ = claude_ready_from(&mut cache, options, &inputs, &inputs[..1]);
             let db = f.db();
-            for function in ["semon_event_writer", "semon_semantic_writer"] {
-                db.create_scalar_function(
-                    function,
-                    0,
-                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                    |_| Ok(1_i64),
-                )
-                .unwrap();
-            }
             let bind = |namespace: &str| {
                 let namespace = namespace.to_owned();
                 db.create_scalar_function(
@@ -13883,7 +13703,6 @@ mod tests {
             let db = f.db();
             // Native writes compile the source-journal trigger; this is an
             // event writer, never the backfill writer.
-            crate::storage::sqlite::source_journal::register_backfill_writer(&db, false).unwrap();
             // Native metadata writes still compile the complete ownership
             // trigger. Register the denied publisher role; these noise rows
             // are native keys and must not gain publication authority.
@@ -13894,15 +13713,6 @@ mod tests {
                 |_| Ok(0_i64),
             )
             .unwrap();
-            for name in ["semon_event_writer", "semon_semantic_writer"] {
-                db.create_scalar_function(
-                    name,
-                    0,
-                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                    |_| Ok(1_i64),
-                )
-                .unwrap();
-            }
             let bind = |namespace: &str| {
                 bind_metadata_scope(&db, namespace).unwrap();
                 let namespace = namespace.to_owned();

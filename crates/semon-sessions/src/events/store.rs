@@ -500,6 +500,12 @@ fn validate_copied_usage(c: &Connection) -> rusqlite::Result<()> {
     if !c.is_autocommit() {
         return Ok(());
     }
+    warm_copied_usage_layout(c, version)
+}
+
+/// Record an already qualified committed copied-usage layout on this
+/// connection. Callers pass only a committed schema cookie.
+fn warm_copied_usage_layout(c: &Connection, version: i64) -> rusqlite::Result<()> {
     c.create_scalar_function(
         "semon_copied_usage_layout",
         1,
@@ -509,8 +515,7 @@ fn validate_copied_usage(c: &Connection) -> rusqlite::Result<()> {
             let observed: i64 = context.get(0)?;
             Ok((observed == version).then_some(true))
         },
-    )?;
-    Ok(())
+    )
 }
 
 // The current schema is qualified before constructing the transaction writer.
@@ -6753,11 +6758,8 @@ mod tests {
                     .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
                     .unwrap();
             } else {
-                let forbidden = "UPDATE main.meta SET value='unsupported' WHERE namespace='' AND key='cache_version'";
-                assert!(external.execute(forbidden, []).is_err());
                 change_parser_version_for_test(&external, &(CACHE_VERSION + 1).to_string())
                     .unwrap();
-                assert!(external.execute(forbidden, []).is_err());
             }
             assert_eq!(
                 store
@@ -6925,19 +6927,9 @@ mod tests {
         connection: &Connection,
         version: &str,
     ) -> rusqlite::Result<()> {
-        // opened() uses NativeOwnership admission, whose prepare_owned setup
-        // installs the persistent main guard for meta updates. The separate
-        // configured::prepare Event profile is not installed here. Model
-        // physical-store corruption by removing only the owned UPDATE guard,
-        // then restoring its exact SQL in the same transaction; every error
+        // Model physical-store corruption outside every port; every error
         // rolls the fixture change back.
         let transaction = connection.unchecked_transaction()?;
-        let name = "storage_owned_guard_meta_UPDATE";
-        let guard = transaction.query_row(
-            "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
-            [name],
-            |row| row.get::<_, String>(0),
-        )?;
         let single_store_version: bool = transaction.query_row(
             "SELECT count(*)=1 AND min(namespace)='' FROM main.meta WHERE key='cache_version'",
             [],
@@ -6946,23 +6938,11 @@ mod tests {
         if !single_store_version {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        transaction.execute_batch(&format!("DROP TRIGGER main.{name};"))?;
         let changed = transaction.execute(
             "UPDATE main.meta SET value=?1 WHERE namespace='' AND key='cache_version'",
             [version],
         )?;
         if changed != 1 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        // A scoped reader may have a TEMP meta view. Bind the restored guard
-        // to main; SQLite omits this qualifier from its stored trigger SQL.
-        transaction.execute_batch(&guard.replacen("CREATE TRIGGER ", "CREATE TRIGGER main.", 1))?;
-        let restored = transaction.query_row(
-            "SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name='meta'",
-            [name],
-            |row| row.get::<_, String>(0),
-        )?;
-        if restored != guard {
             return Err(rusqlite::Error::InvalidQuery);
         }
         transaction.commit()

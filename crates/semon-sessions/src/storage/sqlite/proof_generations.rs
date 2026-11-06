@@ -46,12 +46,6 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON sto
 
 pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     db.execute_batch(SCHEMA).map_err(failed)?;
-    for statement in SCHEMA.lines().map(str::trim) {
-        if let Some(rest) = statement.strip_prefix("CREATE TABLE IF NOT EXISTS ") {
-            let name = rest.split('(').next().ok_or(StorageError::Unavailable)?;
-            super::catalog_namespace::guard(db, name)?;
-        }
-    }
     validate(db)
 }
 
@@ -93,9 +87,6 @@ pub(super) fn validate(db: &Connection) -> Result<(), StorageError> {
         let expected = format!("CREATE {kind} {rest}");
         if actual.as_deref() != Some(expected.as_str()) {
             return Err(StorageError::NamespaceUpgradePending);
-        }
-        if kind == "TABLE" {
-            super::catalog_namespace::validate_guard(db, name)?;
         }
     }
     Ok(())

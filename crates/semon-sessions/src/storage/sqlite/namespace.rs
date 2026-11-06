@@ -273,20 +273,41 @@ mod tests {
     }
 
     #[test]
-    fn current_admission_keeps_unowned_writers_fenced() {
+    fn retired_guard_layout_is_refused_across_reopen_without_mutation() {
+        // Namespace and writer authority live in the typed ports. A store that
+        // still carries a retired schema-level guard family is an unsupported
+        // Semon layout and every admission refuses it, including after reopen.
         let f = Fixture::new();
-        let warm = f.db();
-        assert!(warm.execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
-        f.config.admit_namespace().unwrap();
-        assert!(warm.execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
-        assert!(is_bound(&warm).unwrap());
+        let admitted = f.config.admit_namespace().unwrap();
+        f.db()
+            .execute_batch("CREATE TRIGGER storage_catalog_guard_session_catalog_INSERT BEFORE INSERT ON session_catalog BEGIN SELECT 1; END;")
+            .unwrap();
+        let before = std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                f.config.admit_namespace(),
+                Err(StorageError::NamespaceUpgradePending)
+            );
+            assert!(
+                crate::events::store::configured::NativeOwnership::restore(&f.config).is_err()
+            );
+        }
         assert_eq!(
-            warm.query_row(
-                "SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'",
-                [],
-                |r| r.get::<_, String>(0)
-            )
-            .unwrap(),
+            std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap(),
+            before
+        );
+        f.db()
+            .execute_batch("DROP TRIGGER storage_catalog_guard_session_catalog_INSERT")
+            .unwrap();
+        assert_eq!(f.config.admit_namespace().unwrap(), admitted);
+        assert_eq!(
+            f.db()
+                .query_row(
+                    "SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )
+                .unwrap(),
             f.generation
         );
     }
@@ -315,62 +336,15 @@ mod tests {
         let f = Fixture::new();
         f.config.admit_namespace().unwrap();
         let db = f.db();
-        let tables: Vec<String> = db
-            .prepare("SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'storage_%' ORDER BY name")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
+        // No retired schema-level guard family remains in a current store.
+        let retired: bool = db
+            .query_row(
+                crate::events::store::configured::LEGACY_GUARD_TRIGGERS,
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        let triggers: Vec<(String, String, String)> = db
-            .prepare("SELECT tbl_name,name,sql FROM main.sqlite_schema WHERE type='trigger' ORDER BY tbl_name,name")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        for table in tables {
-            let table_triggers: Vec<_> = triggers
-                .iter()
-                .filter(|(target, _, _)| target == &table)
-                .collect();
-            for operation in ["INSERT", "UPDATE", "DELETE"] {
-                let owner_guard = [
-                    ("storage_owned_guard_", "private native ownership refused"),
-                    ("storage_semantic_guard_", "semantic Source refused"),
-                    (
-                        "storage_source_guard_",
-                        "source operation namespace refused",
-                    ),
-                    ("storage_event_guard_", "configured event writer refused"),
-                    ("storage_event_scope_", "event operation namespace refused"),
-                    ("storage_catalog_guard_", "namespace writer refused"),
-                ]
-                .iter()
-                .any(|(family, refusal)| {
-                    let expected = format!("{family}{table}_{operation}");
-                    let body = format!("RAISE(ABORT,'{refusal}')");
-                    table_triggers.iter().any(|(_, name, sql)| {
-                        name == &expected
-                            && sql.contains(&format!(" BEFORE {operation} ON "))
-                            && sql.contains(&body)
-                    })
-                });
-                let unported_fence = {
-                    let suffix = format!("_{operation}");
-                    table_triggers.iter().any(|(_, name, sql)| {
-                        name.starts_with("storage_private_unported_")
-                            && name.ends_with(&suffix)
-                            && sql.contains(&format!(" BEFORE {operation} ON "))
-                            && sql.contains("RAISE(ABORT,'private native family unported')")
-                    })
-                };
-                assert!(
-                    owner_guard || unported_fence,
-                    "current table {table} has no {operation} owning guard or private-unported fence"
-                );
-            }
-        }
+        assert!(!retired);
         let qualification: u32 = db
             .query_row(
                 "SELECT writer_qualification FROM storage_namespaces WHERE namespace=?1",
@@ -453,7 +427,6 @@ mod tests {
         );
         assert!(is_bound(&f.db()).unwrap());
         assert_eq!(f.config.admit_namespace().unwrap(), admitted);
-        assert!(f.db().execute("UPDATE meta SET value='bad' WHERE namespace='source-A' AND key='catalog_generation'", []).is_err());
         assert_eq!(f.db().query_row("SELECT value FROM meta WHERE namespace='source-A' AND key='catalog_generation'", [], |r| r.get::<_, String>(0)).unwrap(), f.generation);
     }
 }

@@ -1525,7 +1525,6 @@ mod tests {
             .unwrap(),
             0
         );
-        assert!(warm.execute("UPDATE meta SET value='99' WHERE namespace='a' AND key='catalog_changes_floor_current'", []).is_err());
         assert_eq!(
             warm.query_row(
                 "SELECT value FROM meta WHERE namespace='' AND key='catalog_changes_epoch'",

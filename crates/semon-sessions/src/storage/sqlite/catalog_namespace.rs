@@ -1,7 +1,7 @@
 //! Namespace binding and current Catalog reader/writer fences.
 use super::failed;
 use crate::storage::{LogicalSourceNamespace, StorageError};
-use rusqlite::{Connection, OptionalExtension, functions::FunctionFlags};
+use rusqlite::{Connection, functions::FunctionFlags};
 
 pub(crate) const QUALIFIED_CATALOG_TABLES: &[&str] = &[
     "session_catalog",
@@ -93,36 +93,6 @@ pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
     }
     db.execute_batch("CREATE TEMP VIEW IF NOT EXISTS meta AS SELECT namespace,key,value FROM main.meta WHERE namespace=semon_meta_scope(key);").map_err(failed)?;
     Ok(true)
-}
-
-fn guards(table: &str) -> [(String, String); 3] {
-    [
-        ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-        ("UPDATE", "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()"),
-        ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-    ].map(|(operation, predicate)| {
-        let name = format!("storage_catalog_guard_{table}_{operation}");
-        let sql = format!("CREATE TRIGGER {} BEFORE {operation} ON {} WHEN {predicate} BEGIN SELECT RAISE(ABORT,'namespace writer refused'); END", quote(&name), quote(table));
-        (name, sql)
-    })
-}
-
-pub(super) fn guard(db: &Connection, table: &str) -> Result<(), StorageError> {
-    for (_, sql) in guards(table) {
-        db.execute_batch(&sql.replacen("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1))
-            .map_err(failed)?;
-    }
-    validate_guard(db, table)
-}
-
-pub(super) fn validate_guard(db: &Connection, table: &str) -> Result<(), StorageError> {
-    for (name, expected) in guards(table) {
-        let actual: Option<String> = db.query_row("SELECT sql FROM main.sqlite_schema WHERE type='trigger' AND name=?1 AND tbl_name=?2", rusqlite::params![name,table], |r|r.get(0)).optional().map_err(failed)?;
-        if actual.as_deref() != Some(expected.as_str()) {
-            return Err(StorageError::NamespaceUpgradePending);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

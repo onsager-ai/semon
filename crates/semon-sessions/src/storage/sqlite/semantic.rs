@@ -776,31 +776,18 @@ fn diagnose_finish(
     phase: &'static str,
     failure: &rusqlite::Error,
 ) {
-    let guard = match failure {
-        rusqlite::Error::SqliteFailure(_, Some(message)) => match message.as_str() {
-            "semantic Source refused" => "semantic_source",
-            "private native ownership refused" => "native_ownership",
-            "private native family unported" => "private_unported",
-            "source operation namespace refused" => "source_namespace",
-            "event operation namespace refused" => "event_namespace",
-            "configured event writer refused" => "event_writer",
-            "namespace writer refused" => "catalog_namespace",
-            _ => "unclassified",
-        },
-        _ => "unclassified",
-    };
     eprintln!(
-        "semantic_finish_failure phase={phase} guard={guard} sqlite_extended_code={:?}",
+        "semantic_finish_failure phase={phase} sqlite_extended_code={:?}",
         failure.sqlite_error().map(|error| error.extended_code)
     );
-    let flags: rusqlite::Result<(bool, bool, Option<bool>, Option<bool>)> = db.query_row(
-        "SELECT semon_namespace() IS ?1,semon_semantic_writer() IS 1,(SELECT namespace IS semon_namespace() FROM main.catalog_semantic_stage WHERE namespace=?1 AND singleton=1 AND epoch=?2),(SELECT namespace IS semon_namespace() FROM main.storage_semantic_model_batches WHERE namespace=?1)",
+    let flags: rusqlite::Result<(bool, Option<bool>, Option<bool>)> = db.query_row(
+        "SELECT semon_namespace() IS ?1,(SELECT namespace IS semon_namespace() FROM main.catalog_semantic_stage WHERE namespace=?1 AND singleton=1 AND epoch=?2),(SELECT namespace IS semon_namespace() FROM main.storage_semantic_model_batches WHERE namespace=?1)",
         params![ns, epoch],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     );
     match flags {
-        Ok((namespace_matches, writer_enabled, stage_row_matches, model_row_matches)) => eprintln!(
-            "semantic_finish_binding phase={phase} namespace_matches={namespace_matches} writer_enabled={writer_enabled} stage_row_matches={stage_row_matches:?} model_row_matches={model_row_matches:?}"
+        Ok((namespace_matches, stage_row_matches, model_row_matches)) => eprintln!(
+            "semantic_finish_binding phase={phase} namespace_matches={namespace_matches} stage_row_matches={stage_row_matches:?} model_row_matches={model_row_matches:?}"
         ),
         Err(error) => eprintln!(
             "semantic_finish_binding phase={phase} probe_failed=true sqlite_extended_code={:?}",
@@ -1044,7 +1031,6 @@ pub(crate) fn validate_publication_support(db: &Connection) -> Result<(), Storag
         }
     }
     super::proof_generations::validate(db)?;
-    super::catalog_namespace::validate_guard(db, "storage_semantic_publications")?;
     Ok(())
 }
 
@@ -1059,14 +1045,6 @@ pub(crate) fn enroll(
         db.execute_batch(sql).map_err(failed)?;
     }
     db.create_scalar_function(
-        "semon_semantic_writer",
-        0,
-        rusqlite::functions::FunctionFlags::SQLITE_UTF8
-            | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-        |_| Ok(1_i64),
-    )
-    .map_err(failed)?;
-    db.create_scalar_function(
         "semon_semantic_publisher",
         0,
         rusqlite::functions::FunctionFlags::SQLITE_UTF8
@@ -1074,27 +1052,7 @@ pub(crate) fn enroll(
         |_| Ok(1_i64),
     )
     .map_err(failed)?;
-    super::catalog_namespace::guard(db, "storage_semantic_publications")?;
     super::proof_generations::initialize(db)?;
-    for table in crate::events::store::configured::semantic_tables()
-        .iter()
-        .copied()
-        .chain([
-            "storage_semantic_profiles",
-            "storage_semantic_model_batches",
-        ])
-    {
-        for (operation, predicate) in [
-            ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-            (
-                "UPDATE",
-                "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-            ),
-            ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-        ] {
-            db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS storage_semantic_guard_{table}_{operation} BEFORE {operation} ON {table} WHEN semon_semantic_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'semantic Source refused'); END;")).map_err(failed)?;
-        }
-    }
     let recipe = crate::events::store::configured::semantic_recipe();
     db.execute(
         "INSERT INTO storage_semantic_profiles VALUES(?1,?2,?3,0)",
@@ -4243,14 +4201,6 @@ impl Stage {
         if !composite {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        tx.create_scalar_function(
-            "semon_semantic_writer",
-            0,
-            rusqlite::functions::FunctionFlags::SQLITE_UTF8
-                | rusqlite::functions::FunctionFlags::SQLITE_INNOCUOUS,
-            |_| Ok(1_i64),
-        )
-        .map_err(failed)?;
         if capability.owner.is_some() {
             tx.create_scalar_function(
                 "semon_semantic_publisher",
@@ -4262,39 +4212,6 @@ impl Stage {
             .map_err(failed)?;
         }
         validate_publication_support(&tx)?;
-        // Qualify all guards from one schema scan, retaining exact table and
-        // trigger-body checks without reparsing a query for every operation.
-        let guards = tx.prepare_cached("SELECT name,tbl_name,sql FROM main.sqlite_schema WHERE type='trigger' AND name GLOB 'storage_semantic_guard_*'").map_err(failed)?
-            .query_map([], |r| Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, r.get::<_, String>(2)?)))).map_err(failed)?
-            .collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>().map_err(failed)?;
-        for table in crate::events::store::configured::semantic_tables()
-            .iter()
-            .copied()
-            .chain([
-                "storage_semantic_profiles",
-                "storage_semantic_model_batches",
-            ])
-        {
-            for (operation, predicate) in [
-                ("INSERT", "NEW.namespace IS NOT semon_namespace()"),
-                (
-                    "UPDATE",
-                    "OLD.namespace IS NOT semon_namespace() OR NEW.namespace IS NOT semon_namespace()",
-                ),
-                ("DELETE", "OLD.namespace IS NOT semon_namespace()"),
-            ] {
-                let name = format!("storage_semantic_guard_{table}_{operation}");
-                let expected = format!(
-                    "CREATE TRIGGER {name} BEFORE {operation} ON {table} WHEN semon_semantic_writer()<>1 OR {predicate} BEGIN SELECT RAISE(ABORT,'semantic Source refused'); END"
-                );
-                if !guards
-                    .get(&name)
-                    .is_some_and(|(actual_table, sql)| actual_table == table && sql == &expected)
-                {
-                    return Err(StorageError::NamespaceUpgradePending);
-                }
-            }
-        }
         let recipe = crate::events::store::configured::semantic_recipe();
         let valid: bool = tx.query_row("SELECT admission=?2 AND recipe=?3 FROM storage_semantic_profiles WHERE namespace=?1", params![config.namespace.as_str(),admission_sql,recipe], |r| r.get(0)).map_err(failed)?;
         if !valid {
