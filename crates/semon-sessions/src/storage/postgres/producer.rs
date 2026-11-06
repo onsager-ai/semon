@@ -83,7 +83,13 @@ impl PgProjectionStore {
         let tx = self.begin(namespace).await?;
         // Raw intents update this row. Locking it serializes the publication
         // with a new intent; repeatable-read refuses a changed snapshot.
-        tx.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+        tx.tx
+            .query_one(
+                "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                &[&namespace.binding()],
+            )
+            .await
+            .map_err(backend)?;
         for input in inputs {
             if tx.raw_write_pending(namespace, input).await? {
                 return Ok(None);

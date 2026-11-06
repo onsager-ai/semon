@@ -118,6 +118,16 @@ impl PgProjectionTransaction<'_> {
         after: Option<(i64, &str)>,
         limit: usize,
     ) -> Result<SearchPage, StorageError> {
-        self.filtered_catalog_page(namespace, scope, None, None, None, Some(query), after, limit).await
+        self.filtered_catalog_page(
+            namespace,
+            scope,
+            None,
+            None,
+            None,
+            Some(query),
+            after,
+            limit,
+        )
+        .await
     }
 }

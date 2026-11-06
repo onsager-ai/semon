@@ -3,6 +3,37 @@ use crate::{
     storage::{Namespace, postgres::PgProjectionStore},
 };
 
+#[cfg(target_os = "linux")]
+struct SqliteOpenWatch(std::os::fd::OwnedFd);
+#[cfg(target_os = "linux")]
+impl SqliteOpenWatch {
+    fn new(options: &crate::Options) -> Self {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let path = crate::events::EventCache::path(&options.cache);
+        // A real readable SQLite sentinel detects hidden read-only opens too.
+        // It is test-owned and separate from the explicit comparison backend.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE sentinel(value TEXT); INSERT INTO sentinel VALUES('unchanged')").unwrap();
+        drop(db);
+        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(fd >= 0);
+        let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert!(unsafe { libc::inotify_add_watch(fd.as_raw_fd(), path.as_ptr(), libc::IN_OPEN | libc::IN_MODIFY | libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) } >= 0);
+        Self(fd)
+    }
+    fn assert_untouched(self, options: &crate::Options) {
+        use std::os::fd::AsRawFd;
+        let mut events = [0u8; 4096];
+        let read = unsafe { libc::read(self.0.as_raw_fd(), events.as_mut_ptr().cast(), events.len()) };
+        assert_eq!(read, -1, "PostgreSQL path accessed the SQLite sentinel");
+        assert_eq!(std::io::Error::last_os_error().kind(), std::io::ErrorKind::WouldBlock);
+        drop(self);
+        std::fs::remove_file(crate::events::EventCache::path(&options.cache)).unwrap();
+    }
+}
+
 struct NativeReader {
     path: std::path::PathBuf,
     source: crate::model::summary::CatalogSource,
@@ -105,6 +136,8 @@ pub(super) async fn lifecycle(dsn: &str) {
     let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone())
         .await
         .unwrap();
+    #[cfg(target_os = "linux")]
+    let sqlite_watch = SqliteOpenWatch::new(&options);
     let start = std::time::Instant::now();
     let first = store
         .publish_sources(&namespace, &options, &inputs)
@@ -230,6 +263,8 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert!(tx.complete_raw_write(&namespace, intent, &crate::PgRawGeneration { generation: "b".repeat(32), length: std::fs::metadata(&path).unwrap().len(), sha256: [8; 32] }).await.unwrap());
     tx.commit(&namespace).await.unwrap();
     assert_eq!(store.catalog_reply(&namespace, &options, "limit=10").await.unwrap().status, 200);
+    #[cfg(target_os = "linux")]
+    sqlite_watch.assert_untouched(&options);
     assert!(!crate::events::EventCache::path(&options.cache).exists());
     assert!(!options.cache.with_extension("sqlite3-wal").exists());
     assert!(!options.cache.with_extension("sqlite3-shm").exists());
