@@ -298,6 +298,57 @@ pub(crate) fn publish_current_rows_original(
     publish_current_rows_original_order(transaction, rows, 64, None)
 }
 
+/// One metadata-search producer; adapters own only physical effects. The phase
+/// callback keeps SQLite's existing performance probes outside the algorithm.
+pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
+    store: &P,
+    rows: &[&CatalogRow],
+    owners: usize,
+    mut phase: impl FnMut(&'static str, usize),
+) -> Result<(), P::Error> {
+    for rows in rows.chunks(64) {
+        phase("start", rows.len());
+        store.begin(rows)?;
+        phase("members", rows.len());
+        for row in rows {
+            store.validate(&row.key)?;
+        }
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            store.remove(scope)?;
+        }
+        phase("removal", 2);
+        let prepared = rows
+            .iter()
+            .map(|row| prepared_fields_port(row).map_err(P::data))
+            .collect::<Result<Vec<_>, _>>()?;
+        phase("normalization", rows.len());
+        for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
+            for scope in [
+                crate::CatalogReadScope::Current,
+                crate::CatalogReadScope::RetainedHistory,
+            ] {
+                store.document(scope, row, encoded, *complete)?;
+            }
+        }
+        phase("documents", rows.len() * 2);
+        let postings = posting_order(rows, &prepared, owners);
+        phase("posting_preparation", postings.len());
+        store.postings(&postings)?;
+        phase("postings", postings.len());
+        for scope in [
+            crate::CatalogReadScope::Current,
+            crate::CatalogReadScope::RetainedHistory,
+        ] {
+            store.counts(scope)?;
+        }
+        phase("counts", 2);
+    }
+    Ok(())
+}
+
 fn publish_current_rows_effects<
     P: crate::storage::catalog::SearchPublicationStore<Error = rusqlite::Error>,
 >(
@@ -316,96 +367,67 @@ fn publish_current_rows_effects<
         })
         .flatten();
     let mut measurements = crate::native_timing::Measurements::new(producer.is_some());
-    for rows in rows.chunks(64) {
+    let mut started = measurements.start();
+    #[cfg(test)]
+    let (mut search_before, mut postings_before, mut postings_after) = (None, None, None);
+    #[cfg(test)]
+    let (mut preparation_started, mut preparation_us, mut physical_rows, mut cohort) =
+        (None, 0, 0, 0);
+    publish_current_rows_port(store, rows, owners, |name, units| {
         #[cfg(test)]
-        let search_before = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        let started = measurements.start();
-        store.begin(rows)?;
-        measurements.record("members", started, rows.len());
-        let started = measurements.start();
-        for row in rows {
-            store.validate(&row.key)?;
-        }
-        for scope in [
-            crate::CatalogReadScope::Current,
-            crate::CatalogReadScope::RetainedHistory,
-        ] {
-            store.remove(scope)?;
-        }
-        measurements.record("removal", started, 2);
-        let started = measurements.start();
-        let prepared = rows
-            .iter()
-            .map(|row| prepared_fields(row))
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        measurements.record("normalization", started, rows.len());
-        let started = measurements.start();
-        for (row, (encoded, _, complete)) in rows.iter().zip(&prepared) {
-            for scope in [
-                crate::CatalogReadScope::Current,
-                crate::CatalogReadScope::RetainedHistory,
-            ] {
-                store.document(scope, row, encoded, *complete)?;
+        if probe.is_some() {
+            match name {
+                "start" => {
+                    search_before = Some(crate::native_timing::ProbeSample::read(transaction));
+                    cohort = units;
+                }
+                "documents" => preparation_started = Some(std::time::Instant::now()),
+                "posting_preparation" => {
+                    preparation_us = preparation_started
+                        .map(|at| at.elapsed().as_micros())
+                        .unwrap_or(0);
+                    postings_before = Some(crate::native_timing::ProbeSample::read(transaction));
+                    physical_rows = units;
+                }
+                "postings" => {
+                    postings_after = Some(crate::native_timing::ProbeSample::read(transaction))
+                }
+                "counts" => {
+                    let counts_after = crate::native_timing::ProbeSample::read(transaction);
+                    if let Some(probe) = probe.as_deref_mut() {
+                        *probe = Some(crate::native_timing::SearchTraversalProbe {
+                            search: search_before.as_ref().unwrap().interval(&counts_after),
+                            postings: postings_before
+                                .as_ref()
+                                .unwrap()
+                                .interval(postings_after.as_ref().unwrap()),
+                            counts: postings_after.as_ref().unwrap().interval(&counts_after),
+                            preparation_us,
+                            sampling_us: search_before.as_ref().unwrap().sampling_us()
+                                + postings_before.as_ref().unwrap().sampling_us()
+                                + postings_after.as_ref().unwrap().sampling_us()
+                                + counts_after.sampling_us(),
+                            owners: cohort,
+                            physical_rows,
+                            logical_positions: physical_rows * 2,
+                        });
+                    }
+                }
+                _ => {}
             }
         }
-        measurements.record("documents", started, rows.len() * 2);
-        // The ordering index groups grams, while its primary key groups source
-        // keys. At most 64 source ranges are resident here. Gram-major writes
-        // revisit their bounded primary-key pages while keeping the ordering
-        // index's current leaf hot, instead of cycling through all gram leaves
-        // for each source and repeatedly spilling dirty pages into the WAL.
-        let started = measurements.start();
-        #[cfg(test)]
-        let preparation_started = probe.as_ref().map(|_| std::time::Instant::now());
-        let postings = posting_order(rows, &prepared, owners);
-        #[cfg(test)]
-        let preparation_us = preparation_started
-            .map(|started| started.elapsed().as_micros())
-            .unwrap_or(0);
-        measurements.record("posting_preparation", started, postings.len());
-        #[cfg(test)]
-        let postings_before = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        let started = measurements.start();
-        store.postings(&postings)?;
-        #[cfg(test)]
-        let postings_after = probe
-            .as_ref()
-            .map(|_| crate::native_timing::ProbeSample::read(transaction));
-        measurements.record("postings", started, postings.len() * 2);
-        measurements.count("posting_rows", postings.len());
-        let started = measurements.start();
-        for scope in [
-            crate::CatalogReadScope::Current,
-            crate::CatalogReadScope::RetainedHistory,
-        ] {
-            store.counts(scope)?;
+        if name != "start" {
+            measurements.record(
+                name,
+                started,
+                if name == "postings" { units * 2 } else { units },
+            );
+            if name == "postings" {
+                measurements.count("posting_rows", units);
+            }
         }
-        measurements.record("counts", started, 2);
-        #[cfg(test)]
-        if let Some(probe) = probe.as_deref_mut() {
-            let counts_after = crate::native_timing::ProbeSample::read(transaction);
-            *probe = Some(crate::native_timing::SearchTraversalProbe {
-                search: search_before.as_ref().unwrap().interval(&counts_after),
-                postings: postings_before
-                    .as_ref()
-                    .unwrap()
-                    .interval(postings_after.as_ref().unwrap()),
-                counts: postings_after.as_ref().unwrap().interval(&counts_after),
-                preparation_us,
-                sampling_us: search_before.as_ref().unwrap().sampling_us()
-                    + postings_before.as_ref().unwrap().sampling_us()
-                    + postings_after.as_ref().unwrap().sampling_us()
-                    + counts_after.sampling_us(),
-                owners: rows.len(),
-                physical_rows: postings.len(),
-                logical_positions: postings.len() * 2,
-            });
-        }
-    }
+        started = measurements.start();
+    })?;
     if let Some(producer) = producer {
         measurements.emit(&producer, "search_rows");
     }
@@ -624,6 +646,11 @@ fn insert_row(
 }
 
 fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<String>, bool)> {
+    prepared_fields_port(row).map_err(|_| rusqlite::Error::InvalidQuery)
+}
+fn prepared_fields_port(
+    row: &CatalogRow,
+) -> Result<(String, BTreeSet<String>, bool), serde_json::Error> {
     let fields = fields(row);
     let complete = fields.iter().map(String::len).sum::<usize>() <= MAX_DOCUMENT_BYTES;
     let grams = if complete {
@@ -632,8 +659,7 @@ fn prepared_fields(row: &CatalogRow) -> rusqlite::Result<(String, BTreeSet<Strin
         BTreeSet::new()
     };
     let complete = complete && grams.len() <= MAX_GRAMS;
-    let encoded = serde_json::to_string(if complete { fields.as_slice() } else { &[] })
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let encoded = serde_json::to_string(if complete { fields.as_slice() } else { &[] })?;
     Ok((encoded, grams, complete))
 }
 

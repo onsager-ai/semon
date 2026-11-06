@@ -14,6 +14,13 @@ use super::{
 };
 use crate::Tokens;
 
+pub(crate) fn full_changes(index: &FileIndex) -> DirtyRows {
+    DirtyRows {
+        usage: index.usage_by_id.keys().cloned().collect(),
+        ..DirtyRows::default()
+    }
+}
+
 pub(crate) struct NativeRowPlan<'a> {
     pub(crate) events: RowChanges<'a, Event>,
     pub(crate) extras: RowChanges<'a, Event>,

@@ -2,6 +2,10 @@ name: Native storage contract
 on:
   pull_request:
   workflow_dispatch:
+  push:
+    branches:
+      - task/479-pg-facts-20261026
+      - task/479-pg-catalog-20261026
 permissions:
   contents: read
 concurrency:
@@ -57,13 +61,26 @@ jobs:
           key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
       - name: Native frontier physical-work qualification
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
+      - name: Current native store admission and nonmutation
+        run: |
+          cargo test --locked -p semon-sessions --lib events::store::tests::unsupported_ -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::current_reopen_keeps_wal_reader_and_concurrent_publication -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::storage_initialization_holds_its_lock_through_the_first_wal_switch -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::storage_open_rechecks_a_concurrent_version_change_before_writes -- --exact --nocapture
       - name: Native Claude name and owned member replay qualification
         run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
       - name: SQLite adapter and reusable metadata conformance
         run: |
+          cargo test --locked -p semon-sessions --lib storage::catalog::catalog135_source_prefix_identity_keeps_nullable_and_unsigned_semantics -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib catalog_search::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib reported_rows -- --nocapture
+          cargo test --locked -p semon-sessions --lib reported_runs -- --nocapture
+          cargo test --locked -p semon-sessions --lib recovery_scalar119_sqlite_current_record_refusal_preserves_bytes -- --nocapture
+          cargo test --locked -p semon-sessions --lib configured_reported_runs_corruption_and_ownership_refuse_before_effect -- --nocapture
           cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
           cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::recovery_ -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tree_state::namespace_tests:: -- --nocapture
           cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
           SEMON_TEST_NOW=1795000000000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::configured::tests::selected57::selected60::configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_before_raw -- --exact --nocapture
           cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
