@@ -3378,15 +3378,28 @@ impl SqliteStore {
             }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
-            let mut history_budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
+            let mut history_budget =
+                crate::overview::SummaryPublicationBudget::after_catalog_metadata(0);
             for row in rows.iter().chain(withdrawn.iter()) {
                 crate::storage::sqlite::proof_generations::retain_current_refs_for_unowned_history(
-                    &transaction, owner.config().namespace.as_str(), &row.key, owner.admission(),
-                    owner.config().expected_stream_epoch.as_deref().ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
+                    &transaction,
+                    owner.config().namespace.as_str(),
+                    &row.key,
+                    owner.admission(),
+                    owner
+                        .config()
+                        .expected_stream_epoch
+                        .as_deref()
+                        .ok_or(StoreError::Configured(StorageError::ScopeChanged))?,
                     &mut history_budget,
-                ).map_err(|error| match error {
-                    crate::storage::sqlite::proof_generations::PublicationError::Storage(error) => StoreError::Configured(error),
-                    crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow => StoreError::Configured(StorageError::HistoryRetentionBounds),
+                )
+                .map_err(|error| match error {
+                    crate::storage::sqlite::proof_generations::PublicationError::Storage(error) => {
+                        StoreError::Configured(error)
+                    }
+                    crate::storage::sqlite::proof_generations::PublicationError::BudgetOverflow => {
+                        StoreError::Configured(StorageError::HistoryRetentionBounds)
+                    }
                 })?;
             }
             crate::storage::sqlite::history::publish_composition(&history, publication)

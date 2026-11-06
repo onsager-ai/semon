@@ -672,7 +672,7 @@ fn has_local_history_origin(
 /// Preserve exact Current refs as retention pointers for original History
 /// when its local History grant is absent. These refs cannot authorize reuse:
 /// verified History reads require a matching local History origin grant.
-pub(super) fn retain_current_refs_for_unowned_history(
+pub(crate) fn retain_current_refs_for_unowned_history(
     db: &Connection,
     namespace: &str,
     session_key: &str,

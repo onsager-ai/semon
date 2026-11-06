@@ -12026,9 +12026,6 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
     (catalog, overview, trace, generation)
 }
 
-
-
-
 #[test]
 fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() {
     let fixture = Fixture::new();
