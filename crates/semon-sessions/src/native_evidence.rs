@@ -638,12 +638,21 @@ impl NativeEvidence {
         self.closed.store(true, Ordering::Release);
     }
 
-    /// The source key this producer's database is read under in tests.
+    /// The source key this producer was configured under, in tests.
     #[cfg(test)]
     pub(crate) fn source_key(&self) -> String {
         self.namespace
             .as_ref()
             .map_or_else(String::new, |namespace| namespace.as_str().to_owned())
+    }
+
+    /// The key a test reads this producer's database under.
+    #[cfg(test)]
+    pub(crate) fn read_key(&self) -> String {
+        self.namespace
+            .as_ref()
+            .map_or("local", |namespace| namespace.binding())
+            .to_owned()
     }
 
     /// Open main's single scoped writer, bound to the host's namespace.

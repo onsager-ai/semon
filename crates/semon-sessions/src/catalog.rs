@@ -158,7 +158,7 @@ pub fn session_source_proof(
         // database's own binding, so it never reads under another namespace.
         let namespace = crate::storage::sqlite::binding(&transaction)?
             .1
-            .unwrap_or_default();
+            .unwrap_or_else(|| "local".to_owned());
         transaction.commit()?;
         // Reuse the catalog's current-root/native-selection validation. A
         // publication race fails closed rather than mixing catalog generations.
