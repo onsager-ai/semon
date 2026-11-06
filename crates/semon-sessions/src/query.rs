@@ -977,7 +977,13 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        let postgres = self
+            .sources
+            .machines
+            .iter()
+            .any(|(_, source)| source.storage.is_postgres());
         if !self.embedded
+            && !postgres
             && self.sources.machines.len() == 1
             && !self.sources.is_retired()
             && matches!(tool, "get_session" | "read_transcript")
@@ -1006,6 +1012,7 @@ impl Query {
             }
         }
         if !self.embedded
+            && !postgres
             && self.sources.machines.len() > 1
             && !self.sources.is_retired()
             && matches!(tool, "get_session" | "read_transcript")
@@ -1179,6 +1186,12 @@ impl Query {
             .ok_or_else(|| QueryError::unknown_session(catalog_key))?;
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
+        }
+        if evidence.storage.is_postgres() {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Focused Query recipes are not yet available on PostgreSQL",
+            ));
         }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {

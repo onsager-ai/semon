@@ -65,6 +65,32 @@ pub(super) fn lifecycle(dsn: &str) {
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
     assert!(!answer["sessions"].as_array().unwrap().is_empty());
+    assert_eq!(
+        query
+            .call_catalog(
+                "list_sessions",
+                &json!({}),
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+            .unwrap_err()
+            .code,
+        "capability_unavailable"
+    );
+    assert_eq!(
+        query
+            .call_selected(
+                "injected-runtime",
+                key,
+                "get_session",
+                &json!({"id":key}),
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+            )
+            .unwrap_err()
+            .code,
+        "capability_unavailable"
+    );
     // A foreign source key cannot use this app-owned capability, even if the
     // same native paths exist. Lower-level conformance proves forced-RLS SQL.
     let foreign = evidence.storage.page(

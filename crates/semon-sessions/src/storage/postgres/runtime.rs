@@ -12,6 +12,18 @@ impl PgProjectionStore {
     ) -> Result<crate::model::QueryData, StorageError> {
         ensure(&self.namespace, namespace)?;
         let inputs = crate::inputs(options).map_err(backend)?;
+        let _source_locks = inputs
+            .iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .map(|input| {
+                crate::source_change::SourceLock::acquire(
+                    options,
+                    &crate::source_change::lock_key(options, input),
+                    false,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?;
         for input in &inputs {
             if !input.path.ends_with(".jsonl") {
                 continue;

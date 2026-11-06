@@ -557,6 +557,17 @@ impl Query {
             })
             .max();
         let since = self.since(args, now)?;
+        if self
+            .sources
+            .machines
+            .iter()
+            .any(|(_, source)| source.storage.is_postgres())
+        {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Catalog Query recipes are not yet available on PostgreSQL",
+            ));
+        }
         let identity_observations: Vec<_> = self
             .sources
             .machines

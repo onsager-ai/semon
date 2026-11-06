@@ -28,6 +28,17 @@ impl PgProjectionStore {
         {
             return Err(backend("invalid native producer cohort"));
         }
+        let _source_locks = inputs
+            .iter()
+            .map(|input| {
+                crate::source_change::SourceLock::acquire(
+                    options,
+                    &crate::source_change::lock_key(options, input),
+                    false,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?;
         let tx = self.begin(namespace).await?;
         for input in inputs {
             if tx.raw_write_pending(namespace, input).await? {
