@@ -1490,7 +1490,7 @@ fn read_transcript_pages_as_the_viewer_does() {
         if let Some(turn) = args["turn"].as_str() {
             let anchor = crate::session_turn_anchor(
                 &home.options,
-                "fixture",
+                "local",
                 &format!("sid={sid}&turn={turn}"),
             );
             assert_eq!(anchor.status, 200);
@@ -1501,7 +1501,7 @@ fn read_transcript_pages_as_the_viewer_does() {
                 anchor["generation"].as_str().unwrap()
             ));
         }
-        let served = crate::session_transcript_range(&home.options, "fixture", &url, None);
+        let served = crate::session_transcript_range(&home.options, "local", &url, None);
         assert_eq!(served.status, 200, "{url}");
         let served: Value = serde_json::from_slice(&served.body).unwrap();
         assert_eq!(served["api"], 1);

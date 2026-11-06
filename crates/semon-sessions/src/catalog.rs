@@ -154,10 +154,15 @@ pub fn session_source_proof(
             [],
             |row| row.get(0),
         )?;
+        // This proof names no source namespace; it validates against the
+        // database's own binding, so it never reads under another namespace.
+        let namespace = crate::storage::sqlite::binding(&transaction)?
+            .1
+            .unwrap_or_default();
         transaction.commit()?;
         // Reuse the catalog's current-root/native-selection validation. A
         // publication race fails closed rather than mixing catalog generations.
-        let identity = session_catalog_identity(options, "source-proof", &key)?
+        let identity = session_catalog_identity(options, &namespace, &key)?
             .ok_or_else(|| io::Error::other("source catalog changed"))?;
         let observed = identity
             .source_refs

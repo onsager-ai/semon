@@ -2950,7 +2950,11 @@ mod tests {
             .unwrap()
         {}
         drop(work);
-        let reply = crate::session_catalog_page(view.options(), "fixture", "limit=100");
+        let reply = crate::session_catalog_page(
+            view.options(),
+            &view.evidence.source_key(),
+            "limit=100",
+        );
         assert_eq!(
             reply.status,
             200,
@@ -2963,7 +2967,7 @@ mod tests {
     fn native_selected(view: &MachineView, sid: &str) -> Value {
         let reply = crate::session_transcript_range(
             view.options(),
-            "fixture",
+            &view.evidence.source_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
@@ -3003,7 +3007,7 @@ mod tests {
         .unwrap();
         let reply = crate::session_transcript_range(
             core.options(),
-            "fixture",
+            &core.evidence.source_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
