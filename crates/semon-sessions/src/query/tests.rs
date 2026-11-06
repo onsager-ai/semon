@@ -5536,8 +5536,11 @@ fn catalog_search_selected_work_stays_fixed_as_unrelated_history_grows() {
 fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
     let home = Home::new("native-observer-transfer");
     home.top("lead", &[human("lead", ts(23, 59), "shared native prompt")]);
-    let observer =
-        crate::SessionCatalogObserver::with_pool(home.options.clone(), crate::RefreshPool::new(1));
+    let observer = crate::SessionCatalogObserver::with_pool(
+        "",
+        home.options.clone(),
+        crate::RefreshPool::new(1),
+    );
     observer.demand().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -5551,10 +5554,7 @@ fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
     }
     let evidence = observer.shared_view().evidence.clone();
     assert!(evidence.work.lock().unwrap().events.is_some());
-    let sources = Arc::new(SessionSources::from_catalog_observers(vec![(
-        String::new(),
-        &observer,
-    )]));
+    let sources = Arc::new(SessionSources::from_catalog_observers(vec![&observer]));
     assert!(Arc::ptr_eq(&sources.machines[0].1, &evidence));
     let mut query = Query::from_sources(sources.clone());
     let before = crate::events::FILE_READS.with(std::cell::Cell::get);

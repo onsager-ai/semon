@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 
 use super::{
@@ -93,6 +93,35 @@ fn publish(options: &Options) {
     {}
     drop(work);
     evidence.retire();
+}
+
+/// The production producer of a host-configured source: it binds the
+/// database to the source's namespace and refuses one bound to another.
+fn produce(namespace: &Namespace, options: &Options) -> std::io::Result<()> {
+    let evidence =
+        crate::native_evidence::NativeEvidence::for_source(namespace.clone(), options.clone());
+    let mut work = crate::viewer::lock(&evidence.work);
+    let result = loop {
+        match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
+            Ok(true) => break Ok(()),
+            Ok(false) => {}
+            Err(error) => break Err(error),
+        }
+    };
+    drop(work);
+    evidence.retire();
+    result
+}
+
+fn bound(options: &Options) -> Option<String> {
+    database(options)
+        .query_row(
+            "SELECT value FROM meta WHERE key='storage_namespace'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .unwrap()
 }
 
 fn request(query: &str) -> crate::catalog::Request {
@@ -456,6 +485,7 @@ fn storage_projection_tag_check_classifies_raw_prefix_and_projector() {
         offset: 10,
         prefix_sha256: [3; 32],
         tail_sha256: [4; 32],
+        epoch: 7,
         projector: crate::model::summary::CATALOG_VERSION,
     };
     assert_eq!(tag.check(&tag), TagCheck::Current);
@@ -468,6 +498,19 @@ fn storage_projection_tag_check_classifies_raw_prefix_and_projector() {
     assert_eq!(tag.check(&advanced), TagCheck::Advanced);
     let copied = ProjectionTag { ino: 9, ..advanced };
     assert_eq!(tag.check(&copied), TagCheck::Relocated);
+    // Past the boundary at the same Raw identity, a replaced ledger is no
+    // append of the published prefix.
+    assert_eq!(
+        tag.check(&ProjectionTag {
+            epoch: 8,
+            ..advanced
+        }),
+        TagCheck::Mismatch("ledger_epoch")
+    );
+    assert_eq!(
+        tag.check(&ProjectionTag { epoch: 8, ..tag }),
+        TagCheck::Current
+    );
     assert_eq!(
         tag.check(&ProjectionTag { dev: 9, ..tag }),
         TagCheck::Current
@@ -508,4 +551,135 @@ fn storage_projection_tag_check_classifies_raw_prefix_and_projector() {
     }
     assert!(Namespace::new(&"n".repeat(4097)).is_err());
     assert!(Namespace::new("a\0b").is_err());
+}
+
+#[test]
+fn storage_production_producer_binds_its_namespace_and_refuses_another() {
+    let root = root();
+    native(&root.0, "selected", "synthetic prompt");
+    let (a, local) = (source(&root.0, "a"), source(&root.0, "local"));
+    let na = namespace("machine-a");
+    produce(&na, &a).unwrap();
+    assert_eq!(bound(&a).as_deref(), Some("machine-a"));
+    let store = SqliteSessionStore::new([(na.clone(), a.clone())]);
+    let served = summary(read(&store, &na, &na));
+    assert_eq!((served.0, served.2), (200, 1));
+    let files = |options: &Options| -> i64 {
+        database(options)
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap()
+    };
+    let indexed = files(&a);
+
+    // Another source configured on this database is refused before any
+    // index or Catalog write.
+    let error = produce(&namespace("machine-b"), &a).unwrap_err();
+    assert!(error.to_string().contains("another namespace"), "{error}");
+    assert_eq!(bound(&a).as_deref(), Some("machine-a"));
+    assert_eq!(files(&a), indexed);
+    assert_eq!(summary(read(&store, &na, &na)), served);
+
+    // The local source's empty key is bound as `local`; both spellings read
+    // it and another namespace placed on it is refused.
+    produce(&Namespace::local(), &local).unwrap();
+    assert_eq!(bound(&local).as_deref(), Some("local"));
+    let named = namespace("local");
+    let locals = SqliteSessionStore::new([
+        (Namespace::local(), local.clone()),
+        (named.clone(), local.clone()),
+    ]);
+    assert_eq!(
+        read(&locals, &Namespace::local(), &Namespace::local())
+            .unwrap()
+            .0,
+        200
+    );
+    assert_eq!(read(&locals, &named, &named).unwrap().0, 200);
+    let misplaced = SqliteSessionStore::new([(na.clone(), local.clone())]);
+    assert!(matches!(
+        read(&misplaced, &na, &na),
+        Err(StorageError::WrongNamespace { .. })
+    ));
+    assert!(produce(&na, &local).is_err());
+    assert_eq!(bound(&local).as_deref(), Some("local"));
+}
+
+#[test]
+fn storage_same_inode_rewrite_past_the_published_boundary_is_refused_then_rebuilt() {
+    use std::io::Write;
+    let root = root();
+    let path = native(&root.0, "selected", "synthetic prompt");
+    let a = source(&root.0, "a");
+    let na = namespace("machine-a");
+    let store = SqliteSessionStore::new([(na.clone(), a.clone())]);
+    produce(&na, &a).unwrap();
+    assert_eq!(read(&store, &na, &na).unwrap().0, 200);
+    let key = path.to_str().unwrap();
+    let tag = || {
+        store
+            .index_writer(&na)
+            .unwrap()
+            .ledger_tag(&na, key)
+            .unwrap()
+            .unwrap()
+    };
+    let recorded = || -> i64 {
+        database(&a)
+            .query_row(
+                "SELECT ledger_epoch FROM session_catalog_sources WHERE source_path=?1 AND lifecycle='current'",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let published = tag();
+    assert_eq!(recorded(), published.epoch);
+    let record = |uuid: &str, prompt: &str| {
+        json!({"type":"user","sessionId":"selected","uuid":uuid,"parentUuid":"selected","cwd":"/synthetic/project","timestamp":"2026-10-01T00:01:00Z","message":{"role":"user","content":prompt}})
+    };
+
+    // An append keeps the ledger epoch: the published prefix stays readable.
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{}", record("appended", "synthetic append")).unwrap();
+    drop(file);
+    observe(&store, &na);
+    let appended = tag();
+    assert!(appended.offset > published.offset);
+    assert_eq!(appended.epoch, published.epoch);
+    assert_eq!(published.check(&appended), TagCheck::Advanced);
+    assert_eq!(read(&store, &na, &na).unwrap().0, 200);
+
+    // Rewriting the same inode in place with other bytes that reach past the
+    // published boundary is a replaced ledger, refused by its epoch alone.
+    fs::write(
+        &path,
+        format!(
+            "{}\n{}\n{}\n",
+            json!({"type":"user","sessionId":"selected","uuid":"selected","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"rewritten prompt"}}),
+            record("rewritten-1", "rewritten answer"),
+            record("rewritten-2", "rewritten again"),
+        ),
+    )
+    .unwrap();
+    observe(&store, &na);
+    let rewritten = tag();
+    assert_eq!((rewritten.dev, rewritten.ino), (published.dev, published.ino));
+    assert!(rewritten.offset > published.offset);
+    assert_ne!(rewritten.epoch, published.epoch);
+    assert_eq!(
+        published.check(&rewritten),
+        TagCheck::Mismatch("ledger_epoch")
+    );
+    let (status, body) = read(&store, &na, &na).unwrap();
+    assert_eq!(
+        (status, &body["error"]["code"]),
+        (503, &json!("projection_stale")),
+        "{body}"
+    );
+
+    // The producer rebuilds the unit from Raw at the new epoch.
+    produce(&na, &a).unwrap();
+    assert_eq!(recorded(), tag().epoch);
+    let (status, body) = read(&store, &na, &na).unwrap();
+    assert_eq!(status, 200, "{body}");
 }

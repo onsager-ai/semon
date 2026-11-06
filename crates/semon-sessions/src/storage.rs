@@ -38,8 +38,21 @@ impl Namespace {
         Ok(Self(name.to_owned()))
     }
 
+    /// The local source's namespace: its key is empty, bound as `local`.
+    #[cfg(test)]
+    pub(crate) fn local() -> Self {
+        Self(String::new())
+    }
+
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The name a database is bound to. The local source's empty key is an
+    /// alias of `local`, so both spellings address one binding while replies
+    /// and cursors keep the key the caller used.
+    pub(crate) fn binding(&self) -> &str {
+        if self.0.is_empty() { "local" } else { &self.0 }
     }
 }
 
@@ -86,7 +99,7 @@ impl std::error::Error for StorageError {}
 
 /// Refuse an operation for a namespace other than the capability's own.
 fn ensure(bound: &Namespace, requested: &Namespace) -> Result<(), StorageError> {
-    if bound == requested {
+    if bound.binding() == requested.binding() {
         Ok(())
     } else {
         Err(StorageError::WrongNamespace {
@@ -98,7 +111,10 @@ fn ensure(bound: &Namespace, requested: &Namespace) -> Result<(), StorageError> 
 
 /// The cheap tag of one projected source: the Raw identity, the consumed
 /// prefix digest that main's ledger and byte proofs qualify against the native
-/// bytes, and the projector version that derived the unit.
+/// bytes, the ledger epoch and the projector version that derived the unit.
+/// The epoch advances whenever the ledger is replaced rather than appended,
+/// so a same-identity rewrite that grows past the published boundary is told
+/// apart from an append.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ProjectionTag {
     pub(crate) dev: u64,
@@ -106,6 +122,7 @@ pub(crate) struct ProjectionTag {
     pub(crate) offset: u64,
     pub(crate) prefix_sha256: [u8; 32],
     pub(crate) tail_sha256: [u8; 32],
+    pub(crate) epoch: i64,
     pub(crate) projector: u32,
 }
 
@@ -126,31 +143,35 @@ pub(crate) enum TagCheck {
 }
 
 impl ProjectionTag {
-    pub(crate) fn of(source: &CatalogSource, projector: u32) -> Self {
+    pub(crate) fn of(source: &CatalogSource, epoch: i64, projector: u32) -> Self {
         Self {
             dev: source.dev,
             ino: source.ino,
             offset: source.offset,
             prefix_sha256: source.prefix_sha256,
             tail_sha256: source.tail_sha256,
+            epoch,
             projector,
         }
     }
 
-    pub(crate) fn of_ledger(ledger: &crate::events::Ledger, projector: u32) -> Self {
+    pub(crate) fn of_ledger(ledger: &crate::events::Ledger, epoch: i64, projector: u32) -> Self {
         Self {
             dev: ledger.stat.dev,
             ino: ledger.stat.ino,
             offset: ledger.offset,
             prefix_sha256: ledger.prefix,
             tail_sha256: ledger.tail,
+            epoch,
             projector,
         }
     }
 
     /// Compare this stored tag with the tag of the committed ledger. The
     /// consumed-prefix digest decides at the published boundary; a content
-    /// identical copy at another Raw identity is still the same prefix.
+    /// identical copy at another Raw identity is still the same prefix. Past
+    /// the boundary at the same Raw identity only an unchanged ledger epoch is
+    /// an append: a replaced ledger no longer extends the published prefix.
     pub(crate) fn check(&self, committed: &Self) -> TagCheck {
         let digests = (self.prefix_sha256, self.tail_sha256);
         if self.projector != committed.projector {
@@ -164,7 +185,11 @@ impl ProjectionTag {
                 TagCheck::Mismatch("consumed_prefix")
             }
         } else if (self.dev, self.ino) == (committed.dev, committed.ino) {
-            TagCheck::Advanced
+            if self.epoch == committed.epoch {
+                TagCheck::Advanced
+            } else {
+                TagCheck::Mismatch("ledger_epoch")
+            }
         } else {
             TagCheck::Relocated
         }

@@ -20,9 +20,7 @@ thread_local! {
 }
 
 use crate::{
-    Node, Options, collect_with_index,
-    events::EventCache,
-    model,
+    Node, Options, collect_with_index, model,
     native_evidence::{NativeEvidence, Snapshot, Work},
     refresh::{Key, RefreshPool},
     union::{Refresh, ViewerCore},
@@ -827,8 +825,14 @@ impl MachineView {
     /// refreshed before each read until [`MachineView::set_refresh`], and
     /// checked in the background by [`RefreshPool::shared`] until
     /// [`MachineView::set_pool`]. Nothing is read until the first request.
+    #[cfg(test)]
     pub(crate) fn new(options: Options) -> Arc<Self> {
         Self::from_evidence(NativeEvidence::new(options))
+    }
+
+    /// A view of one configured source, producing into its namespace.
+    pub(crate) fn for_source(namespace: crate::storage::Namespace, options: Options) -> Arc<Self> {
+        Self::from_evidence(NativeEvidence::for_source(namespace, options))
     }
 
     /// Attach Viewer production to an existing native owner without a second
@@ -929,9 +933,7 @@ impl MachineView {
             return Err(io::Error::other("a tree build failed on purpose"));
         }
         if work.events.is_none() {
-            work.events = Some(
-                EventCache::open_scoped(&self.evidence.options.cache).map_err(io::Error::other)?,
-            );
+            work.events = Some(self.evidence.open_index()?);
         }
         let index = work.events.as_mut().expect("native index loaded");
         let roots = collect_with_index(&self.evidence.options, index)?;
@@ -1620,7 +1622,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{native_evidence::Stamp, tx};
+    use crate::{events::EventCache, native_evidence::Stamp, tx};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -2011,7 +2013,7 @@ mod tests {
             panic!("single-source native Catalog publication did not complete");
         };
         let row = || {
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=100");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=100");
             assert_eq!(reply.status, 200);
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
@@ -7553,7 +7555,7 @@ mod tests {
     fn native_permalinks_use_indexed_identity_without_workspace_models() {
         let (alpha, bravo) = (machine("twin", "lane-a"), machine("twin", "lane-b"));
         for fixture in [&alpha, &bravo] {
-            let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+            let observer = crate::SessionCatalogObserver::new("source", fixture.options.clone());
             observer.changed().unwrap();
             eventually("native permalink publication", || {
                 let reply = crate::session_catalog_page(&fixture.options, "source", "limit=1");
@@ -8160,13 +8162,16 @@ mod tests {
         let available = lane_fixture();
         let pool = RefreshPool::new(2);
         let blocked_observer =
-            crate::SessionCatalogObserver::with_pool(blocked.options.clone(), pool.clone());
-        let available_observer =
-            crate::SessionCatalogObserver::with_pool(available.options.clone(), pool.clone());
+            crate::SessionCatalogObserver::with_pool("held", blocked.options.clone(), pool.clone());
+        let available_observer = crate::SessionCatalogObserver::with_pool(
+            "available",
+            available.options.clone(),
+            pool.clone(),
+        );
         let blocked_view = blocked_observer.shared_view();
         let sources = Arc::new(crate::SessionSources::from_catalog_observers(vec![
-            ("held".into(), &blocked_observer),
-            ("available".into(), &available_observer),
+            &blocked_observer,
+            &available_observer,
         ]));
 
         let barrier = Arc::new(std::sync::Barrier::new(4));

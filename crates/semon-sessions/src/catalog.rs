@@ -5212,7 +5212,7 @@ mod tests {
     fn source_observer_publishes_first_push_without_a_viewer_core() {
         let fixture = Fixture::new();
         fixture.source("first-push");
-        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        let observer = crate::SessionCatalogObserver::new("configured", fixture.options.clone());
         assert!(!EventCache::path(&fixture.options.cache).exists());
         observer.changed().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -7787,7 +7787,7 @@ mod tests {
         intent.complete(from + line.len() as u64).unwrap();
         let pool = crate::RefreshPool::new(1);
         let observer =
-            crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
+            crate::SessionCatalogObserver::with_pool("", fixture.options.clone(), pool.clone());
         // No Push notification reaches the new observer. Persisted read interest
         // must find the unacknowledged revision left by the previous owner.
         observer.watch().unwrap();
@@ -9068,6 +9068,7 @@ mod tests {
         assert_eq!(fixture.body("").0, 503);
 
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );
@@ -9096,6 +9097,7 @@ mod tests {
         drop(db);
 
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );
@@ -9124,12 +9126,13 @@ mod tests {
         fixture.publish_existing();
 
         let pool = crate::RefreshPool::new(1);
-        let observer =
-            crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
-        let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![(
-            "source".into(),
-            &observer,
-        )]));
+        let observer = crate::SessionCatalogObserver::with_pool(
+            "source",
+            fixture.options.clone(),
+            pool.clone(),
+        );
+        let sources =
+            std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![&observer]));
         let view = observer.shared_view();
         let _work = crate::viewer::lock(&view.evidence.work);
         let (sent, received) = std::sync::mpsc::channel();
@@ -9175,6 +9178,7 @@ mod tests {
     fn initial_catalog_wait_reports_deadline_and_retirement() {
         let fixture = Fixture::new();
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );

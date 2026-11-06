@@ -1534,6 +1534,11 @@ impl EventCache {
         self.scoped && self.store.is_none()
     }
 
+    /// Whether this index writes through to a durable store.
+    pub(crate) fn persistent(&self) -> bool {
+        self.store.is_some()
+    }
+
     pub(crate) fn is_scoped(&self) -> bool {
         self.scoped
     }

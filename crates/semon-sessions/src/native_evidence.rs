@@ -22,6 +22,10 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    /// The source namespace its host configured. The producer binds its
+    /// database to it and refuses a database bound to another namespace.
+    /// Only test constructions observe a database without a host namespace.
+    namespace: Option<crate::storage::Namespace>,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
@@ -230,7 +234,10 @@ impl SessionSources {
         Self::from_evidence(
             machines
                 .into_iter()
-                .map(|(key, options)| (key, NativeEvidence::new(options)))
+                .map(|(key, options)| {
+                    let namespace = source_namespace(&key);
+                    (key, NativeEvidence::for_source(namespace, options))
+                })
                 .collect(),
         )
     }
@@ -239,10 +246,10 @@ impl SessionSources {
     /// reopening indexes or creating a second writer. The host transfers their
     /// lifecycle ownership into this machine set: retiring or closing this set
     /// also retires the original observers. This grants no source authority.
-    pub fn from_catalog_observers(machines: Vec<(String, &crate::SessionCatalogObserver)>) -> Self {
+    pub fn from_catalog_observers(machines: Vec<&crate::SessionCatalogObserver>) -> Self {
         let views: Vec<_> = machines
             .into_iter()
-            .map(|(key, observer)| (key, observer.shared_view()))
+            .map(|observer| (observer.source_key().to_owned(), observer.shared_view()))
             .collect();
         let sources = Self::from_evidence(
             views
@@ -440,11 +447,29 @@ impl SessionSources {
     }
 }
 
+/// The namespace of a host's source key. Keys are configured source names,
+/// so one that is no namespace is a host configuration error.
+pub(crate) fn source_namespace(key: &str) -> crate::storage::Namespace {
+    crate::storage::Namespace::new(key).expect("source key is a storage namespace")
+}
+
 impl NativeEvidence {
-    /// Construction is lazy: no source, cache or refresh worker is opened.
+    /// A producer without a host namespace, for tests that observe one
+    /// database directly; it neither binds nor checks a binding.
+    #[cfg(test)]
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        Self::construct(None, options)
+    }
+
+    /// Construction is lazy: no source, cache or refresh worker is opened.
+    pub(crate) fn for_source(namespace: crate::storage::Namespace, options: Options) -> Arc<Self> {
+        Self::construct(Some(namespace), options)
+    }
+
+    fn construct(namespace: Option<crate::storage::Namespace>, options: Options) -> Arc<Self> {
         Arc::new(Self {
             options,
+            namespace,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
@@ -613,6 +638,15 @@ impl NativeEvidence {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// Open main's single scoped writer, bound to the host's namespace.
+    pub(crate) fn open_index(&self) -> io::Result<EventCache> {
+        match &self.namespace {
+            Some(namespace) => crate::storage::sqlite::open_index(&self.options, namespace)
+                .map_err(io::Error::other),
+            None => EventCache::open_scoped(&self.options.cache).map_err(io::Error::other),
+        }
+    }
+
     /// Initialize the source index and publish a bounded cold catalog page.
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
         if work
@@ -624,12 +658,21 @@ impl NativeEvidence {
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
-            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
+            work.events = Some(match self.open_index() {
                 Ok(cache) => cache,
-                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                    return Err(io::Error::other(error));
+                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => return Err(error),
+                Err(_) => {
+                    let mut cache =
+                        EventCache::open(&self.options.cache).map_err(io::Error::other)?;
+                    // An in-memory index for this run has nothing durable to bind.
+                    if let Some(namespace) = &self.namespace
+                        && cache.persistent()
+                    {
+                        crate::storage::sqlite::bind(&mut cache, namespace)
+                            .map_err(io::Error::other)?;
+                    }
+                    cache
                 }
-                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");

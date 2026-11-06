@@ -9,20 +9,33 @@ use crate::{Options, Refresh, RefreshPool, viewer::MachineView};
 /// advances bounded discovery and complete-record checkpoints. Both paths yield
 /// between steps and retain the existing source authority and publication fences.
 pub struct SessionCatalogObserver {
+    source_key: String,
     view: Arc<MachineView>,
 }
 
 impl SessionCatalogObserver {
-    pub fn new(options: Options) -> Self {
-        Self::with_pool(options, RefreshPool::shared())
+    /// Observe the source configured under `source_key` (empty for the local
+    /// source). Its database is bound to that source's namespace, and a
+    /// database bound to another source is refused.
+    pub fn new(source_key: &str, options: Options) -> Self {
+        Self::with_pool(source_key, options, RefreshPool::shared())
     }
 
     /// Hosts may share their existing bounded refresh pool across observers.
-    pub fn with_pool(options: Options, pool: Arc<RefreshPool>) -> Self {
-        let view = MachineView::new(options);
+    pub fn with_pool(source_key: &str, options: Options, pool: Arc<RefreshPool>) -> Self {
+        let namespace = crate::native_evidence::source_namespace(source_key);
+        let view = MachineView::for_source(namespace, options);
         view.set_pool(pool);
         view.set_refresh(Refresh::OnInvalidate);
-        Self { view }
+        Self {
+            source_key: source_key.to_owned(),
+            view,
+        }
+    }
+
+    /// The source key this observer was configured under.
+    pub fn source_key(&self) -> &str {
+        &self.source_key
     }
 
     pub(crate) fn shared_view(&self) -> Arc<MachineView> {

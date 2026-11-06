@@ -246,7 +246,8 @@ fn emit_catalog_publish_attempt(
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: older owned indexes rebuild together. Version 35 adds the
 // per-database storage version stamp; current stores do not run storage DDL.
-pub(crate) const SCHEMA_VERSION: i64 = 35;
+// Version 36 adds the ledger epoch to source ledgers and published sources.
+pub(crate) const SCHEMA_VERSION: i64 = 36;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -313,6 +314,7 @@ CREATE TABLE IF NOT EXISTS session_catalog_sources (
     harness TEXT NOT NULL,
     native_id TEXT NOT NULL,
     source_path TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(session_key, source_path)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
@@ -383,7 +385,8 @@ CREATE TABLE IF NOT EXISTS files (
     rate_limits TEXT,
     codex_native_usage TEXT,
     codex_pricing_fingerprint TEXT,
-    copilot TEXT
+    copilot TEXT,
+    epoch INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
     file_id INTEGER NOT NULL,
@@ -3346,7 +3349,9 @@ impl SqliteStore {
                     let mut remove_sources = transaction
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
-                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
+                    // The publication fence above proved each source's ledger equal to
+                    // the committed one, so its epoch is the one the unit derives from.
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path,ledger_epoch) VALUES (?1,?2,?3,?4,(SELECT epoch FROM files WHERE path=?4)) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id,ledger_epoch=excluded.ledger_epoch").map_err(failure)?;
                     metadata_measurements.record("statements", statements_started, 1);
                     let bulk_changed = if batch_bytes.is_some() {
                         if producer.is_some() {
@@ -5610,12 +5615,33 @@ fn gap(what: &str) -> rusqlite::Error {
 
 // ---- Reading -------------------------------------------------------------------------------
 
-/// The committed ledger of one source path, for projection tag checks.
+/// The committed ledger of one source path and its epoch, for projection tag
+/// checks. The epoch advances each time the ledger is replaced, not appended.
 pub(crate) fn committed_ledger(
     connection: &Connection,
     path: &str,
-) -> rusqlite::Result<Option<Ledger>> {
-    Ok(ledger_row(connection, path)?.map(|(_, ledger)| ledger))
+) -> rusqlite::Result<Option<(Ledger, i64)>> {
+    let Some((_, ledger)) = ledger_row(connection, path)? else {
+        return Ok(None);
+    };
+    let epoch = connection
+        .prepare_cached("SELECT epoch FROM files WHERE path=?1")?
+        .query_row([path], |row| row.get(0))?;
+    Ok(Some((ledger, epoch)))
+}
+
+/// The ledger epoch a Current unit's source was published at.
+pub(crate) fn published_epoch(
+    connection: &Connection,
+    session_key: &str,
+    path: &str,
+) -> rusqlite::Result<Option<i64>> {
+    connection
+        .prepare_cached(
+            "SELECT ledger_epoch FROM session_catalog_sources WHERE session_key=?1 AND source_path=?2",
+        )?
+        .query_row([session_key, path], |row| row.get(0))
+        .optional()
 }
 
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
@@ -6071,6 +6097,9 @@ fn write_index_changes_measured(
         index,
         measurements,
     )?;
+    if changes.is_none() {
+        advance_ledger_epoch(transaction, path)?;
+    }
     native_usage::write(transaction, path, ledger, index)?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
@@ -6131,6 +6160,24 @@ fn write_index_changes_measured(
         super::INDEX_WRITTEN_ROWS
             .with(|n| n.set(n.get() + (written_after - written_before) as u64));
     }
+    Ok(())
+}
+
+/// A ledger written without append changes replaces the source's rows, so it
+/// takes a fresh epoch from one database-wide counter. A file row removed and
+/// written again can therefore never reuse an epoch a publication recorded.
+fn advance_ledger_epoch(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
+    transaction
+        .prepare_cached(
+            "INSERT INTO meta(key,value) VALUES('ledger_epoch','1') \
+             ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        )?
+        .execute([])?;
+    transaction
+        .prepare_cached(
+            "UPDATE files SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE key='ledger_epoch') WHERE path=?1",
+        )?
+        .execute([path])?;
     Ok(())
 }
 

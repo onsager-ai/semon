@@ -55,7 +55,7 @@ pub(crate) fn qualify(connection: &Connection, namespace: &Namespace) -> Result<
         ));
     }
     match bound {
-        Some(bound) if bound != namespace.as_str() => Err(StorageError::WrongNamespace {
+        Some(bound) if bound != namespace.binding() => Err(StorageError::WrongNamespace {
             bound,
             requested: namespace.as_str().to_owned(),
         }),
@@ -77,18 +77,48 @@ pub(crate) fn projection_mismatch(
     {
         for source in &row.sources {
             let path = source.path.to_string_lossy();
-            let Some(ledger) = crate::events::store::committed_ledger(connection, &path)? else {
+            let Some((ledger, epoch)) = crate::events::store::committed_ledger(connection, &path)?
+            else {
                 continue;
             };
-            let committed = ProjectionTag::of_ledger(&ledger, CATALOG_VERSION);
+            let published = crate::events::store::published_epoch(connection, &row.key, &path)?;
+            let committed = ProjectionTag::of_ledger(&ledger, epoch, CATALOG_VERSION);
             if let TagCheck::Mismatch(reason) =
-                ProjectionTag::of(source, CATALOG_VERSION).check(&committed)
+                ProjectionTag::of(source, published.unwrap_or(epoch), CATALOG_VERSION)
+                    .check(&committed)
             {
                 return Ok(Some(reason));
             }
         }
     }
     Ok(None)
+}
+
+/// Bind the writer's database to `namespace` through its own connection, or
+/// refuse a database bound to another namespace before any index write.
+pub(crate) fn bind(cache: &mut EventCache, namespace: &Namespace) -> Result<(), StorageError> {
+    let bound = cache
+        .bind_storage_namespace(namespace.binding())
+        .map_err(backend)?;
+    if bound == namespace.binding() {
+        Ok(())
+    } else {
+        Err(StorageError::WrongNamespace {
+            bound,
+            requested: namespace.as_str().to_owned(),
+        })
+    }
+}
+
+/// The namespace-bound Event index writer: main's single scoped writer
+/// connection, opened for the producer and the index-writer capability alike.
+pub(crate) fn open_index(
+    options: &crate::Options,
+    namespace: &Namespace,
+) -> Result<EventCache, StorageError> {
+    let mut cache = EventCache::open_scoped(&options.cache).map_err(StorageError::Backend)?;
+    bind(&mut cache, namespace)?;
+    Ok(cache)
 }
 
 fn read_only(path: &Path) -> Result<Connection, StorageError> {
@@ -132,16 +162,7 @@ impl SessionStore for SqliteSessionStore {
 
     fn index_writer(&self, namespace: &Namespace) -> Result<Box<dyn IndexWrite>, StorageError> {
         let options = self.placement(namespace)?.clone();
-        let mut cache = EventCache::open_scoped(&options.cache).map_err(StorageError::Backend)?;
-        let bound = cache
-            .bind_storage_namespace(namespace.as_str())
-            .map_err(backend)?;
-        if bound != namespace.as_str() {
-            return Err(StorageError::WrongNamespace {
-                bound,
-                requested: namespace.as_str().to_owned(),
-            });
-        }
+        let cache = open_index(&options, namespace)?;
         Ok(Box::new(IndexWriter {
             namespace: namespace.clone(),
             options,
@@ -224,7 +245,7 @@ impl IndexWrite for IndexWriter {
         let connection = read_only(&EventCache::path(&self.options.cache))?;
         Ok(crate::events::store::committed_ledger(&connection, path)
             .map_err(backend)?
-            .map(|ledger| ProjectionTag::of_ledger(&ledger, CATALOG_VERSION)))
+            .map(|(ledger, epoch)| ProjectionTag::of_ledger(&ledger, epoch, CATALOG_VERSION)))
     }
 }
 

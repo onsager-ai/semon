@@ -123,7 +123,7 @@ fn main() -> io::Result<()> {
             let records:String=(0..2).map(|turn|json!({"type":"user","sessionId":id,"uuid":format!("{id}-{turn}"),"parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":format!("synthetic prompt {turn}")}}).to_string()+"\n").collect();
             fs::write(projects.join(format!("{id}.jsonl")), records)?;
         }
-        let observer = SessionCatalogObserver::new(options.clone());
+        let observer = SessionCatalogObserver::new(&machine.to_string(), options.clone());
         observer.demand()?;
         loop {
             let reply =
