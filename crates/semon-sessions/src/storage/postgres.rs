@@ -139,7 +139,9 @@ impl PgProjectionTransaction<'_> {
     ) -> Result<Option<ProjectionTag>, StorageError> {
         ensure(&self.namespace, namespace)?;
         if next.projector != crate::model::summary::CATALOG_VERSION {
-            return Err(StorageError::Unsupported("unsupported projector version".into()));
+            return Err(StorageError::Unsupported(
+                "unsupported projector version".into(),
+            ));
         }
         self.tx
             .query_one(

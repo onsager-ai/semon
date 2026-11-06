@@ -194,11 +194,29 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
         .is_err()
     );
     let tx = store_a.begin(&a).await.unwrap();
-    assert!(tx.write_ledger(&a, "wrong-version", None, ProjectionTag { projector: 0, ..tag }, false).await.is_err());
+    assert!(
+        tx.write_ledger(
+            &a,
+            "wrong-version",
+            None,
+            ProjectionTag {
+                projector: 0,
+                ..tag
+            },
+            false
+        )
+        .await
+        .is_err()
+    );
     tx.commit(&a).await.unwrap();
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
-    assert_eq!(tx.check_tag(&a, "session", "same/native/path").await.unwrap(), Some(TagCheck::Mismatch("projector_version")));
+    assert_eq!(
+        tx.check_tag(&a, "session", "same/native/path")
+            .await
+            .unwrap(),
+        Some(TagCheck::Mismatch("projector_version"))
+    );
     tx.commit(&a).await.unwrap();
     admin
         .execute(
