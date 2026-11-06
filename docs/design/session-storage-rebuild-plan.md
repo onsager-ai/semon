@@ -184,9 +184,23 @@ PostgreSQL session backend yet.
   refusals, context reuse, ledger conflicts/rollback and unchanged local files.
   The unchanged-local-files assertion covers this projection API only; it is
   not qualification of a complete PostgreSQL mode.
-- Still required: PostgreSQL implementations of `SessionStore`'s Catalog reader,
-  native index writer and publisher, normalized events/recipes/proofs, custody
-  operations, producer integration and explicit startup backend selection. No
+- Part 2 index checkpoint: `PgProjectionStore::index_source` reuses the native
+  parser and commits normalized events/extras/signals, metadata, consumed ledger
+  and immutable block-proof generations in one restricted-role transaction.
+  Records and proof nodes use batched inserts. Idle scans preserve the epoch;
+  append preserves the old selected-prefix proof and replacement gets a new
+  epoch. Exact block reads qualify a root through indexed sibling witnesses.
+  The PostgreSQL schema stamp is now version 2; unsupported old projection
+  schemas are refused rather than migrated. There is no native body in SQL.
+- Part 2 qualification remains scoped to that index API. PostgreSQL lifecycle
+  coverage includes cold ingest, idle, append, restart, replacement, retained
+  prefix proofs, altered-proof refusal and foreign-namespace RLS. Shared parser
+  comparisons cover normalized rows and consumed proofs; they do not establish
+  Catalog or selected transcript parity. Proof collection, bounded incremental
+  SQL updates and complete producer integration remain pending.
+- Still required: PostgreSQL implementations of `SessionStore`'s Catalog reader
+  and publisher, recipes, custody operations, producer integration and explicit
+  startup backend selection. No
   PostgreSQL startup option is exposed while those paths still require SQLite.
   Full shared semantic conformance and PostgreSQL cold first-page timing remain
   pending. The reported projection transaction time is not first-page timing.

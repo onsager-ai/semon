@@ -13,11 +13,69 @@ async fn connect(dsn: &str) -> tokio_postgres::Client {
     client
 }
 
+fn assert_same_index(
+    path: &std::path::Path,
+    harness: &str,
+    ledger: &crate::events::Ledger,
+    index: &crate::events::FileIndex,
+    sqlite: &mut crate::events::EventCache,
+) {
+    let native = crate::events::scan_file(path, harness, sqlite, &mut false).unwrap();
+    assert_eq!(
+        sqlite.revision(path).unwrap(),
+        (
+            ledger.stat.dev,
+            ledger.stat.ino,
+            ledger.offset,
+            ledger.prefix,
+            ledger.tail,
+            ledger.stat.changed_ns
+        )
+    );
+    assert_eq!(native.events, index.events);
+    assert_eq!(native.extras, index.extras);
+    assert_eq!(native.signals, index.signals);
+    assert_eq!(native.tokens(harness), index.tokens(harness));
+    assert_eq!(native.source_chunks, index.source_chunks);
+}
+
+async fn pg_sanitized_native_indexes(dsn: &str) {
+    let root = super::root();
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/compatibility");
+    let namespace = Namespace::new("fixture-machine").unwrap();
+    let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone()).await.unwrap();
+    let mut sqlite = crate::events::EventCache::open_scoped(&root.0.join("comparison.json")).unwrap();
+    for (harness, fixture) in [
+        ("codex", "codex-native-a9b0815/parser-cases.jsonl"),
+        ("copilot", "copilot-1.0.90/headless-tools.events.jsonl"),
+    ] {
+        let path = root.0.join(format!("{harness}.jsonl"));
+        let bytes = std::fs::read(fixtures.join(fixture)).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        store.index_source(&namespace, &path, harness).await.unwrap();
+        let tx = store.begin(&namespace).await.unwrap();
+        let (ledger, index) = tx.load_index(&namespace, path.to_str().unwrap()).await.unwrap().unwrap();
+        assert_same_index(&path, harness, &ledger, &index, &mut sqlite);
+        tx.commit(&namespace).await.unwrap();
+        // Restart and append a complete native line, retaining parser state.
+        let line = bytes.split_inclusive(|byte| *byte == b'\n').last().unwrap();
+        std::io::Write::write_all(&mut std::fs::OpenOptions::new().append(true).open(&path).unwrap(), line).unwrap();
+        drop(store);
+        store = PgProjectionStore::new(connect(dsn).await, namespace.clone()).await.unwrap();
+        store.index_source(&namespace, &path, harness).await.unwrap();
+        let tx = store.begin(&namespace).await.unwrap();
+        let (ledger, index) = tx.load_index(&namespace, path.to_str().unwrap()).await.unwrap().unwrap();
+        assert_same_index(&path, harness, &ledger, &index, &mut sqlite);
+        tx.commit(&namespace).await.unwrap();
+    }
+}
+
 async fn pg_native_index_lifecycle(dsn: &str) {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let root = super::root();
     let path = super::native(&root.0, "pg-native", &"private native body ".repeat(8192));
+    let mut sqlite = crate::events::EventCache::open_scoped(&root.0.join("comparison.json")).unwrap();
     let namespace = Namespace::new("native-machine").unwrap();
     let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone())
         .await
@@ -35,6 +93,7 @@ async fn pg_native_index_lifecycle(dsn: &str) {
     let tx = store.begin(&namespace).await.unwrap();
     let (ledger, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 1);
+    assert_same_index(&path, "claude", &ledger, &index, &mut sqlite);
     let first_hash = tx
         .proof_block(&namespace, name, first, 0)
         .await
@@ -73,6 +132,7 @@ async fn pg_native_index_lifecycle(dsn: &str) {
     let tx = store.begin(&namespace).await.unwrap();
     let (after, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 2);
+    assert_same_index(&path, "claude", &after, &index, &mut sqlite);
     assert!(after.offset > ledger.offset);
     assert_eq!(
         tx.check_tag(&namespace, "native-session", name)
@@ -153,8 +213,9 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .unwrap();
     assert!(replaced.epoch > next.epoch);
     let tx = store.begin(&namespace).await.unwrap();
-    let (_, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
+    let (replaced_ledger, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 1);
+    assert_same_index(&path, "claude", &replaced_ledger, &index, &mut sqlite);
     assert!(matches!(
         tx.check_tag(&namespace, "native-session", name)
             .await
@@ -208,7 +269,17 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         assert_eq!(count, 0);
     }
     raw_tx.rollback().await.unwrap();
-    assert!(!root.0.join("index.sqlite3").exists());
+    let allowed = std::collections::BTreeSet::from([
+        "comparison.sqlite3".to_owned(),
+        "comparison.sqlite3-wal".to_owned(),
+        "comparison.sqlite3-shm".to_owned(),
+    ]);
+    let actual = std::fs::read_dir(&root.0).unwrap()
+        .filter_map(|entry| {
+            let entry = entry.unwrap();
+            entry.file_type().unwrap().is_file().then(|| entry.file_name().to_string_lossy().into_owned())
+        }).collect::<std::collections::BTreeSet<_>>();
+    assert!(actual.is_subset(&allowed), "only the explicit SQLite comparison may create session files: {actual:?}");
 }
 
 /// Runs only in the service-container workflow. Missing DSNs fail explicitly.
@@ -408,6 +479,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     );
     tx.commit(&a).await.unwrap();
     pg_native_index_lifecycle(&dsn).await;
+    pg_sanitized_native_indexes(&dsn).await;
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
     assert_eq!(

@@ -344,7 +344,7 @@ impl PgProjectionTransaction<'_> {
                 .get::<_, Vec<u8>>(0)
                 .try_into()
                 .map_err(|_| StorageError::Backend("invalid native proof node".into()))?;
-            witness = if at % 2 == 0 {
+            witness = if at.is_multiple_of(2) {
                 parent(&witness, &other)
             } else {
                 parent(&other, &witness)

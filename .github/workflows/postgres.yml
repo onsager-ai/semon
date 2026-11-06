@@ -58,6 +58,9 @@ jobs:
       - name: Check formatting
         id: formatting
         run: cargo fmt --all --check
+      - name: PostgreSQL diagnostic compile
+        if: failure() && steps.formatting.outcome == 'failure' && startsWith(github.ref_name, 'codex/477-rebuild-diagnostic-')
+        run: cargo check --locked -p semon-sessions --all-targets --features postgres
       - name: SQLite storage conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage::conformance:: -- --nocapture
