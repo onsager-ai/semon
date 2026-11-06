@@ -143,6 +143,14 @@ its completion witness is the native-publication success message in the CI log.
   `9c833b783901760998ecdc8cb31c61f14a14410d30984eff67b77609c5c2b789`; image and
   evidence digests, decisions, review provenance and reference pins are unchanged.
   This is binding maintenance only and grants no new appearance approval.
+- CI run 42193624292 for session activity storage (merge preview `44d59c99`)
+  supplies the visual and transport artifacts from that run. The supported audit
+  and proposal generator qualify 155 visual and six transport records as
+  fingerprint-only, with zero refusals. Both generated patches change only
+  candidate fingerprints to
+  `204f8f547c1e6758ed9978d6779bd81a57bd30ab52c329d901aa5f931d6b6650`;
+  image/evidence digests, decisions, review provenance and reference pins remain
+  unchanged. This is binding maintenance and grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
