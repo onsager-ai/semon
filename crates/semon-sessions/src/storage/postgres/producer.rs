@@ -36,20 +36,29 @@ impl PgProjectionStore {
         let mut claims = Vec::new();
         for input in inputs {
             let path = input.full_path(options);
-            let name = path.to_str().ok_or_else(|| backend("invalid native path"))?;
-            let (ledger, index) = tx.load_index(namespace, name).await?
+            let name = path
+                .to_str()
+                .ok_or_else(|| backend("invalid native path"))?;
+            let (ledger, index) = tx
+                .load_index(namespace, name)
+                .await?
                 .ok_or_else(|| backend("native index unavailable"))?;
-            let tag = tx.ledger(namespace, name).await?
+            let tag = tx
+                .ledger(namespace, name)
+                .await?
                 .ok_or_else(|| backend("native ledger unavailable"))?;
             claims.push((name.to_owned(), Some(tag.epoch)));
             files.push((name.to_owned(), ledger, index));
         }
         tx.commit(namespace).await?;
         let mut cache = EventCache::from_projection(files, claims);
-        let options = Options { scan_window: false, ..options.clone() };
-        let prepared = crate::model::prepare_sources(
-            &options, &mut cache, inputs, crate::model::now_ms(),
-        ).map_err(backend)?;
+        let options = Options {
+            scan_window: false,
+            ..options.clone()
+        };
+        let prepared =
+            crate::model::prepare_sources(&options, &mut cache, inputs, crate::model::now_ms())
+                .map_err(backend)?;
         if prepared.rows.is_empty() {
             return Err(backend("native cohort has no qualified Catalog owners"));
         }
@@ -70,10 +79,16 @@ impl PgProjectionStore {
                 return Ok(None);
             }
         }
-        let generation = tx.publish_catalog(namespace, &Publication {
-            rows: &prepared.rows,
-            transcripts: Some(&prepared.transcripts),
-        }, expected.as_deref()).await?;
+        let generation = tx
+            .publish_catalog(
+                namespace,
+                &Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                },
+                expected.as_deref(),
+            )
+            .await?;
         tx.commit(namespace).await?;
         Ok(generation)
     }

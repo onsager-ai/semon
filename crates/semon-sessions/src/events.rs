@@ -1875,9 +1875,11 @@ impl EventCache {
             return paths
                 .iter()
                 .map(|path| {
-                    claims.iter().find(|(saved, _)| saved == path).cloned().ok_or_else(|| {
-                        io::Error::other("projection source was not captured")
-                    })
+                    claims
+                        .iter()
+                        .find(|(saved, _)| saved == path)
+                        .cloned()
+                        .ok_or_else(|| io::Error::other("projection source was not captured"))
                 })
                 .collect();
         }

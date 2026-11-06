@@ -120,12 +120,15 @@ impl RuntimeObservations {
         }
         measurements.record("runtime_ctor_indices", started, 1);
         let started = measurements.start();
-        let connection = sqlite.then(|| {
-            Connection::open_with_flags(
-                EventCache::path(&options.cache),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            ).ok()
-        }).flatten();
+        let connection = sqlite
+            .then(|| {
+                Connection::open_with_flags(
+                    EventCache::path(&options.cache),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .ok()
+            })
+            .flatten();
         measurements.record("runtime_ctor_connection", started, 1);
         Self {
             facts,
