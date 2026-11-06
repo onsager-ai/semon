@@ -662,21 +662,31 @@ mod tests {
     #[test]
     fn routed_models_and_token_coverage() {
         let plain_anthropic = calculate_cost(&[usage("claude-opus-5-5", 100, 20, 0, 0, 0)], &[]);
-        for model in ["gateway/route/claude-opus-5-5", "gateway/route/claude-opus-5-5[1m]"] {
+        for model in [
+            "gateway/route/claude-opus-5-5",
+            "gateway/route/claude-opus-5-5[1m]",
+        ] {
             let routed = calculate_cost(&[usage(model, 100, 20, 0, 0, 0)], &[]);
             assert_eq!(routed.usd, plain_anthropic.usd);
             assert_eq!((routed.priced_tokens, routed.unpriced_tokens), (120, 0));
         }
         let event = CodexUsageEvent {
             model: "gpt-6.1-sol".into(),
-            tokens: ModelTokens { input: 100, output: 20, ..Default::default() },
+            tokens: ModelTokens {
+                input: 100,
+                output: 20,
+                ..Default::default()
+            },
             timestamp: None,
         };
         let native = calculate_cost(&[], &[event]);
         let routed = calculate_cost(&[usage("gateway/route/gpt-6.1-sol", 100, 20, 0, 0, 0)], &[]);
         assert_eq!(routed.usd, native.usd);
         assert_eq!((routed.priced_tokens, routed.unpriced_tokens), (120, 0));
-        let unknown = calculate_cost(&[usage("gateway/route/gpt-6.1-terra", 100, 20, 0, 0, 0)], &[]);
+        let unknown = calculate_cost(
+            &[usage("gateway/route/gpt-6.1-terra", 100, 20, 0, 0, 0)],
+            &[],
+        );
         assert_eq!(unknown.usd, None);
         assert_eq!((unknown.priced_tokens, unknown.unpriced_tokens), (0, 120));
         assert_eq!(unknown.unpriced_models, ["gateway/route/gpt-6.1-terra"]);

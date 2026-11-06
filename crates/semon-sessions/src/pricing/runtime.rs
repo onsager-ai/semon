@@ -43,7 +43,9 @@ const LOOKUP_RULES_VERSION: u32 = 2;
 impl EffectiveTable {
     pub(crate) fn routed_price(&self, id: &str) -> Option<Price> {
         let (_, native) = id.rsplit_once('/')?;
-        let mut matches = PROVIDERS.iter().filter_map(|provider| self.price_for(provider, native));
+        let mut matches = PROVIDERS
+            .iter()
+            .filter_map(|provider| self.price_for(provider, native));
         let price = matches.next()?;
         matches.next().is_none().then_some(price)
     }
@@ -74,7 +76,10 @@ impl EffectiveTable {
         }
         self.fingerprint = format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(&(LOOKUP_RULES_VERSION, fingerprint_rows))?)
+            Sha256::digest(serde_json::to_vec(&(
+                LOOKUP_RULES_VERSION,
+                fingerprint_rows
+            ))?)
         );
         Ok(())
     }

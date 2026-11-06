@@ -1448,7 +1448,13 @@ mod generation_tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["usd", "unpriced_models", "priced_tokens", "unpriced_tokens", "pricing_fingerprint"])
+            BTreeSet::from([
+                "usd",
+                "unpriced_models",
+                "priced_tokens",
+                "unpriced_tokens",
+                "pricing_fingerprint"
+            ])
         );
     }
 
