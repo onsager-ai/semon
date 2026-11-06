@@ -366,8 +366,8 @@ jobs:
           cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/narrow-isolated.log" 2>&1 || result=$?
           git fetch --depth=1 origin main
           git worktree add --detach "$RUNNER_TEMP/diag-main" FETCH_HEAD
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/main-isolated.log" 2>&1 || result=$?
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' --nocapture > "$RUNNER_TEMP/main-full.log" 2>&1 || result=$?
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/main-isolated.log" 2>&1 || result=$?
+          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked -- --skip storage::postgres --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' --nocapture > "$RUNNER_TEMP/main-full.log" 2>&1 || result=$?
           cargo test -p semon-sessions --locked --features postgres-test-tls -- --skip storage::postgres --skip 'catalog::tests::' --skip 'events::' --skip 'query::tests::' --skip 'model::tests::' --nocapture > "$RUNNER_TEMP/narrow-full.log" 2>&1 || result=$?
           for timing_log in narrow-isolated main-isolated main-full narrow-full; do
             echo "measurement=$timing_log"
