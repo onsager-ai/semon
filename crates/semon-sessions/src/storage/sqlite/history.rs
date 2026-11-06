@@ -522,6 +522,16 @@ pub(crate) fn publish_composition(
             incomplete,
         )?;
         if let Some(observations) = publication.observations {
+            let mut observed = observations.clone();
+            if observed.runtime_capture_for(&history).is_some() {
+                let capture = observed.runtime_capture_for(&history).ok_or(rusqlite::Error::InvalidQuery)?;
+                super::proof_generations::native_history_observation_grant(
+                    store.db, store.namespace, &history.key, store.admission,
+                    store.stream.ok_or(rusqlite::Error::InvalidQuery)?, &metadata,
+                    &serde_json::to_string(&capture).map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?,
+                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                continue;
+            }
             let mut cwds = BTreeMap::new();
             for source in &history.sources {
                 let cwd: Option<String> = store
@@ -537,7 +547,6 @@ pub(crate) fn publish_composition(
                     cwds.insert(source.path.clone(), cwd);
                 }
             }
-            let mut observed = observations.clone();
             let cwds = cwds.into_values().collect();
             if let Ok(runtime) = observed.runtime_observation(&history, &cwds) {
                 observed
