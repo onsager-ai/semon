@@ -259,6 +259,26 @@ fn nested_wait_and_decoding_are_bounded_and_call_qualified() {
         observed("exec_command", "cat missing", blocks, false).waste,
         Some(WasteKind::PathNotFound)
     );
+    let decoy =
+        json!({"exit_code":0,"output":json!({"exit_code":1,"output":"HTTP 503"}).to_string()});
+    assert!(
+        observed("exec_command", "cat file", decoy, false)
+            .waste
+            .is_none()
+    );
+    assert!(matches!(
+        command(&["sed".into(), "-n".into(), "1,5p".into(), "file".into()]),
+        Command::Read(_, _)
+    ));
+    assert_eq!(
+        command(&[
+            "sed".into(),
+            "-n".into(),
+            "1e touch file".into(),
+            "file".into()
+        ]),
+        Command::Unknown
+    );
     let mut too_deep = json!({"exit_code":1,"output":"HTTP 503"});
     for _ in 0..=MAX_DEPTH {
         too_deep = json!({"output":too_deep});

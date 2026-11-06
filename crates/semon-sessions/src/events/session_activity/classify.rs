@@ -220,7 +220,13 @@ fn command(words: &[String]) -> Command {
         ["gh", "pr", "create", ..] => Command::PullRequest,
         ["git", "commit", ..] => Command::Commit,
         ["git", "push", ..] => Command::Push,
-        ["rg", ..] if !args.contains(&"--pre") => Command::Search(SearchTool::Rg),
+        ["rg", ..]
+            if !args
+                .iter()
+                .any(|arg| *arg == "--pre" || arg.starts_with("--pre=")) =>
+        {
+            Command::Search(SearchTool::Rg)
+        }
         ["grep", ..] => Command::Search(SearchTool::Grep),
         ["cat", ..] => Command::Read(
             digest(&serde_json::to_vec(words).expect("strings serialize")),
@@ -230,10 +236,12 @@ fn command(words: &[String]) -> Command {
             digest(&serde_json::to_vec(words).expect("strings serialize")),
             ReadTool::Range,
         ),
-        ["sed", "-n", ..] if !args.iter().any(|arg| arg.starts_with("-i")) => Command::Read(
-            digest(&serde_json::to_vec(words).expect("strings serialize")),
-            ReadTool::Range,
-        ),
+        ["sed", "-n", selection, path] if sed_selection(selection) && !path.starts_with('-') => {
+            Command::Read(
+                digest(&serde_json::to_vec(words).expect("strings serialize")),
+                ReadTool::Range,
+            )
+        }
         ["sleep", ..] => Command::Sleep,
         ["git", "status" | "diff" | "log" | "show" | "rev-parse", ..] => Command::Inspect,
         [
@@ -244,6 +252,17 @@ fn command(words: &[String]) -> Command {
         | ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
         _ => Command::Unknown,
     }
+}
+
+fn sed_selection(selection: &str) -> bool {
+    let Some(range) = selection.strip_suffix('p') else {
+        return false;
+    };
+    !range.is_empty()
+        && range.split(',').count() <= 2
+        && range
+            .split(',')
+            .all(|part| !part.is_empty() && part.bytes().all(|c| c.is_ascii_digit()))
 }
 
 fn input_value(input: &Value) -> Option<Cow<'_, Value>> {
@@ -426,7 +445,17 @@ fn decode(
             let mut found = false;
             for key in ["output", "stdout", "stderr", "content"] {
                 if let Some(value) = object.get(key) {
-                    decode(value, depth + 1, budget, result, formatter, envelopes)?;
+                    // Once an exec envelope supplies an outcome, its body is
+                    // opaque command output. Printed JSON cannot override it.
+                    let body_envelopes = result.exit.is_none() && !result.error;
+                    decode(
+                        value,
+                        depth + 1,
+                        budget,
+                        result,
+                        formatter && body_envelopes,
+                        envelopes && body_envelopes,
+                    )?;
                     result.text.push('\n');
                     found = true;
                 }
@@ -733,26 +762,28 @@ pub(crate) fn capture(
                     let name = field(payload, "name").unwrap_or("shell");
                     // Only existing straight-line code-mode decoding can prove a
                     // command in a custom exec script. Arbitrary JS stays unknown.
+                    let decoded_input;
                     let input = if name == "exec" {
-                        field(payload, "input")
+                        decoded_input = field(payload, "input")
                             .filter(|text| {
                                 text.len() <= MAX_BYTES && crate::events::result_source(text)
                             })
                             .and_then(crate::events::script_command)
                             .map(|command| serde_json::json!({"cmd": command}))
-                            .unwrap_or(Value::Null)
+                            .unwrap_or(Value::Null);
+                        &decoded_input
                     } else {
-                        payload.get("arguments").cloned().unwrap_or(Value::Null)
+                        payload.get("arguments").unwrap_or(&Value::Null)
                     };
                     let mut observation = call(
                         if name == "exec" { "exec_command" } else { name },
-                        &input,
+                        input,
                         None,
                         hash.clone(),
                     );
                     observation.formatter = index.events[event].native_direct_call
-                        || (name == "exec" && input != Value::Null);
-                    observation.envelopes = name != "exec" || input != Value::Null;
+                        || (name == "exec" && !input.is_null());
+                    observation.envelopes = name != "exec" || !input.is_null();
                     if !observation.envelopes {
                         observation.commands = vec![Command::Unknown];
                     }

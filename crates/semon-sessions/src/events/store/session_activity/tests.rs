@@ -228,7 +228,18 @@ fn activity_observations_survive_restart_and_facts_share_publication_generation(
         0,
         &serde_json::to_vec(&record).unwrap(),
     );
-    let ledger = super::super::tests::ledger(1);
+    let ledger = Ledger {
+        stat: Stat {
+            dev: 1,
+            ino: 2,
+            size: 1000,
+            modified_ns: 1,
+            changed_ns: Some(1),
+        },
+        offset: 1000,
+        prefix: [1; 32],
+        tail: [2; 32],
+    };
     store
         .write_one("synthetic.jsonl", None, None, &ledger, &index)
         .unwrap();
