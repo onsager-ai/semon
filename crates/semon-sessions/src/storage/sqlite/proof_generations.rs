@@ -284,10 +284,8 @@ pub(crate) fn publish(
 /// fresh receipt; a byte exact receipt replay still reapplies local Current
 /// custody so later mutable owner reconciliation remains authoritative.
 
-
 /// Authenticate a retry against the currently owned immutable receipt. Captured
 /// context comes from that receipt: a retry must not observe a new live context.
-
 
 fn prepare_proof_publication(
     namespace: &str,
@@ -443,8 +441,6 @@ fn publish_current_ref(
     // generations and let imported proof sources acquire local authority.
     Ok(())
 }
-
-
 
 /// Retain outgoing owners' exact Current receipts after History composition,
 /// then release their Current references before grant reconciliation.
@@ -3948,8 +3944,6 @@ pub(crate) fn bind_presentations(
     insert_presentation_root(tx, ns, publication, &root)?;
     Ok(root.digest)
 }
-
-
 
 fn prepare_presentation_root(
     base: &str,

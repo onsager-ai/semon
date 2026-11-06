@@ -3181,17 +3181,6 @@ impl SqliteStore {
             .map_err(failure)?;
         let mut published = None;
         let result = (|| {
-            let metadata_bytes = metadata
-                .iter()
-                .zip(&query_recipes)
-                .try_fold(0usize, |total, (text, recipe)| {
-                    total
-                        .checked_add(text.len())?
-                        .checked_add(recipe.as_ref().map_or(0, String::len))
-                })
-                .ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
-            let mut history_budget =
-                crate::overview::SummaryPublicationBudget::after_catalog_metadata(metadata_bytes);
             let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
             let transaction = self
                 .connection
@@ -10005,9 +9994,6 @@ mod tests {
         drop(row_wise);
         fs::remove_dir_all(root).unwrap();
     }
-
-
-
 
     #[test]
     fn catalog_batch_fallbacks_preserve_row_wise_acceptance_and_duplicate_rollback() {

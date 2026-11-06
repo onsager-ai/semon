@@ -435,13 +435,23 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
         let _ = (owner, runtime);
         let mut cwds = std::collections::BTreeSet::new();
         for source in &row.sources {
-            let cwd: Option<String> = self.0.query_row(
-                "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
-                [source.path.to_string_lossy().as_ref()], |record| record.get(0),
-            ).optional().map_err(io::Error::other)?.flatten();
-            if let Some(cwd) = cwd { cwds.insert(cwd); }
+            let cwd: Option<String> = self
+                .0
+                .query_row(
+                    "SELECT cwd FROM main.files WHERE namespace=semon_namespace() AND path=?1",
+                    [source.path.to_string_lossy().as_ref()],
+                    |record| record.get(0),
+                )
+                .optional()
+                .map_err(io::Error::other)?
+                .flatten();
+            if let Some(cwd) = cwd {
+                cwds.insert(cwd);
+            }
         }
-        let scoped = self.3.get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
+        let scoped = self
+            .3
+            .get_or_init(|| crate::native_evidence::RuntimeObservations::new(options))
             .scope(row, &cwds)?;
         self.2.witness(&scoped).map(Some)
     }
@@ -454,7 +464,8 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     ) -> io::Result<Option<crate::storage::QueryRuntimeBinding>> {
         if super::proof_generations::imported_catalog(self.0, &self.2).map_err(io::Error::other)? {
             return super::proof_generations::observation_binding(self.0, &self.2, row)
-                .map(Some).map_err(io::Error::other);
+                .map(Some)
+                .map_err(io::Error::other);
         }
         Ok(self.runtime_binding())
     }
