@@ -541,3 +541,36 @@ fn codex_custom_exec_nested_wait_is_captured_without_command_guessing() {
     assert!(observation.step_id.is_none());
     assert_eq!(observation.commands, [Command::Unknown]);
 }
+
+#[test]
+fn running_and_background_results_do_not_prove_reads_or_changes() {
+    let running = json!({"session_id":123,"output":"[topic abc1234] partial"});
+    let observation = observed("exec_command", "git commit", running, false);
+    assert!(!observation.completed);
+    assert!(observation.changes.is_empty());
+    let running =
+        "Wall time: 0.1000 seconds\nProcess running with session ID 123\nOutput:\npartial";
+    assert!(!observed("exec_command", "cat file", json!(running), false).completed);
+    let mut observation = call(
+        "Bash",
+        &json!({"command":"cat file","run_in_background":true}),
+        None,
+        "hash".into(),
+    );
+    finish(
+        &mut observation,
+        &json!("partial"),
+        false,
+        None,
+        None,
+        "hash".into(),
+    );
+    assert!(!observation.completed);
+    let oversized = call(
+        "Read",
+        &json!({"file_path":"file","pages": "1".repeat(129)}),
+        None,
+        "hash".into(),
+    );
+    assert_eq!(oversized.commands, [Command::Unknown]);
+}

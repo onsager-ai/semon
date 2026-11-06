@@ -119,6 +119,7 @@ pub(crate) struct Observation {
     formatter: bool,
     envelopes: bool,
     completed: bool,
+    background: bool,
     pub(crate) waste: Option<WasteKind>,
     pub(crate) wait: Option<WaitInterval>,
     pub(crate) empty_search: bool,
@@ -281,6 +282,7 @@ pub(super) fn call(
     call_digest: String,
 ) -> Observation {
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
+    let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
     let commands = match name {
         "Bash" | "bash" | "shell" | "exec_command" => input
             .get("command")
@@ -294,7 +296,14 @@ pub(super) fn call(
                 .get("file_path")
                 .or_else(|| input.get("path"))
                 .and_then(Value::as_str);
-            match path.filter(|path| path.len() <= 4096) {
+            let bounded_selection = ["offset", "limit", "pages"].iter().all(|key| {
+                input.get(key).is_none_or(|value| {
+                    value.is_null()
+                        || value.as_u64().is_some()
+                        || value.as_str().is_some_and(|text| text.len() <= 128)
+                })
+            });
+            match path.filter(|path| path.len() <= 4096 && bounded_selection) {
                 Some(path) => vec![Command::Read(
                     digest(
                         &serde_json::to_vec(&(
@@ -326,6 +335,7 @@ pub(super) fn call(
         formatter: false,
         envelopes: false,
         completed: false,
+        background,
         waste: orchestration.then_some(WasteKind::OrchestrationWait),
         wait: None,
         empty_search: false,
@@ -340,6 +350,7 @@ struct ResultEvidence {
     text: String,
     nested_wait: Option<WaitInterval>,
     is_wait: bool,
+    running: bool,
 }
 
 /// No arbitrary object traversal: unwrap only recognized result keys/content
@@ -373,6 +384,8 @@ fn decode(
             {
                 if let crate::exec_response::ExecResponseOutcome::Exited(code) = outcome {
                     result.exit = Some(i64::from(code));
+                } else if outcome == crate::exec_response::ExecResponseOutcome::SessionOnly {
+                    result.running = true;
                 }
                 result.text.push_str(frame.body);
             } else {
@@ -441,6 +454,8 @@ fn decode(
                 .and_then(Value::as_i64)
                 .or(result.exit);
             result.error |= object.get("is_error").and_then(Value::as_bool) == Some(true);
+            result.running |=
+                result.exit.is_none() && object.get("session_id").is_some_and(|id| !id.is_null());
             let mut found = false;
             for key in ["output", "stdout", "stderr", "content"] {
                 if let Some(value) = object.get(key) {
@@ -670,7 +685,10 @@ pub(super) fn finish(
         }
         return;
     }
-    observation.completed = !result.error && result.exit.is_none_or(|code| code == 0);
+    observation.completed = !observation.background
+        && !result.running
+        && !result.error
+        && result.exit.is_none_or(|code| code == 0);
     if result.is_wait {
         observation.orchestration = true;
     }
@@ -696,7 +714,7 @@ pub(super) fn finish(
             observation.waste = Some(WasteKind::Sleep);
         }
     }
-    if !result.error && result.exit.is_none_or(|code| code == 0) {
+    if observation.completed {
         observation.changes = changes(&observation.commands, &result.text);
     }
 }
@@ -888,7 +906,11 @@ pub(crate) fn classify_reads(
             let until = uncertain_until
                 .entry(row.position.source.clone())
                 .or_default();
-            *until = (*until).max(row.result_offset.unwrap_or(u64::MAX));
+            *until = (*until).max(if observation.completed {
+                row.result_offset.unwrap_or(u64::MAX)
+            } else {
+                u64::MAX
+            });
         }
         if uncertain_until
             .get(&row.position.source)
