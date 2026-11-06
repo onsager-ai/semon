@@ -249,10 +249,12 @@ PostgreSQL session backend yet.
   advance the namespace epoch so a racing repeatable-read publisher refuses.
   These primitives do not yet replace `SessionSourceWrite` in runtime callers.
 - Part 4 qualification covers the shared producer, actual Catalog response,
-  provider-backed selected prompt, append/restart and Raw custody/RLS. Additional
-  sanitized Codex/SQLite comparison and filesystem read-open watch qualification
-  are tracked by the current CI revision. This remains host API qualification,
-  not end-to-end startup mode. The shared-producer-to-Catalog-response measurement
+  provider-backed selected prompt, append/restart and Raw custody/RLS. The
+  sanitized Codex comparison matches shared Catalog metadata/filter results and
+  selected rendered entry content with SQLite. A Linux inotify watch over a real
+  test-owned SQLite sentinel detects hidden read-only opens and mutations; a
+  separate PostgreSQL root also checks that no SQLite session file is created.
+  This remains host API qualification, not end-to-end startup mode. The shared-producer-to-Catalog-response measurement
   is separate from ViewerCore startup and must not be called the PostgreSQL
   viewer cold first-page number.
 - Still required: explicit startup backend configuration and `SessionStore`

@@ -102,12 +102,26 @@ impl PgProjectionStore {
                 return Ok(None);
             }
         }
-        let keys = prepared.rows.iter().map(|row| row.key.as_str()).collect::<BTreeSet<_>>();
+        let keys = prepared
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<BTreeSet<_>>();
         if !prepared.lineage_dependencies.is_empty()
-            || prepared.rows.iter().any(|row| row.parent.as_deref().is_some_and(|parent| !keys.contains(parent)))
-            || prepared.rows.iter().filter_map(|row| row.trace.as_ref()).any(|trace| !trace.closed_over(&keys))
+            || prepared.rows.iter().any(|row| {
+                row.parent
+                    .as_deref()
+                    .is_some_and(|parent| !keys.contains(parent))
+            })
+            || prepared
+                .rows
+                .iter()
+                .filter_map(|row| row.trace.as_ref())
+                .any(|trace| !trace.closed_over(&keys))
         {
-            return Err(backend("native cohort requires complete relationship closure"));
+            return Err(backend(
+                "native cohort requires complete relationship closure",
+            ));
         }
         let generation = tx
             .publish_catalog(
