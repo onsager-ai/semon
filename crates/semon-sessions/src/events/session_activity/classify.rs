@@ -292,7 +292,7 @@ pub(super) fn call(
 ) -> Observation {
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
-    let commands = match name {
+    let mut commands = match name {
         "Bash" | "bash" | "shell" | "exec_command" => input
             .get("command")
             .or_else(|| input.get("cmd"))
@@ -333,6 +333,18 @@ pub(super) fn call(
         "Agent" | "Task" | "wait_agent" => Vec::new(),
         _ => vec![Command::Unknown],
     };
+    for command in &mut commands {
+        if let Command::Read(fingerprint, _) = command {
+            let workdir = input
+                .get("workdir")
+                .or_else(|| input.get("cwd"))
+                .and_then(Value::as_str)
+                .filter(|path| path.len() <= 4096);
+            *fingerprint = digest(
+                &serde_json::to_vec(&(&*fingerprint, workdir)).expect("read context serializes"),
+            );
+        }
+    }
     let orchestration =
         matches!(name, "Agent" | "Task" | "wait_agent") || commands.contains(&Command::Watch);
     Observation {
@@ -759,12 +771,13 @@ pub(crate) fn capture(
                             .pointer("/message/id")
                             .and_then(Value::as_str)
                             .map(|id| ActivityStepId::Claude(id.into()));
-                        let observation = call(
+                        let mut observation = call(
                             field(item, "name").unwrap_or(""),
                             &item["input"],
                             step,
                             hash.clone(),
                         );
+                        bind_source_context(&mut observation, index.cwd.as_deref());
                         index
                             .event_mut(event)
                             .expect("located event")
@@ -818,6 +831,7 @@ pub(crate) fn capture(
                         None,
                         hash.clone(),
                     );
+                    bind_source_context(&mut observation, index.cwd.as_deref());
                     observation.formatter = index.events[event].native_direct_call
                         || (name == "exec" && !input.is_null());
                     observation.envelopes = true;
@@ -840,6 +854,17 @@ pub(crate) fn capture(
                 &hash,
             ),
             _ => {}
+        }
+    }
+}
+
+fn bind_source_context(observation: &mut Observation, cwd: Option<&str>) {
+    for command in &mut observation.commands {
+        if let Command::Read(fingerprint, _) = command {
+            *fingerprint = digest(
+                &serde_json::to_vec(&(&*fingerprint, cwd.filter(|path| path.len() <= 4096)))
+                    .expect("source read context serializes"),
+            );
         }
     }
 }

@@ -595,3 +595,30 @@ fn git_global_options_and_all_explicit_server_errors_are_recognized() {
         Some(WasteKind::ExternalFailure)
     );
 }
+
+#[test]
+fn relative_read_fingerprints_include_working_directory_without_storing_it() {
+    let mut first = call(
+        "exec_command",
+        &json!({"cmd":"cat file","workdir":"/synthetic/one"}),
+        None,
+        "hash".into(),
+    );
+    let mut other = call(
+        "exec_command",
+        &json!({"cmd":"cat file","workdir":"/synthetic/two"}),
+        None,
+        "hash".into(),
+    );
+    finish(&mut first, &json!("body"), false, None, None, "hash".into());
+    finish(&mut other, &json!("body"), false, None, None, "hash".into());
+    assert_ne!(first.commands, other.commands);
+    assert!(
+        !serde_json::to_string(&first)
+            .unwrap()
+            .contains("/synthetic/one")
+    );
+    let mut rows = vec![located(10, first), located(20, other)];
+    classify_reads(&mut rows, &[]);
+    assert!(rows[1].observation.waste.is_none());
+}
