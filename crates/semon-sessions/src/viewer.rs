@@ -1433,6 +1433,9 @@ impl MachineView {
         let mut state = lock(&self.live.state);
         state.built_at = built_at;
         for (kind, result) in &results {
+            if let Err(error) = result {
+                eprintln!("diag477 tick_error catalog={} error={error}", matches!(kind, Kind::Catalog));
+            }
             state.record(*kind, result);
         }
         let failing = results.iter().any(|(_, result)| result.is_err());

@@ -4019,6 +4019,12 @@ fn scan_file_with_mode(
             } else {
                 store.prepare_file(&key, expected, operation_id, harness)
             };
+            eprintln!(
+                "diag477 prepare cohort={cohort} expected={} attempt={attempt} ok={} err={:?}",
+                expected.is_some(),
+                prepared.is_ok(),
+                prepared.as_ref().err()
+            );
             cache
                 .scan_measurements
                 .record("prepare_file", prepare_started, 1);
