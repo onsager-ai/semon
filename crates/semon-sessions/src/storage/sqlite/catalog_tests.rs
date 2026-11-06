@@ -3624,7 +3624,10 @@ fn projection_cache_tag_refuses_wrong_projector_and_altered_prefix() {
     tx.execute("UPDATE storage_projection_tags SET raw_identity=?1 WHERE namespace=semon_namespace() AND session_key=?2", rusqlite::params!["0".repeat(64),row.key]).unwrap();
     assert!(matches!(
         crate::storage::sqlite::projection_tags::check(
-            &tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog,
+            &tx,
+            &binding,
+            &row,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
         ),
         Err(crate::storage::StorageError::ScopeChanged)
     ));
@@ -3633,7 +3636,10 @@ fn projection_cache_tag_refuses_wrong_projector_and_altered_prefix() {
     tx.execute("UPDATE session_slot_projections SET generation='stale-generation' WHERE namespace=semon_namespace() AND session_key=?1", [&row.key]).unwrap();
     assert!(matches!(
         crate::storage::sqlite::projection_tags::check(
-            &tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog,
+            &tx,
+            &binding,
+            &row,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
         ),
         Err(crate::storage::StorageError::ScopeChanged)
     ));
@@ -3645,17 +3651,31 @@ fn projection_cache_rebuild_rollback_restart_keeps_prior_publication() {
     const CRASH_DB: &str = "SEMON_TEST_PROJECTION_REBUILD_CRASH_DB";
     if let Some(path) = std::env::var_os(CRASH_DB) {
         let db = Connection::open(&path).unwrap();
-        let namespace: String = db.query_row("SELECT namespace FROM storage_namespaces", [], |row| row.get(0)).unwrap();
-        let stream: String = db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |row| row.get(0)).unwrap();
+        let namespace: String = db
+            .query_row("SELECT namespace FROM storage_namespaces", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let stream: String = db
+            .query_row(
+                "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         drop(db);
         let config = crate::storage::StoreConfig {
-            backend: crate::storage::StoreBackend::Sqlite { database: path.into() },
+            backend: crate::storage::StoreBackend::Sqlite {
+                database: path.into(),
+            },
             namespace: crate::storage::LogicalSourceNamespace::new(namespace).unwrap(),
             expected_stream_epoch: Some(stream),
         };
         let db = crate::storage::sqlite::semantic::Stage::open(
             crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
-        ).unwrap().into_test_connection();
+        )
+        .unwrap()
+        .into_test_connection();
         db.execute_batch(
             "BEGIN IMMEDIATE;
              UPDATE storage_projection_tags SET projector='incomplete-rebuild';
