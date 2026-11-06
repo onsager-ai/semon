@@ -27,6 +27,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
+#[allow(
+    dead_code,
+    reason = "Activity publication is a separate follow-up slice"
+)]
+pub(crate) mod session_activity;
 pub(crate) mod store;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
