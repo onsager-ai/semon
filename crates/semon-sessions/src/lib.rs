@@ -125,7 +125,8 @@ pub use selected_read::SelectedReadControl;
 mod storage;
 #[cfg(feature = "postgres")]
 pub use storage::postgres::{
-    PgProjectionStore, PgProjectionTransaction, schema as postgres_projection_schema,
+    PgProjectionStore, PgProjectionTransaction, PgRawGeneration, PgRawIntent,
+    schema as postgres_projection_schema,
 };
 #[cfg(feature = "postgres")]
 pub use storage::{Namespace as SessionNamespace, ProjectionTag, StorageError, TagCheck};

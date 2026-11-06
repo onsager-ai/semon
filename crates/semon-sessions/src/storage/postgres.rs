@@ -8,6 +8,8 @@ use tokio_postgres::{Client, IsolationLevel, Transaction};
 mod index;
 mod producer;
 mod selected;
+mod raw;
+pub use raw::{PgRawGeneration, PgRawIntent};
 // The typed Catalog API is qualified independently before runtime adoption.
 #[allow(dead_code, reason = "Catalog runtime integration is pending")]
 mod catalog;
@@ -32,7 +34,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 
 fn stamp() -> String {
     format!(
-        "semon-session-store/1 backend=postgres schema=3 parser={} projector={}",
+        "semon-session-store/1 backend=postgres schema=4 parser={} projector={}",
         crate::events::CACHE_VERSION,
         crate::model::summary::CATALOG_VERSION
     )
@@ -61,7 +63,8 @@ impl PgProjectionStore {
         };
         let tx = self.begin(namespace).await?;
         let reply = crate::catalog::postgres_page(&tx, namespace, options, &request)
-            .await.map_err(backend)?;
+            .await
+            .map_err(backend)?;
         tx.commit(namespace).await?;
         Ok(reply)
     }

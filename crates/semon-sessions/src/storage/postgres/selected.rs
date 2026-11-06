@@ -23,24 +23,58 @@ impl PgProjectionStore {
             return Err(backend("invalid selected transcript arguments"));
         }
         let tx = self.begin(namespace).await?;
-        let query = format!("sid={}&scope={}", crate::viewer::percent_encode(key), crate::catalog_search::scope_key(scope));
-        let request = crate::catalog::Request::parse(&query).map_err(|_| backend("invalid selected identity"))?;
-        let reply = crate::catalog::postgres_page(&tx, namespace, options, &request).await.map_err(backend)?;
-        let selected = crate::catalog::selection_from_reply(reply, namespace.as_str(), key, scope, false)
-            .map_err(|_| backend("selected identity unavailable"))?;
+        let query = format!(
+            "sid={}&scope={}",
+            crate::viewer::percent_encode(key),
+            crate::catalog_search::scope_key(scope)
+        );
+        let request = crate::catalog::Request::parse(&query)
+            .map_err(|_| backend("invalid selected identity"))?;
+        let reply = crate::catalog::postgres_page(&tx, namespace, options, &request)
+            .await
+            .map_err(backend)?;
+        let selected =
+            crate::catalog::selection_from_reply(reply, namespace.as_str(), key, scope, false)
+                .map_err(|_| backend("selected identity unavailable"))?;
         let Some((identity, session)) = selected else {
-            return Ok(crate::catalog::error(404, "session_not_found", "The selected session is absent from this catalog.", false));
+            return Ok(crate::catalog::error(
+                404,
+                "session_not_found",
+                "The selected session is absent from this catalog.",
+                false,
+            ));
         };
-        let row = tx.catalog_row(namespace, key, scope).await?
+        let row = tx
+            .catalog_row(namespace, key, scope)
+            .await?
             .ok_or_else(|| backend("selected identity unavailable"))?;
-        let (generation, total, slots) = tx.recipe_page(namespace, key, scope, None, after, limit).await?;
+        let (generation, total, slots) = tx
+            .recipe_page(namespace, key, scope, None, after, limit)
+            .await?;
         if after > total {
             return Err(backend("selected range exceeds projection"));
         }
-        if expected_generation.is_some_and(|expected| expected != crate::transcript_range::entry_generation(&generation)) {
-            return Ok(crate::catalog::error(409, "stale_projection", "The selected projection changed. Resynchronize this session.", true));
+        if expected_generation.is_some_and(|expected| {
+            expected != crate::transcript_range::entry_generation(&generation)
+        }) {
+            return Ok(crate::catalog::error(
+                409,
+                "stale_projection",
+                "The selected projection changed. Resynchronize this session.",
+                true,
+            ));
         }
-        let reply = crate::transcript_range::render_postgres(options, identity, session, &generation, total, after, slots, row.sources, reader);
+        let reply = crate::transcript_range::render_postgres(
+            options,
+            identity,
+            session,
+            &generation,
+            total,
+            after,
+            slots,
+            row.sources,
+            reader,
+        );
         tx.commit(namespace).await?;
         Ok(reply)
     }

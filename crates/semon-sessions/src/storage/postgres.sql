@@ -97,6 +97,21 @@ CREATE TABLE semon_projection.checkpoints (
     metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
     PRIMARY KEY (namespace,checkpoint_key)
 );
+CREATE TABLE semon_projection.raw_sources (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    root text NOT NULL CHECK (root IN ('claude','codex','copilot')),
+    path text NOT NULL CHECK (octet_length(path) BETWEEN 1 AND 4096),
+    revision bigint NOT NULL CHECK (revision > 0),
+    pending boolean NOT NULL,
+    generation text CHECK (octet_length(generation) <= 1048576),
+    CHECK (pending OR generation IS NOT NULL),
+    PRIMARY KEY (namespace,root,path)
+);
+ALTER TABLE semon_projection.raw_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.raw_sources FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.raw_sources
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.change_heads (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     read_scope text NOT NULL CHECK (read_scope IN ('current','retained_history')),

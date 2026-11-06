@@ -50,8 +50,13 @@ impl PgProjectionTransaction<'_> {
         if !(1..=100).contains(&limit) {
             return Err(backend("invalid catalog limit"));
         }
-        let query = query.map(|query| catalog_search::normalize_query(query)
-            .filter(|query| !query.is_empty()).ok_or_else(|| backend("invalid metadata query"))).transpose()?;
+        let query = query
+            .map(|query| {
+                catalog_search::normalize_query(query)
+                    .filter(|query| !query.is_empty())
+                    .ok_or_else(|| backend("invalid metadata query"))
+            })
+            .transpose()?;
         let anchor: Option<String> = query.as_ref().map(|query| query.chars().take(3).collect());
         let (last, key) = after.unwrap_or((i64::MAX, ""));
         let selected = self.tx.query(
@@ -64,22 +69,45 @@ impl PgProjectionTransaction<'_> {
         let mut candidates = 0;
         for item in selected.iter().take(catalog_search::MAX_CANDIDATES) {
             let key: String = item.get(0);
-            let row = self.catalog_row(namespace, &key, scope).await?
+            let row = self
+                .catalog_row(namespace, &key, scope)
+                .await?
                 .ok_or_else(|| backend("catalog candidate unavailable"))?;
             bytes += serde_json::to_vec(&row).map_err(backend)?.len();
             if bytes > catalog_search::MAX_SCAN_BYTES {
-                return Ok(SearchPage { rows, next: checked, partial: true, candidates });
+                return Ok(SearchPage {
+                    rows,
+                    next: checked,
+                    partial: true,
+                    candidates,
+                });
             }
-            let matches = query.as_ref().is_none_or(|query| catalog_search::fields(&row).iter().any(|field| field.contains(query)));
+            let matches = query.as_ref().is_none_or(|query| {
+                catalog_search::fields(&row)
+                    .iter()
+                    .any(|field| field.contains(query))
+            });
             if matches && rows.len() == limit {
-                return Ok(SearchPage { rows, next: checked, partial: false, candidates });
+                return Ok(SearchPage {
+                    rows,
+                    next: checked,
+                    partial: false,
+                    candidates,
+                });
             }
             candidates += 1;
             checked = Some((item.get(1), key));
-            if matches { rows.push(row); }
+            if matches {
+                rows.push(row);
+            }
         }
         let partial = selected.len() > catalog_search::MAX_CANDIDATES;
-        Ok(SearchPage { rows, next: if partial { checked } else { None }, partial, candidates })
+        Ok(SearchPage {
+            rows,
+            next: if partial { checked } else { None },
+            partial,
+            candidates,
+        })
     }
 
     pub(crate) async fn search_catalog(

@@ -816,7 +816,9 @@ pub(crate) fn read(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
-        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(connection)),
+        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(
+            connection,
+        )),
         identity,
         session,
         generation,
@@ -868,13 +870,29 @@ pub(crate) fn render_postgres(
 ) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
     let selection = Selection {
-        proof_db: None, identity, session,
-        generation: entry_generation(stored_generation), total, first, end, start: first,
-        slots, sources: sources.into_iter().map(|source| (source.path.clone(), source)).collect(),
+        proof_db: None,
+        identity,
+        session,
+        generation: entry_generation(stored_generation),
+        total,
+        first,
+        end,
+        start: first,
+        slots,
+        sources: sources
+            .into_iter()
+            .map(|source| (source.path.clone(), source))
+            .collect(),
         history_incomplete: false,
         context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
     };
-    render(options, selection, Some(reader), SessionSourceReadMode::ProviderOnly, SelectedPart::Transcript)
+    render(
+        options,
+        selection,
+        Some(reader),
+        SessionSourceReadMode::ProviderOnly,
+        SelectedPart::Transcript,
+    )
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races

@@ -406,7 +406,13 @@ fn catalog_selection_read(
         }
         None => crate::storage::catalog_page(options, source_key, &request, None),
     };
-    selection_from_reply(reply, source_key, canonical_catalog_key, scope, require_complete)
+    selection_from_reply(
+        reply,
+        source_key,
+        canonical_catalog_key,
+        scope,
+        require_complete,
+    )
 }
 
 pub(crate) fn selection_from_reply(
@@ -1367,9 +1373,25 @@ fn read_page_snapshot(
     } else {
         None
     };
-    present_page(options, machine, request, PresentedPage {
-        generation, observed_at, completeness, selected, next, details, transcript, partial_history, search_report,
-    }, runtime, runtime_observations, recorded)
+    present_page(
+        options,
+        machine,
+        request,
+        PresentedPage {
+            generation,
+            observed_at,
+            completeness,
+            selected,
+            next,
+            details,
+            transcript,
+            partial_history,
+            search_report,
+        },
+        runtime,
+        runtime_observations,
+        recorded,
+    )
 }
 
 #[cfg(feature = "postgres")]
@@ -1381,45 +1403,132 @@ pub(crate) async fn postgres_page(
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let machine = namespace.as_str();
     if request.cursor.as_ref().is_some_and(|cursor| {
-        cursor.scope != request.scope || cursor.machine != machine
-            || cursor.harness != request.harness || cursor.repo != request.repo
-            || cursor.model != request.model || cursor.q != request.q
+        cursor.scope != request.scope
+            || cursor.machine != machine
+            || cursor.harness != request.harness
+            || cursor.repo != request.repo
+            || cursor.model != request.model
+            || cursor.q != request.q
     }) {
-        return Ok(error(400, "cursor_scope_mismatch", "Discard the cursor when changing machine or filters.", false));
+        return Ok(error(
+            400,
+            "cursor_scope_mismatch",
+            "Discard the cursor when changing machine or filters.",
+            false,
+        ));
     }
-    let generation = tx.catalog_generation(namespace).await?
+    let generation = tx
+        .catalog_generation(namespace)
+        .await?
         .ok_or_else(|| io::Error::other("catalog not published"))?;
-    if request.cursor.as_ref().is_some_and(|cursor| cursor.generation != generation) {
-        return Ok(error(409, "stale_cursor", "The catalog changed. Discard this cursor.", true));
+    if request
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.generation != generation)
+    {
+        return Ok(error(
+            409,
+            "stale_cursor",
+            "The catalog changed. Discard this cursor.",
+            true,
+        ));
     }
-    let after = request.cursor.as_ref().map(|cursor| (cursor.last, cursor.key.as_str()));
+    let after = request
+        .cursor
+        .as_ref()
+        .map(|cursor| (cursor.last, cursor.key.as_str()));
     let (selected, position, search_report) = if let Some(key) = &request.sid {
-        (tx.catalog_row(namespace, key, request.scope).await?.into_iter().collect(), None, None)
+        (
+            tx.catalog_row(namespace, key, request.scope)
+                .await?
+                .into_iter()
+                .collect(),
+            None,
+            None,
+        )
     } else {
-        let found = tx.filtered_catalog_page(namespace, request.scope, request.harness.as_deref(), request.repo.as_deref(), request.model.as_deref(), request.q.as_deref(), after, request.limit).await?;
-        (found.rows, found.next, request.q.as_ref().map(|_| crate::catalog_search::Report {
-            partial: found.partial, candidates: found.candidates, index_complete: true,
-        }))
+        let found = tx
+            .filtered_catalog_page(
+                namespace,
+                request.scope,
+                request.harness.as_deref(),
+                request.repo.as_deref(),
+                request.model.as_deref(),
+                request.q.as_deref(),
+                after,
+                request.limit,
+            )
+            .await?;
+        (
+            found.rows,
+            found.next,
+            request.q.as_ref().map(|_| crate::catalog_search::Report {
+                partial: found.partial,
+                candidates: found.candidates,
+                index_complete: true,
+            }),
+        )
     };
     if request.sid.is_some() && selected.is_empty() {
-        return Ok(error(404, "session_not_found", "The selected session is absent from this catalog.", false));
+        return Ok(error(
+            404,
+            "session_not_found",
+            "The selected session is absent from this catalog.",
+            false,
+        ));
     }
-    let next = position.map(|(last, key)| serde_json::to_string(&Cursor {
-        inclusive: false, scope: request.scope, version: 1, generation: generation.clone(),
-        machine: machine.to_owned(), harness: request.harness.clone(), repo: request.repo.clone(),
-        model: request.model.clone(), q: request.q.clone(), last, key,
-    })).transpose()?;
+    let next = position
+        .map(|(last, key)| {
+            serde_json::to_string(&Cursor {
+                inclusive: false,
+                scope: request.scope,
+                version: 1,
+                generation: generation.clone(),
+                machine: machine.to_owned(),
+                harness: request.harness.clone(),
+                repo: request.repo.clone(),
+                model: request.model.clone(),
+                q: request.q.clone(),
+                last,
+                key,
+            })
+        })
+        .transpose()?;
     let transcript = if let Some(row) = selected.first().filter(|_| request.sid.is_some()) {
-        let (recipe, total, _) = tx.recipe_page(namespace, &row.key, request.scope, None, 0, 1).await?;
-        Some(json!({"version":crate::slot_projection::VERSION,"generation":crate::transcript_range::entry_generation(&recipe),"total":total}))
-    } else { None };
+        let (recipe, total, _) = tx
+            .recipe_page(namespace, &row.key, request.scope, None, 0, 1)
+            .await?;
+        Some(
+            json!({"version":crate::slot_projection::VERSION,"generation":crate::transcript_range::entry_generation(&recipe),"total":total}),
+        )
+    } else {
+        None
+    };
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let runtime_observations = crate::native_evidence::RuntimeObservations::projection(options);
-    let recorded = options.facts.as_ref().and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-    present_page(options, machine, request, PresentedPage {
-        generation, observed_at: None, completeness: "complete".into(), selected, next,
-        details: None, transcript, partial_history: Default::default(), search_report,
-    }, runtime, runtime_observations, recorded)
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    present_page(
+        options,
+        machine,
+        request,
+        PresentedPage {
+            generation,
+            observed_at: None,
+            completeness: "complete".into(),
+            selected,
+            next,
+            details: None,
+            transcript,
+            partial_history: Default::default(),
+            search_report,
+        },
+        runtime,
+        runtime_observations,
+        recorded,
+    )
 }
 
 pub(crate) struct PresentedPage {
@@ -1443,9 +1552,23 @@ fn present_page(
     runtime_observations: crate::native_evidence::RuntimeObservations,
     recorded: Option<crate::facts::source_authority::CurrentSources>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
-    let PresentedPage { generation, observed_at, completeness, selected, next, details, transcript, partial_history, search_report } = page;
-    let facts_known = options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
-    let codex_selection_known = options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.selection_known());
+    let PresentedPage {
+        generation,
+        observed_at,
+        completeness,
+        selected,
+        next,
+        details,
+        transcript,
+        partial_history,
+        search_report,
+    } = page;
+    let facts_known =
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|source| source.selection_known());
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
     let machine_label = match &options.facts {
