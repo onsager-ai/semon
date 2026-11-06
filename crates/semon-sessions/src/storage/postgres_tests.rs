@@ -17,7 +17,7 @@ async fn pg_native_index_lifecycle(dsn: &str) {
     use sha2::{Digest, Sha256};
     use std::io::Write;
     let root = super::root();
-    let path = super::native(&root.0, "pg-native", "private native body");
+    let path = super::native(&root.0, "pg-native", &"private native body ".repeat(8192));
     let namespace = Namespace::new("native-machine").unwrap();
     let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone())
         .await
@@ -39,7 +39,7 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .unwrap();
     assert_eq!(
         first_hash,
-        <[u8; 32]>::from(Sha256::digest(std::fs::read(&path).unwrap()))
+        <[u8; 32]>::from(Sha256::digest(&std::fs::read(&path).unwrap()[..crate::source_chunks::SIZE]))
     );
     tx.publish_tag(&namespace, "native-session", name, first)
         .await
@@ -83,9 +83,10 @@ async fn pg_native_index_lifecycle(dsn: &str) {
     assert_eq!(
         first_hash,
         <[u8; 32]>::from(Sha256::digest(
-            &std::fs::read(&path).unwrap()[..first.offset as usize]
+            &std::fs::read(&path).unwrap()[..crate::source_chunks::SIZE]
         ))
     );
+    tx.commit(&namespace).await.unwrap();
     let mut raw = connect(dsn).await;
     let raw_tx = raw.transaction().await.unwrap();
     raw_tx
@@ -95,6 +96,24 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         )
         .await
         .unwrap();
+    let changed = raw_tx.execute(
+        "UPDATE semon_projection.proof_blocks SET digest=decode(repeat('ff',32),'hex') WHERE namespace=$1 AND path=$2 AND ordinal=0",
+        &[&namespace.binding(), &name],
+    ).await.unwrap();
+    assert!(changed > 0);
+    raw_tx.commit().await.unwrap();
+    let proof_tx = store.begin(&namespace).await.unwrap();
+    assert!(proof_tx.proof_block(&namespace, name, first, 0).await.is_err());
+    proof_tx.commit(&namespace).await.unwrap();
+    let raw_tx = raw.transaction().await.unwrap();
+    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
+    raw_tx.execute(
+        "UPDATE semon_projection.proof_blocks SET digest=$3 WHERE namespace=$1 AND path=$2 AND ordinal=0",
+        &[&namespace.binding(), &name, &&first_hash[..]],
+    ).await.unwrap();
+    raw_tx.commit().await.unwrap();
+    let raw_tx = raw.transaction().await.unwrap();
+    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
     let stored: i64 = raw_tx
         .query_one(
             "SELECT count(*) FROM semon_projection.records WHERE record LIKE '%private%'",
@@ -105,7 +124,6 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .get(0);
     assert_eq!(stored, 0, "normalized rows contain no native bodies");
     raw_tx.rollback().await.unwrap();
-    tx.commit(&namespace).await.unwrap();
     std::fs::write(&path, format!("{}\n", serde_json::json!({"type":"user","sessionId":"pg-native","uuid":"replacement","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"replacement"}}))).unwrap();
     let replaced = store
         .index_source(&namespace, &path, "claude")
@@ -156,7 +174,7 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         )
         .await
         .unwrap();
-    for table in ["files", "records", "proofs", "proof_blocks"] {
+    for table in ["files", "records", "proofs", "proof_blocks", "proof_nodes"] {
         let count: i64 = raw_tx
             .query_one(
                 &format!("SELECT count(*) FROM semon_projection.{table}"),
@@ -177,7 +195,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     let admin =
         connect(&std::env::var("SEMON_PG_ADMIN_TEST_DSN").expect("CI PostgreSQL admin DSN")).await;
     admin.batch_execute(&schema()).await.unwrap();
-    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON semon_projection.namespaces,semon_projection.ledgers,semon_projection.units,semon_projection.files,semon_projection.records,semon_projection.proofs,semon_projection.proof_blocks TO semon_app; GRANT SELECT ON semon_projection.metadata TO semon_app").await.unwrap();
+    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON semon_projection.namespaces,semon_projection.ledgers,semon_projection.units,semon_projection.files,semon_projection.records,semon_projection.proofs,semon_projection.proof_blocks,semon_projection.proof_nodes TO semon_app; GRANT SELECT ON semon_projection.metadata TO semon_app").await.unwrap();
     let dsn = std::env::var("SEMON_PG_TEST_DSN").expect("CI restricted PostgreSQL DSN");
     let a = Namespace::new("machine-a").unwrap();
     let b = Namespace::new("machine-b").unwrap();

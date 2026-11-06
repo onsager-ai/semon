@@ -61,6 +61,8 @@ CREATE TABLE semon_projection.proofs (
     prefix bytea NOT NULL CHECK (octet_length(prefix) = 32),
     tail bytea NOT NULL CHECK (octet_length(tail) = 32),
     resume text,
+    blocks bigint NOT NULL CHECK (blocks >= 0),
+    root bytea NOT NULL CHECK (octet_length(root) = 32),
     PRIMARY KEY (namespace,path,generation)
 );
 CREATE TABLE semon_projection.proof_blocks (
@@ -72,6 +74,21 @@ CREATE TABLE semon_projection.proof_blocks (
     PRIMARY KEY (namespace,path,generation,ordinal),
     FOREIGN KEY (namespace,path,generation) REFERENCES semon_projection.proofs(namespace,path,generation) ON DELETE CASCADE
 );
+CREATE TABLE semon_projection.proof_nodes (
+    namespace text NOT NULL,
+    path text NOT NULL,
+    generation text NOT NULL,
+    level integer NOT NULL CHECK (level >= 0),
+    ordinal bigint NOT NULL CHECK (ordinal >= 0),
+    digest bytea NOT NULL CHECK (octet_length(digest) = 32),
+    PRIMARY KEY (namespace,path,generation,level,ordinal),
+    FOREIGN KEY (namespace,path,generation) REFERENCES semon_projection.proofs(namespace,path,generation) ON DELETE CASCADE
+);
+ALTER TABLE semon_projection.proof_nodes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.proof_nodes FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.proof_nodes
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 ALTER TABLE semon_projection.files ENABLE ROW LEVEL SECURITY;
 ALTER TABLE semon_projection.files FORCE ROW LEVEL SECURITY;
 CREATE POLICY namespace_isolation ON semon_projection.files

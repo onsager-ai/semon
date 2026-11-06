@@ -11,6 +11,29 @@ fn generation(tag: ProjectionTag) -> String {
     format!("{:x}", Sha256::digest(format!("{tag:?}").as_bytes()))
 }
 
+fn parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(left);
+    hash.update(right);
+    hash.finalize().into()
+}
+
+fn tree(hashes: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
+    let mut levels = vec![hashes.to_vec()];
+    while levels.last().is_some_and(|level| level.len() > 1) {
+        let next = levels.last().unwrap().chunks(2)
+            .map(|pair| parent(&pair[0], pair.get(1).unwrap_or(&pair[0])))
+            .collect();
+        levels.push(next);
+    }
+    levels
+}
+
+fn root(levels: &[Vec<[u8; 32]>]) -> [u8; 32] {
+    levels.last().and_then(|level| level.first()).copied()
+        .unwrap_or_else(|| Sha256::digest([]).into())
+}
+
 impl PgProjectionStore {
     /// Parse one native source with the shared parser, then atomically commit
     /// its normalized rows, consumed ledger and byte proofs. A concurrent writer
@@ -124,7 +147,7 @@ impl PgProjectionTransaction<'_> {
             }
         }
         let saved = self.tx.query_one(
-            "SELECT consumed,resume FROM semon_projection.proofs WHERE namespace=$1 AND path=$2 AND generation=$3",
+            "SELECT consumed,resume,root FROM semon_projection.proofs WHERE namespace=$1 AND path=$2 AND generation=$3",
             &[&namespace.binding(), &path, &generation(tag)],
         ).await.map_err(backend)?;
         let resume: Option<&str> = saved.get(1);
@@ -150,7 +173,7 @@ impl PgProjectionTransaction<'_> {
                     .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?,
             );
         }
-        if !chunks.valid(ledger.offset) {
+        if !chunks.valid(ledger.offset) || root(&tree(&chunks.hashes)).as_slice() != saved.get::<_, &[u8]>(2) {
             return Err(StorageError::Backend(
                 "native proof boundary mismatch".into(),
             ));
@@ -232,9 +255,11 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &path, &kinds, &ordinals, &values],
         ).await.map_err(backend)?;
         let version = generation(tag);
+        let levels = tree(&chunks.hashes);
+        let proof_root = root(&levels);
         self.tx.execute(
-            "INSERT INTO semon_projection.proofs(namespace,path,generation,consumed,prefix,tail,resume) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
-            &[&namespace.binding(), &path, &version, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..], &resume],
+            "INSERT INTO semon_projection.proofs(namespace,path,generation,consumed,prefix,tail,resume,blocks,root) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING",
+            &[&namespace.binding(), &path, &version, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..], &resume, &number(chunks.hashes.len() as u64)?, &&proof_root[..]],
         ).await.map_err(backend)?;
         let ordinals = (0..chunks.hashes.len())
             .map(|ordinal| number(ordinal as u64))
@@ -247,6 +272,20 @@ impl PgProjectionTransaction<'_> {
         self.tx.execute(
             "INSERT INTO semon_projection.proof_blocks(namespace,path,generation,ordinal,digest) SELECT $1,$2,$3,b.* FROM unnest($4::bigint[],$5::bytea[]) b ON CONFLICT DO NOTHING",
             &[&namespace.binding(), &path, &version, &ordinals, &digests],
+        ).await.map_err(backend)?;
+        let mut node_levels = Vec::new();
+        let mut node_ordinals = Vec::new();
+        let mut node_hashes = Vec::new();
+        for (level, nodes) in levels.iter().enumerate() {
+            for (ordinal, digest) in nodes.iter().enumerate() {
+                node_levels.push(level as i32);
+                node_ordinals.push(number(ordinal as u64)?);
+                node_hashes.push(digest.to_vec());
+            }
+        }
+        self.tx.execute(
+            "INSERT INTO semon_projection.proof_nodes(namespace,path,generation,level,ordinal,digest) SELECT $1,$2,$3,n.* FROM unnest($4::integer[],$5::bigint[],$6::bytea[]) n ON CONFLICT DO NOTHING",
+            &[&namespace.binding(), &path, &version, &node_levels, &node_ordinals, &node_hashes],
         ).await.map_err(backend)?;
         Ok(Some(tag))
     }
@@ -268,14 +307,37 @@ impl PgProjectionTransaction<'_> {
             ));
         }
         let row = self.tx.query_opt(
-            "SELECT b.digest FROM semon_projection.proof_blocks b JOIN semon_projection.proofs p USING(namespace,path,generation) WHERE b.namespace=$1 AND b.path=$2 AND b.generation=$3 AND b.ordinal=$4 AND p.consumed=$5 AND p.prefix=$6 AND p.tail=$7",
+            "SELECT b.digest,p.blocks,p.root FROM semon_projection.proof_blocks b JOIN semon_projection.proofs p USING(namespace,path,generation) WHERE b.namespace=$1 AND b.path=$2 AND b.generation=$3 AND b.ordinal=$4 AND p.consumed=$5 AND p.prefix=$6 AND p.tail=$7",
             &[&namespace.binding(), &path, &generation(tag), &number(ordinal)?, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..]],
         ).await.map_err(backend)?;
-        row.map(|row| {
-            row.get::<_, Vec<u8>>(0)
-                .try_into()
-                .map_err(|_| StorageError::Backend("invalid native proof digest".into()))
-        })
-        .transpose()
+        let Some(row) = row else { return Ok(None) };
+        let digest: [u8; 32] = row.get::<_, Vec<u8>>(0).try_into()
+            .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?;
+        let mut count = row.get::<_, i64>(1) as u64;
+        if count != tag.offset.div_ceil(crate::source_chunks::SIZE as u64) || ordinal >= count {
+            return Err(StorageError::Backend("native proof boundary mismatch".into()));
+        }
+        let mut at = ordinal;
+        let mut level = 0_i32;
+        let mut witness = digest;
+        // Each level reads one sibling by primary key, independent of history
+        // and total source length. All nodes come from this selected snapshot.
+        while count > 1 {
+            let sibling = if (at ^ 1) < count { at ^ 1 } else { at };
+            let row = self.tx.query_one(
+                "SELECT digest FROM semon_projection.proof_nodes WHERE namespace=$1 AND path=$2 AND generation=$3 AND level=$4 AND ordinal=$5",
+                &[&namespace.binding(), &path, &generation(tag), &level, &number(sibling)?],
+            ).await.map_err(backend)?;
+            let other: [u8; 32] = row.get::<_, Vec<u8>>(0).try_into()
+                .map_err(|_| StorageError::Backend("invalid native proof node".into()))?;
+            witness = if at % 2 == 0 { parent(&witness, &other) } else { parent(&other, &witness) };
+            at /= 2;
+            count = count.div_ceil(2);
+            level += 1;
+        }
+        if witness.as_slice() != row.get::<_, &[u8]>(2) {
+            return Err(StorageError::Backend("native proof root mismatch".into()));
+        }
+        Ok(Some(digest))
     }
 }
