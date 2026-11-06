@@ -153,6 +153,20 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .unwrap();
     assert_eq!(first.epoch, next.epoch);
     assert!(next.offset > first.offset);
+    let tx = store.begin(&namespace).await.unwrap();
+    let (committed, normalized) = tx.load_index(&namespace, name).await.unwrap().unwrap();
+    let mut replaced_ledger = committed.clone();
+    replaced_ledger.stat.ino += 1;
+    let uncommitted = tx.write_index(
+        &namespace, name, Some(next), &replaced_ledger, &normalized, false,
+    ).await.unwrap().unwrap();
+    assert!(uncommitted.epoch > next.epoch);
+    drop(tx);
+    let tx = store.begin(&namespace).await.unwrap();
+    assert_eq!(tx.ledger(&namespace, name).await.unwrap(), Some(next));
+    assert!(tx.proof_block(&namespace, name, uncommitted, 0).await.unwrap().is_none());
+    assert!(tx.write_index(&namespace, name, Some(first), &committed, &normalized, true).await.unwrap().is_none());
+    tx.commit(&namespace).await.unwrap();
     drop(store);
     let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone())
         .await
