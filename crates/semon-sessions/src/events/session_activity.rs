@@ -8,7 +8,11 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{CodexNativeUsage, CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use super::CodexNativeUsage;
+use super::{CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
 use crate::{claude_usage::Shared, pricing};
 
 pub(crate) const ACTIVITY_RULES_VERSION: u32 = 1;
@@ -16,19 +20,19 @@ const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
 /// the complete native (thread, session, turn, response) tuple, not response alone.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ActivityStepId {
     Claude(String),
     Codex([String; 4]),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct SourcePosition {
     pub(crate) source: String,
     pub(crate) offset: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ContextBand {
     Under50k,
     From50kTo150k,
@@ -45,7 +49,7 @@ impl ContextBand {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Ownership {
     Exclusive,
     /// The exact key returned by `claude_usage::shared`; no original is inferred.
@@ -55,13 +59,15 @@ pub(crate) enum Ownership {
 /// A normalized usage row, before session ordering and pricing. Keep these
 /// constructors at the boundary so legacy cumulative Codex counters cannot be
 /// mistaken for native response facts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct UsageStep {
-    id: ActivityStepId,
-    position: SourcePosition,
-    usage: Usage,
+    pub(crate) id: ActivityStepId,
+    pub(crate) position: SourcePosition,
+    pub(crate) usage: Usage,
 }
 
-enum Usage {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum Usage {
     Claude(MessageUsage),
     Codex(CodexUsageEvent),
 }
@@ -79,8 +85,21 @@ impl UsageStep {
         }
     }
 
+    pub(crate) fn normalized_codex(
+        identity: [String; 4],
+        position: SourcePosition,
+        event: CodexUsageEvent,
+    ) -> Self {
+        Self {
+            id: ActivityStepId::Codex(identity),
+            position,
+            usage: Usage::Codex(event),
+        }
+    }
+
     /// `model_outcome` comes from the existing native fact table, after source
     /// receipt qualification. This filter does not establish that qualification.
+    #[cfg(test)]
     pub(crate) fn codex(
         payload: &serde_json::Value,
         model_outcome: &str,
@@ -106,7 +125,7 @@ impl UsageStep {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ActivityStep {
     pub(crate) id: ActivityStepId,
     pub(crate) position: SourcePosition,
@@ -122,7 +141,7 @@ pub(crate) struct ActivityStep {
     pub(crate) compactions: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Compaction {
     pub(crate) position: SourcePosition,
     pub(crate) timestamp: Option<i64>,
@@ -131,7 +150,7 @@ pub(crate) struct Compaction {
 
 /// A partial sum preserves both the measured amount and its missing coverage.
 /// In particular the final step does not invent a zero duration.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Measured<T> {
     pub(crate) known: T,
     pub(crate) unknown_steps: u64,
@@ -147,7 +166,7 @@ impl<T: std::ops::AddAssign> Measured<T> {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StepTotals {
     pub(crate) steps: u64,
     pub(crate) list_cost_usd: Measured<f64>,
@@ -164,7 +183,7 @@ impl StepTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct OwnershipTotals {
     pub(crate) observed: StepTotals,
     pub(crate) exclusive: StepTotals,
@@ -181,7 +200,7 @@ impl OwnershipTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Serialize, Deserialize)]
 pub(crate) struct SessionActivityAggregate {
     pub(crate) totals: OwnershipTotals,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
@@ -193,7 +212,7 @@ pub(crate) struct SessionActivityAggregate {
     pub(crate) exclusive_cost_complete: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionActivity {
     pub(crate) session_key: String,
     pub(crate) rules_version: u32,

@@ -1,9 +1,9 @@
 # Session activity analytics derivation
 
-The first implementation slice is an internal pure derivation in
-`events/session_activity.rs`. It consumes normalized native usage and compaction
-signals for one canonical session. It does not publish storage rows or expose
-Query, MCP, Catalog or transcript fields.
+The internal pure derivation in `events/session_activity.rs` consumes normalized
+native usage and compaction signals for one canonical session. The session model
+publishes its typed results through `events/store/session_activity.rs`; it adds
+no Query, MCP, Catalog JSON or transcript fields.
 
 The producer supplies the existing Claude usage merge order and exact
 `claude_usage::shared` ownership map. One message ID is one observed step within
@@ -38,12 +38,35 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Follow-up work must wire the exact selected source cohort into a versioned
-SQLite activity projection, publish it atomically with the Catalog generation,
-and qualify current and retained-history reads against their respective source
-generations. That work owns the schema bump, rules-version rebuild and separate
-pricing invalidation, append/restart tests, and bounded storage reads. The pure
-slice changes neither parser nor schema versions. Family roll-ups, waste rules,
-change facts and public reads remain separate work. Preserve the source and
-custody contracts in [retained native projections](retained-native-projections.md)
-and [native session source readers](session-source-reader.md).
+Schema 35 stores a session activity header, ordered step rows keyed by
+`(session_key, generation, ordinal)`, and separate ordered compaction rows.
+Parser 30 retains the exact last Claude usage observation offset alongside the
+existing message ID and assistant UUIDs. The producer uses its established file
+merge order and copied-record ownership map; Codex reads only model-accepted
+facts whose normalized source receipt matches the selected consumed ledger.
+Header and detail publication shares the Catalog transaction and its complete
+source membership, ledger, claim and generation checks. Metadata-only updates
+cannot retain activity for a different source cohort.
+
+The header binds the source-vector generation, activity rules version, pricing
+fingerprint and row counts. The internal reader returns at most 256 ordered
+steps, checks the selected source cohort and rejects stale continuations, rules
+or prices. It belongs inside the caller's selection transaction. Activity rules
+changes enqueue current source owners through the existing Catalog invalidation
+path. Changed source generations derive again during normal model publication.
+Recognized obsolete indexes rebuild from supported sources under the existing
+refusal/rebuild policy; there is no migration or old-store reader.
+
+Each step saves typed pricing inputs without native bodies. The existing pricing
+producer reprices at most 128 activity rows per transaction across restart,
+including retained observations with unavailable native bytes. Step stamps prevent
+mixed-price pages; the final batch advances the header fingerprint and activity
+generation. Unknown prices remain unknown. No activity arrays or aggregates are
+added to the cached description or served session model.
+
+Family roll-ups, waste rules, change facts, public reads and selecting distinct
+retained-history cohorts remain separate work. The retained latest observation
+can only qualify against its own exact source vector; a different history cohort
+is unavailable. Preserve the source and custody contracts in
+[retained native projections](retained-native-projections.md) and
+[native session source readers](session-source-reader.md).

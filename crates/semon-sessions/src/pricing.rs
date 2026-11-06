@@ -658,6 +658,7 @@ mod tests {
         write_1h: u64,
     ) -> MessageUsage {
         MessageUsage {
+            offset: 0,
             record_ids: Default::default(),
             model: Some(model.to_owned()),
             tokens: crate::Tokens::default(),

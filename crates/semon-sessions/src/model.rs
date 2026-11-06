@@ -2423,6 +2423,60 @@ impl<'a> Builder<'a> {
         crate::claude_usage::shared(records.iter().map(|(key, records)| (*key, records)))
     }
 
+    fn session_activity(
+        &self,
+        session: &Sess,
+    ) -> io::Result<Option<events::store::session_activity::Projection>> {
+        use events::session_activity::{SourcePosition, UsageStep};
+        if !matches!(
+            session.kind,
+            SessKind::Lineage | SessKind::Agent | SessKind::Codex
+        ) {
+            return Ok(None);
+        }
+        let mut usage = Vec::new();
+        let mut signals = Vec::new();
+        for position in &session.files {
+            let file = &self.files[*position];
+            let path = file
+                .path
+                .to_str()
+                .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
+            if file.harness() == "claude" {
+                usage.extend(file.summary.usage().iter().map(|(id, used)| {
+                    UsageStep::claude(
+                        id.clone(),
+                        SourcePosition {
+                            source: path.into(),
+                            offset: used.offset,
+                        },
+                        used.clone(),
+                    )
+                }));
+            } else if file.summary.codex_native_usage.is_some() {
+                usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
+            }
+            signals.extend(
+                file.summary
+                    .signals
+                    .iter()
+                    .cloned()
+                    .map(|signal| (path.into(), signal)),
+            );
+        }
+        Ok(Some(events::store::session_activity::Projection::derive(
+            session.key.clone(),
+            usage,
+            &self
+                .shared_usage
+                .get(&session.key)
+                .cloned()
+                .unwrap_or_default(),
+            signals,
+            crate::pricing::snapshot(),
+        )))
+    }
+
     fn describe(&mut self, index: usize) {
         let session = &self.sessions[index];
         let mut files = Vec::new();
@@ -8320,6 +8374,9 @@ fn build_sources_inner(
                 .get(&row.key)
                 .map(|at| &builder.sessions[*at])
             {
+                if history_records.is_none() && builder.cache.has_activity_store() {
+                    row.session_activity = builder.session_activity(session)?;
+                }
                 let started = measurements.start();
                 row.trace = Some(
                     crate::causal_trace::Projection::capture(

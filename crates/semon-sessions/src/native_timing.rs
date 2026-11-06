@@ -1156,6 +1156,7 @@ mod tests {
             .map(|position| {
                 let key = format!("probe-{position:02}");
                 crate::model::summary::CatalogRow {
+                    session_activity: None,
                     overview: None,
                     trace: None,
                     query: Some(serde_json::json!({"version":1,"state":"off","last":version})),

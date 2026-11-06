@@ -1,5 +1,7 @@
 //! One test per rule in the design's table, on synthetic homes only.
 
+mod activity;
+
 use std::{
     io::Write,
     path::PathBuf,
