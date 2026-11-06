@@ -165,7 +165,7 @@ impl PgProjectionTransaction<'_> {
             {
                 previous.epoch
             }
-            Some(previous) if previous == next => previous.epoch,
+            Some(previous) if previous == (ProjectionTag { epoch: previous.epoch, ..next }) => previous.epoch,
             _ => self.tx.query_one("UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1 RETURNING epoch", &[&namespace.binding()]).await.map_err(backend)?.get(0),
         };
         self.tx.execute("INSERT INTO semon_projection.ledgers(namespace,path,dev,ino,consumed,prefix,tail,epoch,projector) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(namespace,path) DO UPDATE SET dev=excluded.dev,ino=excluded.ino,consumed=excluded.consumed,prefix=excluded.prefix,tail=excluded.tail,epoch=excluded.epoch,projector=excluded.projector", &[&namespace.binding(),&path,&(next.dev as i64),&(next.ino as i64),&number(next.offset)?,&&next.prefix_sha256[..],&&next.tail_sha256[..],&next.epoch,&(next.projector as i32)]).await.map_err(backend)?;

@@ -1,5 +1,8 @@
 //! Native normalized indexes and immutable consumed-prefix block proofs.
-use super::{Namespace, PgProjectionStore, PgProjectionTransaction, ProjectionTag, StorageError, backend, ensure, number};
+use super::{
+    Namespace, PgProjectionStore, PgProjectionTransaction, ProjectionTag, StorageError, backend,
+    ensure, number,
+};
 use crate::events::{FileIndex, Ledger};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc};
@@ -24,18 +27,27 @@ impl PgProjectionStore {
         if !matches!(harness, "claude" | "codex" | "copilot") {
             return Err(StorageError::Backend("unsupported native harness".into()));
         }
-        let name = path.to_str().ok_or_else(|| StorageError::Backend("invalid native path".into()))?;
+        let name = path
+            .to_str()
+            .ok_or_else(|| StorageError::Backend("invalid native path".into()))?;
         let tx = self.begin(namespace).await?;
         let expected = tx.ledger(namespace, name).await?;
         let previous = tx.load_index(namespace, name).await?;
         tx.commit(namespace).await?;
-        let (ledger, index, append) = crate::events::scan_postgres_file(path, harness, previous).map_err(backend)?;
+        let (ledger, index, append) =
+            crate::events::scan_postgres_file(path, harness, previous).map_err(backend)?;
         if crate::events::Stat::of(path).map_err(backend)? != ledger.stat {
-            return Err(StorageError::Backend("native source changed while indexing".into()));
+            return Err(StorageError::Backend(
+                "native source changed while indexing".into(),
+            ));
         }
         let tx = self.begin(namespace).await?;
-        let tag = tx.write_index(namespace, name, expected, &ledger, &index, append).await?
-            .ok_or_else(|| StorageError::Backend("native index conflict; rescan required".into()))?;
+        let tag = tx
+            .write_index(namespace, name, expected, &ledger, &index, append)
+            .await?
+            .ok_or_else(|| {
+                StorageError::Backend("native index conflict; rescan required".into())
+            })?;
         tx.commit(namespace).await?;
         Ok(tag)
     }
@@ -48,16 +60,26 @@ impl PgProjectionTransaction<'_> {
         path: &str,
     ) -> Result<Option<(Ledger, FileIndex)>, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let Some(row) = self.tx.query_opt(
-            "SELECT ledger,metadata FROM semon_projection.files WHERE namespace=$1 AND path=$2",
-            &[&namespace.binding(), &path],
-        ).await.map_err(backend)? else { return Ok(None) };
+        let Some(row) = self
+            .tx
+            .query_opt(
+                "SELECT ledger,metadata FROM semon_projection.files WHERE namespace=$1 AND path=$2",
+                &[&namespace.binding(), &path],
+            )
+            .await
+            .map_err(backend)?
+        else {
+            return Ok(None);
+        };
         let ledger: Ledger = serde_json::from_str(row.get(0)).map_err(backend)?;
         let mut index: FileIndex = serde_json::from_str(row.get(1)).map_err(backend)?;
-        let tag = self.ledger(namespace, path).await?
+        let tag = self
+            .ledger(namespace, path)
+            .await?
             .ok_or_else(|| StorageError::Backend("normalized ledger unavailable".into()))?;
         if ProjectionTag::of_ledger(&ledger, tag.epoch, tag.projector) != tag
-            || tag.projector != crate::model::summary::CATALOG_VERSION {
+            || tag.projector != crate::model::summary::CATALOG_VERSION
+        {
             return Err(StorageError::Backend("normalized ledger mismatch".into()));
         }
         let rows = self.tx.query(
@@ -68,13 +90,37 @@ impl PgProjectionTransaction<'_> {
             let ordinal: i64 = row.get(1);
             let text: &str = row.get(2);
             let len = match row.get::<_, i16>(0) {
-                0 => { let len = index.events.len(); index.events.push(serde_json::from_str(text).map_err(backend)?); len }
-                1 => { let len = index.extras.len(); index.extras.push(serde_json::from_str(text).map_err(backend)?); len }
-                2 => { let len = index.signals.len(); index.signals.push(serde_json::from_str(text).map_err(backend)?); len }
-                _ => return Err(StorageError::Backend("invalid normalized record kind".into())),
+                0 => {
+                    let len = index.events.len();
+                    index
+                        .events
+                        .push(serde_json::from_str(text).map_err(backend)?);
+                    len
+                }
+                1 => {
+                    let len = index.extras.len();
+                    index
+                        .extras
+                        .push(serde_json::from_str(text).map_err(backend)?);
+                    len
+                }
+                2 => {
+                    let len = index.signals.len();
+                    index
+                        .signals
+                        .push(serde_json::from_str(text).map_err(backend)?);
+                    len
+                }
+                _ => {
+                    return Err(StorageError::Backend(
+                        "invalid normalized record kind".into(),
+                    ));
+                }
             };
             if ordinal != number(len as u64)? {
-                return Err(StorageError::Backend("normalized record sequence gap".into()));
+                return Err(StorageError::Backend(
+                    "normalized record sequence gap".into(),
+                ));
             }
         }
         let saved = self.tx.query_one(
@@ -89,17 +135,25 @@ impl PgProjectionTransaction<'_> {
         let mut chunks = crate::source_chunks::Chunks {
             offset: saved.get::<_, i64>(0) as u64,
             hashes: Vec::with_capacity(hashes.len()),
-            resume: resume.map(serde_json::from_str).transpose().map_err(backend)?,
+            resume: resume
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(backend)?,
         };
         for row in hashes {
             if row.get::<_, i64>(0) != number(chunks.hashes.len() as u64)? {
                 return Err(StorageError::Backend("native proof sequence gap".into()));
             }
-            chunks.hashes.push(row.get::<_, Vec<u8>>(1).try_into()
-                .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?);
+            chunks.hashes.push(
+                row.get::<_, Vec<u8>>(1)
+                    .try_into()
+                    .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?,
+            );
         }
         if !chunks.valid(ledger.offset) {
-            return Err(StorageError::Backend("native proof boundary mismatch".into()));
+            return Err(StorageError::Backend(
+                "native proof boundary mismatch".into(),
+            ));
         }
         index.source_chunks = Some(Arc::new(chunks));
         Ok(Some((ledger, index)))
@@ -115,42 +169,85 @@ impl PgProjectionTransaction<'_> {
         append: bool,
     ) -> Result<Option<ProjectionTag>, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let chunks = index.source_chunks.as_ref().filter(|chunks| chunks.valid(ledger.offset))
+        let chunks = index
+            .source_chunks
+            .as_ref()
+            .filter(|chunks| chunks.valid(ledger.offset))
             .ok_or_else(|| StorageError::Backend("native proof boundary mismatch".into()))?;
         // Serialize before changing any durable rows: errors cannot leave a
         // partially applied logical operation in an otherwise committable tx.
         let encoded_ledger = serde_json::to_string(ledger).map_err(backend)?;
         let metadata = serde_json::to_string(index).map_err(backend)?;
-        let resume = chunks.resume.as_ref().map(serde_json::to_string).transpose().map_err(backend)?;
+        let resume = chunks
+            .resume
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(backend)?;
         let mut records = Vec::new();
         for (kind, events) in [(0_i16, &index.events), (1, &index.extras)] {
             for (ordinal, event) in events.iter().enumerate() {
-                records.push((kind, number(ordinal as u64)?, serde_json::to_string(event).map_err(backend)?));
+                records.push((
+                    kind,
+                    number(ordinal as u64)?,
+                    serde_json::to_string(event).map_err(backend)?,
+                ));
             }
         }
         for (ordinal, signal) in index.signals.iter().enumerate() {
-            records.push((2_i16, number(ordinal as u64)?, serde_json::to_string(signal).map_err(backend)?));
+            records.push((
+                2_i16,
+                number(ordinal as u64)?,
+                serde_json::to_string(signal).map_err(backend)?,
+            ));
         }
         let next = ProjectionTag::of_ledger(ledger, 0, crate::model::summary::CATALOG_VERSION);
-        let Some(tag) = self.write_ledger(namespace, path, expected, next, append).await? else { return Ok(None) };
+        let Some(tag) = self
+            .write_ledger(namespace, path, expected, next, append)
+            .await?
+        else {
+            return Ok(None);
+        };
         self.tx.execute(
             "INSERT INTO semon_projection.files(namespace,path,ledger,metadata) VALUES($1,$2,$3,$4) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,metadata=excluded.metadata",
             &[&namespace.binding(), &path, &encoded_ledger, &metadata],
         ).await.map_err(backend)?;
-        self.tx.execute("DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &path]).await.map_err(backend)?;
-        let statement = self.tx.prepare("INSERT INTO semon_projection.records(namespace,path,kind,ordinal,record) VALUES($1,$2,$3,$4,$5)").await.map_err(backend)?;
+        self.tx
+            .execute(
+                "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2",
+                &[&namespace.binding(), &path],
+            )
+            .await
+            .map_err(backend)?;
+        let mut kinds = Vec::with_capacity(records.len());
+        let mut ordinals = Vec::with_capacity(records.len());
+        let mut values = Vec::with_capacity(records.len());
         for (kind, ordinal, record) in records {
-            self.tx.execute(&statement, &[&namespace.binding(), &path, &kind, &ordinal, &record]).await.map_err(backend)?;
+            kinds.push(kind);
+            ordinals.push(ordinal);
+            values.push(record);
         }
+        self.tx.execute(
+            "INSERT INTO semon_projection.records(namespace,path,kind,ordinal,record) SELECT $1,$2,r.* FROM unnest($3::smallint[],$4::bigint[],$5::text[]) r",
+            &[&namespace.binding(), &path, &kinds, &ordinals, &values],
+        ).await.map_err(backend)?;
         let version = generation(tag);
         self.tx.execute(
             "INSERT INTO semon_projection.proofs(namespace,path,generation,consumed,prefix,tail,resume) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT DO NOTHING",
             &[&namespace.binding(), &path, &version, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..], &resume],
         ).await.map_err(backend)?;
-        let statement = self.tx.prepare("INSERT INTO semon_projection.proof_blocks(namespace,path,generation,ordinal,digest) VALUES($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING").await.map_err(backend)?;
-        for (ordinal, digest) in chunks.hashes.iter().enumerate() {
-            self.tx.execute(&statement, &[&namespace.binding(), &path, &version, &number(ordinal as u64)?, &&digest[..]]).await.map_err(backend)?;
-        }
+        let ordinals = (0..chunks.hashes.len())
+            .map(|ordinal| number(ordinal as u64))
+            .collect::<Result<Vec<_>, _>>()?;
+        let digests = chunks
+            .hashes
+            .iter()
+            .map(|digest| digest.to_vec())
+            .collect::<Vec<_>>();
+        self.tx.execute(
+            "INSERT INTO semon_projection.proof_blocks(namespace,path,generation,ordinal,digest) SELECT $1,$2,$3,b.* FROM unnest($4::bigint[],$5::bytea[]) b ON CONFLICT DO NOTHING",
+            &[&namespace.binding(), &path, &version, &ordinals, &digests],
+        ).await.map_err(backend)?;
         Ok(Some(tag))
     }
 
@@ -166,13 +263,19 @@ impl PgProjectionTransaction<'_> {
     ) -> Result<Option<[u8; 32]>, StorageError> {
         ensure(&self.namespace, namespace)?;
         if tag.projector != crate::model::summary::CATALOG_VERSION {
-            return Err(StorageError::Unsupported("unsupported projector version".into()));
+            return Err(StorageError::Unsupported(
+                "unsupported projector version".into(),
+            ));
         }
         let row = self.tx.query_opt(
             "SELECT b.digest FROM semon_projection.proof_blocks b JOIN semon_projection.proofs p USING(namespace,path,generation) WHERE b.namespace=$1 AND b.path=$2 AND b.generation=$3 AND b.ordinal=$4 AND p.consumed=$5 AND p.prefix=$6 AND p.tail=$7",
             &[&namespace.binding(), &path, &generation(tag), &number(ordinal)?, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..]],
         ).await.map_err(backend)?;
-        row.map(|row| row.get::<_, Vec<u8>>(0).try_into()
-            .map_err(|_| StorageError::Backend("invalid native proof digest".into()))).transpose()
+        row.map(|row| {
+            row.get::<_, Vec<u8>>(0)
+                .try_into()
+                .map_err(|_| StorageError::Backend("invalid native proof digest".into()))
+        })
+        .transpose()
     }
 }

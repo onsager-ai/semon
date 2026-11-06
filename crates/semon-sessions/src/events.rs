@@ -2797,15 +2797,20 @@ pub(crate) fn scan_postgres_file(
     previous: Option<(Ledger, FileIndex)>,
 ) -> io::Result<(Ledger, FileIndex, bool)> {
     let loaded = Loaded {
-        files: previous.into_iter().map(|(ledger, index)| {
-            (path.to_string_lossy().into_owned(), ledger, index)
-        }).collect(),
+        files: previous
+            .into_iter()
+            .map(|(ledger, index)| (path.to_string_lossy().into_owned(), ledger, index))
+            .collect(),
         ..Loaded::default()
     };
     let mut cache = EventCache::from_loaded(loaded);
     let index = scan_file(path, harness, &mut cache, &mut false)?;
-    let ledger = cache.files.get(path.to_string_lossy().as_ref())
-        .ok_or_else(|| io::Error::other("native parser ledger unavailable"))?.ledger.clone();
+    let ledger = cache
+        .files
+        .get(path.to_string_lossy().as_ref())
+        .ok_or_else(|| io::Error::other("native parser ledger unavailable"))?
+        .ledger
+        .clone();
     let append = !cache.replaced.contains(path.to_string_lossy().as_ref());
     Ok((ledger, (*index).clone(), append))
 }

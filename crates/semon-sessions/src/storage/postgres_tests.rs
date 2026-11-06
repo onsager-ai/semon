@@ -14,63 +14,157 @@ async fn connect(dsn: &str) -> tokio_postgres::Client {
 }
 
 async fn pg_native_index_lifecycle(dsn: &str) {
-    use std::io::Write;
     use sha2::{Digest, Sha256};
+    use std::io::Write;
     let root = super::root();
     let path = super::native(&root.0, "pg-native", "private native body");
     let namespace = Namespace::new("native-machine").unwrap();
-    let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone()).await.unwrap();
-    let first = store.index_source(&namespace, &path, "claude").await.unwrap();
+    let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone())
+        .await
+        .unwrap();
+    let first = store
+        .index_source(&namespace, &path, "claude")
+        .await
+        .unwrap();
+    let unchanged = store.index_source(&namespace, &path, "claude").await.unwrap();
+    assert_eq!(first, unchanged, "idle indexing preserves the generation");
     let name = path.to_str().unwrap();
     let tx = store.begin(&namespace).await.unwrap();
     let (ledger, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 1);
-    let first_hash = tx.proof_block(&namespace, name, first, 0).await.unwrap().unwrap();
-    assert_eq!(first_hash, <[u8; 32]>::from(Sha256::digest(std::fs::read(&path).unwrap())));
-    tx.publish_tag(&namespace, "native-session", name, first).await.unwrap();
+    let first_hash = tx
+        .proof_block(&namespace, name, first, 0)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first_hash,
+        <[u8; 32]>::from(Sha256::digest(std::fs::read(&path).unwrap()))
+    );
+    tx.publish_tag(&namespace, "native-session", name, first)
+        .await
+        .unwrap();
     tx.commit(&namespace).await.unwrap();
-    let appended = format!("{}\n", serde_json::json!({"type":"assistant","sessionId":"pg-native","uuid":"answer","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"private answer"}]}}));
-    std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(appended.as_bytes()).unwrap();
-    let next = store.index_source(&namespace, &path, "claude").await.unwrap();
+    let appended = format!(
+        "{}\n",
+        serde_json::json!({"type":"assistant","sessionId":"pg-native","uuid":"answer","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"private answer"}]}})
+    );
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(appended.as_bytes())
+        .unwrap();
+    let next = store
+        .index_source(&namespace, &path, "claude")
+        .await
+        .unwrap();
     assert_eq!(first.epoch, next.epoch);
     assert!(next.offset > first.offset);
     drop(store);
-    let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone()).await.unwrap();
+    let mut store = PgProjectionStore::new(connect(dsn).await, namespace.clone())
+        .await
+        .unwrap();
     let tx = store.begin(&namespace).await.unwrap();
     let (after, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 2);
     assert!(after.offset > ledger.offset);
-    assert_eq!(tx.check_tag(&namespace, "native-session", name).await.unwrap(), Some(TagCheck::Advanced));
-    assert_eq!(tx.proof_block(&namespace, name, first, 0).await.unwrap(), Some(first_hash));
+    assert_eq!(
+        tx.check_tag(&namespace, "native-session", name)
+            .await
+            .unwrap(),
+        Some(TagCheck::Advanced)
+    );
+    assert_eq!(
+        tx.proof_block(&namespace, name, first, 0).await.unwrap(),
+        Some(first_hash)
+    );
     // The old consumed prefix's witness still qualifies those exact bytes.
-    assert_eq!(first_hash, <[u8; 32]>::from(Sha256::digest(&std::fs::read(&path).unwrap()[..first.offset as usize])));
+    assert_eq!(
+        first_hash,
+        <[u8; 32]>::from(Sha256::digest(
+            &std::fs::read(&path).unwrap()[..first.offset as usize]
+        ))
+    );
     let mut raw = connect(dsn).await;
     let raw_tx = raw.transaction().await.unwrap();
-    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
-    let stored: i64 = raw_tx.query_one("SELECT count(*) FROM semon_projection.records WHERE record LIKE '%private%'", &[]).await.unwrap().get(0);
+    raw_tx
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&namespace.binding()],
+        )
+        .await
+        .unwrap();
+    let stored: i64 = raw_tx
+        .query_one(
+            "SELECT count(*) FROM semon_projection.records WHERE record LIKE '%private%'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
     assert_eq!(stored, 0, "normalized rows contain no native bodies");
     raw_tx.rollback().await.unwrap();
     tx.commit(&namespace).await.unwrap();
     std::fs::write(&path, format!("{}\n", serde_json::json!({"type":"user","sessionId":"pg-native","uuid":"replacement","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"replacement"}}))).unwrap();
-    let replaced = store.index_source(&namespace, &path, "claude").await.unwrap();
+    let replaced = store
+        .index_source(&namespace, &path, "claude")
+        .await
+        .unwrap();
     assert!(replaced.epoch > next.epoch);
     let tx = store.begin(&namespace).await.unwrap();
     let (_, index) = tx.load_index(&namespace, name).await.unwrap().unwrap();
     assert_eq!(index.events.len(), 1);
-    assert!(matches!(tx.check_tag(&namespace, "native-session", name).await.unwrap(), Some(TagCheck::Mismatch(_))));
-    assert_eq!(tx.proof_block(&namespace, name, first, 0).await.unwrap(), Some(first_hash));
+    assert!(matches!(
+        tx.check_tag(&namespace, "native-session", name)
+            .await
+            .unwrap(),
+        Some(TagCheck::Mismatch(_))
+    ));
+    assert_eq!(
+        tx.proof_block(&namespace, name, first, 0).await.unwrap(),
+        Some(first_hash)
+    );
     tx.commit(&namespace).await.unwrap();
     // Real RLS, including normalized and proof tables, on a reused connection.
-    let mut foreign = PgProjectionStore::new(connect(dsn).await, Namespace::new("foreign-native").unwrap()).await.unwrap();
+    let mut foreign = PgProjectionStore::new(
+        connect(dsn).await,
+        Namespace::new("foreign-native").unwrap(),
+    )
+    .await
+    .unwrap();
     let foreign_namespace = Namespace::new("foreign-native").unwrap();
     let tx = foreign.begin(&foreign_namespace).await.unwrap();
-    assert!(tx.load_index(&foreign_namespace, name).await.unwrap().is_none());
-    assert!(tx.proof_block(&foreign_namespace, name, first, 0).await.unwrap().is_none());
+    assert!(
+        tx.load_index(&foreign_namespace, name)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        tx.proof_block(&foreign_namespace, name, first, 0)
+            .await
+            .unwrap()
+            .is_none()
+    );
     tx.commit(&foreign_namespace).await.unwrap();
     let raw_tx = raw.transaction().await.unwrap();
-    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&foreign_namespace.binding()]).await.unwrap();
+    raw_tx
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&foreign_namespace.binding()],
+        )
+        .await
+        .unwrap();
     for table in ["files", "records", "proofs", "proof_blocks"] {
-        let count: i64 = raw_tx.query_one(&format!("SELECT count(*) FROM semon_projection.{table}"), &[]).await.unwrap().get(0);
+        let count: i64 = raw_tx
+            .query_one(
+                &format!("SELECT count(*) FROM semon_projection.{table}"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
         assert_eq!(count, 0);
     }
     raw_tx.rollback().await.unwrap();
