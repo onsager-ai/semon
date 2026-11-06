@@ -2951,7 +2951,7 @@ mod tests {
         {}
         drop(work);
         let reply =
-            crate::session_catalog_page(view.options(), &view.evidence.source_key(), "limit=100");
+            crate::session_catalog_page(view.options(), &view.evidence.read_key(), "limit=100");
         assert_eq!(
             reply.status,
             200,
@@ -2964,7 +2964,7 @@ mod tests {
     fn native_selected(view: &MachineView, sid: &str) -> Value {
         let reply = crate::session_transcript_range(
             view.options(),
-            &view.evidence.source_key(),
+            &view.evidence.read_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
@@ -3004,7 +3004,7 @@ mod tests {
         .unwrap();
         let reply = crate::session_transcript_range(
             core.options(),
-            &core.evidence.source_key(),
+            &core.evidence.read_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
@@ -4434,10 +4434,13 @@ mod tests {
     fn one_machine_native_reads_preserve_content_across_embedding_modes() {
         let fixture = machine("laptop", "lane");
         let standalone = ViewerCore::new(fixture.options.clone());
-        let mut embedded =
-            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
-        let mut background =
-            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        // Each source namespace keeps its own database over the same native home.
+        let keyed = Options {
+            cache: fixture.options.cache.with_file_name("some-key-index.json"),
+            ..fixture.options.clone()
+        };
+        let mut embedded = ViewerCore::with_machines(vec![("some-key".into(), keyed.clone())]);
+        let mut background = ViewerCore::with_machines(vec![("some-key".into(), keyed)]);
         background.set_refresh(Refresh::Background);
         for core in [&standalone, &embedded, &background] {
             publish_core_native(core);
@@ -5117,8 +5120,16 @@ mod tests {
         assert_eq!(day["current"]["started"], 1);
         assert!(day["sessions"].get(selected_id("a", "a-old")).is_none());
         // One machine through `with_machines` answers as it does alone.
-        let alone = ViewerCore::with_machines(vec![("k".into(), alpha.options.clone())]);
-        let single = ViewerCore::new(alpha.options.clone());
+        // Another source namespace keeps its own database over the same home.
+        let keyed = Options {
+            cache: alpha.options.cache.with_file_name("k-index.json"),
+            ..alpha.options.clone()
+        };
+        let alone = ViewerCore::with_machines(vec![("k".into(), keyed)]);
+        let single = ViewerCore::new(Options {
+            cache: alpha.options.cache.with_file_name("local-index.json"),
+            ..alpha.options.clone()
+        });
         publish_core_native(&alone);
         publish_core_native(&single);
         let (a, b) = (
