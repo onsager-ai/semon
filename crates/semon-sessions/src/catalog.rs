@@ -1494,6 +1494,17 @@ pub(crate) async fn postgres_page(
             })
         })
         .transpose()?;
+    if request.scope == CatalogReadScope::Current {
+        for row in &selected {
+            for source in &row.sources {
+                let input = crate::native_evidence::catalog_input(&source.path, options)
+                    .ok_or_else(|| io::Error::other("Catalog source outside configured roots"))?;
+                if tx.raw_write_pending(namespace, &input).await? {
+                    return Ok(error(503, "projection_stale", "A native source write is pending.", true));
+                }
+            }
+        }
+    }
     let transcript = if let Some(row) = selected.first().filter(|_| request.sid.is_some()) {
         let (recipe, total, _) = tx
             .recipe_page(namespace, &row.key, request.scope, None, 0, 1)

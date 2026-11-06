@@ -37,13 +37,24 @@ impl PgProjectionTransaction<'_> {
         if !crate::is_input_path(input.root.as_str(), &input.path) {
             return Err(backend("Raw intent outside native allowlist"));
         }
-        self.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+        self.tx
+            .query_one(
+                "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                &[&namespace.binding()],
+            )
+            .await
+            .map_err(backend)?;
         let root = input.root.as_str();
         let revision: i64 = self.tx.query_one(
             "INSERT INTO semon_projection.raw_sources(namespace,root,path,revision,pending) VALUES($1,$2,$3,1,true) ON CONFLICT(namespace,root,path) DO UPDATE SET revision=semon_projection.raw_sources.revision+1,pending=true,generation=NULL RETURNING revision",
             &[&namespace.binding(), &root, &input.path],
         ).await.map_err(backend)?.get(0);
-        Ok(PgRawIntent { namespace: namespace.clone(), root: root.into(), path: input.path.clone(), revision })
+        Ok(PgRawIntent {
+            namespace: namespace.clone(),
+            root: root.into(),
+            path: input.path.clone(),
+            revision,
+        })
     }
 
     /// Only after the host has fsynced and independently qualified these exact
@@ -58,7 +69,10 @@ impl PgProjectionTransaction<'_> {
         ensure(&self.namespace, namespace)?;
         ensure(&intent.namespace, namespace)?;
         if generation.generation.len() != 32
-            || !generation.generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !generation
+                .generation
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
         {
             return Err(backend("invalid Raw generation"));
         }
@@ -85,7 +99,8 @@ impl PgProjectionTransaction<'_> {
             "SELECT generation FROM semon_projection.raw_sources WHERE namespace=$1 AND root=$2 AND path=$3 AND NOT pending",
             &[&namespace.binding(), &input.root.as_str(), &input.path],
         ).await.map_err(backend)?;
-        row.map(|row| serde_json::from_str(row.get(0)).map_err(backend)).transpose()
+        row.map(|row| serde_json::from_str(row.get(0)).map_err(backend))
+            .transpose()
     }
 
     pub async fn raw_write_pending(

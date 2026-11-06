@@ -26,6 +26,13 @@ impl PgProjectionStore {
         {
             return Err(backend("invalid native producer cohort"));
         }
+        let tx = self.begin(namespace).await?;
+        for input in inputs {
+            if tx.raw_write_pending(namespace, input).await? {
+                return Err(backend("Raw write is pending"));
+            }
+        }
+        tx.commit(namespace).await?;
         for input in inputs {
             self.index_source(namespace, &input.full_path(options), input.root.as_str())
                 .await?;
@@ -74,6 +81,11 @@ impl PgProjectionStore {
             }
         }
         let tx = self.begin(namespace).await?;
+        for input in inputs {
+            if tx.raw_write_pending(namespace, input).await? {
+                return Ok(None);
+            }
+        }
         for (path, epoch) in &prepared.claims {
             if tx.ledger(namespace, path).await?.map(|tag| tag.epoch) != *epoch {
                 return Ok(None);
