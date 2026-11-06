@@ -770,6 +770,10 @@ impl FileIndex {
             .map_or(&self.codex_usage_events, |usage| &usage.events)
     }
 
+    pub(crate) fn has_native_usage(&self) -> bool {
+        self.codex_native_usage.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn native_usage_history_sizes(&self) -> Option<(usize, usize)> {
         self.codex_native_usage

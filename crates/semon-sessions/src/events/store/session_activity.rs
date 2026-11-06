@@ -229,7 +229,7 @@ pub(crate) fn page(
     let mut steps = Vec::new();
     while let Some(record) = rows.next()? {
         crate::selected_read::row(record, 256)?;
-        if record.get::<_, u64>(0)? != start + steps.len() as u64
+        if u64::try_from(record.get::<_, i64>(0)?).ok() != Some(start + steps.len() as u64)
             || record.get::<_, String>(2)? != pricing_fingerprint
         {
             return Ok(None);

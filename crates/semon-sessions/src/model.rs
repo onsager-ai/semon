@@ -2453,7 +2453,7 @@ impl<'a> Builder<'a> {
                         used.clone(),
                     )
                 }));
-            } else if file.summary.codex_native_usage.is_some() {
+            } else if file.summary.has_native_usage() {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
             signals.extend(
