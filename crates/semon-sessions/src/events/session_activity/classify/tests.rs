@@ -574,3 +574,24 @@ fn running_and_background_results_do_not_prove_reads_or_changes() {
     );
     assert_eq!(oversized.commands, [Command::Unknown]);
 }
+
+#[test]
+fn git_global_options_and_all_explicit_server_errors_are_recognized() {
+    let observation = observed(
+        "Bash",
+        "git -C work -c user.name=Example commit -m synthetic",
+        json!("[topic abc1234] synthetic"),
+        false,
+    );
+    assert_eq!(
+        observation.changes,
+        [Change::Commit {
+            branch: "topic".into(),
+            sha: "abc1234".into()
+        }]
+    );
+    assert_eq!(
+        observed("Bash", "gh api user", json!("HTTP 599"), true).waste,
+        Some(WasteKind::ExternalFailure)
+    );
+}

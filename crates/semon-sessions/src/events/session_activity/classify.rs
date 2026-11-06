@@ -213,12 +213,27 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
 
 fn command(words: &[String]) -> Command {
     let args: Vec<_> = words.iter().map(String::as_str).collect();
+    if let Some(mut rest) = args.strip_prefix(&["git"]) {
+        while matches!(rest.first(), Some(&"-c" | &"-C")) {
+            let Some(next) = rest.get(2..) else {
+                return Command::Unknown;
+            };
+            rest = next;
+        }
+        return match rest.first().copied() {
+            Some("commit") => Command::Commit,
+            Some("push") => Command::Push,
+            Some("status" | "diff" | "log" | "show" | "rev-parse") => Command::Inspect,
+            Some(
+                "add" | "checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase",
+            ) => Command::Mutation,
+            _ => Command::Unknown,
+        };
+    }
     match args.as_slice() {
         ["gh", "run", "watch", ..] => Command::Watch,
         ["gh", "pr", "checks", rest @ ..] if rest.contains(&"--watch") => Command::Watch,
         ["gh", "pr", "create", ..] => Command::PullRequest,
-        ["git", "commit", ..] => Command::Commit,
-        ["git", "push", ..] => Command::Push,
         ["rg", ..]
             if !args
                 .iter()
@@ -242,13 +257,7 @@ fn command(words: &[String]) -> Command {
             )
         }
         ["sleep", ..] => Command::Sleep,
-        ["git", "status" | "diff" | "log" | "show" | "rev-parse", ..] => Command::Inspect,
-        [
-            "git",
-            "add" | "checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase",
-            ..,
-        ]
-        | ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
+        ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
         _ => Command::Unknown,
     }
 }
@@ -502,10 +511,6 @@ fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
     } else if [
         "rate limit",
         "too many requests",
-        "http 500",
-        "http 502",
-        "http 503",
-        "http 504",
         "authentication failed",
         "unauthorized",
         "http 401",
@@ -518,6 +523,11 @@ fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
     ]
     .iter()
     .any(|needle| text.contains(needle))
+        || text.match_indices("http ").any(|(at, _)| {
+            text.get(at + 5..at + 8).is_some_and(|code| {
+                code.len() == 3 && code.starts_with('5') && code.bytes().all(|c| c.is_ascii_digit())
+            })
+        })
     {
         WasteKind::ExternalFailure
     } else {
