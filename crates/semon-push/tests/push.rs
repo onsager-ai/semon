@@ -914,7 +914,7 @@ fn facts_are_sent_and_a_bad_token_is_refused() {
     facts.mirror_observation_id = None;
     facts.mirror_sequence = None;
     assert_eq!(facts.hostname, "laptop");
-    assert_eq!(facts, semon_sessions::local_facts(&home.options).unwrap());
+    assert_eq!(facts, semon_sessions::local_facts(&home.options, "").unwrap());
 
     home.write("token", "wrong-token");
     #[cfg(unix)]
