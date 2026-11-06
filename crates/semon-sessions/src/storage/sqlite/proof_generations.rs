@@ -990,22 +990,7 @@ pub(crate) fn verified_publication_receipts(
 /// Add durable references before the existing proof-copy/collection algorithm.
 /// An absent S2 family is an unbound current profile, never a reader fallback.
 pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<String>> {
-    let present: bool = db
-        .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE name='storage_proof_sources')",
-        )?
-        .query_row([], |r| r.get(0))?;
-    if !present {
-        return Ok(Vec::new());
-    }
-    let mut statement = db.prepare_cached("SELECT DISTINCT s.ledger FROM storage_proof_sources s WHERE s.namespace=semon_namespace() AND s.path=?1 AND (EXISTS(SELECT 1 FROM storage_proof_refs r WHERE r.namespace=s.namespace AND r.id=s.id AND r.session_key=s.session_key) OR EXISTS(SELECT 1 FROM storage_proof_leases l JOIN storage_proof_generations g ON g.namespace=l.namespace AND g.id=l.id AND g.session_key=l.session_key JOIN storage_namespaces n ON n.namespace=l.namespace WHERE l.namespace=s.namespace AND l.id=s.id AND l.session_key=s.session_key AND l.admission=n.admission_generation AND l.owner_epoch=(SELECT epoch FROM storage_proof_reader_owners o WHERE o.namespace=l.namespace) AND l.stream=g.stream AND l.stream=(SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch') AND l.expires>?2)) LIMIT 257")?;
-    let values = statement
-        .query_map(params![path, crate::model::now_ms()], |r| r.get(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if values.len() > 256 {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(values)
+    super::projection_tags::referenced(db, path)
 }
 
 /// Delete at most `budget` metadata generations. This never touches Raw or

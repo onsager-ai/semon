@@ -147,6 +147,27 @@ fn check_tag(
         .transpose()
 }
 
+/// Exact native proof generations reachable from Current or durable History.
+/// The source membership index bounds this lookup to owners of one path.
+pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<String>> {
+    let mut referenced = std::collections::BTreeSet::new();
+    for table in ["session_catalog", "session_history_catalog"] {
+        let mut statement = db.prepare_cached(&format!(
+            "SELECT CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata END FROM main.session_catalog_sources s JOIN main.{table} c ON c.namespace=s.namespace AND c.session_key=s.session_key WHERE s.namespace=semon_namespace() AND s.source_path=?1 LIMIT 257"
+        ))?;
+        let rows = statement.query_map([path], |row| row.get::<_, String>(0))?;
+        for (ordinal, text) in rows.enumerate() {
+            if ordinal == 256 { return Err(rusqlite::Error::InvalidQuery); }
+            let row: CatalogRow = serde_json::from_str(&text?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            for source in row.sources.iter().filter(|source| source.path == std::path::Path::new(path)) {
+                referenced.insert(crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)));
+            }
+            if referenced.len() > 256 { return Err(rusqlite::Error::InvalidQuery); }
+        }
+    }
+    Ok(referenced.into_iter().collect())
+}
+
 /// Withdrawal/replacement hands the exact old cache owner to durable History in
 /// the same transaction, before the Current row or its tag can be overwritten.
 pub(crate) fn retain(
