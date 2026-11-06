@@ -21,7 +21,10 @@ fn parent(left: &[u8; 32], right: &[u8; 32]) -> [u8; 32] {
 fn tree(hashes: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
     let mut levels = vec![hashes.to_vec()];
     while levels.last().is_some_and(|level| level.len() > 1) {
-        let next = levels.last().unwrap().chunks(2)
+        let next = levels
+            .last()
+            .unwrap()
+            .chunks(2)
             .map(|pair| parent(&pair[0], pair.get(1).unwrap_or(&pair[0])))
             .collect();
         levels.push(next);
@@ -30,7 +33,10 @@ fn tree(hashes: &[[u8; 32]]) -> Vec<Vec<[u8; 32]>> {
 }
 
 fn root(levels: &[Vec<[u8; 32]>]) -> [u8; 32] {
-    levels.last().and_then(|level| level.first()).copied()
+    levels
+        .last()
+        .and_then(|level| level.first())
+        .copied()
         .unwrap_or_else(|| Sha256::digest([]).into())
 }
 
@@ -173,7 +179,9 @@ impl PgProjectionTransaction<'_> {
                     .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?,
             );
         }
-        if !chunks.valid(ledger.offset) || root(&tree(&chunks.hashes)).as_slice() != saved.get::<_, &[u8]>(2) {
+        if !chunks.valid(ledger.offset)
+            || root(&tree(&chunks.hashes)).as_slice() != saved.get::<_, &[u8]>(2)
+        {
             return Err(StorageError::Backend(
                 "native proof boundary mismatch".into(),
             ));
@@ -311,11 +319,15 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &path, &generation(tag), &number(ordinal)?, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..]],
         ).await.map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
-        let digest: [u8; 32] = row.get::<_, Vec<u8>>(0).try_into()
+        let digest: [u8; 32] = row
+            .get::<_, Vec<u8>>(0)
+            .try_into()
             .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?;
         let mut count = row.get::<_, i64>(1) as u64;
         if count != tag.offset.div_ceil(crate::source_chunks::SIZE as u64) || ordinal >= count {
-            return Err(StorageError::Backend("native proof boundary mismatch".into()));
+            return Err(StorageError::Backend(
+                "native proof boundary mismatch".into(),
+            ));
         }
         let mut at = ordinal;
         let mut level = 0_i32;
@@ -328,9 +340,15 @@ impl PgProjectionTransaction<'_> {
                 "SELECT digest FROM semon_projection.proof_nodes WHERE namespace=$1 AND path=$2 AND generation=$3 AND level=$4 AND ordinal=$5",
                 &[&namespace.binding(), &path, &generation(tag), &level, &number(sibling)?],
             ).await.map_err(backend)?;
-            let other: [u8; 32] = row.get::<_, Vec<u8>>(0).try_into()
+            let other: [u8; 32] = row
+                .get::<_, Vec<u8>>(0)
+                .try_into()
                 .map_err(|_| StorageError::Backend("invalid native proof node".into()))?;
-            witness = if at % 2 == 0 { parent(&witness, &other) } else { parent(&other, &witness) };
+            witness = if at % 2 == 0 {
+                parent(&witness, &other)
+            } else {
+                parent(&other, &witness)
+            };
             at /= 2;
             count = count.div_ceil(2);
             level += 1;

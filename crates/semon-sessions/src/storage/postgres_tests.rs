@@ -26,7 +26,10 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .index_source(&namespace, &path, "claude")
         .await
         .unwrap();
-    let unchanged = store.index_source(&namespace, &path, "claude").await.unwrap();
+    let unchanged = store
+        .index_source(&namespace, &path, "claude")
+        .await
+        .unwrap();
     assert_eq!(first, unchanged, "idle indexing preserves the generation");
     let name = path.to_str().unwrap();
     let tx = store.begin(&namespace).await.unwrap();
@@ -39,7 +42,9 @@ async fn pg_native_index_lifecycle(dsn: &str) {
         .unwrap();
     assert_eq!(
         first_hash,
-        <[u8; 32]>::from(Sha256::digest(&std::fs::read(&path).unwrap()[..crate::source_chunks::SIZE]))
+        <[u8; 32]>::from(Sha256::digest(
+            &std::fs::read(&path).unwrap()[..crate::source_chunks::SIZE]
+        ))
     );
     tx.publish_tag(&namespace, "native-session", name, first)
         .await
@@ -103,17 +108,34 @@ async fn pg_native_index_lifecycle(dsn: &str) {
     assert!(changed > 0);
     raw_tx.commit().await.unwrap();
     let proof_tx = store.begin(&namespace).await.unwrap();
-    assert!(proof_tx.proof_block(&namespace, name, first, 0).await.is_err());
+    assert!(
+        proof_tx
+            .proof_block(&namespace, name, first, 0)
+            .await
+            .is_err()
+    );
     proof_tx.commit(&namespace).await.unwrap();
     let raw_tx = raw.transaction().await.unwrap();
-    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
+    raw_tx
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&namespace.binding()],
+        )
+        .await
+        .unwrap();
     raw_tx.execute(
         "UPDATE semon_projection.proof_blocks SET digest=$3 WHERE namespace=$1 AND path=$2 AND ordinal=0",
         &[&namespace.binding(), &name, &&first_hash[..]],
     ).await.unwrap();
     raw_tx.commit().await.unwrap();
     let raw_tx = raw.transaction().await.unwrap();
-    raw_tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
+    raw_tx
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&namespace.binding()],
+        )
+        .await
+        .unwrap();
     let stored: i64 = raw_tx
         .query_one(
             "SELECT count(*) FROM semon_projection.records WHERE record LIKE '%private%'",
