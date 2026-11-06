@@ -2689,6 +2689,14 @@ impl IndexStore for SqliteStore {
     }
 
     fn bind_storage_namespace(&mut self, namespace: &str) -> Result<String, StoreError> {
+        // A binding is written once and never changed: an already bound,
+        // stamped database needs no writer reservation to report it.
+        let (stamp, bound) = crate::storage::sqlite::binding(&self.connection).map_err(failure)?;
+        if let Some(bound) = bound
+            && stamp.as_deref() == Some(crate::storage::sqlite::stamp().as_str())
+        {
+            return Ok(bound);
+        }
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
