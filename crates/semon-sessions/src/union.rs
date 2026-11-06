@@ -753,8 +753,7 @@ impl ViewerCore {
 
     /// A view of a machine, in this core's refresh mode.
     fn view(&self, key: &str, options: Options) -> Arc<MachineView> {
-        let view =
-            MachineView::for_source(crate::native_evidence::source_namespace(key), options);
+        let view = MachineView::for_source(crate::native_evidence::source_namespace(key), options);
         view.set_pool(self.pool.clone());
         view.set_refresh(self.refresh);
         view

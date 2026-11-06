@@ -634,9 +634,7 @@ fn storage_same_inode_rewrite_past_the_published_boundary_is_refused_then_rebuil
     };
     let published = tag();
     assert_eq!(recorded(), published.epoch);
-    let record = |uuid: &str, prompt: &str| {
-        json!({"type":"user","sessionId":"selected","uuid":uuid,"parentUuid":"selected","cwd":"/synthetic/project","timestamp":"2026-10-01T00:01:00Z","message":{"role":"user","content":prompt}})
-    };
+    let record = |uuid: &str, prompt: &str| json!({"type":"user","sessionId":"selected","uuid":uuid,"parentUuid":"selected","cwd":"/synthetic/project","timestamp":"2026-10-01T00:01:00Z","message":{"role":"user","content":prompt}});
 
     // An append keeps the ledger epoch: the published prefix stays readable.
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
@@ -663,7 +661,10 @@ fn storage_same_inode_rewrite_past_the_published_boundary_is_refused_then_rebuil
     .unwrap();
     observe(&store, &na);
     let rewritten = tag();
-    assert_eq!((rewritten.dev, rewritten.ino), (published.dev, published.ino));
+    assert_eq!(
+        (rewritten.dev, rewritten.ino),
+        (published.dev, published.ino)
+    );
     assert!(rewritten.offset > published.offset);
     assert_ne!(rewritten.epoch, published.epoch);
     assert_eq!(
