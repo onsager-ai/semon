@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 
 // The selected complete application is independent of both the candidate and
-// derived pen/mockup exports. Keep its identity and required coverage together.
+// derived mockup exports. Keep its identity and required coverage together.
 export const REFERENCE = {
   source: '263a02da278716ab2309b8e34a463419e5c781e5',
   hub: '503fbe090749ea1d58b9ca9fa4ccae7289ee426e',

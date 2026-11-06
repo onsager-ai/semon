@@ -1,9 +1,10 @@
 # AI-assisted design in Semon
 
 Use the pinned ui-design workflow from `.agents/skills/ui-design/SKILL.md`
-(Claude's discovery projection is generated). Optional pen.dev tooling is
-configured once at user level by its integration setup reference. Do not add
-repository MCP files, duplicate vendor skills or personal credentials here.
+(Claude's discovery projection is generated). Storybook is the design/review
+surface; mockup and design-canvas tools (pen.dev, Stitch, generated-image
+mockups) are not used. Do not add repository MCP files, duplicate vendor skills
+or personal credentials here.
 
 Current user setup selects `--harness codex`; Claude Code installation, user
 configuration and live validation are deferred. The generated Claude discovery
@@ -13,20 +14,16 @@ projection remains for future compatibility.
 
 Read the [UI design brief](ui-design-brief.md) before UI edits, and
 reconcile its applicable scope with the current task and settled product decisions.
-The editable [session inspection canvas](session-inspection/session-inspection.pen)
-records layout and interaction intent; [delivery evidence](session-inspection/README.md)
-links historical explorations, actual before/after captures and checks.
-Reuse semantic tokens and established components. Update the canvas when layout
-or interaction intent changes, compare representative implementation screenshots
+Reuse semantic tokens and established components. Review layout and interaction
+intent in Storybook, compare representative implementation screenshots
 at matching widths/themes/states, and explain intentional deviations in the PR.
 Review visual diffs before updating baselines. These controls extend this existing
 brief and the pinned skill; they do not create another instruction system.
 
 Preserve the applicable parts of the existing rendered viewer as the default
-visual baseline. Pen.dev canvases describe workflow intent within that foundation;
-they do not replace its fonts, type scale, controls or compact spacing. Calibrate
-design artifacts from computed product styles and use actual UI screenshots for
-visual review. Document an intentional foundation change separately when the
+visual baseline. Design review does not replace its fonts, type scale, controls
+or compact spacing. Calibrate design artifacts from computed product styles and
+use actual UI screenshots for visual review. Document an intentional foundation change separately when the
 task calls for one.
 
 Read [the design contract](design-contract.md), [viewer ownership](viewer-ownership.md),
@@ -49,11 +46,10 @@ states, status, menus, sheets and panels.
 Apply the pinned ui-design skill's baseline consistency review in the existing
 issue or PR. Record the governing decision/source, affected state, expected
 visible behavior and whether its reference is preserved, updated or unresolved.
-Historical application versions, PNGs and design canvases retain their recorded
-provenance; current requirements determine which parts remain applicable. A
+Historical application versions and PNGs retain their recorded provenance; current requirements determine which parts remain applicable. A
 chosen historical version does not reinstate a capability paused by a later
-decision. A design canvas records intent; it does not independently override
-the repository's visual comparator or shared token authority.
+decision. Design review does not independently override the repository's visual
+comparator or shared token authority.
 
 For the agreed collection scope in [#380](https://github.com/onsager-ai/semon/issues/380),
 these examples distinguish the required actions:
@@ -88,16 +84,14 @@ machine-enforced semantic-review gate is introduced here.
 ## Tool workflow
 
 Start with source extraction, not a new visual identity. Read semantic roles
-from the current production CSS and components. A derived design brief or .pen
-library records its source commit and both themes, and must be reconciled with
-the shared contract and current requirements before reuse.
+from the current production CSS and components. A derived design brief records
+its source commit and both themes, and must be reconciled with the shared contract
+and current requirements before reuse.
 
-Use pen.dev for editable canvas refinement, variables, reusable components and
-exports. Desktop MCP requires the same-host app; cloud sessions use the supported
-headless CLI. Confirm the document, save deliberately and inspect actual exported
-images. Implement authorized changes in authored Preact/CSS using existing owners.
-Stitch is retired; its archived outputs are historical evidence and cannot become
-new design or pixel authority. Do not run its setup, generation or MCP workflows.
+Review states and variants in Storybook and inspect actual rendered images.
+Implement authorized changes in authored Preact/CSS using existing owners.
+Mockup and design-canvas tools are retired; purged outputs cannot become design
+or pixel authority.
 
 ## Sharing and acceptance
 
