@@ -170,6 +170,27 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert!(changes.caught_up);
     assert_eq!(changes.changes.len(), 1);
     let stream_epoch = changes.stream_epoch;
+    // Force a late search-document refusal after Catalog and recipe writes.
+    // Committing the surrounding transaction must retain the old publication.
+    let mut oversized = row.clone();
+    oversized.name = "x".repeat(9000);
+    assert!(tx.publish_catalog(&namespace, &Publication { rows: std::slice::from_ref(&oversized), transcripts: Some(std::slice::from_ref(&projection)) }, Some(&generation)).await.is_err());
+    assert_eq!(tx.catalog_generation(&namespace).await.unwrap(), Some(generation.clone()));
+    assert_eq!(tx.catalog_row(&namespace, &row.key, CatalogReadScope::Current).await.unwrap().unwrap().name, row.name);
+    assert_eq!(tx.catalog_changes(&namespace, CatalogReadScope::Current, Some(&stream_epoch), 0, 10).await.unwrap().head, 1);
+    // The same typed publication and recipes exercise the ordinary SQLite
+    // publisher; no assertion is weakened to accommodate PostgreSQL.
+    let comparison_root = crate::storage::conformance::root();
+    let options = crate::storage::conformance::source(&comparison_root.0, "comparison");
+    let mut sqlite = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+    crate::events::scan_file(&path, "claude", &mut sqlite, &mut false).unwrap();
+    let sqlite_publication = Publication { rows: std::slice::from_ref(&row), transcripts: Some(std::slice::from_ref(&projection)) };
+    assert!(sqlite.publish_catalog_projection_fenced(&sqlite_publication, None).unwrap().is_some());
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+    let metadata: String = db.query_row("SELECT metadata FROM session_catalog WHERE session_key=?1", [&row.key], |row| row.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&metadata).unwrap(), serde_json::to_value(&page.rows[0]).unwrap());
+    let sqlite_slots = sqlite.session_slots(&row, sqlite.session_catalog_generation().as_deref(), projection.slots.len()).unwrap();
+    assert_eq!(serde_json::to_value(sqlite_slots).unwrap(), serde_json::to_value(&slots).unwrap());
     assert_eq!(
         serde_json::to_value(&slots).unwrap(),
         serde_json::to_value(&projection.slots).unwrap()
@@ -369,4 +390,18 @@ pub(super) async fn lifecycle(dsn: &str) {
             .is_none()
     );
     tx.commit(&foreign).await.unwrap();
+    let mut raw = crate::storage::conformance::postgres::connect(dsn).await;
+    for table in ["catalog", "catalog_heads", "recipe_heads", "recipes", "history_catalog", "history_recipe_heads", "history_recipes", "search_postings", "reported_facts", "checkpoints", "changes", "change_heads"] {
+        let tx = raw.transaction().await.unwrap();
+        tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&foreign.binding()]).await.unwrap();
+        let visible: i64 = tx.query_one(&format!("SELECT count(*) FROM semon_projection.{table}"), &[]).await.unwrap().get(0);
+        assert_eq!(visible, 0, "foreign rows visible in {table}");
+        assert_eq!(tx.execute(&format!("DELETE FROM semon_projection.{table} WHERE namespace=$1"), &[&namespace.binding()]).await.unwrap(), 0);
+        tx.rollback().await.unwrap();
+    }
+    let tx = raw.transaction().await.unwrap();
+    tx.query_one("SELECT set_config('semon.namespace',$1,true)", &[&foreign.binding()]).await.unwrap();
+    let refused = tx.execute("INSERT INTO semon_projection.checkpoints(namespace,checkpoint_key,revision,metadata) VALUES($1,'foreign-insert',1,'denied')", &[&namespace.binding()]).await.unwrap_err();
+    assert_eq!(refused.code(), Some(&tokio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE));
+    tx.rollback().await.unwrap();
 }

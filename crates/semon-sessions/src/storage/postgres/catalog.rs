@@ -47,12 +47,23 @@ impl PgProjectionTransaction<'_> {
         expected_generation: Option<&str>,
     ) -> Result<Option<String>, StorageError> {
         ensure(&self.namespace, namespace)?;
-        self.tx.batch_execute("SAVEPOINT catalog_publication").await.map_err(backend)?;
-        let result = self.publish_catalog_inner(namespace, publication, expected_generation).await;
+        self.tx
+            .batch_execute("SAVEPOINT catalog_publication")
+            .await
+            .map_err(backend)?;
+        let result = self
+            .publish_catalog_inner(namespace, publication, expected_generation)
+            .await;
         if !matches!(result, Ok(Some(_))) {
-            self.tx.batch_execute("ROLLBACK TO SAVEPOINT catalog_publication").await.map_err(backend)?;
+            self.tx
+                .batch_execute("ROLLBACK TO SAVEPOINT catalog_publication")
+                .await
+                .map_err(backend)?;
         }
-        self.tx.batch_execute("RELEASE SAVEPOINT catalog_publication").await.map_err(backend)?;
+        self.tx
+            .batch_execute("RELEASE SAVEPOINT catalog_publication")
+            .await
+            .map_err(backend)?;
         result
     }
 
@@ -451,12 +462,21 @@ impl PgProjectionTransaction<'_> {
         expected: ProjectionTag,
     ) -> Result<bool, StorageError> {
         ensure(&self.namespace, namespace)?;
-        self.tx.batch_execute("SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+        self.tx
+            .batch_execute("SAVEPOINT raw_withdrawal")
+            .await
+            .map_err(backend)?;
         let result = self.withdraw_source_inner(namespace, path, expected).await;
         if !matches!(result, Ok(true)) {
-            self.tx.batch_execute("ROLLBACK TO SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+            self.tx
+                .batch_execute("ROLLBACK TO SAVEPOINT raw_withdrawal")
+                .await
+                .map_err(backend)?;
         }
-        self.tx.batch_execute("RELEASE SAVEPOINT raw_withdrawal").await.map_err(backend)?;
+        self.tx
+            .batch_execute("RELEASE SAVEPOINT raw_withdrawal")
+            .await
+            .map_err(backend)?;
         result
     }
 

@@ -70,7 +70,7 @@ impl PgProjectionTransaction<'_> {
             if bytes > catalog_search::MAX_SCAN_BYTES {
                 return Ok(SearchPage {
                     rows,
-                    next: checked.or(Some((last, key))),
+                    next: checked,
                     partial: true,
                     candidates,
                 });
