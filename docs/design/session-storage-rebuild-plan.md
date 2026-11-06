@@ -173,7 +173,8 @@ PostgreSQL session backend yet.
 - Optional `postgres` feature: an injectable `PgProjectionStore` provides
   repeatable-read projection transactions, namespace binding, version stamps,
   ledger CAS, namespace-wide replacement epochs, tag publication and tag checks.
-  The host provisions `POSTGRES_PROJECTION_SCHEMA` with a separate owner role.
+  The host provisions `postgres_projection_schema()` with a separate owner role.
+  The one database version stamp is read-only for the application role.
   All tables have forced RLS; the adapter refuses superuser, BYPASSRLS and table
   owner application clients. Namespace context is transaction-local. This module
   opens no local database and reads no credentials.

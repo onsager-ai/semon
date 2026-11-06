@@ -5,7 +5,15 @@
 use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
-pub const SCHEMA: &str = include_str!("postgres.sql");
+/// Current schema for host provisioning by a role separate from the application.
+/// It is installed once; existing/unsupported stores are never migrated here.
+pub fn schema() -> String {
+    format!(
+        "{} INSERT INTO semon_projection.metadata(singleton,stamp) VALUES(true,'{}');",
+        include_str!("postgres.sql"),
+        stamp()
+    )
+}
 
 fn backend(error: impl std::fmt::Display) -> StorageError {
     StorageError::Backend(error.to_string())
@@ -53,11 +61,10 @@ impl PgProjectionStore {
             .await
             .map_err(backend)?;
         tx.query_one("SELECT set_config('semon.namespace',$1,true),set_config('statement_timeout','5000',true),set_config('lock_timeout','1000',true)", &[&namespace.binding()]).await.map_err(backend)?;
-        tx.execute("INSERT INTO semon_projection.namespaces(namespace,stamp) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &stamp()]).await.map_err(backend)?;
         let found: String = tx
             .query_one(
-                "SELECT stamp FROM semon_projection.namespaces WHERE namespace=$1",
-                &[&namespace.binding()],
+                "SELECT stamp FROM semon_projection.metadata WHERE singleton=true",
+                &[],
             )
             .await
             .map_err(backend)?
@@ -67,6 +74,7 @@ impl PgProjectionStore {
                 "unsupported PostgreSQL projection stamp".into(),
             ));
         }
+        tx.execute("INSERT INTO semon_projection.namespaces(namespace) VALUES($1) ON CONFLICT DO NOTHING", &[&namespace.binding()]).await.map_err(backend)?;
         Ok(PgProjectionTransaction {
             tx,
             namespace: namespace.clone(),

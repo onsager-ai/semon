@@ -1,9 +1,12 @@
 -- Provision with a role distinct from the restricted application role. The host
 -- grants only USAGE and DML to that role, never schema/table ownership.
 CREATE SCHEMA semon_projection;
+CREATE TABLE semon_projection.metadata (
+    singleton boolean PRIMARY KEY CHECK (singleton),
+    stamp text NOT NULL
+);
 CREATE TABLE semon_projection.namespaces (
     namespace text PRIMARY KEY,
-    stamp text NOT NULL,
     epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0)
 );
 CREATE TABLE semon_projection.ledgers (

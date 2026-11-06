@@ -1,6 +1,6 @@
 use super::super::{
     Namespace, ProjectionTag, StorageError, TagCheck,
-    postgres::{PgProjectionStore, SCHEMA},
+    postgres::{PgProjectionStore, schema},
 };
 
 async fn connect(dsn: &str) -> tokio_postgres::Client {
@@ -18,8 +18,8 @@ async fn connect(dsn: &str) -> tokio_postgres::Client {
 async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     let admin =
         connect(&std::env::var("SEMON_PG_ADMIN_TEST_DSN").expect("CI PostgreSQL admin DSN")).await;
-    admin.batch_execute(SCHEMA).await.unwrap();
-    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA semon_projection TO semon_app").await.unwrap();
+    admin.batch_execute(&schema()).await.unwrap();
+    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON semon_projection.namespaces,semon_projection.ledgers,semon_projection.units TO semon_app; GRANT SELECT ON semon_projection.metadata TO semon_app").await.unwrap();
     let dsn = std::env::var("SEMON_PG_TEST_DSN").expect("CI restricted PostgreSQL DSN");
     let a = Namespace::new("machine-a").unwrap();
     let b = Namespace::new("machine-b").unwrap();
@@ -166,7 +166,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     );
     let refused = tx
         .execute(
-            "INSERT INTO semon_projection.namespaces(namespace,stamp) VALUES('foreign','bad')",
+            "INSERT INTO semon_projection.namespaces(namespace) VALUES('foreign')",
             &[],
         )
         .await
@@ -193,6 +193,8 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
         .await
         .is_err()
     );
+    admin.execute("UPDATE semon_projection.metadata SET stamp='unsupported'", &[]).await.unwrap();
+    assert!(matches!(store_a.begin(&a).await, Err(StorageError::Unsupported(_))));
     let root = std::env::var("SEMON_PG_EMPTY_ROOT").expect("CI empty working directory");
     assert!(
         std::fs::read_dir(root).unwrap().next().is_none(),
