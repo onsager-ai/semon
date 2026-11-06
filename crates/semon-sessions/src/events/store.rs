@@ -7972,11 +7972,10 @@ mod tests {
             admission,
             stream_epoch: stream.clone(),
         };
-        let snapshot = crate::storage::sqlite::source_journal::SourceJournal::owned(
-            store.owner.clone(),
-        )
-        .connection()
-        .unwrap();
+        let snapshot =
+            crate::storage::sqlite::source_journal::SourceJournal::owned(store.owner.clone())
+                .connection()
+                .unwrap();
         snapshot.execute_batch("BEGIN DEFERRED").unwrap();
         let first_marker: String = snapshot
             .query_row(

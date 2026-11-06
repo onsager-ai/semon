@@ -208,6 +208,9 @@ pub(crate) fn retain(
 ) -> Result<(), StorageError> {
     let prefix = crate::retention::source_generation(&row.sources)
         .map_err(|_| StorageError::ScopeChanged)?;
-    db.execute("INSERT INTO storage_projection_tags(namespace,session_key,owner_kind,raw_identity,prefix_digest,projector,generation,capture) SELECT namespace,session_key,'history',raw_identity,prefix_digest,projector,generation,capture FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND raw_identity=?3 AND prefix_digest=?4 AND projector=?5 ON CONFLICT(namespace,session_key,owner_kind) DO NOTHING", params![namespace,row.key,identity(row)?,prefix,PROJECTOR]).map_err(failed)?;
+    let copied = db.execute("INSERT INTO storage_projection_tags(namespace,session_key,owner_kind,raw_identity,prefix_digest,projector,generation,capture) SELECT namespace,session_key,'history',raw_identity,prefix_digest,projector,generation,capture FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog' AND raw_identity=?3 AND prefix_digest=?4 AND projector=?5 ON CONFLICT(namespace,session_key,owner_kind) DO NOTHING", params![namespace,row.key,identity(row)?,prefix,PROJECTOR]).map_err(failed)?;
+    if copied != 1 {
+        return Err(StorageError::ScopeChanged);
+    }
     Ok(())
 }

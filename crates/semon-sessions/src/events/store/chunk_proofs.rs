@@ -344,7 +344,10 @@ pub(crate) fn projection_header_ready(
             .query_row(
                 native_metadata_value(c)?,
                 [format!("{prefix}header")],
-                |row| row.get(0),
+                |row| {
+                    crate::selected_read::row(row, 512)?;
+                    row.get(0)
+                },
             )
             .optional()?;
         let Some(encoded) = encoded.flatten() else {
