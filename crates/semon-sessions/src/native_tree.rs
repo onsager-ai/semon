@@ -114,7 +114,7 @@ pub(crate) struct Summary {
     #[serde(default)]
     pub(crate) usage_total: Option<Tokens>,
     #[serde(skip)]
-    pub(crate) stored: Option<events::store::tree_state::Snapshot>,
+    pub(crate) stored: Option<events::store::tree_state::TreeCheckpoint>,
     // Never persisted: a marker can carry a handoff prompt path, and the
     // on-disk cache must not retain session content (risk:secret).
     #[serde(skip)]

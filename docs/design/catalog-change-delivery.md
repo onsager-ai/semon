@@ -1,5 +1,8 @@
 # Durable catalog change delivery
 
+See the [native storage contract and partial port inventory](session-storage-contract.md)
+for the #478 backend boundary and explicit remaining work.
+
 This is the source-side foundation for a persistent multi-source catalog. It does
 not activate a global Viewer list or change source authorization.
 

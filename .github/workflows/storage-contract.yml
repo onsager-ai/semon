@@ -1,0 +1,126 @@
+name: Native storage contract
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: storage-contract-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  formatting:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting independently of compilation
+        id: rustfmt
+        run: cargo fmt --all --check
+      - name: Prepare formatting patch for thermal-restricted review
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        run: |
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/storage-rustfmt.patch"
+      - name: Retain exact formatting patch
+        if: failure() && steps.rustfmt.outcome == 'failure'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: storage-rustfmt
+          path: ${{ runner.temp }}/storage-rustfmt.patch
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Inventory native SQLite coupling
+        run: python3 scripts/check-native-storage-boundary.py
+  conformance:
+    runs-on: ubuntu-latest
+    env:
+      SEMON_PRICING_REFRESH: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-storage-${{ hashFiles('Cargo.lock') }}
+      - name: Native frontier physical-work qualification
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain84_native_frontier_vm_work_is_indexed -- --nocapture
+      - name: Native Claude name and owned member replay qualification
+        run: cargo test --locked -p semon-sessions --lib configured_semantic_domain94 -- --nocapture
+      - name: SQLite adapter and reusable metadata conformance
+        run: |
+          cargo test --locked -p semon-sessions --lib storage:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib storage::sqlite::source_journal::tests::discovery_batch_ -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::recovery_ -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests:: -- --nocapture
+          SEMON_TEST_NOW=1795000000000 cargo test --locked -p semon-sessions --features test-clock --lib events::store::configured::tests::selected57::selected60::configured_semantic_selected71_active_call_uses_ordinary_clock_and_refuses_before_raw -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_committed_witness_skips_repeated_work_and_recovers_changes_and_rollback_aba -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::cold_discovery_cached_witness_preserves_contract_and_namespace_refusals -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_two_source_publication_ack_finish_and_head -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_competing_publisher_and_begin_zero_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_faults_rollback_ack_proof_and_hints -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publication_replay_is_idempotent -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_replacement_retains_history_and_fences_stale_publisher -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_scoped_search_effects_replace_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_real_model_two_source_query_metadata_and_transcript -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t1_same_runtime_takeover_retains_progress_and_fences_epoch -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t2_different_runtime_takeover_scopes_reset -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t3_active_old_epoch_cannot_take_back_successor -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t4_quiescent_post_finish_takeover_fences_new_handle -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t5_same_runtime_takeover_rolls_back_whole_database -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_t6_listing_readiness_does_not_qualify_other_readers -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_model_refuses_noncurrent_schema_and_changed_raw_zero_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_real_model_claude_replacement_rollback_stale_and_history -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::catalog_typed_custody_and_slots_match_original_publication_digest -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib history_projection::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_publisher_keeps_unbound_head_refusal -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_ingest_and_stage_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_same_db_rollback_and_reopen_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_two_sources_cross_namespace_capability_refused_zero_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_public_factory_still_refuses_second_source -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_runtime_capability_is_crate_private_and_public_factory_stays_closed -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_batch_reduces_events_native_keys_frontier_scoped -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_reset_and_reduction_rollback_zero_partial_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_ingest_begin_batch_record_uses_real_claim_and_generation -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_namespace_factories_keep_rollback_and_restart_isolated -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stale_record_and_admission_refuse_without_writes -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::tests::copied_usage_layout_is_warmed_by_actual_producer_and_selected_factories -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib native_timing::tests::cleanup_prepare_failure_preserves_error_without_zero_vm_work_or_record -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib native_timing::tests::cold_discovery_progress_separates_active_pages_from_continuation_gaps -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_ingest_isolates_witnesses_restart_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_mixed_family_refuses_before_ingest -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_stage_authored_keys_preserve_collisions_and_refuse_unported_consumers -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_semantic_support_cache_rejects_transient_and_corrupt_layouts -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::native_usage::namespace_tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::native_usage::file_namespace_tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_authored_assembly_preserves_factories_and_complete_dependencies -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_enrollment_initializes_floors_atomically_and_fences_warm_writers -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_source_keys_and_floors_isolate_restart_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_metadata_proof_reference_owners_refuse_unported_history_before_gc -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_family_rejects_corrupt_constraints_before_payload_dml -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_family_rejects_mixed_shapes_before_payload_dml -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_layout_is_independent_of_core_and_native_layout -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::reprice::tests::native_usage_copied_tree_pricing_collision_restart_and_rollback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::store::configured::tests::configured_repair_proof_snapshot_uses_admission_and_refuses_unbound_fallback -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib events::tests::configured_ -- --nocapture
+      - name: Native Catalog and Query fixture contracts through adapter
+        run: |
+          cargo test --locked -p semon-sessions --lib catalog::tests:: -- --nocapture
+          cargo test --locked -p semon-sessions --lib query::tests::published_catalog -- --nocapture
+          cargo test --locked -p semon-sessions --lib query::tests::catalog_query -- --nocapture
+      - name: Reported facts persistence after typed error propagation
+        run: |
+          cargo test --locked -p semon-sessions --lib events::store::tests::scoped_store_restores_only_named_reported_runs_and_preserves_overwritten_history -- --exact --nocapture
+          cargo test --locked -p semon-sessions --lib facts::tests::reported_runs -- --nocapture
