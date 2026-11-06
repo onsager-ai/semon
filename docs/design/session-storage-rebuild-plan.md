@@ -225,13 +225,44 @@ PostgreSQL session backend yet.
   only differing values and removes truncated tails. Serialization and SQL input
   still cover the complete index; bounded delta preparation and proof-generation
   collection remain pending.
-- Still required: PostgreSQL `SessionStore` runtime capabilities, complete search
-  filters/coverage and continuation parity, composite Current/History merging,
-  source-backed selected transcript rendering, custody host ports, producer
-  integration and explicit startup backend selection. No PostgreSQL startup
-  option is exposed while those paths still require SQLite. Full shared semantic
-  conformance, full-pipeline RLS/no-hidden-SQLite qualification and a PostgreSQL
-  viewer cold first-page timing remain pending.
+- Part 4 host-port checkpoint: `PgProjectionStore::publish_sources` indexes a
+  bounded allowlisted cohort, captures PostgreSQL indexes/claims, reuses native
+  Catalog derivation without an attached SQL store, and publishes recipes under
+  Catalog/source CAS. Runtime observation capture explicitly bypasses SQLite for
+  this derivation. This is explicit-cohort production, not machine discovery or
+  global lineage qualification; served completeness and search coverage remain
+  partial. The host retains source custody through this blocking native work.
+- `catalog_reply` reuses the existing Catalog query parser, response presentation,
+  source-root validation and runtime fences. PostgreSQL filters and keyset cursors
+  cover harness/repo/no-repo/model/metadata search. `transcript_reply` reads identity
+  and recipe windows in one PostgreSQL snapshot and uses the existing native
+  renderer through an independently authorized host `SessionSourceReader`.
+  Generation mismatches refuse; native text remains source-backed. Causal range
+  context is explicitly incomplete, and selected details/field/annotation routes
+  are not implemented on this host port. Native proof verification remains the
+  host reader's obligation; no hidden SQLite proof connection is opened.
+- Schema 4 adds forced-RLS Raw intent revisions and completed host generation
+  markers. Commit intent before Raw mutation, retain the host's exclusive custody
+  fence, then complete after fsync and independent byte qualification. Restart
+  retains pending state, stale completion refuses, and uncommitted intents roll
+  back. Pending writes refuse Current reads and producer publication; intents
+  advance the namespace epoch so a racing repeatable-read publisher refuses.
+  These primitives do not yet replace `SessionSourceWrite` in runtime callers.
+- Part 4 qualification covers the shared producer, actual Catalog response,
+  provider-backed selected prompt, append/restart and Raw custody/RLS. Additional
+  sanitized Codex/SQLite comparison and filesystem read-open watch qualification
+  are tracked by the current CI revision. This remains host API qualification,
+  not end-to-end startup mode. The shared-producer-to-Catalog-response measurement
+  is separate from ViewerCore startup and must not be called the PostgreSQL
+  viewer cold first-page number.
+- Still required: explicit startup backend configuration and `SessionStore`
+  runtime adoption by NativeEvidence, ViewerCore, Query, discovery, host custody
+  callers and remaining direct readers. No PostgreSQL startup option is exposed
+  while those paths still require SQLite. Complete search coverage, composite
+  Current/History merging, selected details/causal context/fields/annotations,
+  proof-generation collection and bounded delta preparation remain pending.
+  Full shared lifecycle conformance, full-pipeline RLS/no-hidden-SQLite
+  qualification and a PostgreSQL viewer cold first-page timing remain pending.
 
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is

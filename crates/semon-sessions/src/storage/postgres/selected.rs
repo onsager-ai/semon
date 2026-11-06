@@ -1,4 +1,5 @@
-//! Selected native rendering keeps metadata and lazy proof reads in one snapshot.
+//! Selected native rendering keeps metadata in one PostgreSQL snapshot. The
+//! authorized host reader independently qualifies native bytes and their proofs.
 use super::{Namespace, PgProjectionStore, StorageError, backend, ensure};
 use crate::{CatalogReadScope, Options, SessionSourceReader, ViewerReply};
 

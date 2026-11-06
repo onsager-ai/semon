@@ -854,7 +854,8 @@ pub(crate) fn read(
 }
 
 /// Render a PostgreSQL recipe window with a request-owned authorized source
-/// reader. Metadata and proof witnesses remain in the caller's SQL snapshot.
+/// reader. Metadata stays in the caller's SQL snapshot; the host reader
+/// independently qualifies the exact byte generation and its proofs.
 #[cfg(feature = "postgres")]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn render_postgres(
