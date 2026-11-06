@@ -1,9 +1,12 @@
+#[path = "postgres/catalog_tests.rs"]
+mod catalog_tests;
+
 use super::super::{
     Namespace, ProjectionTag, StorageError, TagCheck,
     postgres::{PgProjectionStore, schema},
 };
 
-async fn connect(dsn: &str) -> tokio_postgres::Client {
+pub(crate) async fn connect(dsn: &str) -> tokio_postgres::Client {
     let (client, connection) = tokio_postgres::connect(dsn, tokio_postgres::NoTls)
         .await
         .unwrap();
@@ -361,7 +364,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     let admin =
         connect(&std::env::var("SEMON_PG_ADMIN_TEST_DSN").expect("CI PostgreSQL admin DSN")).await;
     admin.batch_execute(&schema()).await.unwrap();
-    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON semon_projection.namespaces,semon_projection.ledgers,semon_projection.units,semon_projection.files,semon_projection.records,semon_projection.proofs,semon_projection.proof_blocks,semon_projection.proof_nodes TO semon_app; GRANT SELECT ON semon_projection.metadata TO semon_app").await.unwrap();
+    admin.batch_execute("GRANT USAGE ON SCHEMA semon_projection TO semon_app; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA semon_projection TO semon_app; REVOKE INSERT,UPDATE,DELETE ON semon_projection.metadata FROM semon_app").await.unwrap();
     let dsn = std::env::var("SEMON_PG_TEST_DSN").expect("CI restricted PostgreSQL DSN");
     let a = Namespace::new("machine-a").unwrap();
     let b = Namespace::new("machine-b").unwrap();
@@ -553,6 +556,7 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     tx.commit(&a).await.unwrap();
     pg_native_index_lifecycle(&dsn).await;
     pg_sanitized_native_indexes(&dsn).await;
+    catalog_tests::lifecycle(&dsn).await;
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
     assert_eq!(

@@ -55,6 +55,8 @@ jobs:
         with:
           name: pg-review
           path: ${{ runner.temp }}/pg-review/
+      - name: Compile PostgreSQL conformance
+        run: cargo test --locked -p semon-sessions --lib --features postgres storage::conformance:: --no-run
       - name: Check formatting
         id: formatting
         run: cargo fmt --all --check

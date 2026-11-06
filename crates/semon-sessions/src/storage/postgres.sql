@@ -84,6 +84,79 @@ CREATE TABLE semon_projection.proof_nodes (
     PRIMARY KEY (namespace,path,generation,level,ordinal),
     FOREIGN KEY (namespace,path,generation) REFERENCES semon_projection.proofs(namespace,path,generation) ON DELETE CASCADE
 );
+CREATE TABLE semon_projection.catalog_heads (
+    namespace text PRIMARY KEY REFERENCES semon_projection.namespaces(namespace),
+    generation text NOT NULL
+);
+CREATE TABLE semon_projection.catalog (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    session_key text NOT NULL,
+    lifecycle text NOT NULL CHECK (lifecycle IN ('current','retained')),
+    last_ms bigint NOT NULL,
+    harness text NOT NULL,
+    repo text NOT NULL,
+    model text NOT NULL,
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY (namespace,session_key)
+);
+CREATE INDEX catalog_current_order ON semon_projection.catalog(namespace,last_ms DESC,session_key) WHERE lifecycle='current';
+CREATE INDEX catalog_history_order ON semon_projection.catalog(namespace,last_ms DESC,session_key);
+CREATE TABLE semon_projection.recipe_heads (
+    namespace text NOT NULL,
+    session_key text NOT NULL,
+    generation text NOT NULL,
+    source_generation text NOT NULL,
+    version integer NOT NULL,
+    total bigint NOT NULL CHECK (total >= 0),
+    PRIMARY KEY (namespace,session_key),
+    FOREIGN KEY (namespace,session_key) REFERENCES semon_projection.catalog(namespace,session_key)
+);
+CREATE TABLE semon_projection.recipes (
+    namespace text NOT NULL,
+    session_key text NOT NULL,
+    slot bigint NOT NULL CHECK (slot >= 0),
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY (namespace,session_key,slot),
+    FOREIGN KEY (namespace,session_key) REFERENCES semon_projection.recipe_heads(namespace,session_key)
+);
+CREATE TABLE semon_projection.history_catalog (LIKE semon_projection.catalog INCLUDING CONSTRAINTS INCLUDING INDEXES);
+CREATE TABLE semon_projection.history_recipe_heads (LIKE semon_projection.recipe_heads INCLUDING CONSTRAINTS INCLUDING INDEXES);
+CREATE TABLE semon_projection.history_recipes (LIKE semon_projection.recipes INCLUDING CONSTRAINTS INCLUDING INDEXES);
+ALTER TABLE semon_projection.catalog_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.catalog_heads FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.catalog_heads
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.catalog ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.catalog FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.catalog
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.recipe_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.recipe_heads FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.recipe_heads
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.recipes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.recipes FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.recipes
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.history_catalog ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.history_catalog FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.history_catalog
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.history_recipe_heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.history_recipe_heads FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.history_recipe_heads
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+ALTER TABLE semon_projection.history_recipes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.history_recipes FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.history_recipes
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 ALTER TABLE semon_projection.proof_nodes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE semon_projection.proof_nodes FORCE ROW LEVEL SECURITY;
 CREATE POLICY namespace_isolation ON semon_projection.proof_nodes
