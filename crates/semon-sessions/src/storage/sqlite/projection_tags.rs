@@ -157,12 +157,23 @@ pub(crate) fn referenced(db: &Connection, path: &str) -> rusqlite::Result<Vec<St
         ))?;
         let rows = statement.query_map([path], |row| row.get::<_, String>(0))?;
         for (ordinal, text) in rows.enumerate() {
-            if ordinal == 256 { return Err(rusqlite::Error::InvalidQuery); }
-            let row: CatalogRow = serde_json::from_str(&text?).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            for source in row.sources.iter().filter(|source| source.path == std::path::Path::new(path)) {
-                referenced.insert(crate::source_carrier::ledger_digest(&crate::source_carrier::ledger(source)));
+            if ordinal == 256 {
+                return Err(rusqlite::Error::InvalidQuery);
             }
-            if referenced.len() > 256 { return Err(rusqlite::Error::InvalidQuery); }
+            let row: CatalogRow =
+                serde_json::from_str(&text?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            for source in row
+                .sources
+                .iter()
+                .filter(|source| source.path == std::path::Path::new(path))
+            {
+                referenced.insert(crate::source_carrier::ledger_digest(
+                    &crate::source_carrier::ledger(source),
+                ));
+            }
+            if referenced.len() > 256 {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
         }
     }
     Ok(referenced.into_iter().collect())

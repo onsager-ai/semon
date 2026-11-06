@@ -735,11 +735,12 @@ mod verified_history_tests {
              CREATE TABLE storage_catalog_native_observation_grants(namespace TEXT,session_key TEXT,owner_kind TEXT,metadata_digest TEXT,admission INTEGER,stream TEXT,direct_capture TEXT,PRIMARY KEY(namespace,session_key,owner_kind));",
         )
         .unwrap();
+        db.execute_batch(super::super::projection_tags::SCHEMA).unwrap();
         db
     }
 
     #[test]
-    fn composed_history_keeps_only_verified_refs_and_refreshes_metadata_grant() {
+    fn composed_history_keeps_source_tag_and_refreshes_metadata_capture() {
         let db = composition_db();
         let namespace = "local";
         let admission = 7;
@@ -747,16 +748,6 @@ mod verified_history_tests {
         let first = row("first");
         let first_metadata = serde_json::to_string(&first).unwrap();
         let source_generation = crate::retention::source_generation(&first.sources).unwrap();
-        db.execute(
-            "INSERT INTO storage_proof_refs VALUES(?1,?2,'current','receipt-one'),(?1,?2,'current','receipt-unselected')",
-            rusqlite::params![namespace, first.key],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO storage_proof_generations VALUES(?1,'receipt-one',?2,?3,?4,'original receipt metadata')",
-            rusqlite::params![namespace, first.key, i64::try_from(admission).unwrap(), stream],
-        )
-        .unwrap();
         let history = OriginalHistory {
             db: &db,
             namespace,
@@ -778,7 +769,6 @@ mod verified_history_tests {
                 capture: &capture,
             })
             .unwrap();
-        let first_digest = crate::storage::proof_codec::digest(first_metadata.as_bytes());
         let first_projection_generation: String = db
             .query_row(
                 "SELECT generation FROM session_history_projections WHERE namespace=?1 AND session_key=?2",
@@ -786,14 +776,6 @@ mod verified_history_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let first_refs: Vec<String> = db
-            .prepare("SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id")
-            .unwrap()
-            .query_map(rusqlite::params![namespace, first.key], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(first_refs, ["receipt-one"]);
         assert_eq!(first_projection_generation, "same-generation");
 
         let updated = row("metadata-only update");
@@ -811,32 +793,17 @@ mod verified_history_tests {
                 capture: &updated_capture,
             })
             .unwrap();
-        let updated_digest = crate::storage::proof_codec::digest(updated_metadata.as_bytes());
-        let (stored_metadata, projection_generation, grant_digest, grant_capture): (
-            String,
-            String,
-            String,
-            Option<String>,
-        ) = db
-            .query_row(
-                "SELECT h.metadata,p.generation,g.metadata_digest,g.direct_capture FROM session_history_catalog h JOIN session_history_projections p USING(namespace,session_key) JOIN storage_catalog_native_observation_grants g USING(namespace,session_key) WHERE h.namespace=?1 AND h.session_key=?2 AND g.owner_kind='history'",
-                rusqlite::params![namespace, updated.key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
+        let (stored_metadata, projection_generation, prefix, capture): (
+            String, String, String, Option<String>,
+        ) = db.query_row(
+            "SELECT h.metadata,p.generation,t.prefix_digest,t.capture FROM session_history_catalog h JOIN session_history_projections p USING(namespace,session_key) JOIN storage_projection_tags t USING(namespace,session_key) WHERE h.namespace=?1 AND h.session_key=?2 AND t.owner_kind='history'",
+            rusqlite::params![namespace, updated.key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).unwrap();
         assert_eq!(stored_metadata, updated_metadata);
         assert_eq!(projection_generation, first_projection_generation);
-        assert_eq!(grant_digest, updated_digest);
-        assert_ne!(grant_digest, first_digest);
-        assert_eq!(grant_capture.as_deref(), Some(updated_capture.as_str()));
-        let updated_refs: Vec<String> = db
-            .prepare("SELECT id FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history' ORDER BY id")
-            .unwrap()
-            .query_map(rusqlite::params![namespace, updated.key], |row| row.get(0))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap();
-        assert_eq!(updated_refs, ["receipt-one"]);
+        assert_eq!(prefix, source_generation);
+        assert_eq!(capture.as_deref(), Some(updated_capture.as_str()));
     }
 
     #[test]
