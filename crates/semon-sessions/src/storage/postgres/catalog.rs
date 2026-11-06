@@ -93,7 +93,9 @@ impl PgProjectionTransaction<'_> {
         let mut tags = BTreeMap::new();
         let mut bytes = 0usize;
         for row in publication.rows {
-            if !keys.insert(row.key.as_str())
+            if row.key.is_empty()
+                || row.key.len() > 4096
+                || !keys.insert(row.key.as_str())
                 || row.lifecycle != CatalogLifecycle::Current
                 || row.sources.is_empty()
                 || row.sources.len() > 64
@@ -178,8 +180,7 @@ impl PgProjectionTransaction<'_> {
             }
         }
         let mut hash = Sha256::new();
-        let previous_generation = expected_generation.unwrap_or_default();
-        hash.update(previous_generation);
+        hash.update(expected_generation.unwrap_or_default());
         hash.update(serde_json::to_vec(&encoded).map_err(backend)?);
         hash.update(serde_json::to_vec(&recipes).map_err(backend)?);
         let generation = format!("{:x}", hash.finalize());
@@ -296,6 +297,9 @@ impl PgProjectionTransaction<'_> {
             return Ok(None);
         }
         let mut row: CatalogRow = serde_json::from_str(row.get(0)).map_err(backend)?;
+        if row.key != key || row.sources.is_empty() || row.sources.len() > 64 {
+            return Err(backend("catalog identity or source budget mismatch"));
+        }
         if scope == CatalogReadScope::Current {
             if row.lifecycle != CatalogLifecycle::Current {
                 return Err(backend("catalog lifecycle mismatch"));
