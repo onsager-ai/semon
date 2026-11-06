@@ -46,6 +46,15 @@ mod current_history_custody {
             .unwrap();
             saved.push((n as i64, text));
         }
+        crate::storage::sqlite::projection_tags::publish(
+            &db,
+            source.namespace(),
+            &old,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
+            "original-generation",
+            None,
+        )
+        .unwrap();
         (db, old, saved, source)
     }
     fn step(db: &mut Connection, old: &crate::model::summary::CatalogRow, source: &AdmittedSource) -> bool {
@@ -199,6 +208,15 @@ mod current_history_custody {
         db.execute(
             "UPDATE main.session_slot_projections SET generation='replacement-generation' WHERE namespace=semon_namespace()",
             [],
+        )
+        .unwrap();
+        crate::storage::sqlite::projection_tags::publish(
+            &db,
+            source.namespace(),
+            &old,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
+            "replacement-generation",
+            None,
         )
         .unwrap();
         assert!(!step(&mut db, &old, &source));

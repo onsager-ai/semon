@@ -88,7 +88,11 @@ jobs:
           case_number=0
           for test in \
             events::store::tests::direct_catalog_history_tags_preserve_existing_producer_metadata \
-            events::store::tests::direct_catalog_tags_are_bounded_and_wal_snapshots_keep_their_generation \
+            events::store::tests::current_history_custody::custody_pages_resume_without_exposing_partial_history \
+            events::store::tests::current_history_custody::custody_byte_pages_preserve_utf8_and_oversized_unsupported_recipes \
+            events::store::tests::current_history_custody::completed_original_is_immutable_when_current_reuses_its_harness \
+            events::store::tests::current_history_custody::custody_preserves_unsupported_original_slot_addresses \
+            events::store::tests::current_history_custody::custody_rollback_and_changed_original_restart_cleanly \            events::store::tests::direct_catalog_tags_are_bounded_and_wal_snapshots_keep_their_generation \
             events::store::tests::direct_catalog_tag_replacement_rolls_back_with_the_catalog_marker \
             catalog::tests::projection_cache_tag_refuses_wrong_projector_and_altered_prefix \
             catalog::tests::projection_cache_rebuild_rollback_restart_keeps_prior_publication \
