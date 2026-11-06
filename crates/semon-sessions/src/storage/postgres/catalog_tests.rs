@@ -514,12 +514,38 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert_eq!(changes.changes.len(), 1);
     assert_eq!(changes.head, 2);
     assert!(changes.caught_up);
-    let compacted = tx.compact_changes(&namespace, CatalogReadScope::Current, &stream_epoch, 2, 1).await.unwrap();
+    let compacted = tx
+        .compact_changes(&namespace, CatalogReadScope::Current, &stream_epoch, 2, 1)
+        .await
+        .unwrap();
     assert_eq!(compacted.removed, 1);
     assert_eq!(compacted.compacted_through, 1);
     assert!(compacted.more);
-    assert!(tx.catalog_changes(&namespace, CatalogReadScope::Current, Some(&stream_epoch), 0, 10).await.is_err());
-    assert_eq!(tx.catalog_changes(&namespace, CatalogReadScope::Current, Some(&stream_epoch), 1, 10).await.unwrap().changes.len(), 1);
+    assert!(
+        tx.catalog_changes(
+            &namespace,
+            CatalogReadScope::Current,
+            Some(&stream_epoch),
+            0,
+            10
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(
+        tx.catalog_changes(
+            &namespace,
+            CatalogReadScope::Current,
+            Some(&stream_epoch),
+            1,
+            10
+        )
+        .await
+        .unwrap()
+        .changes
+        .len(),
+        1
+    );
     assert!(
         tx.catalog_changes(
             &namespace,

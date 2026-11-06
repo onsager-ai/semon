@@ -198,12 +198,40 @@ PostgreSQL session backend yet.
   comparisons cover normalized rows and consumed proofs; they do not establish
   Catalog or selected transcript parity. Proof collection, bounded incremental
   SQL updates and complete producer integration remain pending.
-- Still required: PostgreSQL implementations of `SessionStore`'s Catalog reader
-  and publisher, recipes, custody operations, producer integration and explicit
-  startup backend selection. No
-  PostgreSQL startup option is exposed while those paths still require SQLite.
-  Full shared semantic conformance and PostgreSQL cold first-page timing remain
-  pending. The reported projection transaction time is not first-page timing.
+- Part 3 storage checkpoint: schema 3 adds typed bounded Catalog publication
+  under generation/source CAS, Current and retained-History metadata, versioned
+  source-bound recipe windows and metadata substring postings. Reads check the
+  row's source tag against its publication and committed ledger in one
+  repeatable-read transaction. Publication and withdrawal have savepoint rollback
+  on refusal, so callers cannot commit a partially applied operation. New tables
+  have forced namespace RLS. No receipts, grants, triggers, capability functions
+  or temporary views are introduced.
+- Part 3 custody primitives: revision-CAS reported Facts and staging checkpoints,
+  namespace custody epoch, transactional scoped change heads/cursors and bounded
+  acknowledgement compaction. Raw withdrawal first captures the committed Catalog
+  and recipes, retires Current and emits change hints atomically. Unsupported
+  composite History handoff refuses without replacing older custody. This does
+  not yet implement the host Raw intent/completion or generation-marker ports.
+- Part 3 qualification is a storage API subset, not full producer/viewer parity.
+  Tests cover cold publication, append/restart, replacement/truncation, stale
+  publication, late-refusal rollback, recipe source/version generations, a
+  prepared-but-unpublished append during withdrawal, Facts/checkpoint restart
+  and rollback, change cursors/compaction and direct SQL RLS on the added tables.
+  The same typed row and recipes are compared with SQLite's publisher. The
+  PostgreSQL lifecycle root has no SQLite session files; its explicit SQLite
+  comparison uses a separate root. The measured ingest-through-typed-Catalog
+  first page is reported separately and is not a viewer first-page measurement.
+- Index writes no longer delete/reinsert all normalized rows: an upsert updates
+  only differing values and removes truncated tails. Serialization and SQL input
+  still cover the complete index; bounded delta preparation and proof-generation
+  collection remain pending.
+- Still required: PostgreSQL `SessionStore` runtime capabilities, complete search
+  filters/coverage and continuation parity, composite Current/History merging,
+  source-backed selected transcript rendering, custody host ports, producer
+  integration and explicit startup backend selection. No PostgreSQL startup
+  option is exposed while those paths still require SQLite. Full shared semantic
+  conformance, full-pipeline RLS/no-hidden-SQLite qualification and a PostgreSQL
+  viewer cold first-page timing remain pending.
 
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is
