@@ -1,0 +1,14 @@
+{
+  "rules_version": 1,
+  "pricing_fingerprint": "synthetic-prices-v1",
+  "steps": [
+    {"id": "first", "context_tokens": 49999, "band": "Under50k", "elapsed_ms": 2000, "compactions": 0},
+    {"id": "second", "context_tokens": 50000, "band": "From50kTo150k", "elapsed_ms": 3600000, "compactions": 1},
+    {"id": "third", "context_tokens": 150001, "band": "Over150k", "elapsed_ms": null, "compactions": 0}
+  ],
+  "observed_steps": 3,
+  "exclusive_steps": 3,
+  "shared_steps": 0,
+  "compactions": 1,
+  "thrash": false
+}

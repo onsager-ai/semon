@@ -1,0 +1,378 @@
+//! Pure session activity derivation over already qualified native facts.
+//!
+//! This module does not read sources or publish a projection. The producer must
+//! select one canonical session's complete source cohort, merge Claude usage in
+//! the existing model order, resolve exact copied-record ownership, and supply
+//! only receipt-qualified Codex facts and normalized signals. Source positions
+//! break timestamp ties; they are provenance, never authorization.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use super::{CodexNativeUsage, CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
+use crate::{claude_usage::Shared, pricing};
+
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 1;
+const HOUR_MS: u64 = 3_600_000;
+
+/// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
+/// the complete native (thread, session, turn, response) tuple, not response alone.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ActivityStepId {
+    Claude(String),
+    Codex([String; 4]),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct SourcePosition {
+    pub(crate) source: String,
+    pub(crate) offset: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum ContextBand {
+    Under50k,
+    From50kTo150k,
+    Over150k,
+}
+
+impl ContextBand {
+    fn for_tokens(tokens: u64) -> Self {
+        match tokens {
+            0..50_000 => Self::Under50k,
+            50_000..=150_000 => Self::From50kTo150k,
+            _ => Self::Over150k,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Ownership {
+    Exclusive,
+    /// The exact key returned by `claude_usage::shared`; no original is inferred.
+    Shared(String),
+}
+
+/// A normalized usage row, before session ordering and pricing. Keep these
+/// constructors at the boundary so legacy cumulative Codex counters cannot be
+/// mistaken for native response facts.
+pub(crate) struct UsageStep {
+    id: ActivityStepId,
+    position: SourcePosition,
+    usage: Usage,
+}
+
+enum Usage {
+    Claude(MessageUsage),
+    Codex(CodexUsageEvent),
+}
+
+impl UsageStep {
+    pub(crate) fn claude(
+        message_id: String,
+        position: SourcePosition,
+        usage: MessageUsage,
+    ) -> Self {
+        Self {
+            id: ActivityStepId::Claude(message_id),
+            position,
+            usage: Usage::Claude(usage),
+        }
+    }
+
+    /// `model_outcome` comes from the existing native fact table, after source
+    /// receipt qualification. This filter does not establish that qualification.
+    pub(crate) fn codex(
+        payload: &serde_json::Value,
+        model_outcome: &str,
+        position: SourcePosition,
+        model: String,
+        timestamp: Option<i64>,
+    ) -> Option<Self> {
+        if model_outcome != "accepted" {
+            return None;
+        }
+        let (identity, _, tokens) = CodexNativeUsage::decode(payload)?;
+        let identity: [String; 4] =
+            serde_json::from_str(&identity).expect("native decoder emits a complete string tuple");
+        Some(Self {
+            id: ActivityStepId::Codex(identity),
+            position,
+            usage: Usage::Codex(CodexUsageEvent {
+                model,
+                tokens,
+                timestamp,
+            }),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ActivityStep {
+    pub(crate) id: ActivityStepId,
+    pub(crate) position: SourcePosition,
+    pub(crate) ownership: Ownership,
+    pub(crate) model: Option<String>,
+    pub(crate) tokens: ModelTokens,
+    pub(crate) context_tokens: u64,
+    pub(crate) band: ContextBand,
+    pub(crate) list_cost_usd: Option<f64>,
+    pub(crate) carry_cost_usd: Option<f64>,
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) elapsed_ms: Option<u64>,
+    pub(crate) compactions: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Compaction {
+    pub(crate) position: SourcePosition,
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) step_id: Option<ActivityStepId>,
+}
+
+/// A partial sum preserves both the measured amount and its missing coverage.
+/// In particular the final step does not invent a zero duration.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Measured<T> {
+    pub(crate) known: T,
+    pub(crate) unknown_steps: u64,
+}
+
+impl<T: std::ops::AddAssign> Measured<T> {
+    fn add(&mut self, value: Option<T>) {
+        if let Some(value) = value {
+            self.known += value;
+        } else {
+            self.unknown_steps += 1;
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct StepTotals {
+    pub(crate) steps: u64,
+    pub(crate) list_cost_usd: Measured<f64>,
+    pub(crate) carry_cost_usd: Measured<f64>,
+    pub(crate) elapsed_ms: Measured<u64>,
+}
+
+impl StepTotals {
+    fn add(&mut self, step: &ActivityStep) {
+        self.steps += 1;
+        self.list_cost_usd.add(step.list_cost_usd);
+        self.carry_cost_usd.add(step.carry_cost_usd);
+        self.elapsed_ms.add(step.elapsed_ms);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct OwnershipTotals {
+    pub(crate) observed: StepTotals,
+    pub(crate) exclusive: StepTotals,
+    pub(crate) shared: StepTotals,
+}
+
+impl OwnershipTotals {
+    fn add(&mut self, step: &ActivityStep) {
+        self.observed.add(step);
+        match &step.ownership {
+            Ownership::Exclusive => self.exclusive.add(step),
+            Ownership::Shared(_) => self.shared.add(step),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SessionActivityAggregate {
+    pub(crate) totals: OwnershipTotals,
+    pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
+    pub(crate) compactions: u64,
+    pub(crate) thrash: bool,
+    pub(crate) thrash_windows: Vec<[ActivityStepId; 3]>,
+    /// Shared observations leave original billing ownership unresolved, even
+    /// when all exclusively attributed steps can be priced.
+    pub(crate) exclusive_cost_complete: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct SessionActivity {
+    pub(crate) session_key: String,
+    pub(crate) rules_version: u32,
+    pub(crate) pricing_fingerprint: String,
+    pub(crate) steps: Vec<ActivityStep>,
+    pub(crate) compactions: Vec<Compaction>,
+    pub(crate) aggregate: SessionActivityAggregate,
+}
+
+/// Use the model's existing Claude merge order: the last normalized row for a
+/// message ID wins. Only accepted Codex facts may enter; repeated accepted
+/// identities (e.g. selected copies) retain the first observation. Duplicate or
+/// conflicting fact rows are filtered by `UsageStep::codex`, never re-totaled.
+pub(crate) fn derive(
+    session_key: String,
+    usage: impl IntoIterator<Item = UsageStep>,
+    shared: &Shared,
+    signals: impl IntoIterator<Item = (String, Signal)>,
+    table: Arc<pricing::EffectiveTable>,
+) -> SessionActivity {
+    let mut rows = BTreeMap::new();
+    for row in usage {
+        match &row.id {
+            ActivityStepId::Claude(_) => {
+                rows.insert(row.id.clone(), row);
+            }
+            ActivityStepId::Codex(_) => {
+                rows.entry(row.id.clone()).or_insert(row);
+            }
+        }
+    }
+    let mut steps: Vec<_> = rows
+        .into_values()
+        .map(|row| {
+            let mut cost = pricing::CostBuild::with_table(table.clone());
+            let (model, tokens, timestamp) = match &row.usage {
+                Usage::Claude(usage) => {
+                    cost.message(usage);
+                    (
+                        usage.model.clone(),
+                        usage.model_tokens.clone(),
+                        usage.billing.timestamp,
+                    )
+                }
+                Usage::Codex(event) => {
+                    cost.codex(event);
+                    (
+                        Some(event.model.clone()),
+                        event.tokens.clone(),
+                        event.timestamp,
+                    )
+                }
+            };
+            let (list_cost_usd, carry_cost_usd) = cost.finish_step(tokens.cache_read);
+            let context_tokens = tokens
+                .input
+                .saturating_add(tokens.cache_read)
+                .saturating_add(tokens.cache_write);
+            let ownership = match &row.id {
+                ActivityStepId::Claude(id) => shared
+                    .get(id)
+                    .map_or(Ownership::Exclusive, |key| Ownership::Shared(key.clone())),
+                ActivityStepId::Codex(_) => Ownership::Exclusive,
+            };
+            ActivityStep {
+                id: row.id,
+                position: row.position,
+                ownership,
+                model,
+                tokens,
+                context_tokens,
+                band: ContextBand::for_tokens(context_tokens),
+                list_cost_usd,
+                carry_cost_usd,
+                timestamp,
+                elapsed_ms: None,
+                compactions: 0,
+            }
+        })
+        .collect();
+    // Unknown times sort after known times, by exact source position. They do
+    // not acquire a synthetic timestamp or a duration across the missing value.
+    steps.sort_by(|a, b| {
+        (a.timestamp.is_none(), a.timestamp, &a.position, &a.id).cmp(&(
+            b.timestamp.is_none(),
+            b.timestamp,
+            &b.position,
+            &b.id,
+        ))
+    });
+    for index in 0..steps.len().saturating_sub(1) {
+        if let (Some(at), Some(next)) = (steps[index].timestamp, steps[index + 1].timestamp) {
+            steps[index].elapsed_ms = Some((next.saturating_sub(at).max(0) as u64).min(HOUR_MS));
+        }
+    }
+    let mut compactions: Vec<_> = signals
+        .into_iter()
+        .filter(|(_, signal)| signal.k == SignalKind::Compact)
+        .map(|(source, signal)| Compaction {
+            position: SourcePosition {
+                source,
+                offset: signal.o,
+            },
+            timestamp: signal.t,
+            step_id: None,
+        })
+        .collect();
+    compactions.sort_by(|a, b| a.position.cmp(&b.position));
+    // Signals have already passed native compaction dedupe. Only suppress a
+    // repeated observation of that exact normalized source/offset here.
+    compactions.dedup_by(|a, b| a.position == b.position);
+    let timestamped = steps.partition_point(|step| step.timestamp.is_some());
+    let mut source_steps: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        source_steps
+            .entry(step.position.source.clone())
+            .or_default()
+            .push((step.position.offset, index));
+    }
+    for offsets in source_steps.values_mut() {
+        offsets.sort_unstable();
+    }
+    for compact in &mut compactions {
+        let owner = if let Some(at) = compact.timestamp {
+            let next = steps[..timestamped].partition_point(|step| {
+                (step.timestamp.expect("timestamped prefix"), &step.position)
+                    < (at, &compact.position)
+            });
+            if next < timestamped {
+                Some(next)
+            } else {
+                timestamped.checked_sub(1)
+            }
+        } else {
+            // Without time, only offsets within the same physical source prove
+            // following/preceding order. Cross-source placement stays unknown.
+            source_steps
+                .get(&compact.position.source)
+                .and_then(|offsets| {
+                    let next =
+                        offsets.partition_point(|(offset, _)| *offset < compact.position.offset);
+                    offsets
+                        .get(next)
+                        .or_else(|| offsets.last())
+                        .map(|(_, index)| *index)
+                })
+        };
+        if let Some(owner) = owner {
+            steps[owner].compactions += 1;
+            compact.step_id = Some(steps[owner].id.clone());
+        }
+    }
+    let mut aggregate = SessionActivityAggregate {
+        compactions: compactions.len() as u64,
+        ..Default::default()
+    };
+    for step in &steps {
+        aggregate.totals.add(step);
+        aggregate.by_band.entry(step.band).or_default().add(step);
+    }
+    for window in steps.windows(3) {
+        if window.iter().map(|step| step.compactions).sum::<u64>() >= 3 {
+            aggregate
+                .thrash_windows
+                .push(std::array::from_fn(|index| window[index].id.clone()));
+        }
+    }
+    aggregate.thrash = !aggregate.thrash_windows.is_empty();
+    aggregate.exclusive_cost_complete = aggregate.totals.shared.steps == 0
+        && aggregate.totals.exclusive.list_cost_usd.unknown_steps == 0;
+    SessionActivity {
+        session_key,
+        rules_version: ACTIVITY_RULES_VERSION,
+        pricing_fingerprint: table.fingerprint.clone(),
+        steps,
+        compactions,
+        aggregate,
+    }
+}
+
+#[cfg(test)]
+mod tests;

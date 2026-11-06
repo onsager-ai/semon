@@ -127,12 +127,12 @@ its completion witness is the native-publication success message in the CI log.
   fingerprints to `0cc656540a26a662f4423420537bfd68d9b1a9d49619ab41eb788a7eb0faf5c9`.
   Existing appearance decisions, review provenance and reference pins remain intact;
   this maintenance grants no new appearance approval.
-- CI run 42179297945 for the session cost coverage change (merge preview `de418185`)
-  supplies visual artifact 13486800677 and transport artifact 13486501600. The
-  supported audit and proposal generator qualify 155 visual and six transport
-  records as fingerprint-only, with no refusals. The adopted patches change only
-  candidate fingerprints to
-  `57502a36b8a6c03c56616e3f5af86b081a4b38248daa3d6f6b75da0d64048ae7`; image and
+- CI run 42179472278 for the session activity step derivation (merge preview `10f55b3a`)
+  supplies visual and transport artifacts from that run. The supported audit and
+  proposal generator qualify 155 visual and six transport records as
+  fingerprint-only, with no refusals. The adopted patches change only candidate
+  fingerprints to
+  `7ec74e8ee80032f6c4311a4c35b53602ef83490e613c8af48dd183edfb8134bf`; image and
   evidence digests, decisions, review provenance and reference pins are unchanged.
   This is binding maintenance only and grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
