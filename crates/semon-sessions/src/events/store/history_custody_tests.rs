@@ -48,7 +48,7 @@ mod current_history_custody {
         }
         crate::storage::sqlite::projection_tags::publish(
             &db,
-            source.namespace(),
+            crate::events::store::fixture_namespace().as_str(),
             &old,
             crate::storage::catalog::CatalogObservationOwner::Catalog,
             "original-generation",
@@ -212,7 +212,7 @@ mod current_history_custody {
         .unwrap();
         crate::storage::sqlite::projection_tags::publish(
             &db,
-            source.namespace(),
+            crate::events::store::fixture_namespace().as_str(),
             &old,
             crate::storage::catalog::CatalogObservationOwner::Catalog,
             "replacement-generation",
