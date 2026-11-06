@@ -291,7 +291,7 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
             params![self.namespace, key],
         )?;
         self.db.execute(
-            "DELETE FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
+            "DELETE FROM main.storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
             params![self.namespace, key],
         )?;
         self.db.execute(
@@ -374,200 +374,20 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     }
 }
 
-/// Main's native custody recipe, evaluated inside the publisher's source CAS.
-/// Retained slots are qualified by their original source-generation header.
-/// Publication receipts are a separate contract owned by #478.
+/// Compose from native projection tags inside the publisher's existing CAS.
+/// The shared planner retains its bounded slots, CWDs and metadata accounting.
 pub(crate) fn publish_composition(
     store: &OriginalHistory<'_>,
     publication: &crate::slot_projection::Publication<'_>,
 ) -> rusqlite::Result<()> {
-    use crate::slot_projection::{SavedSlot, VERSION};
-    use sha2::{Digest, Sha256};
-    use std::collections::{BTreeMap, BTreeSet};
-    let Some(projections) = publication.transcripts else {
-        return Ok(());
-    };
-    let rows: BTreeMap<_, _> = publication
-        .rows
-        .iter()
-        .map(|row| (row.key.as_str(), row))
-        .collect();
-    for projection in projections {
-        let Some(current) = rows.get(projection.key.as_str()).copied() else {
-            continue;
-        };
-        if store.original(&current.key)? {
-            continue;
-        }
-        let old = CompositeHistoryStore::previous(store, &current.key)?
-            .as_deref()
-            .and_then(|text| serde_json::from_str::<CatalogRow>(text).ok());
-        if let Some(old) = old.as_ref().filter(|old| old.harness != current.harness) {
-            for source in &old.sources {
-                store.retain_source(old, source)?;
-            }
-            continue;
-        }
-        let paths: BTreeSet<_> = current.sources.iter().map(|source| &source.path).collect();
-        let mut missing = BTreeMap::new();
-        for source in old.as_ref().into_iter().flat_map(|row| &row.sources) {
-            if !paths.contains(&source.path) && !store.relocated(source, &current.sources)? {
-                missing.insert(source.path.clone(), source.clone());
-            }
-        }
-        if missing.is_empty() {
-            store.clear(&current.key)?;
-            continue;
-        }
-        let mut history = current.clone();
-        history.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-        history.query = None;
-        history.query_recipe = None;
-        history.sources.extend(missing.values().cloned());
-        history.native_ids = history
-            .sources
-            .iter()
-            .map(|source| source.native_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let old = old.as_ref().expect("missing sources require a prior owner");
-        for source in missing.values() {
-            store.retain_source(old, source)?;
-        }
-        let mut slots = projection.slots.clone();
-        let (history_slots, header) = store.previous_recipe(&current.key)?;
-        let qualified = header.as_ref().is_some_and(|(version, generation, _)| {
-            *version == VERSION
-                && generation.is_some()
-                && crate::retention::source_generation(&old.sources)
-                    .ok()
-                    .as_ref()
-                    == generation.as_ref()
-        });
-        let mut incomplete = true;
-        if qualified {
-            incomplete = header.is_some_and(|(_, _, incomplete)| incomplete);
-            let old_sources: BTreeMap<_, _> = old
-                .sources
-                .iter()
-                .map(|source| (&source.path, source))
-                .collect();
-            let current_sources: BTreeMap<_, _> = current
-                .sources
-                .iter()
-                .map(|source| (&source.path, source))
-                .collect();
-            for text in store.recipe_slots(&current.key, history_slots)? {
-                let slot: SavedSlot = match serde_json::from_str(&text) {
-                    Ok(slot) => slot,
-                    Err(_) => {
-                        incomplete = true;
-                        continue;
-                    }
-                };
-                let Some(file) = &slot.file else {
-                    continue;
-                };
-                if !missing.contains_key(&file.path) {
-                    if slot
-                        .source_paths()
-                        .iter()
-                        .any(|path| missing.contains_key(*path))
-                    {
-                        incomplete = true;
-                    }
-                    continue;
-                }
-                if slot.source_paths().iter().all(|path| {
-                    missing.contains_key(*path)
-                        || old_sources.get(*path) == current_sources.get(*path)
-                }) {
-                    let at = slot
-                        .t
-                        .and_then(|time| {
-                            slots
-                                .iter()
-                                .position(|current| current.t.is_some_and(|t| t > time))
-                        })
-                        .unwrap_or(slots.len());
-                    slots.insert(at, slot);
-                } else {
-                    incomplete = true;
-                }
-            }
-        }
-        let mut seen = BTreeSet::new();
-        slots.retain(|slot| seen.insert(slot.identity()));
-        let texts: Vec<String> = slots
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<_, _>>()
-            .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
-        let sources = crate::retention::source_generation(&history.sources)
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        let metadata = serde_json::to_string(&history)
-            .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
-        let generation = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&(VERSION, &sources, &texts, incomplete))
-                    .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?
-            )
-        );
-        store.composed(
-            &current.key,
-            &generation,
-            &sources,
-            &metadata,
-            &texts,
-            incomplete,
-        )?;
-        if let Some(observations) = publication.observations {
-            let mut observed = observations.clone();
-            if observed.runtime_capture_for(&history).is_some() {
-                let capture = observed
-                    .runtime_capture_for(&history)
-                    .ok_or(rusqlite::Error::InvalidQuery)?;
-                super::projection_tags::publish(
-                    store.db, store.namespace, &history,
-                    crate::storage::catalog::CatalogObservationOwner::History,
-                    &generation, Some(&capture),
-                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                continue;
-            }
-            let mut cwds = BTreeMap::new();
-            for source in &history.sources {
-                let cwd: Option<String> = store
-                    .db
-                    .query_row(
-                        "SELECT cwd FROM main.files WHERE namespace=?1 AND path=?2",
-                        params![store.namespace, source.path.to_string_lossy()],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten();
-                if let Some(cwd) = cwd {
-                    cwds.insert(source.path.clone(), cwd);
-                }
-            }
-            let cwds = cwds.into_values().collect();
-            if let Ok(runtime) = observed.runtime_observation(&history, &cwds) {
-                observed
-                    .capture_runtime(&history, &cwds, runtime)
-                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-                let capture = observed
-                    .runtime_capture_for(&history)
-                    .ok_or(rusqlite::Error::InvalidQuery)?;
-                super::projection_tags::publish(
-                    store.db, store.namespace, &history,
-                    crate::storage::catalog::CatalogObservationOwner::History,
-                    &generation, Some(&capture),
-                ).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-            }
-        }
-    }
-    Ok(())
+    let bytes = publication.rows.iter().try_fold(0usize, |total,row| {
+        serde_json::to_string(row).map(|text| total.saturating_add(text.len()))
+    }).map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
+    let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(bytes);
+    let (plan,captures) = crate::storage::catalog::prepare_history_composition(
+        store,publication.rows,publication.transcripts,publication.observations,&mut budget,
+    )?;
+    crate::storage::catalog::apply_prepared_history_composition(store,&plan,&captures)
 }
 
 impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistory<'_> {
@@ -733,35 +553,35 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                     }
                 }
             }
-            if !snapshot.unavailable
-                && snapshot.recipe_header.is_some()
-                && let Some(stream) = self.stream
-            {
-                let Some(exact_owner_metadata) = snapshot.previous.as_deref() else {
-                    snapshot.unavailable = true;
-                    return Ok(snapshot);
+            if !snapshot.unavailable && snapshot.recipe_header.is_some() {
+                let binding = crate::storage::QueryRuntimeBinding {
+                    namespace: crate::storage::LogicalSourceNamespace::new(self.namespace).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    admission: self.admission,
+                    stream_epoch: self.stream.ok_or(rusqlite::Error::InvalidQuery)?.to_owned(),
                 };
-                match super::proof_generations::verified_publication_receipts(
-                    self.db,
-                    super::proof_generations::PublicationReceiptRequest {
-                        namespace: self.namespace,
-                        session_key: &current.key,
-                        stream,
-                        publication_admission: self.admission,
-                        previous: previous_row,
-                        exact_owner_metadata,
-                        kind: if history_exists {
-                            super::proof_generations::PublicationReceiptRef::History
-                        } else {
-                            super::proof_generations::PublicationReceiptRef::Current
-                        },
-                    },
-                    budget,
-                )
-                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?
-                {
-                    Some(receipts) => snapshot.receipts = receipts,
-                    None => snapshot.unavailable = true,
+                let owner = if history_exists { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
+                if super::projection_tags::check(self.db,&binding,previous_row,owner).is_err() {
+                    snapshot.unavailable = true;
+                } else {
+                    let mut cwds = std::collections::BTreeMap::new();
+                    for text in &snapshot.recipe_slots {
+                        let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text).map_err(<Self as CompositeHistoryStore>::data)?;
+                        for (path,cwd) in slot.source_cwds() {
+                            let cwd = cwd.map(str::to_owned);
+                            if !previous_row.sources.iter().any(|source| &source.path == path) || cwds.get(path).is_some_and(|prior| prior != &cwd) {
+                                snapshot.unavailable = true;
+                                break;
+                            }
+                            cwds.insert(path.clone(),cwd);
+                        }
+                    }
+                    if !snapshot.unavailable {
+                        let prefix = crate::retention::source_generation(&previous_row.sources).map_err(<Self as CompositeHistoryStore>::data)?;
+                        let fingerprint = crate::native_evidence::runtime::cwd_fingerprint(&cwds.values().filter_map(Clone::clone).collect());
+                        snapshot.receipts.push(crate::storage::catalog::VerifiedHistoryReceipt::verified(
+                            prefix.clone(),prefix,previous_row.sources.clone(),snapshot.recipe_slots.clone(),fingerprint,cwds,
+                        ));
+                    }
                 }
             }
         }
@@ -790,7 +610,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             metadata,
             texts,
             incomplete,
-            receipt_ids,
+            receipt_ids: _,
             capture,
         } = composition;
         #[cfg(test)]
@@ -819,24 +639,9 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         if projection_changed > 0 || metadata_changed > 0 {
             self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
         }
-        let stream = self.stream.ok_or(rusqlite::Error::InvalidQuery)?;
-        super::proof_generations::replace_verified_history_refs(
-            self.db,
-            self.namespace,
-            key,
-            receipt_ids,
-        )
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-        super::proof_generations::native_history_observation_grant(
-            self.db,
-            self.namespace,
-            key,
-            self.admission,
-            stream,
-            metadata,
-            capture,
-        )
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let capture: crate::storage::selected::PresentationObservations = serde_json::from_str(capture).map_err(<Self as CompositeHistoryStore>::data)?;
+        super::projection_tags::publish(self.db,self.namespace,&row,crate::storage::catalog::CatalogObservationOwner::History,generation,Some(&capture))
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }

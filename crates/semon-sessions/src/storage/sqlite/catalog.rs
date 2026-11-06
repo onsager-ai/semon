@@ -602,15 +602,14 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
     }
     fn rows(&self, request: &Request) -> io::Result<Vec<SelectedCatalogRow>> {
         rows(self.0, request)
-            .map(|rows| {
-                rows.into_iter()
-                    .map(|row| SelectedCatalogRow {
-                        row,
-                        owner: Some(CatalogObservationOwner::Catalog),
-                    })
-                    .collect()
+            .map_err(io::Error::other)?
+            .into_iter()
+            .map(|row| {
+                super::projection_tags::check(self.0, &self.2, &row, CatalogObservationOwner::Catalog)
+                    .map_err(io::Error::other)?;
+                Ok(SelectedCatalogRow { row, owner: Some(CatalogObservationOwner::Catalog) })
             })
-            .map_err(io::Error::other)
+            .collect()
     }
     fn search(
         &self,

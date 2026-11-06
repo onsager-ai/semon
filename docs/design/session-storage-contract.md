@@ -54,6 +54,33 @@ there is no migration or dual-read path. Shared Catalog version 5 and PG
 publication envelope v1 remain unchanged, with no format activation in this
 prerequisite.
 
+## Projection-cache decision (2026-11-06)
+
+The SQL session store is a projection cache over authorized Raw. Each projection
+unit carries its Raw identity, consumed-prefix identity and current projector
+version. Readers compare that tag with the selected native source and projection
+generation. Unknown versions, mismatched prefixes and stale generations refuse
+or rebuild from available Raw; they never serve a mismatched projection. The
+existing ledger, chunk proofs and `proof_tree` verification against native or Raw
+bytes remain required through the selected-read lifetime.
+
+Presentation receipts/roots, ordinary and immutable publication receipts,
+observation grants/reconciliation and page-read receipt authentication are being
+removed. The implementation below is a diagnostic transition and is not accepted:
+SQLite ordinary publication and native observation reads have started using tags,
+while selected leases, transfer and PostgreSQL still contain the old machinery.
+Those remaining paths must be removed before this decision is implemented. The
+receipt descriptions later in this document describe that remaining code, not a
+compatibility requirement or an approved final contract.
+
+Reported Facts/usage from other machines, durable delivery epochs/heads/cursors,
+custody and generation markers, Raw intents/completions, claims and staging
+checkpoints retain transactional namespace integrity and PostgreSQL RLS. History
+whose Raw has been withdrawn is durable custody: withdrawal must hand History to
+that set before Current is replaced or removed, including partial publication.
+Receipt-bearing Semon stores are unsupported; refuse them or rebuild projections
+from authorized Raw without deleting user data or non-rebuildable custody.
+
 ## One current SQLite contract
 
 All current tables use the namespace-leading physical contract. Namespace-local

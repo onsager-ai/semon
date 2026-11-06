@@ -2469,64 +2469,15 @@ pub(crate) fn native_observation_grant(
 /// The direct Catalog writer owns one producer grant for the latest
 /// `session_catalog` metadata of each session. Semantic Stage keeps its
 /// immutable receipt grants in `meta` through `native_observation_grant`.
+#[cfg(test)]
 pub(crate) fn native_catalog_observation_grant(
-    db: &Connection,
-    namespace: &str,
-    session_key: &str,
-    admission: u64,
-    stream: &str,
-    metadata: &str,
-    observations: Option<&crate::storage::selected::PresentationObservations>,
+    db: &Connection, namespace: &str, session_key: &str, _admission: u64, _stream: &str,
+    metadata: &str, observations: Option<&crate::storage::selected::PresentationObservations>,
 ) -> Result<(), StorageError> {
-    let mut row: CatalogRow =
-        serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
-    if row.key != session_key {
-        return Err(StorageError::Unavailable);
-    }
-    // Catalog lifecycle is a display change. The publisher grant hashes the
-    // row in its producer form so either retained display tag selects it.
-    row.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
-    let admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-    let exact_semantic_owner = exact_immutable_observation_owner(
-        db,
-        namespace,
-        session_key,
-        "current",
-        admission,
-        stream,
-        &metadata,
-    )?;
-    let direct_capture = if exact_semantic_owner {
-        None
-    } else {
-        match observations.and_then(|observations| observations.runtime_capture_for(&row)) {
-            Some(capture) => {
-                if !capture.is_runtime_capture_for(&row) {
-                    return Err(StorageError::ScopeChanged);
-                }
-                let capture =
-                    serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
-                if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
-                    return Err(StorageError::HistoryRetentionBounds);
-                }
-                Some(capture)
-            }
-            None => None,
-        }
-    };
-    db.prepare_cached("INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,'catalog',?3,?4,?5,?6) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET metadata_digest=excluded.metadata_digest,admission=excluded.admission,stream=excluded.stream,direct_capture=excluded.direct_capture").map_err(failed)?.execute(
-        params![
-            namespace,
-            session_key,
-            proof_codec::digest(metadata.as_bytes()),
-            admission,
-            stream,
-            direct_capture
-        ],
-    )
-    .map_err(failed)?;
-    Ok(())
+    let row: CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
+    if row.key != session_key { return Err(StorageError::ScopeChanged); }
+    let generation: Option<String> = db.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2", params![namespace,session_key], |saved| saved.get(0)).optional().map_err(failed)?;
+    super::projection_tags::publish(db,namespace,&row,CatalogObservationOwner::Catalog,generation.as_deref().unwrap_or_default(),observations)
 }
 
 /// Store a fresh composed-row runtime capture in the existing physical
@@ -2661,12 +2612,7 @@ pub(crate) struct PreparedObservationUpdate {
     owner: CatalogObservationOwner,
     stored: String,
     metadata: String,
-    before_digest: String,
-    after_digest: String,
-    admission: i64,
-    stream: String,
     direct_capture: Option<String>,
-    existing_slot: bool,
     history_activity: (Option<i64>, bool),
 }
 
@@ -2685,20 +2631,10 @@ impl PreparedObservationUpdate {
         if changed != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        if self.existing_slot {
-            let changed = db.execute(
-                "UPDATE storage_catalog_native_observation_grants SET metadata_digest=?6,direct_capture=?8 WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3 AND metadata_digest=?4 AND admission=?5 AND stream=?7",
-                params![self.namespace, self.key, self.owner.kind(), self.before_digest, self.admission, self.after_digest, self.stream, self.direct_capture],
-            )?;
-            if changed != 1 {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-        } else {
-            db.execute(
-                "INSERT INTO storage_catalog_native_observation_grants(namespace,session_key,owner_kind,metadata_digest,admission,stream,direct_capture) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![self.namespace, self.key, self.owner.kind(), self.after_digest, self.admission, self.stream, self.direct_capture],
-            )?;
-        }
+        let repaired: CatalogRow = serde_json::from_str(&self.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let capture = self.direct_capture.as_deref().map(serde_json::from_str::<crate::storage::selected::PresentationObservations>).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let generation: String = db.query_row("SELECT generation FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3", params![self.namespace,self.key,self.owner.kind()], |row| row.get(0))?;
+        super::projection_tags::publish(db, &self.namespace, &repaired, self.owner, &generation, capture.as_ref()).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }
@@ -2777,7 +2713,6 @@ fn prepare_observation_update(
     #[cfg(test)]
     let _fault = ObservationReadFault::install(db, owner);
     let table = owner.table();
-    let owner_kind = owner.kind();
     let namespace = current.namespace.as_str();
     let stored: Option<Option<String>> = db
         .query_row(
@@ -2815,115 +2750,15 @@ fn prepare_observation_update(
         return Err(StorageError::ScopeChanged.into());
     }
 
-    let mut before = selected.clone();
-    before.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let before_metadata = serde_json::to_string(&before).map_err(|_| StorageError::Unavailable)?;
-    let before_digest = proof_codec::digest(before_metadata.as_bytes());
-    let admission = i64::try_from(current.admission).map_err(|_| StorageError::ScopeChanged)?;
-    let proof_kind = match owner {
-        CatalogObservationOwner::Catalog => "current",
-        CatalogObservationOwner::History => "history",
-    };
-    let owner_slot: Option<(String, i64, String, Option<String>, bool)> = db
-        .query_row(
-            "SELECT metadata_digest,admission,stream,CASE WHEN octet_length(direct_capture)<=8388608 THEN direct_capture END,direct_capture IS NOT NULL AND octet_length(direct_capture)>8388608 FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
-            params![namespace, selected.key, owner_kind],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-        )
-        .optional()
-        .map_err(ObservationPreparationError::Sql)?;
-    if owner_slot
-        .as_ref()
-        .is_some_and(|(digest, slot_admission, stream, _, _)| {
-            digest != &before_digest
-                || *slot_admission != admission
-                || stream != &current.stream_epoch
-        })
-    {
-        return Err(StorageError::ScopeChanged.into());
-    }
-    if owner_slot
-        .as_ref()
-        .is_some_and(|(_, _, _, _, oversized)| *oversized)
-    {
-        return Err(StorageError::HistoryRetentionBounds.into());
-    }
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
-    // Match the reader's decoding of the exact persisted postimage, including
-    // JSON floating-point values produced by repricing.
-    let mut normalized: CatalogRow =
-        serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
-    normalized.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-    let normalized = serde_json::to_string(&normalized).map_err(|_| StorageError::Unavailable)?;
-    if metadata.len() > 1_048_576 || normalized.len() > 1_048_576 {
-        return Err(StorageError::HistoryRetentionBounds.into());
-    }
-    // An immutable preimage authenticates the update, but only an exact
-    // postimage receipt can replace the new owner's independent capture.
-    let exact_postimage = exact_immutable_observation_owner(
-        db,
-        namespace,
-        &selected.key,
-        proof_kind,
-        admission,
-        &current.stream_epoch,
-        &normalized,
-    )?;
-    let direct_capture = if exact_postimage {
-        None
-    } else {
-        let immutable_preimage = exact_immutable_observation_owner(
-            db,
-            namespace,
-            &selected.key,
-            proof_kind,
-            admission,
-            &current.stream_epoch,
-            &before_metadata,
-        )?;
-        let (binding, observations) =
-            observation_binding_with_observations(db, current, selected, owner)?;
-        if binding != proven {
-            return Err(StorageError::ScopeChanged.into());
-        }
-        let capture = observations
-            .runtime_capture_for(repaired)
-            .filter(|capture| capture.is_runtime_capture_for(repaired));
-        if local_only
-            && immutable_preimage
-            && observations.runtime_for(repaired) == observations.runtime_for(selected)
-            && capture.is_some()
-        {
-            // Cost-only metadata keeps the authenticated receipt's exact
-            // source and runtime inputs. The new owner grant binds the
-            // postimage; it does not need a second runtime capture.
-            None
-        } else if let Some(capture) = capture {
-            let capture = serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)?;
-            if capture.len() > DIRECT_CAPTURE_MAX_BYTES {
-                return Err(StorageError::HistoryRetentionBounds.into());
-            }
-            Some(capture)
-        } else if !local_only {
-            // Query repair can change the dependency set, but cannot claim
-            // the old runtime capture authenticates those new dependencies.
-            None
-        } else {
-            return Err(StorageError::ScopeChanged.into());
-        }
-    };
+    if metadata.len() > 1_048_576 { return Err(StorageError::HistoryRetentionBounds.into()); }
+    let observations = super::projection_tags::check(db, current, selected, owner)?;
+    let direct_capture = observations.and_then(|observations| observations.runtime_capture_for(repaired))
+        .map(|capture| serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)).transpose()?;
+    if local_only && direct_capture.is_none() { return Err(StorageError::ScopeChanged.into()); }
     Ok(PreparedObservationUpdate {
-        namespace: namespace.to_owned(),
-        key: selected.key.clone(),
-        owner,
-        stored,
-        metadata,
-        before_digest,
-        after_digest: proof_codec::digest(normalized.as_bytes()),
-        admission,
-        stream: current.stream_epoch.clone(),
+        namespace: namespace.to_owned(), key: selected.key.clone(), owner, stored, metadata,
         direct_capture,
-        existing_slot: owner_slot.is_some(),
         history_activity: crate::storage::query::history_activity(repaired),
     })
 }

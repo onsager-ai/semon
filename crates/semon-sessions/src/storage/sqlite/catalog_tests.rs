@@ -3590,6 +3590,44 @@ fn source_projection_readiness_defers_oversized_metadata_and_source_context() {
 }
 
 #[test]
+fn projection_cache_tag_refuses_wrong_projector_and_altered_prefix() {
+    let fixture = Fixture::new();
+    fixture.publish(1);
+    let mut db = fixture.db();
+    let row: CatalogRow = serde_json::from_str(&db.query_row::<String,_,_>(
+        "SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='session-00000'", [], |row| row.get(0),
+    ).unwrap()).unwrap();
+    let reader = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
+    let tx = db.transaction().unwrap();
+    let binding = reader.runtime_binding_at(&tx).unwrap();
+    let check = || crate::storage::sqlite::projection_tags::check(&tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog);
+    assert!(check().is_ok());
+    tx.execute("UPDATE storage_projection_tags SET projector='unknown-projector' WHERE namespace=semon_namespace() AND session_key=?1", [&row.key]).unwrap();
+    assert!(matches!(check(), Err(crate::storage::StorageError::ScopeChanged)));
+    tx.execute("UPDATE storage_projection_tags SET projector='native-projection-v1',prefix_digest=?1 WHERE namespace=semon_namespace() AND session_key=?2", rusqlite::params!["0".repeat(64),row.key]).unwrap();
+    assert!(matches!(check(), Err(crate::storage::StorageError::ScopeChanged)));
+    tx.rollback().unwrap();
+}
+
+#[test]
+fn projection_cache_rebuild_rollback_restart_keeps_prior_publication() {
+    let fixture = Fixture::new();
+    fixture.publish(1);
+    let before = fixture.body("sid=session-00000");
+    assert_eq!(before.0, 200);
+    {
+        let mut db = fixture.db();
+        let tx = db.transaction().unwrap();
+        tx.execute("UPDATE storage_projection_tags SET projector='incomplete-rebuild' WHERE namespace=semon_namespace()", []).unwrap();
+        tx.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace()", []).unwrap();
+        // Closing the uncommitted producer models a crash before rebuild commit.
+    }
+    assert_eq!(fixture.body("sid=session-00000"), before);
+    fixture.publish_existing();
+    assert_eq!(fixture.body("sid=session-00000").0, 200);
+}
+
+#[test]
 fn source_projection_readiness_never_initializes_and_rejects_stale_headers() {
     let fixture = Fixture::new();
     let relative = "projects/project/session-00000.jsonl";
