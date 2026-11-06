@@ -2224,6 +2224,28 @@ mod tests {
     }
 
     #[test]
+    fn shared_namespace_collision_runs_on_one_configured_sqlite_store() {
+        let a = Fixture::new_with_namespace("collision-a");
+        let mut b = a.config.clone();
+        b.namespace = LogicalSourceNamespace::new("collision-b").unwrap();
+        crate::events::store::configured::NativeOwnership::admit_catalog_publisher(&b).unwrap();
+        crate::storage::source_observations::conformance::shared_source_namespace_collision(
+            || {
+                Box::new(SourceJournal::owned(
+                    crate::events::store::configured::NativeOwnership::restore(&a.config).unwrap(),
+                )) as Box<dyn SourceObservationStore>
+            },
+            "collision-a",
+            || {
+                Box::new(SourceJournal::owned(
+                    crate::events::store::configured::NativeOwnership::restore(&b).unwrap(),
+                )) as Box<dyn SourceObservationStore>
+            },
+            "collision-b",
+        );
+    }
+
+    #[test]
     fn configured_discovery_claim_cas_restart_and_originals() {
         let f = Fixture::new();
         let mut store = Box::new(SourceJournal::owned(

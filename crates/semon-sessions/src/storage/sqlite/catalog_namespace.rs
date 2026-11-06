@@ -59,6 +59,29 @@ pub(crate) fn register(
 /// explicit namespace predicate. Indexed Catalog ranges use main plus the same
 /// predicate, retaining namespace-leading covering indexes.
 pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
+    // Reader views depend only on committed schema: derive them once per
+    // qualified database identity and schema cookie, then reuse the DDL.
+    let version: i64 = db
+        .pragma_query_value(None, "schema_version", |r| r.get(0))
+        .map_err(failed)?;
+    let identity = crate::events::store::configured::layout_identity(db, version)?;
+    if let Some(views) = identity
+        .as_ref()
+        .and_then(crate::events::store::configured::qualified_reader_views)
+    {
+        db.execute_batch(&views).map_err(failed)?;
+        return Ok(true);
+    }
+    let views = reader_views(db)?;
+    db.execute_batch(&views).map_err(failed)?;
+    if let Some(identity) = &identity {
+        crate::events::store::configured::record_reader_views(identity, &views);
+    }
+    Ok(true)
+}
+
+fn reader_views(db: &Connection) -> Result<String, StorageError> {
+    let mut views = String::new();
     for table in QUALIFIED_CATALOG_TABLES {
         let current: bool = if *table == "session_catalog_changes" {
             // Revisions order the shared stream globally; namespace owns each
@@ -89,10 +112,10 @@ pub(crate) fn scope_readers(db: &Connection) -> Result<bool, StorageError> {
         if columns.is_empty() {
             return Err(StorageError::NamespaceUpgradePending);
         }
-        db.execute_batch(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT {columns} FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table))).map_err(failed)?;
+        views.push_str(&format!("CREATE TEMP VIEW IF NOT EXISTS {} AS SELECT {columns} FROM main.{} WHERE namespace=semon_namespace();", quote(table), quote(table)));
     }
-    db.execute_batch("CREATE TEMP VIEW IF NOT EXISTS meta AS SELECT namespace,key,value FROM main.meta WHERE namespace=semon_meta_scope(key);").map_err(failed)?;
-    Ok(true)
+    views.push_str("CREATE TEMP VIEW IF NOT EXISTS meta AS SELECT namespace,key,value FROM main.meta WHERE namespace=semon_meta_scope(key);");
+    Ok(views)
 }
 
 #[cfg(test)]

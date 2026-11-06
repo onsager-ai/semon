@@ -33,6 +33,17 @@ fn pg_source_shared_conformance_restart_cas_partial_foreign_and_nul() {
 }
 
 #[test]
+fn pg_source_shared_namespace_collision_refuses_foreign_operations() {
+    let (pool, _) = fixture(|_| {});
+    crate::storage::source_observations::conformance::shared_source_namespace_collision(
+        || Box::new(journal(&pool, "collision-a")),
+        "collision-a",
+        || Box::new(journal(&pool, "collision-b")),
+        "collision-b",
+    );
+}
+
+#[test]
 fn pg_source_intent_unknown_commit_reopen_binding_and_terminal_ack() {
     let (pool, _) = fixture(|_| {});
     let namespace = "intent\0scope";

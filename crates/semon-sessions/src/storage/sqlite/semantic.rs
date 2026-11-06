@@ -5972,3 +5972,37 @@ mod scoped_reduction_tests {
         assert!(!resolved, "ambiguity refusal leaves the endpoint untouched");
     }
 }
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    #[test]
+    fn staging_capability_cannot_open_the_publisher_search_writer() {
+        // Writer capabilities are distinct admitted handles, not connection
+        // flags. A staging-only source carries no Catalog publisher owner, so
+        // the publication writers refuse it before any statement runs.
+        let source = AdmittedSource {
+            config: StoreConfig {
+                backend: crate::storage::StoreBackend::Sqlite {
+                    database: std::path::PathBuf::from("staging-only.sqlite3"),
+                },
+                namespace: crate::storage::LogicalSourceNamespace::new("staging-only").unwrap(),
+                expected_stream_epoch: Some("a".repeat(64)),
+            },
+            owner: None,
+            admission: 1,
+            generation: None,
+        };
+        let db = Connection::open_in_memory().unwrap();
+        assert_eq!(
+            source.validate_publication(&db),
+            Err(StorageError::NamespaceUpgradePending)
+        );
+        assert!(matches!(
+            super::super::search::SearchWriter::admitted(&db, &source),
+            Err(StorageError::NamespaceUpgradePending)
+        ));
+        assert_eq!(db.total_changes(), 0);
+    }
+}

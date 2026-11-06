@@ -576,4 +576,70 @@ pub(crate) mod conformance {
         );
         assert_eq!(store.backfill_state().unwrap(), before);
     }
+
+    /// Two Sources sharing one backend observe the same relative path
+    /// independently. Each port refuses the other's operation without partial
+    /// effects, and the refusal survives reopening both ports.
+    pub(crate) fn shared_source_namespace_collision(
+        mut open_a: impl FnMut() -> Box<dyn SourceObservationStore>,
+        namespace_a: &str,
+        mut open_b: impl FnMut() -> Box<dyn SourceObservationStore>,
+        namespace_b: &str,
+    ) {
+        let paths = vec!["collision-shared".to_owned(), "collision-only-a".to_owned()];
+        let shared = vec![paths[0].clone()];
+        let mut a = open_a();
+        let mut b = open_b();
+        let b_initial = b.claims(&paths).unwrap();
+        assert_eq!(
+            a.discover(&discover_operation(namespace_a, &paths, false), &paths, false)
+                .unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        let a_claims = a.claims(&paths).unwrap();
+        assert_eq!(b.claims(&paths).unwrap(), b_initial);
+
+        // Source A's operation presented to Source B is refused with no effect.
+        let a_operation = discover_operation(namespace_a, &shared, false);
+        assert_eq!(
+            b.discover(&a_operation, &shared, false).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(b.claims(&paths).unwrap(), b_initial);
+        assert_eq!(
+            b.discover(&discover_operation(namespace_b, &shared, false), &shared, false)
+                .unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        let b_claims = b.claims(&paths).unwrap();
+        assert_eq!(a.claims(&paths).unwrap(), a_claims);
+
+        // A CAS on Source A's claim never changes Source B's same path.
+        let a_shared = a.claims(&shared).unwrap();
+        assert_eq!(
+            a.invalidate(&invalidate_operation(namespace_a, &a_shared), &a_shared)
+                .unwrap(),
+            SourceMutationReceipt::Applied
+        );
+        assert_ne!(a.claims(&shared).unwrap(), a_shared);
+        assert_eq!(b.claims(&paths).unwrap(), b_claims);
+        drop(a);
+        drop(b);
+
+        let mut b = open_b();
+        let mut a = open_a();
+        assert_eq!(b.claims(&paths).unwrap(), b_claims);
+        assert_eq!(
+            b.discover(&a_operation, &shared, false).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        let b_operation = discover_operation(namespace_b, &shared, true);
+        let a_after = a.claims(&paths).unwrap();
+        assert_eq!(
+            a.discover(&b_operation, &shared, true).unwrap(),
+            SourceMutationReceipt::Conflict
+        );
+        assert_eq!(a.claims(&paths).unwrap(), a_after);
+        assert_eq!(b.claims(&paths).unwrap(), b_claims);
+    }
 }

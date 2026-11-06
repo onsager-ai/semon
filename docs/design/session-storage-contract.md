@@ -72,6 +72,16 @@ unbound store or install the retired enrollment runtime. SQLite unenrollment
 refuses with `NamespaceUpgradePending` until current-format revocation is
 qualified; it never drops custody tables to restore unbound native writers.
 
+SQLite namespace and writer authority lives in the namespace-bound port types
+and their conformance tests, not in schema triggers or connection capability
+flags. Each writer capability is a distinct admitted Rust type, and its SQL binds
+the namespace explicitly. A store that still carries a retired schema-level guard
+family is an unsupported Semon layout and is refused. The physical layout is
+qualified once per database identity (path, device, inode and stream epoch) and
+committed schema cookie, not on every connection. PostgreSQL keeps its
+restricted-role row-level security. `scripts/check-native-storage-boundary.py`
+refuses a reintroduced guard family or retired capability flag.
+
 Catalog publication requires the current owner and expected generation. There is
 no unbound writer/history/search mode, transaction snapshot fallback or old Catalog
 assignment/import runtime. The obsolete assignment API has been removed. Fixtures

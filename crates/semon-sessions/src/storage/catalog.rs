@@ -205,6 +205,7 @@ pub(crate) trait CompositeHistoryStore {
     type Error;
     fn data(error: serde_json::Error) -> Self::Error;
     fn original(&self, key: &str) -> Result<bool, Self::Error>;
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     fn previous(&self, key: &str) -> Result<Option<String>, Self::Error>;
     fn history_exists(&self, key: &str) -> Result<bool, Self::Error>;
     fn retain_source(&self, row: &CatalogRow, source: &CatalogSource) -> Result<(), Self::Error>;
@@ -214,11 +215,13 @@ pub(crate) trait CompositeHistoryStore {
         current: &[CatalogSource],
     ) -> Result<bool, Self::Error>;
     fn clear(&self, key: &str) -> Result<(), Self::Error>;
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     fn previous_recipe(
         &self,
         key: &str,
     ) -> Result<(bool, Option<HistoryRecipeHeader>), Self::Error>;
     fn recipe_slots(&self, key: &str, history: bool) -> Result<Vec<String>, Self::Error>;
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     fn composed(
         &self,
         key: &str,

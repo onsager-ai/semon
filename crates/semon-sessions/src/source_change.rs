@@ -24,6 +24,7 @@ pub(crate) fn stat_generation(stat: &Stat) -> io::Result<String> {
 }
 
 impl AppendEvidence {
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     pub(crate) fn qualifies(&self, before: &Stat, after: &Stat) -> bool {
         valid_generation(&self.generation)
             && self.before == *before

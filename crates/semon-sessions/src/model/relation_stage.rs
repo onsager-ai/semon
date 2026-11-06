@@ -241,11 +241,14 @@ impl LifecycleAuthority {
 /// recorded ownership only; native identity and relationships are still reduced
 /// by the existing parser/matcher over the resulting complete Raw cohort.
 pub(crate) trait LifecycleStore {
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     fn path_owners(&self, path: &str) -> io::Result<Vec<String>>;
     fn owner(&self, key: &str) -> io::Result<summary::CatalogRow>;
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     fn neighbors(&self, key: &str) -> io::Result<Vec<String>>;
 }
 
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
 pub(crate) fn affected_owners(
     store: &impl LifecycleStore,
     paths: &[String],

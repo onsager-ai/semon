@@ -280,7 +280,7 @@ mod tests {
         let f = Fixture::new();
         let admitted = f.config.admit_namespace().unwrap();
         f.db()
-            .execute_batch("CREATE TRIGGER storage_catalog_guard_session_catalog_INSERT BEFORE INSERT ON session_catalog BEGIN SELECT 1; END;")
+            .execute_batch("CREATE TRIGGER storage_catalog_guard_session_catalog_INSERT BEFORE INSERT ON session_catalog BEGIN SELECT 1; END; -- LEGACY_GUARD_FIXTURE")
             .unwrap();
         let before = std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap();
         for _ in 0..2 {
@@ -288,9 +288,7 @@ mod tests {
                 f.config.admit_namespace(),
                 Err(StorageError::NamespaceUpgradePending)
             );
-            assert!(
-                crate::events::store::configured::NativeOwnership::restore(&f.config).is_err()
-            );
+            assert!(crate::events::store::configured::NativeOwnership::restore(&f.config).is_err());
         }
         assert_eq!(
             std::fs::read(f.config.backend.sqlite_database().unwrap()).unwrap(),

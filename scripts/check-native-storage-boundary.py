@@ -35,4 +35,20 @@ if not args.discover:
     inventory = json.loads((root / "storage/sqlite/writer-inventory.json").read_text())
     if set(inventory["unqualified_paths"]) != listed or inventory["writer_qualification"] != 0:
         raise SystemExit("Namespace writer qualification must match the unported path inventory")
+    # SQLite namespace and writer authority live in the namespace-bound port
+    # types, not in schema triggers or connection capability flags. Refuse a
+    # reintroduced guard family or retired capability function anywhere in the
+    # crate, including tests (tests may only create the legacy names as
+    # refusal fixtures through LEGACY_GUARD_FIXTURE).
+    retired = re.compile(
+        r"CREATE TRIGGER (?:IF NOT EXISTS )?\{?(?:storage_(?:owned|semantic|source|event|catalog)_guard_|storage_event_scope_|storage_private_unported_)"
+        r"|\bsemon_(?:event_writer|semantic_writer|source_backfill_writer)\b"
+    )
+    for path in sorted(root.rglob("*.rs")):
+        source = path.read_text()
+        for line_number, line in enumerate(source.splitlines(), 1):
+            if retired.search(line) and "LEGACY_GUARD_FIXTURE" not in line:
+                raise SystemExit(
+                    f"Retired SQLite guard or capability flag reintroduced: {path}:{line_number}"
+                )
     print("Native storage boundary matches the explicit remaining-path inventory.")

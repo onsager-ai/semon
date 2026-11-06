@@ -528,9 +528,6 @@ pub(crate) fn validate_semantic_schema(config: &StoreConfig) -> Result<(), Stora
     SourceJournal(config.clone()).validate(&db)
 }
 
-pub(crate) fn semantic_tables() -> &'static [&'static str] {
-    semantic_stage::STAGE_TABLES
-}
 pub(crate) fn semantic_recipe() -> &'static str {
     semantic_stage::RECIPE
 }
@@ -611,13 +608,18 @@ pub(crate) fn validate_catalog_publication_profile(
 /// Database file identity (path, device, inode), its random stream epoch and
 /// committed schema cookie. A layout qualified under one identity is reused
 /// by every later connection to the same database in this process.
-type LayoutIdentity = (String, u64, u64, String, i64);
+pub(crate) type LayoutIdentity = (String, u64, u64, String, i64);
 
-static QUALIFIED_LAYOUTS: std::sync::Mutex<BTreeSet<LayoutIdentity>> =
-    std::sync::Mutex::new(BTreeSet::new());
+/// Qualified committed layouts, with the namespace reader views derived from
+/// the same schema once a reader has scoped a connection to it.
+static QUALIFIED_LAYOUTS: std::sync::Mutex<BTreeMap<LayoutIdentity, Option<String>>> =
+    std::sync::Mutex::new(BTreeMap::new());
 const QUALIFIED_LAYOUT_LIMIT: usize = 256;
 
-fn layout_identity(db: &Connection, version: i64) -> Result<Option<LayoutIdentity>, StorageError> {
+pub(crate) fn layout_identity(
+    db: &Connection,
+    version: i64,
+) -> Result<Option<LayoutIdentity>, StorageError> {
     let Some(path) = db.path().filter(|path| !path.is_empty()) else {
         return Ok(None);
     };
@@ -635,12 +637,32 @@ fn layout_identity(db: &Connection, version: i64) -> Result<Option<LayoutIdentit
         return Ok(None);
     };
     let epoch: Option<String> = db
-        .prepare_cached("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'")
+        .prepare_cached(
+            "SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'",
+        )
         .map_err(failed)?
         .query_row([], |r| r.get(0))
         .optional()
         .map_err(failed)?;
     Ok(epoch.map(|epoch| (path.to_owned(), device, inode, epoch, version)))
+}
+
+/// Reader view DDL already derived for a qualified committed layout.
+pub(crate) fn qualified_reader_views(identity: &LayoutIdentity) -> Option<String> {
+    QUALIFIED_LAYOUTS
+        .lock()
+        .ok()
+        .and_then(|layouts| layouts.get(identity).cloned().flatten())
+}
+
+/// Retain reader view DDL only for a layout already qualified as committed:
+/// an uncommitted schema cookie is never a key in the qualified set.
+pub(crate) fn record_reader_views(identity: &LayoutIdentity, views: &str) {
+    if let Ok(mut layouts) = QUALIFIED_LAYOUTS.lock()
+        && let Some(entry) = layouts.get_mut(identity)
+    {
+        *entry = Some(views.to_owned());
+    }
 }
 
 /// Schema-level guard trigger families retired from the current SQLite
@@ -723,7 +745,7 @@ impl NativeOwnership {
         let qualified = identity.as_ref().is_some_and(|identity| {
             QUALIFIED_LAYOUTS
                 .lock()
-                .is_ok_and(|layouts| layouts.contains(identity))
+                .is_ok_and(|layouts| layouts.contains_key(identity))
         });
         if !qualified {
             Self::qualify_physical(db)?;
@@ -751,7 +773,7 @@ impl NativeOwnership {
                 if layouts.len() >= QUALIFIED_LAYOUT_LIMIT {
                     layouts.clear();
                 }
-                layouts.insert(identity);
+                layouts.insert(identity, None);
             }
         }
         Ok(())
@@ -782,7 +804,11 @@ impl NativeOwnership {
         // Namespace and writer authority belong to the typed ports. A store
         // still carrying the earlier schema-level guard families is an
         // unsupported Semon layout: refuse it rather than adopt its triggers.
-        let legacy_guards: bool = db.prepare_cached(LEGACY_GUARD_TRIGGERS).map_err(failed)?.query_row([], |r| r.get(0)).map_err(failed)?;
+        let legacy_guards: bool = db
+            .prepare_cached(LEGACY_GUARD_TRIGGERS)
+            .map_err(failed)?
+            .query_row([], |r| r.get(0))
+            .map_err(failed)?;
         if legacy_guards {
             return Err(StorageError::NamespaceUpgradePending);
         }
@@ -7202,7 +7228,7 @@ mod tests {
             // the ports refuse it instead of adopting or repairing it.
             let f = Fixture::new();
             f.db()
-                .execute_batch(&format!("CREATE TRIGGER storage_owned_guard_{table}_UPDATE BEFORE UPDATE ON {table} BEGIN SELECT 1; END;"))
+                .execute_batch(&format!("CREATE TRIGGER storage_owned_guard_{table}_UPDATE BEFORE UPDATE ON {table} BEGIN SELECT 1; END; -- LEGACY_GUARD_FIXTURE"))
                 .unwrap();
             let before = f.state();
             assert!(NativeOwnership::restore(&f.config).is_err(), "{table}");
@@ -7281,7 +7307,7 @@ mod tests {
         // A committed retired guard family invalidates the cached layout.
         let other = f.db();
         other
-            .execute_batch("CREATE TRIGGER storage_owned_guard_files_UPDATE BEFORE UPDATE ON files BEGIN SELECT 1; END;")
+            .execute_batch("CREATE TRIGGER storage_owned_guard_files_UPDATE BEFORE UPDATE ON files BEGIN SELECT 1; END; -- LEGACY_GUARD_FIXTURE")
             .unwrap();
         assert!(writer.ledger(&path).is_err());
         other
@@ -7294,7 +7320,7 @@ mod tests {
             .pragma_query_value(None, "schema_version", |row| row.get(0))
             .unwrap();
         let tx = writer.connection.transaction().unwrap();
-        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_INSERT BEFORE INSERT ON files BEGIN SELECT 1; END;")
+        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_INSERT BEFORE INSERT ON files BEGIN SELECT 1; END; -- LEGACY_GUARD_FIXTURE")
             .unwrap();
         let dropped_cookie: i64 = tx
             .pragma_query_value(None, "schema_version", |row| row.get(0))
@@ -7320,7 +7346,7 @@ mod tests {
         tx.rollback().unwrap();
 
         let tx = writer.connection.transaction().unwrap();
-        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_DELETE BEFORE DELETE ON files BEGIN SELECT 1; END;")
+        tx.execute_batch("CREATE TRIGGER storage_owned_guard_files_DELETE BEFORE DELETE ON files BEGIN SELECT 1; END; -- LEGACY_GUARD_FIXTURE")
             .unwrap();
         assert_eq!(
             tx.pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
@@ -8775,17 +8801,13 @@ mod tests {
                 |_| Ok("source-a".to_owned()),
             )
             .unwrap();
-            for name in [
+            db.create_scalar_function(
                 "semon_semantic_publisher",
-            ] {
-                db.create_scalar_function(
-                    name,
-                    0,
-                    FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
-                    |_| Ok(1_i64),
-                )
-                .unwrap();
-            }
+                0,
+                FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_INNOCUOUS,
+                |_| Ok(1_i64),
+            )
+            .unwrap();
             db
         }
 

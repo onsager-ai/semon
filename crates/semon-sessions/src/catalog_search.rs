@@ -328,6 +328,8 @@ pub(crate) fn publish_scoped_rows_with_store<
 
 /// One metadata-search producer; adapters own only physical effects. The phase
 /// callback keeps SQLite's existing performance probes outside the algorithm.
+// Only the PostgreSQL adapter drives this port outside SQLite tests.
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
 pub(crate) fn publish_current_rows_port<P: crate::storage::catalog::SearchPublicationStore>(
     store: &P,
     rows: &[&CatalogRow],
