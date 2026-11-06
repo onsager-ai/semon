@@ -705,7 +705,7 @@ impl ViewerCore {
     #[cfg(test)]
     pub(crate) fn with_test_view(view: Arc<MachineView>) -> Self {
         let core = Self::with_machines(Vec::new());
-        *write_lock(&core.views) = Arc::new(vec![(String::new(), view)]);
+        *write_lock(&core.views) = Arc::new(vec![(view.evidence.source_key(), view)]);
         core
     }
 
