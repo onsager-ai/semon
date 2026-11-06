@@ -450,7 +450,9 @@ impl SessionSources {
 
 /// The namespace of a host's source key. Keys are configured source names,
 /// so one that is no namespace is a host configuration error.
-pub(crate) fn source_namespace(key: &str) -> Result<crate::storage::Namespace, crate::storage::StorageError> {
+pub(crate) fn source_namespace(
+    key: &str,
+) -> Result<crate::storage::Namespace, crate::storage::StorageError> {
     crate::storage::Namespace::new(key)
 }
 

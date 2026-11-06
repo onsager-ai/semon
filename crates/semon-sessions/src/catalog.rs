@@ -3778,9 +3778,14 @@ mod tests {
         assert_eq!(proof.source.offset, proof.size);
         assert_eq!(proof.freshness.state, "cached");
         assert!(
-            session_source_proof(&fixture.options, "", "claude", "projects/project/missing.jsonl")
-                .unwrap()
-                .is_none()
+            session_source_proof(
+                &fixture.options,
+                "",
+                "claude",
+                "projects/project/missing.jsonl"
+            )
+            .unwrap()
+            .is_none()
         );
         assert_eq!(
             session_source_proof(&fixture.options, "", "claude", "../bad.jsonl"),
@@ -3873,10 +3878,14 @@ mod tests {
         bytes.extend_from_slice(b"{\"type\":\"user\"");
         fs::write(&native, &bytes).unwrap();
         fixture.publish_existing();
-        let proof =
-            session_source_proof(&fixture.options, "", "claude", "projects/project/partial.jsonl")
-                .unwrap()
-                .unwrap();
+        let proof = session_source_proof(
+            &fixture.options,
+            "",
+            "claude",
+            "projects/project/partial.jsonl",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proof.source.offset, complete.len() as u64);
         assert_eq!(proof.size, bytes.len() as u64);
         assert_eq!(proof.freshness.state, "incomplete");
@@ -3888,7 +3897,12 @@ mod tests {
         fs::write(&replacement, &bytes).unwrap();
         fs::rename(replacement, native).unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "", "claude", "projects/project/partial.jsonl"),
+            session_source_proof(
+                &fixture.options,
+                "",
+                "claude",
+                "projects/project/partial.jsonl"
+            ),
             Err(CatalogIdentityError::Unavailable)
         );
     }
@@ -3908,7 +3922,8 @@ mod tests {
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             SQL_STEPS.with(|value| value.set(0));
             let proof = session_source_proof(
-                &fixture.options, "",
+                &fixture.options,
+                "",
                 "claude",
                 "projects/project/session-00000.jsonl",
             )
@@ -3921,7 +3936,8 @@ mod tests {
                 let start = std::time::Instant::now();
                 assert!(
                     session_source_proof(
-                        &fixture.options, "",
+                        &fixture.options,
+                        "",
                         "claude",
                         "projects/project/session-00000.jsonl"
                     )
@@ -7775,7 +7791,8 @@ mod tests {
             path: "projects/project/selected.jsonl".into(),
         };
         let intent = crate::SessionSourceWrite::begin(
-            &fixture.options, "",
+            &fixture.options,
+            "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -7902,7 +7919,8 @@ mod tests {
             path: archived.into(),
         };
         let intent = SessionSourceWrite::begin(
-            &fixture.options, "",
+            &fixture.options,
+            "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -8078,7 +8096,8 @@ mod tests {
         };
         let from = fs::metadata(&path).unwrap().len();
         let intent = crate::SessionSourceWrite::begin(
-            &fixture.options, "",
+            &fixture.options,
+            "",
             &input,
             Some("1".repeat(32).as_str()),
             from,
@@ -8220,7 +8239,8 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             for phase in 0..3 {
                 let intent =
-                    crate::SessionSourceWrite::begin(&fixture.options, "", &input, None, 0).unwrap();
+                    crate::SessionSourceWrite::begin(&fixture.options, "", &input, None, 0)
+                        .unwrap();
                 fs::write(&path,json!({"sessionId":if phase==0 {"selected-a"} else {"selected-b"},"name":format!("runtime-{phase}")}).to_string()).unwrap();
                 if phase == 1 {
                     drop(intent); // Raw committed, process lost before Index intent completion.
@@ -8450,7 +8470,8 @@ mod tests {
                 path: "projects/project/cleared.jsonl".into(),
             };
             let intent = crate::SessionSourceWrite::begin(
-                &fixture.options, "",
+                &fixture.options,
+                "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 0,
@@ -8636,7 +8657,8 @@ mod tests {
             };
             let from = fs::metadata(&path).unwrap().len();
             let intent = crate::SessionSourceWrite::begin(
-                &fixture.options, "",
+                &fixture.options,
+                "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 from,

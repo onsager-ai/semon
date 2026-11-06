@@ -72,7 +72,8 @@ impl SessionSourceWrite {
             input.full_path(options).to_string_lossy().as_ref(),
         )?;
         let before = Stat::of(&input.full_path(options)).ok();
-        let (revision, previous) = crate::events::store::begin_source_write(options, &namespace, input)?;
+        let (revision, previous) =
+            crate::events::store::begin_source_write(options, &namespace, input)?;
         if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
             let previous_id = crate::read_regular_at_most(&input.full_path(options), 65536)
                 .ok()
@@ -239,7 +240,11 @@ impl SessionFactsWrite {
     }
     // The reference receiver journals facts, but its Raw transport does not
     // journal every mutation. Keep ordinary metadata discovery for that reader.
-    pub(crate) fn begin_observed(options: &Options, source_key: &str, wanted: &crate::Facts) -> io::Result<Self> {
+    pub(crate) fn begin_observed(
+        options: &Options,
+        source_key: &str,
+        wanted: &crate::Facts,
+    ) -> io::Result<Self> {
         Self::begin_with_source_journal(options, source_key, wanted, false)
     }
     fn begin_with_source_journal(

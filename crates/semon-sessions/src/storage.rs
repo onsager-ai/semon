@@ -10,6 +10,8 @@
 //! unit carries a [`ProjectionTag`] that readers check against the committed
 //! ledger before serving it.
 pub(crate) mod sqlite;
+#[cfg(feature = "postgres")]
+pub(crate) mod postgres;
 
 #[cfg(test)]
 mod conformance;
@@ -28,10 +30,10 @@ const NAMESPACE_MAX: usize = 4096;
 /// A logical source namespace. Machine identity, native session identity and
 /// public addressing never depend on where its database is placed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct Namespace(String);
+pub struct Namespace(String);
 
 impl Namespace {
-    pub(crate) fn new(name: &str) -> Result<Self, StorageError> {
+    pub fn new(name: &str) -> Result<Self, StorageError> {
         if name.len() > NAMESPACE_MAX || name.contains('\0') {
             return Err(StorageError::InvalidNamespace);
         }
@@ -65,7 +67,7 @@ impl fmt::Display for Namespace {
 /// Why a port operation was refused. Every variant is returned before the
 /// operation changes durable state.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum StorageError {
+pub enum StorageError {
     InvalidNamespace,
     /// The capability or database is bound to another namespace.
     WrongNamespace {
@@ -116,19 +118,19 @@ fn ensure(bound: &Namespace, requested: &Namespace) -> Result<(), StorageError> 
 /// so a same-identity rewrite that grows past the published boundary is told
 /// apart from an append.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectionTag {
-    pub(crate) dev: u64,
-    pub(crate) ino: u64,
-    pub(crate) offset: u64,
-    pub(crate) prefix_sha256: [u8; 32],
-    pub(crate) tail_sha256: [u8; 32],
-    pub(crate) epoch: i64,
-    pub(crate) projector: u32,
+pub struct ProjectionTag {
+    pub dev: u64,
+    pub ino: u64,
+    pub offset: u64,
+    pub prefix_sha256: [u8; 32],
+    pub tail_sha256: [u8; 32],
+    pub epoch: i64,
+    pub projector: u32,
 }
 
 /// How a stored tag relates to the committed ledger of the same source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TagCheck {
+pub enum TagCheck {
     /// The unit was projected from exactly the committed prefix.
     Current,
     /// The ledger appended to the same Raw identity; the published prefix

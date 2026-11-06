@@ -1,0 +1,65 @@
+name: PostgreSQL projection conformance
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [codex/477-rebuild-diagnostic-20261106-20]
+permissions:
+  contents: read
+env:
+  SEMON_PRICING_REFRESH: "off"
+  SEMON_PG_ADMIN_TEST_DSN: "host=127.0.0.1 user=postgres password=ephemeral-admin dbname=postgres connect_timeout=2"
+  SEMON_PG_TEST_DSN: "host=127.0.0.1 user=semon_app password=ephemeral-app dbname=postgres connect_timeout=2"
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: ephemeral-admin
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: pg-projection-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Provision restricted application role
+        env:
+          PGPASSWORD: ephemeral-admin
+        run: |
+          psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE semon_app LOGIN PASSWORD 'ephemeral-app' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
+      - name: Resolve optional dependency lock and prepare formatting patch
+        run: |
+          cargo metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          mkdir -p "$RUNNER_TEMP/pg-review"
+          cp Cargo.lock "$RUNNER_TEMP/pg-review/Cargo.lock"
+          cargo fmt --all
+          git diff --binary -- '*.rs' > "$RUNNER_TEMP/pg-review/rustfmt.patch"
+          git apply --reverse "$RUNNER_TEMP/pg-review/rustfmt.patch"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pg-review
+          path: ${{ runner.temp }}/pg-review/
+      - name: SQLite storage conformance
+        run: cargo test --locked -p semon-sessions --lib storage::conformance:: -- --nocapture
+      - name: PostgreSQL projection and restricted-role RLS conformance
+        env:
+          SEMON_PG_EMPTY_ROOT: ${{ runner.temp }}/pg-empty
+        run: |
+          mkdir "$SEMON_PG_EMPTY_ROOT"
+          cargo test --locked -p semon-sessions --lib --features postgres storage::conformance:: -- --nocapture
+      - name: PostgreSQL feature strict clippy
+        run: cargo clippy --locked -p semon-sessions --all-targets --features postgres -- --no-deps -D warnings

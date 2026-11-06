@@ -106,7 +106,8 @@ mod tests {
         }
         fn proof(&self) -> crate::SessionSourceProof {
             crate::session_source_proof(
-                &self.options, "",
+                &self.options,
+                "",
                 "codex",
                 "sessions/2026/09/24/rollout-file.jsonl",
             )
