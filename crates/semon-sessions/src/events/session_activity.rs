@@ -200,7 +200,7 @@ impl OwnershipTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionActivityAggregate {
     pub(crate) totals: OwnershipTotals,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
