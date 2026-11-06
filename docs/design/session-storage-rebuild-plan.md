@@ -161,9 +161,39 @@ Namespace isolation is enforced by row-level security for a restricted role.
 The transaction foundation and ownership work from PR #487 and PR #485 is the
 porting reference.
 
+Implementation checkpoint (2026-11-07): partial slice, not a selectable
+PostgreSQL session backend yet.
+
+- Carried fixes: invalid host source keys are retained as lazy configuration
+  errors and refused before opening an index. `SessionSourceWrite`,
+  `SessionFactsWrite`, `collect`, `FactsSource`/`local_facts`,
+  `retain_source_event_index` and `session_source_proof` take an explicit source
+  key. Custody journal transactions bind/check their own connection; read-only
+  proofs and retention check the requested namespace in their snapshot.
+- Optional `postgres` feature: an injectable `PgProjectionStore` provides
+  repeatable-read projection transactions, namespace binding, version stamps,
+  ledger CAS, namespace-wide replacement epochs, tag publication and tag checks.
+  The host provisions `POSTGRES_PROJECTION_SCHEMA` with a separate owner role.
+  All tables have forced RLS; the adapter refuses superuser, BYPASSRLS and table
+  owner application clients. Namespace context is transaction-local. This module
+  opens no local database and reads no credentials.
+- CI: `postgres.yml` uses a free PostgreSQL 16 service container and a restricted
+  non-owner application role. The storage conformance module exercises SQLite
+  and the PostgreSQL transaction subset, direct SQL foreign-row read/write
+  refusals, context reuse, ledger conflicts/rollback and unchanged local files.
+  The unchanged-local-files assertion covers this projection API only; it is
+  not qualification of a complete PostgreSQL mode.
+- Still required: PostgreSQL implementations of `SessionStore`'s Catalog reader,
+  native index writer and publisher, normalized events/recipes/proofs, custody
+  operations, producer integration and explicit startup backend selection. No
+  PostgreSQL startup option is exposed while those paths still require SQLite.
+  Full shared semantic conformance and PostgreSQL cold first-page timing remain
+  pending. The reported projection transaction time is not first-page timing.
+
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is
-created in PostgreSQL mode.
+created in PostgreSQL mode. The transaction subset does not complete these
+full-backend acceptance checks.
 
 Main tests that guard it: the whole SQLite suite stays green; the PostgreSQL
 job is added without loosening any existing job.

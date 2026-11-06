@@ -112,8 +112,9 @@ impl PgProjectionTransaction<'_> {
         self.tx.query_opt("SELECT dev,ino,consumed,prefix,tail,epoch,projector FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &path]).await.map_err(backend)?.as_ref().map(decode).transpose()
     }
 
-    /// Ledger CAS and epoch allocation are one transaction. An append preserves
-    /// its epoch; a replacement gets a new namespace-wide epoch. A conflicting
+    /// Ledger CAS and epoch allocation are one transaction. `append` requires
+    /// the caller's native byte proof that this extends the consumed prefix.
+    /// An append preserves its epoch; a replacement gets a new epoch. A conflicting
     /// caller must roll back and rescan Raw rather than acknowledge its range.
     pub async fn write_ledger(
         &self,
@@ -136,7 +137,14 @@ impl PgProjectionTransaction<'_> {
             return Ok(None);
         }
         next.epoch = match actual.filter(|_| append) {
-            Some(previous) if previous.check(&next) == TagCheck::Advanced => previous.epoch,
+            Some(previous)
+                if previous.check(&ProjectionTag {
+                    epoch: previous.epoch,
+                    ..next
+                }) == TagCheck::Advanced =>
+            {
+                previous.epoch
+            }
             Some(previous) if previous == next => previous.epoch,
             _ => self.tx.query_one("UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1 RETURNING epoch", &[&namespace.binding()]).await.map_err(backend)?.get(0),
         };

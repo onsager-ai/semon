@@ -48,7 +48,9 @@ jobs:
           cp Cargo.lock "$RUNNER_TEMP/pg-review/Cargo.lock"
           cargo fmt --all
           git diff --binary -- '*.rs' > "$RUNNER_TEMP/pg-review/rustfmt.patch"
-          git apply --reverse "$RUNNER_TEMP/pg-review/rustfmt.patch"
+          if test -s "$RUNNER_TEMP/pg-review/rustfmt.patch"; then
+            git apply --reverse "$RUNNER_TEMP/pg-review/rustfmt.patch"
+          fi
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: pg-review

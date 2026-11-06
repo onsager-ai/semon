@@ -5150,7 +5150,7 @@ mod tests {
     fn two_machines_with_one_hostname_stay_two_and_offline_facts_say_so() {
         let (first, second) = (machine("twin", "lane-1"), machine("twin", "lane-2"));
         let facts = second.root.join("facts.json");
-        let mut recorded = crate::local_facts(&second.options, "")
+        let mut recorded = crate::local_facts(&second.options, "two")
             .unwrap()
             .offline(1_790_000_000_000);
         recorded.hostname = "twin".into();
