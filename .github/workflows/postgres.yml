@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [codex/477-rebuild-diagnostic-20261106-20]
+    branches: [main, codex/477-rebuild-20261106, codex/477-rebuild-diagnostic-20261106-20]
 permissions:
   contents: read
 env:
@@ -41,9 +41,9 @@ jobs:
           PGPASSWORD: ephemeral-admin
         run: |
           psql -h 127.0.0.1 -U postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE semon_app LOGIN PASSWORD 'ephemeral-app' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE"
-      - name: Resolve optional dependency lock and prepare formatting patch
+      - name: Validate locked dependencies and prepare formatting patch
         run: |
-          cargo metadata --format-version 1 > "$RUNNER_TEMP/metadata.json"
+          cargo metadata --locked --format-version 1 > "$RUNNER_TEMP/metadata.json"
           mkdir -p "$RUNNER_TEMP/pg-review"
           cp Cargo.lock "$RUNNER_TEMP/pg-review/Cargo.lock"
           cargo fmt --all
@@ -55,6 +55,8 @@ jobs:
         with:
           name: pg-review
           path: ${{ runner.temp }}/pg-review/
+      - name: Check formatting
+        run: cargo fmt --all --check
       - name: SQLite storage conformance
         run: |
           cargo test --locked -p semon-sessions --lib storage::conformance:: -- --nocapture
