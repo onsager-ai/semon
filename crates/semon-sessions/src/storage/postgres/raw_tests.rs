@@ -60,7 +60,11 @@ pub(super) async fn lifecycle(dsn: &str) {
         Some(generation.clone())
     );
     let pending = tx.begin_raw_write(&namespace, &input).await.unwrap();
-    assert!(!tx.complete_raw_write(&namespace, rolled_back, &generation).await.unwrap());
+    assert!(
+        !tx.complete_raw_write(&namespace, rolled_back, &generation)
+            .await
+            .unwrap()
+    );
     assert!(tx.raw_write_pending(&namespace, &input).await.unwrap());
     tx.commit(&namespace).await.unwrap();
     let foreign = Namespace::new("foreign-raw-custody").unwrap();
