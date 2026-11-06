@@ -12027,6 +12027,45 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 }
 
 #[test]
+fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
+    let fixture = Fixture::new();
+    let first = fixture.source("first");
+    let first_copy = fixture.options.claude_home.join("projects/project/first-copy.jsonl");
+    let mut raw = fs::read_to_string(&first).unwrap();
+    raw.push_str(&format!("{}\n", json!({"type":"continued-in","sessionId":"first","continuedInSessionId":"first-copy","timestamp":"2026-10-01T00:00:00Z"})));
+    fs::write(&first, raw).unwrap();
+    fs::write(&first_copy, format!("{}\n", json!({"type":"user","sessionId":"first-copy","uuid":"first-copy","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"synthetic prompt copy"}}))).unwrap();
+    fixture.publish_existing();
+    let slots = |table: &str| {
+        fixture.db().prepare(&format!("SELECT metadata FROM main.{table} WHERE namespace=semon_namespace() AND session_key='first' ORDER BY slot")).unwrap()
+            .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let original = slots("session_slots");
+    let missing = original.iter().filter(|text| {
+        serde_json::from_str::<crate::slot_projection::SavedSlot>(text).unwrap().source_paths().contains(&&first_copy)
+    }).cloned().collect::<Vec<_>>();
+    assert!(!missing.is_empty());
+    fs::remove_file(&first_copy).unwrap();
+    fixture.publish_existing();
+    assert_eq!(slots("session_history_slots"), original);
+    writeln!(fs::OpenOptions::new().append(true).open(&first).unwrap(), "{}", json!({"type":"assistant","sessionId":"first","uuid":"repeated-history","parentUuid":"first","timestamp":"2026-10-02T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"updated native answer"}]}})).unwrap();
+    fixture.publish_existing();
+    let history = slots("session_history_slots");
+    let current = slots("session_slots");
+    assert!(current.iter().all(|slot| history.contains(slot)));
+    assert!(missing.iter().all(|slot| history.contains(slot)));
+    assert!(current.iter().any(|text| serde_json::from_str::<crate::slot_projection::SavedSlot>(text).unwrap().native_event_id.as_deref() == Some("repeated-history")));
+    let db = fixture.db();
+    let current: String = db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='first'", [], |row| row.get(0)).unwrap();
+    let retained: String = db.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='first'", [], |row| row.get(0)).unwrap();
+    let current: crate::model::summary::CatalogRow = serde_json::from_str(&current).unwrap();
+    let retained: crate::model::summary::CatalogRow = serde_json::from_str(&retained).unwrap();
+    assert_eq!(current.sources.len(), 1);
+    assert_eq!(retained.sources.len(), 2);
+    assert_eq!(retained.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+}
+
+#[test]
 fn semantic_summary_overflow_rolls_back_prior_row_and_defers_whole_next_group() {
     let fixture = Fixture::new();
     let first = fixture.source("first");
