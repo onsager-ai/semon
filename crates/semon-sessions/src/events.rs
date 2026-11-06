@@ -81,7 +81,9 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v23: native connector completions and tool search are tools, including
 /// their exact code-mode parent; only explicitly typed reasoning is thinking.
 /// v25: code-mode yields and polls require a direct, literal single-result source.
-const CACHE_VERSION: u32 = 25;
+/// v26: direct formatter outcomes require a qualified header and one unique,
+/// unnamespaced native function_call owner.
+const CACHE_VERSION: u32 = 26;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2422,6 +2424,10 @@ pub(crate) struct Event {
     /// A Codex `custom_tool_call` named `exec`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode: bool,
+    /// An unnamespaced Codex `function_call` named `exec_command` or
+    /// `write_stdin`, eligible for direct formatter outcome evidence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub(crate) native_direct_call: bool,
     /// Still open for operation attribution within the current turn.
     #[serde(default, skip_serializing_if = "is_false")]
     pub(crate) code_mode_open: bool,
@@ -4529,6 +4535,37 @@ fn codex_exit(output: Option<&Value>) -> Option<i64> {
     value.get("metadata")?.get("exit_code")?.as_i64()
 }
 
+/// A formatted direct-exec exit is evidence only for the exact native
+/// function-call pair that owns this output. The shared formatter decoder
+/// qualifies the header; a session ID by itself never establishes a result.
+fn codex_direct_exec_exit(index: &FileIndex, call_id: &str, output: Option<&Value>) -> Option<i64> {
+    // A repeated source ID has no unique owner, even if `pending` currently
+    // points at one of its calls. Keep this guard scoped to formatter evidence;
+    // legacy structured exit metadata retains its existing matching behavior.
+    if !index
+        .tool_ids
+        .get(call_id)
+        .is_some_and(|indices| indices.len() == 1)
+    {
+        return None;
+    }
+    let call = index
+        .pending
+        .get(call_id)
+        .and_then(|at| index.events.get(*at))?;
+    if call.k != Kind::Tool
+        || !call.native_direct_call
+        || !matches!(call.n.as_deref(), Some("exec_command" | "write_stdin"))
+    {
+        return None;
+    }
+    match crate::exec_response::decode_exec_response(output?.as_str()?)?.native_outcome()? {
+        crate::exec_response::ExecResponseOutcome::Exited(code) => Some(i64::from(code)),
+        crate::exec_response::ExecResponseOutcome::SessionOnly
+        | crate::exec_response::ExecResponseOutcome::NoExit => None,
+    }
+}
+
 /// Text Codex adds before a prompt, by its tag. Any other text is a prompt,
 /// even one that starts with `<`.
 const HARNESS_TAGS: [&str; 5] = [
@@ -4843,6 +4880,13 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 .to_owned(),
                         ),
                         code_mode,
+                        native_direct_call: field(payload, "type") == Some("function_call")
+                            && field(payload, "call_id").is_some()
+                            && matches!(
+                                field(payload, "name"),
+                                Some("exec_command" | "write_stdin")
+                            )
+                            && payload.get("namespace").is_none_or(Value::is_null),
                         code_mode_open: code_mode,
                         script,
                         poll_target,
@@ -4855,7 +4899,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
                 if let Some(id) = field(payload, "call_id") {
                     let output = payload.get("output").or_else(|| payload.get("tools"));
-                    let code = codex_exit(output);
+                    let direct_code = if field(payload, "type") == Some("function_call_output") {
+                        codex_direct_exec_exit(summary, id, output)
+                    } else {
+                        None
+                    };
+                    let code = codex_exit(output).or(direct_code);
                     let mut flags = if code.is_none() { UNKNOWN } else { 0 };
                     if acknowledgement(output) {
                         flags |= ACK;
@@ -5243,6 +5292,22 @@ mod tests {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":id,"arguments":"{}"}})
     }
 
+    fn direct_call(id: &str, name: &str) -> Value {
+        let arguments = match name {
+            "exec_command" => serde_json::json!({"cmd":"printf fixture"}).to_string(),
+            "write_stdin" => {
+                let session_id = match id {
+                    "negative" => 5151,
+                    "running" => 6151,
+                    _ => 1,
+                };
+                serde_json::json!({"session_id":session_id,"chars":""}).to_string()
+            }
+            _ => "{}".to_owned(),
+        };
+        serde_json::json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":arguments}})
+    }
+
     fn output(id: &str, output: Value) -> Value {
         serde_json::json!({"type":"response_item","payload":{"type":"function_call_output","call_id":id,"output":output}})
     }
@@ -5272,6 +5337,110 @@ mod tests {
             serde_json::json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"item","exit_code":1}}}),
         ]);
         assert_eq!(replies, [Some(false), None, Some(true), Some(true)]);
+    }
+
+    #[test]
+    fn direct_formatter_outcomes_need_a_qualified_matching_native_call() {
+        let valid_zero = "Chunk ID: a\nWall time: 0.1000 seconds\nProcess exited with code 0\nOriginal token count: 7\nOutput:\nfinished";
+        let valid_nonzero =
+            "Wall time: 0.2000 seconds\nProcess exited with code 3\nOutput:\nfailed";
+        let valid_negative_and_running = "Chunk ID: b\nWall time: 0.3000 seconds\nProcess exited with code -7\nProcess running with session ID 5151\nOutput:\nfailed";
+        let running_only =
+            "Wall time: 0.4000 seconds\nProcess running with session ID 6151\nOutput:\nrunning";
+        let no_process_fields =
+            "Wall time: 0.4500 seconds\nOriginal token count: 2\nOutput:\nunknown";
+        let both_optionals = "Wall time: 0.5000 seconds\nProcess exited with code 0\nProcess running with session ID 6161\nOutput:\nfinished";
+        let body_headers = "Wall time: 0.6000 seconds\nProcess exited with code 0\nOutput:\nbody\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nopaque";
+        let malformed = [
+            "Wall time: 0.7000 seconds\nOriginal token count: 8\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 0.8000 seconds\nProcess exited with code 0\nProcess exited with code 1\nOutput:\nignored",
+            "Wall time: 0.9000 seconds\nProcess exited with code nope\nOutput:\nignored",
+            "Wall time: NaN seconds\nProcess exited with code 0\nOutput:\nignored",
+            "Wall time: 1.0000 seconds\nProcess exited with code 0\nmissing boundary",
+            "Wall time: 1.1000 seconds\nProcess exited with code 2147483648\nOutput:\nignored",
+            "Process exited with code 0\nOutput:\nignored",
+        ];
+        let mut records = Vec::new();
+        for (id, name, formatted) in [
+            ("zero", "exec_command", valid_zero),
+            ("nonzero", "exec_command", valid_nonzero),
+            ("negative", "write_stdin", valid_negative_and_running),
+            ("running", "write_stdin", running_only),
+            ("no-fields", "exec_command", no_process_fields),
+            ("both", "exec_command", both_optionals),
+            ("opaque", "exec_command", body_headers),
+        ] {
+            records.push(direct_call(id, name));
+            records.push(output(id, serde_json::json!(formatted)));
+        }
+        let mut null_namespace = direct_call("null-namespace", "exec_command");
+        null_namespace["payload"]["namespace"] = serde_json::Value::Null;
+        records.push(null_namespace);
+        records.push(output("null-namespace", serde_json::json!(valid_zero)));
+        for (ordinal, formatted) in malformed.iter().enumerate() {
+            let id = format!("malformed-{ordinal}");
+            records.push(direct_call(&id, "exec_command"));
+            records.push(output(&id, serde_json::json!(formatted)));
+        }
+        let oversized_prefix = format!(
+            "Chunk ID: {}\nWall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nignored",
+            "x".repeat(2048)
+        );
+        records.push(direct_call("oversized-prefix", "exec_command"));
+        records.push(output(
+            "oversized-prefix",
+            serde_json::json!(oversized_prefix),
+        ));
+        records.push(direct_call("unrelated", "shell"));
+        records.push(output("unrelated", serde_json::json!(valid_nonzero)));
+        records.push(direct_call("wrong-carrier", "exec_command"));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"wrong-carrier","output":valid_nonzero}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"code-mode","input":"text('fixture')"}}));
+        records.push(serde_json::json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"code-mode","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":valid_nonzero}]}}));
+        let mut namespaced = direct_call("namespaced", "exec_command");
+        namespaced["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        records.push(namespaced);
+        records.push(output("namespaced", serde_json::json!(valid_zero)));
+
+        let mut expected = vec![
+            Some(false),
+            Some(true),
+            Some(true),
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(false),
+        ];
+        expected.extend(std::iter::repeat_n(None, malformed.len() + 5));
+        assert_eq!(codex_reply(&records), expected);
+    }
+
+    #[test]
+    fn direct_formatter_refuses_a_reused_pending_call_id() {
+        let mut index = FileIndex::default();
+        let records = [
+            direct_call("reused", "exec_command"),
+            direct_call("reused", "exec_command"),
+            output(
+                "reused",
+                serde_json::json!(
+                    "Wall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\nfinished"
+                ),
+            ),
+        ];
+        for (offset, record) in records.iter().enumerate() {
+            codex(&mut index, record, offset as u64);
+        }
+        assert_eq!(index.events.len(), 2);
+        assert!(index.events.iter().all(|event| event.native_direct_call));
+        assert!(index.events[0].r.is_none());
+        let reply = index.events[1]
+            .r
+            .as_ref()
+            .expect("the output resolves the latest call");
+        assert_eq!(reply.o, 2);
+        assert_ne!(reply.f & UNKNOWN, 0, "the duplicate ID has no unique owner");
     }
 
     #[test]
@@ -7021,6 +7190,70 @@ mod tests {
                 }
                 other => panic!("unexpected fixture relation {other}"),
             }
+            if let Some(native_direct_call) = expected["native_direct_call"].as_bool() {
+                assert_eq!(event.native_direct_call, native_direct_call, "{id}");
+            }
+            if let Some(outcome) = expected["outcome"].as_str() {
+                let reply = event.r.as_ref().expect("expected direct output");
+                assert_eq!(reply.o, expected["reply_offset"].as_u64().unwrap(), "{id}");
+                let output = crate::tx::read_record(&log, reply.o).unwrap();
+                assert_eq!(output["payload"]["call_id"], id, "{id}");
+                match outcome {
+                    "ok" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(!reply.e, "{id}");
+                    }
+                    "err" => {
+                        assert_eq!(reply.f & UNKNOWN, 0, "{id}");
+                        assert!(reply.e, "{id}");
+                    }
+                    "unknown" => assert_ne!(reply.f & UNKNOWN, 0, "{id}"),
+                    other => panic!("unexpected direct outcome {other}"),
+                }
+            }
+        }
+
+        let reused = &manifest["reused_id_contract"];
+        let reused_id = reused["id"].as_str().unwrap();
+        let reused_calls: Vec<_> = cold
+            .events
+            .iter()
+            .filter(|event| event.id.as_deref() == Some(reused_id))
+            .collect();
+        assert_eq!(reused_calls.len(), 2);
+        let expected_offsets = reused["call_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            reused_calls.iter().map(|event| event.o).collect::<Vec<_>>(),
+            expected_offsets
+        );
+        assert!(reused_calls.iter().all(|event| event.native_direct_call));
+        let expected_replies = reused["reply_offsets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(Value::as_u64)
+            .collect::<Option<Vec<_>>>()
+            .unwrap();
+        assert_eq!(expected_replies.len(), reused_calls.len());
+        for (ordinal, event) in reused_calls.iter().enumerate() {
+            let reply = event.r.as_ref().unwrap();
+            assert_eq!(reply.o, expected_replies[ordinal]);
+            let output = crate::tx::read_record(&log, reply.o).unwrap();
+            assert_eq!(output["payload"]["call_id"], reused_id);
+            match reused["expected_outcomes"][ordinal].as_str().unwrap() {
+                "ok" => {
+                    assert_eq!(reply.f & UNKNOWN, 0);
+                    assert!(!reply.e);
+                }
+                "unknown" => assert_ne!(reply.f & UNKNOWN, 0),
+                other => panic!("unexpected reused-id outcome {other}"),
+            }
         }
 
         let mixed = &cold.events[by_id(&cold, "multi-output")];
@@ -7073,6 +7306,43 @@ mod tests {
         let mut reopened = EventCache::open(&cache_path);
         let reopened_index = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
         assert_eq!(format!("{reopened_index:?}"), cold_debug);
+        for (id, expected) in [
+            ("direct-zero", true),
+            ("direct-session-only", true),
+            ("direct-unrelated", false),
+            ("direct-code-mode", false),
+            ("direct-namespaced", false),
+        ] {
+            assert_eq!(
+                reopened_index.events[by_id(&reopened_index, id)].native_direct_call,
+                expected,
+                "{id} carrier survives cache reopen"
+            );
+        }
+        let output_text = |id: &str| {
+            let call = &reopened_index.events[by_id(&reopened_index, id)];
+            let record = crate::tx::read_record(&log, call.r.as_ref().unwrap().o).unwrap();
+            record["payload"]["output"].as_str().unwrap().to_owned()
+        };
+        let running_text = output_text("direct-session-only");
+        let running_frame = crate::exec_response::decode_exec_response(&running_text)
+            .expect("complete running frame");
+        assert!(running_frame.native_qualified);
+        assert_eq!(running_frame.exit_code, None);
+        assert_eq!(running_frame.session_id, Some("6151"));
+        let negative_text = output_text("direct-negative");
+        let negative_frame = crate::exec_response::decode_exec_response(&negative_text)
+            .expect("complete negative exit frame");
+        assert!(negative_frame.native_qualified);
+        assert_eq!(negative_frame.exit_code, Some(-7));
+        assert_eq!(negative_frame.session_id, Some("5151"));
+        let opaque_text = output_text("direct-body-fake");
+        let opaque_frame = crate::exec_response::decode_exec_response(&opaque_text)
+            .expect("complete frame with opaque body");
+        assert_eq!(
+            opaque_frame.body,
+            "command\nProcess exited with code 99\nProcess running with session ID 8888\nWall time: 9.0000 seconds\nOutput:\nbody remains opaque"
+        );
         let reopened_poll = &reopened_index.events[by_id(&reopened_index, "poll-95583")];
         assert_eq!(reopened_poll.poll_target.as_deref(), Some("95583"));
         assert!(reopened_poll.result_source);
@@ -7083,7 +7353,40 @@ mod tests {
         let replay_output = serde_json::json!({"timestamp":"2026-09-24T00:19:01.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"replay-poll-95583","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":replay_body.to_string()}]}});
         let call_offset = fs::metadata(&log).unwrap().len();
         let output_offset = call_offset + u64::try_from(replay_call.to_string().len() + 1).unwrap();
-        append_lines(&log, &[replay_call, replay_output]);
+        let appended_call = direct_call("appended-direct", "exec_command");
+        let appended_output = output(
+            "appended-direct",
+            serde_json::json!(
+                "Wall time: 1.5000 seconds\nProcess exited with code 0\nOutput:\nappended"
+            ),
+        );
+        let mut appended_namespaced_call = direct_call("appended-namespaced", "exec_command");
+        appended_namespaced_call["payload"]["namespace"] = serde_json::json!("mcp__fixture__exec");
+        let appended_namespaced_output = output(
+            "appended-namespaced",
+            serde_json::json!(
+                "Wall time: 1.7000 seconds\nProcess exited with code 0\nOutput:\nnamespaced"
+            ),
+        );
+        let appended_call_offset =
+            output_offset + u64::try_from(replay_output.to_string().len() + 1).unwrap();
+        let appended_output_offset =
+            appended_call_offset + u64::try_from(appended_call.to_string().len() + 1).unwrap();
+        let appended_namespaced_call_offset =
+            appended_output_offset + u64::try_from(appended_output.to_string().len() + 1).unwrap();
+        let appended_namespaced_output_offset = appended_namespaced_call_offset
+            + u64::try_from(appended_namespaced_call.to_string().len() + 1).unwrap();
+        append_lines(
+            &log,
+            &[
+                replay_call,
+                replay_output,
+                appended_call,
+                appended_output,
+                appended_namespaced_call,
+                appended_namespaced_output,
+            ],
+        );
         let incremental = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
         let replay = &incremental.events[by_id(&incremental, "replay-poll-95583")];
         let start = by_id(&incremental, "start-95583");
@@ -7095,17 +7398,57 @@ mod tests {
                 .as_ref()
                 .is_some_and(|yielded| yielded.polls.contains(&output_offset))
         );
+        let appended = &incremental.events[by_id(&incremental, "appended-direct")];
+        assert_eq!(appended.o, appended_call_offset);
+        assert!(appended.native_direct_call);
+        let appended_reply = appended.r.as_ref().unwrap();
+        assert_eq!(appended_reply.o, appended_output_offset);
+        assert_eq!(appended_reply.f & UNKNOWN, 0);
+        assert!(!appended_reply.e);
+        let appended_namespaced = &incremental.events[by_id(&incremental, "appended-namespaced")];
+        assert_eq!(appended_namespaced.o, appended_namespaced_call_offset);
+        assert!(!appended_namespaced.native_direct_call);
+        let appended_namespaced_reply = appended_namespaced.r.as_ref().unwrap();
+        assert_eq!(
+            appended_namespaced_reply.o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(appended_namespaced_reply.f & UNKNOWN, 0);
         let incremental_debug = format!("{incremental:?}");
         drop(reopened);
         let mut reopened = EventCache::open(&cache_path);
         let reopened_final = scan_file(&log, "codex", &mut reopened, &mut false).unwrap();
         assert_eq!(format!("{reopened_final:?}"), incremental_debug);
+        let reopened_appended = &reopened_final.events[by_id(&reopened_final, "appended-direct")];
+        assert!(reopened_appended.native_direct_call);
+        assert_eq!(
+            reopened_appended.r.as_ref().unwrap().o,
+            appended_output_offset
+        );
+        let reopened_namespaced =
+            &reopened_final.events[by_id(&reopened_final, "appended-namespaced")];
+        assert!(!reopened_namespaced.native_direct_call);
+        assert_eq!(
+            reopened_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(reopened_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
         let reopened_replay = &reopened_final.events[by_id(&reopened_final, "replay-poll-95583")];
         assert_eq!(reopened_replay.poll_target.as_deref(), Some("95583"));
         assert!(reopened_replay.result_source);
         let mut final_cold_cache = EventCache::default();
         let final_cold = scan_file(&log, "codex", &mut final_cold_cache, &mut false).unwrap();
         assert_eq!(format!("{final_cold:?}"), incremental_debug);
+        let final_direct = &final_cold.events[by_id(&final_cold, "appended-direct")];
+        assert!(final_direct.native_direct_call);
+        assert_eq!(final_direct.r.as_ref().unwrap().o, appended_output_offset);
+        let final_namespaced = &final_cold.events[by_id(&final_cold, "appended-namespaced")];
+        assert!(!final_namespaced.native_direct_call);
+        assert_eq!(
+            final_namespaced.r.as_ref().unwrap().o,
+            appended_namespaced_output_offset
+        );
+        assert_ne!(final_namespaced.r.as_ref().unwrap().f & UNKNOWN, 0);
         fs::remove_dir_all(root).unwrap();
     }
 
