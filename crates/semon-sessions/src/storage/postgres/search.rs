@@ -118,62 +118,6 @@ impl PgProjectionTransaction<'_> {
         after: Option<(i64, &str)>,
         limit: usize,
     ) -> Result<SearchPage, StorageError> {
-        ensure(&self.namespace, namespace)?;
-        if !(1..=100).contains(&limit) {
-            return Err(backend("invalid search limit"));
-        }
-        let query = catalog_search::normalize_query(query)
-            .filter(|query| !query.is_empty())
-            .ok_or_else(|| backend("invalid metadata query"))?;
-        let anchor: String = query.chars().take(3).collect();
-        let (last, key) = after.unwrap_or((i64::MAX, ""));
-        let postings = self.tx.query(
-            "SELECT p.session_key,p.last_ms FROM semon_projection.search_postings p JOIN semon_projection.catalog c USING(namespace,session_key) WHERE p.namespace=$1 AND p.gram=$2 AND p.read_scope=$7 AND ($3 OR c.lifecycle='current') AND (p.last_ms<$4 OR (p.last_ms=$4 AND p.session_key>$5)) ORDER BY p.last_ms DESC,p.session_key LIMIT $6",
-            &[&namespace.binding(), &anchor, &(scope == CatalogReadScope::RetainedHistory), &last, &key, &number(catalog_search::MAX_CANDIDATES as u64 + 1)?, &catalog_search::scope_key(scope)],
-        ).await.map_err(backend)?;
-        let mut rows = Vec::new();
-        let mut checked = None;
-        let mut bytes = 0;
-        let mut candidates = 0;
-        for posting in postings.iter().take(catalog_search::MAX_CANDIDATES) {
-            let key: String = posting.get(0);
-            let last: i64 = posting.get(1);
-            let row = self
-                .catalog_row(namespace, &key, scope)
-                .await?
-                .ok_or_else(|| backend("search candidate unavailable"))?;
-            bytes += serde_json::to_vec(&row).map_err(backend)?.len();
-            if bytes > catalog_search::MAX_SCAN_BYTES {
-                return Ok(SearchPage {
-                    rows,
-                    next: checked,
-                    partial: true,
-                    candidates,
-                });
-            }
-            let matches = catalog_search::fields(&row)
-                .iter()
-                .any(|field| field.contains(&query));
-            if matches && rows.len() == limit {
-                return Ok(SearchPage {
-                    rows,
-                    next: checked,
-                    partial: false,
-                    candidates,
-                });
-            }
-            candidates += 1;
-            checked = Some((last, key));
-            if matches {
-                rows.push(row);
-            }
-        }
-        let partial = postings.len() > catalog_search::MAX_CANDIDATES;
-        Ok(SearchPage {
-            rows,
-            next: if partial { checked } else { None },
-            partial,
-            candidates,
-        })
+        self.filtered_catalog_page(namespace, scope, None, None, None, Some(query), after, limit).await
     }
 }

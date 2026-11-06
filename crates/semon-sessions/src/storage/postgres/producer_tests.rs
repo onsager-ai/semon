@@ -42,6 +42,56 @@ impl crate::SessionSourceReader for NativeReader {
     }
 }
 
+async fn semantic_parity(dsn: &str) {
+    let root = crate::storage::conformance::root();
+    let options = crate::storage::conformance::source(&root.0, "pg-parity");
+    let sqlite = crate::storage::conformance::source(&root.0, "sqlite-parity");
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/compatibility");
+    let path = options.codex_home.join("sessions/2026/09/24/rollout-parser-cases.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::copy(fixtures.join("codex-native-a9b0815/parser-cases.jsonl"), &path).unwrap();
+    let input = Input { root: InputRoot::Codex, path: "sessions/2026/09/24/rollout-parser-cases.jsonl".into() };
+    let namespace = Namespace::new("shared-semantic-parity").unwrap();
+    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone()).await.unwrap();
+    store.publish_sources(&namespace, &options, std::slice::from_ref(&input)).await.unwrap().unwrap();
+    crate::storage::conformance::produce(&Namespace::new("sqlite-parity").unwrap(), &sqlite).unwrap();
+    let local = crate::session_catalog_page(&sqlite, "sqlite-parity", "limit=10");
+    assert_eq!(local.status, 200);
+    let remote = store.catalog_reply(&namespace, &options, "limit=10").await.unwrap();
+    assert_eq!(remote.status, 200);
+    let local: serde_json::Value = serde_json::from_slice(&local.body).unwrap();
+    let remote: serde_json::Value = serde_json::from_slice(&remote.body).unwrap();
+    for field in ["key", "name", "harness", "native_ids", "repo", "model", "tokens", "source_refs"] {
+        assert_eq!(remote["items"][0][field], local["items"][0][field], "shared producer {field}");
+    }
+    let key = remote["items"][0]["key"].as_str().unwrap();
+    for query in ["q=parser&harness=codex&limit=1", "q=parser&harness=claude&limit=1", "no_repo=1", "repo=fixture", "model=absent"] {
+        let a = crate::session_catalog_page(&sqlite, "sqlite-parity", query);
+        let b = store.catalog_reply(&namespace, &options, query).await.unwrap();
+        assert_eq!(a.status, b.status, "{query}");
+        let a: serde_json::Value = serde_json::from_slice(&a.body).unwrap();
+        let b: serde_json::Value = serde_json::from_slice(&b.body).unwrap();
+        let keys = |value: &serde_json::Value| value["items"].as_array().unwrap().iter().map(|row| row["key"].clone()).collect::<Vec<_>>();
+        assert_eq!(keys(&a), keys(&b), "{query}");
+    }
+    let tx = store.begin(&namespace).await.unwrap();
+    let row = tx.catalog_row(&namespace, key, CatalogReadScope::Current).await.unwrap().unwrap();
+    let source = row.sources[0].clone();
+    let tag = tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap().unwrap();
+    let proof = tx.proof_block(&namespace, path.to_str().unwrap(), tag, 0).await.unwrap().unwrap();
+    tx.commit(&namespace).await.unwrap();
+    let reader = NativeReader { path, source, proof };
+    let remote = store.transcript_reply(&namespace, &options, key, CatalogReadScope::Current, None, 0, 10, &reader).await.unwrap();
+    let query = format!("sid={}&after=0&limit=10", crate::viewer::percent_encode(key));
+    let local = crate::session_transcript_range(&sqlite, "sqlite-parity", &query, None);
+    assert_eq!(remote.status, local.status);
+    let remote: serde_json::Value = serde_json::from_slice(&remote.body).unwrap();
+    let local: serde_json::Value = serde_json::from_slice(&local.body).unwrap();
+    let texts = |value: &serde_json::Value| value["entries"].as_array().unwrap().iter().map(|entry| (entry["k"].clone(), entry["text"].clone(), entry["out"].clone(), entry["cmd"].clone())).collect::<Vec<_>>();
+    assert_eq!(texts(&remote), texts(&local));
+    assert!(!crate::events::EventCache::path(&options.cache).exists());
+}
+
 pub(super) async fn lifecycle(dsn: &str) {
     let root = crate::storage::conformance::root();
     let options = crate::storage::conformance::source(&root.0, "pg-producer");
@@ -171,7 +221,17 @@ pub(super) async fn lifecycle(dsn: &str) {
             .is_none()
     );
     tx.commit(&foreign).await.unwrap();
+    let tx = store.begin(&namespace).await.unwrap();
+    let intent = tx.begin_raw_write(&namespace, &inputs[0]).await.unwrap();
+    tx.commit(&namespace).await.unwrap();
+    assert!(store.publish_sources(&namespace, &options, &inputs).await.is_err());
+    assert_eq!(store.catalog_reply(&namespace, &options, "limit=10").await.unwrap().status, 503);
+    let tx = store.begin(&namespace).await.unwrap();
+    assert!(tx.complete_raw_write(&namespace, intent, &crate::PgRawGeneration { generation: "b".repeat(32), length: std::fs::metadata(&path).unwrap().len(), sha256: [8; 32] }).await.unwrap());
+    tx.commit(&namespace).await.unwrap();
+    assert_eq!(store.catalog_reply(&namespace, &options, "limit=10").await.unwrap().status, 200);
     assert!(!crate::events::EventCache::path(&options.cache).exists());
     assert!(!options.cache.with_extension("sqlite3-wal").exists());
     assert!(!options.cache.with_extension("sqlite3-shm").exists());
+    semantic_parity(dsn).await;
 }

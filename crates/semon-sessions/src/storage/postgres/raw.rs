@@ -39,7 +39,7 @@ impl PgProjectionTransaction<'_> {
         }
         self.tx
             .query_one(
-                "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                "UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1 RETURNING epoch",
                 &[&namespace.binding()],
             )
             .await
