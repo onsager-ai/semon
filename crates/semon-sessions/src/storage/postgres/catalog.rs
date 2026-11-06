@@ -528,6 +528,9 @@ impl PgProjectionTransaction<'_> {
             self.catalog_changed(namespace, key).await?;
             self.tx.execute("UPDATE semon_projection.catalog SET lifecycle='retained' WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
         }
+        let previous = self.catalog_generation(namespace).await?.ok_or_else(|| backend("catalog not published"))?;
+        let generation = format!("{:x}", Sha256::digest(format!("{previous}|withdraw|{path}|{expected:?}")));
+        self.tx.execute("UPDATE semon_projection.catalog_heads SET generation=$2 WHERE namespace=$1", &[&namespace.binding(), &generation]).await.map_err(backend)?;
         self.tx
             .execute(
                 "DELETE FROM semon_projection.files WHERE namespace=$1 AND path=$2",
