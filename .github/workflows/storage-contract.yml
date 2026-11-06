@@ -88,6 +88,8 @@ jobs:
           case_number=0
           for test in \
             events::store::tests::direct_catalog_history_tags_preserve_existing_producer_metadata \
+            events::store::tests::direct_catalog_tags_are_bounded_and_wal_snapshots_keep_their_generation \
+            events::store::tests::direct_catalog_tag_replacement_rolls_back_with_the_catalog_marker \
             catalog::tests::projection_cache_tag_refuses_wrong_projector_and_altered_prefix \
             catalog::tests::projection_cache_rebuild_rollback_restart_keeps_prior_publication \
             catalog::tests::partial_publication_withdrawal_hands_native_history_to_custody \

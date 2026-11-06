@@ -7944,7 +7944,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_catalog_grants_are_bounded_and_wal_snapshots_keep_their_generation() {
+    fn direct_catalog_tags_are_bounded_and_wal_snapshots_keep_their_generation() {
         let root = scratch("direct-catalog-grant-wal");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
         let config = options.source.config(&options.cache).unwrap();
@@ -7972,7 +7972,11 @@ mod tests {
             admission,
             stream_epoch: stream.clone(),
         };
-        let snapshot = Connection::open(&store.path).unwrap();
+        let snapshot = crate::storage::sqlite::source_journal::SourceJournal::owned(
+            store.owner.clone(),
+        )
+        .connection()
+        .unwrap();
         snapshot.execute_batch("BEGIN DEFERRED").unwrap();
         let first_marker: String = snapshot
             .query_row(
@@ -7998,7 +8002,7 @@ mod tests {
             let grants: i64 = store
                 .connection
                 .query_row(
-                    "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2",
+                    "SELECT count(*) FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
                     params![namespace, rows[0].key],
                     |row| row.get(0),
                 )
@@ -8034,7 +8038,7 @@ mod tests {
                     &snapshot, &binding, &original
                 )
                 .is_ok(),
-                "the pinned WAL snapshot retains its old owner grant"
+                "the pinned WAL snapshot retains its old projection tag"
             );
         }
         let marker_count: i64 = store
@@ -8795,7 +8799,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_catalog_grant_replacement_rolls_back_with_the_catalog_marker() {
+    fn direct_catalog_tag_replacement_rolls_back_with_the_catalog_marker() {
         let root = scratch("direct-catalog-grant-rollback");
         let (options, mut rows, projections) = catalog_native_fixture(&root, 1, false);
         let config = options.source.config(&options.cache).unwrap();
@@ -8818,10 +8822,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let before_grant: (String, i64, String) = store
+        let before_grant: (String, String, String) = store
             .connection
             .query_row(
-                "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                "SELECT raw_identity,prefix_digest,generation FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
                 params![namespace, key],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -8850,10 +8854,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        let after_grant: (String, i64, String) = store
+        let after_grant: (String, String, String) = store
             .connection
             .query_row(
-                "SELECT metadata_digest,admission,stream FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                "SELECT raw_identity,prefix_digest,generation FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
                 params![namespace, key],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -8874,7 +8878,7 @@ mod tests {
             format!(
                 "{first_generation}:{}:{}",
                 store.owner.admission(),
-                before_grant.2
+                config.expected_stream_epoch.as_deref().unwrap()
             )
         );
         store

@@ -3517,6 +3517,14 @@ impl Stage {
         )
         .map_err(error)?;
         publication_phase("original_history");
+        for row in &prepared.relationships.retired_owners {
+            let mut retained = row.clone();
+            retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
+            let bytes = serde_json::to_vec(&retained)
+                .map_err(|error| StoreError::Data(error.to_string()))?
+                .len();
+            overview_budget.charge(bytes).map_err(error)?;
+        }
         if !crate::storage::catalog::preserve_rows(
             &history,
             &prepared.rows,
