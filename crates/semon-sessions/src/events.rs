@@ -1130,9 +1130,9 @@ pub(crate) trait IndexStore: Send {
         Ok(())
     }
 
-    /// Cold-cohort intent for a new source. A store may queue it and commit
-    /// every queued intent of a cohort in one transaction before that
-    /// cohort's apply transaction; the default records it immediately.
+    /// Host ingest intent. A store may queue it and commit every queued
+    /// intent of a cohort in one transaction before that cohort's apply
+    /// transaction; the default records it immediately.
     fn defer_file(
         &mut self,
         path: &str,
@@ -3999,12 +3999,9 @@ fn scan_file_with_mode(
                     format!("{}:{attempt}", operation.id).as_bytes(),
                 )
             });
-            // A new source in a scoped cold cohort queues its host intent; the
-            // store commits the cohort's intents together before any apply.
-            let cohort = operation.is_some()
-                && expected.is_none()
-                && cache.scan_byte_budget.is_some()
-                && cache.scoped;
+            // A host attempt queues its intent; the store commits a cohort's
+            // intents together before any apply. A retried attempt leaves none.
+            let cohort = operation.is_some();
             let operation_id = operation
                 .as_deref()
                 .or(cache.event_operation.as_deref())

@@ -1211,7 +1211,7 @@ struct Intent {
     revision: Option<i64>,
 }
 
-/// A cold-cohort intent queued in memory until its cohort commits. It binds
+/// A host ingest intent queued in memory until its cohort commits. It binds
 /// the Source claim revision observed before parsing; the batch transaction
 /// rechecks that claim and the expected ledger before recording the intent.
 struct Deferred {
@@ -1958,9 +1958,9 @@ impl Writer {
         Ok(())
     }
 
-    /// Queue a new source's cold-cohort intent without a writer reservation.
-    /// `commit` records the queued intents of its files in one transaction,
-    /// committed before that cohort's apply transaction.
+    /// Queue a host ingest intent without a writer reservation. After its Raw
+    /// checks, `commit` records the queued intents of its files in one
+    /// transaction, committed before that cohort's apply transaction.
     pub(crate) fn defer(
         &mut self,
         path: &str,
@@ -1974,8 +1974,10 @@ impl Writer {
         }
         self.deferred.retain(|deferred| deferred.path != path);
         self.intents.remove(path);
+        // A cohort holds at most 64 sources, all queued after any intent an
+        // abandoned scan left behind; that oldest entry is never committed.
         if self.deferred.len() >= 64 {
-            return self.begin(path, expected, operation_id, harness);
+            self.deferred.remove(0);
         }
         // Observed before parsing. The cohort transaction records the intent
         // only while the Source claim still has this revision.
@@ -2082,9 +2084,6 @@ impl Writer {
         {
             return Err(StorageError::InvalidArguments);
         }
-        // Queued cohort intents commit in their own transaction before apply.
-        let paths = files.iter().map(|f| f.0).collect::<Vec<_>>();
-        self.begin_deferred(&paths)?;
         // Establish explicit admission before any Raw access, then release the
         // read snapshot. The writer transaction validates again below.
         drop(self.snapshot()?);
@@ -2103,6 +2102,9 @@ impl Writer {
                 return Err(StorageError::Conflict);
             }
         }
+        // Queued host intents commit in their own transaction before apply.
+        let paths = files.iter().map(|f| f.0).collect::<Vec<_>>();
+        self.begin_deferred(&paths)?;
         NativeOwnership::validate_physical(&self.connection)?;
         let timing = crate::native_timing::enabled();
         let mut measurements = crate::native_timing::Measurements::new(timing);
