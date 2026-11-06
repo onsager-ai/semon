@@ -60,6 +60,27 @@ pub(crate) fn check(
     row: &CatalogRow,
     owner: CatalogObservationOwner,
 ) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+    check_tag(db, current, row, owner, true)
+}
+
+/// Custody keeps source identity even when a recipe version cannot be decoded.
+/// Such a predecessor contributes metadata and CWDs, never unsupported slots.
+pub(crate) fn check_custody(
+    db: &Connection,
+    current: &QueryRuntimeBinding,
+    row: &CatalogRow,
+    owner: CatalogObservationOwner,
+) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
+    check_tag(db, current, row, owner, false)
+}
+
+fn check_tag(
+    db: &Connection,
+    current: &QueryRuntimeBinding,
+    row: &CatalogRow,
+    owner: CatalogObservationOwner,
+    require_recipe: bool,
+) -> Result<Option<crate::storage::selected::PresentationObservations>, StorageError> {
     let tag: Option<(String,String,String,String,Option<String>)> = db.query_row(
         "SELECT raw_identity,prefix_digest,projector,generation,CASE WHEN octet_length(capture)<=8388608 THEN capture END FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3",
         params![current.namespace.as_str(),row.key,kind(owner)],
@@ -107,7 +128,7 @@ pub(crate) fn check(
     if let Some((actual, source, version)) = header {
         if actual != generation
             || source.as_deref() != Some(prefix.as_str())
-            || version != crate::slot_projection::VERSION
+            || (require_recipe && version != crate::slot_projection::VERSION)
         {
             return Err(StorageError::ScopeChanged);
         }

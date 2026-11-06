@@ -18,6 +18,7 @@ pub(crate) enum QueryRecipeResidence {
     NativeHistory {
         metadata_digest: String,
     },
+    #[cfg(feature = "postgres")]
     Immutable {
         owner: QueryRecipeOwner,
         generation: super::proof_lifetime::ProofGenerationId,
@@ -25,6 +26,7 @@ pub(crate) enum QueryRecipeResidence {
     },
 }
 
+#[cfg(feature = "postgres")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum QueryRecipeOwner {
     Catalog,

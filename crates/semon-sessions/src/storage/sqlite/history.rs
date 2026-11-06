@@ -374,30 +374,6 @@ impl crate::storage::catalog::CompositeHistoryStore for OriginalHistory<'_> {
     }
 }
 
-/// Compose from native projection tags inside the publisher's existing CAS.
-/// The shared planner retains its bounded slots, CWDs and metadata accounting.
-pub(crate) fn publish_composition(
-    store: &OriginalHistory<'_>,
-    publication: &crate::slot_projection::Publication<'_>,
-) -> rusqlite::Result<()> {
-    let bytes = publication
-        .rows
-        .iter()
-        .try_fold(0usize, |total, row| {
-            serde_json::to_string(row).map(|text| total.saturating_add(text.len()))
-        })
-        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
-    let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(bytes);
-    let (plan, captures) = crate::storage::catalog::prepare_history_composition(
-        store,
-        publication.rows,
-        publication.transcripts,
-        publication.observations,
-        &mut budget,
-    )?;
-    crate::storage::catalog::apply_prepared_history_composition(store, &plan, &captures)
-}
-
 impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistory<'_> {
     fn composition_snapshot(
         &self,
@@ -575,7 +551,7 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                 } else {
                     crate::storage::catalog::CatalogObservationOwner::Catalog
                 };
-                if super::projection_tags::check(self.db, &binding, previous_row, owner).is_err() {
+                if super::projection_tags::check_custody(self.db, &binding, previous_row, owner).is_err() {
                     snapshot.unavailable = true;
                 } else {
                     let mut cwds = std::collections::BTreeMap::new();
@@ -641,11 +617,14 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             metadata,
             texts,
             incomplete,
-            receipt_ids: _,
+            receipt_ids,
             capture,
         } = composition;
         #[cfg(test)]
         eprintln!("catalog_history_probe method=composite_composed");
+        if receipt_ids.len() > 64 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         let total = i64::try_from(texts.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let projection_changed = self.db.execute("INSERT INTO main.session_history_projections(namespace,session_key,generation,source_generation,version,total,incomplete) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(namespace,session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,version=excluded.version,total=excluded.total,incomplete=excluded.incomplete WHERE session_history_projections.generation != excluded.generation",params![self.namespace,key,generation,sources,crate::slot_projection::VERSION,total,incomplete])?;
         let row: CatalogRow = serde_json::from_str(metadata)

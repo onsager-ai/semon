@@ -14697,9 +14697,9 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    let (history_digest, has_direct_capture): (String, bool) = db
+    let (history_prefix, has_direct_capture): (String, bool) = db
         .query_row(
-            "SELECT metadata_digest,direct_capture IS NOT NULL FROM main.storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key='root' AND owner_kind='history'",
+            "SELECT prefix_digest,capture IS NOT NULL FROM storage_projection_tags WHERE namespace=?1 AND session_key='root' AND owner_kind='history'",
             [&namespace],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -14711,10 +14711,9 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     let mut normalized_history: crate::model::summary::CatalogRow =
         serde_json::from_str(&history_metadata).unwrap();
     normalized_history.lifecycle = super::summary::CatalogLifecycle::Current;
-    let normalized_history_metadata = serde_json::to_string(&normalized_history).unwrap();
     assert_eq!(
-        history_digest,
-        crate::storage::proof_codec::digest(normalized_history_metadata.as_bytes())
+        history_prefix,
+        crate::retention::source_generation(&normalized_history.sources).unwrap()
     );
     drop(db);
 
